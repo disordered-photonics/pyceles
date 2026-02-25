@@ -8,6 +8,12 @@ import numpy.typing as npt
 from scipy.special import jv, spherical_jn, spherical_yn
 from tqdm.auto import tqdm
 
+from pyceles.core.angular import (
+    beam_axis_and_frame,
+    is_uniform_periodic_azimuth,
+    periodic_azimuthal_weights,
+    trapezoidal_weights,
+)
 from pyceles.core.fields import (
     GaussianBeam,
     PlaneWave,
@@ -41,19 +47,6 @@ class NearFieldComponents:
     E_total: np.ndarray
     H_total: np.ndarray
     inside_mask: np.ndarray
-
-
-def _trapezoidal_weights(x: np.ndarray) -> np.ndarray:
-    """Return 1D trapezoidal integration weights for sample locations `x`."""
-    x = np.asarray(x, dtype=float).reshape(-1)
-    if x.size < 2:
-        return np.zeros_like(x)
-    w = np.empty_like(x)
-    w[0] = 0.5 * (x[1] - x[0])
-    w[-1] = 0.5 * (x[-1] - x[-2])
-    if x.size > 2:
-        w[1:-1] = 0.5 * (x[2:] - x[:-2])
-    return w
 
 
 @cache
@@ -97,40 +90,6 @@ def _contract_modes(mode_coeffs: np.ndarray, mode_tensor: np.ndarray) -> np.ndar
     return np.matmul(np.transpose(mode_tensor, (0, 2, 1)), mode_coeffs)
 
 
-def _is_uniform_periodic_azimuth(alpha: np.ndarray) -> bool:
-    """Return True when azimuthal samples are uniform and span 2*pi periodically."""
-    a = np.asarray(alpha, dtype=float).reshape(-1)
-    if a.size < 3:
-        return False
-    d = np.diff(a)
-    d0 = float(d[0])
-    if not np.allclose(d, d0, rtol=1e-8, atol=1e-12):
-        return False
-    full_span = (a[-1] - a[0]) + d0
-    return bool(np.isclose(full_span, 2.0 * np.pi, rtol=1e-7, atol=1e-10))
-
-
-def _beam_local_frame(
-    polar_angle: float, azimuthal_angle: float
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return orthonormal local frame (u, v, n0) for a beam axis n0."""
-    st = float(np.sin(polar_angle))
-    ct = float(np.cos(polar_angle))
-    ca = float(np.cos(azimuthal_angle))
-    sa = float(np.sin(azimuthal_angle))
-    n0 = np.array([st * ca, st * sa, ct], dtype=float)
-    basis = np.eye(3, dtype=float)
-    ref = basis[int(np.argmin(np.abs(basis @ n0)))]
-    u = ref - float(np.dot(ref, n0)) * n0
-    nu = float(np.linalg.norm(u))
-    if nu == 0.0:
-        u = np.array([0.0, 1.0, 0.0], dtype=float)
-    else:
-        u = u / nu
-    v = np.cross(n0, u)
-    return u, v, n0
-
-
 def _compute_initial_field_gaussian_normal_incidence_analytic(
     field_points_local: np.ndarray,
     *,
@@ -154,7 +113,7 @@ def _compute_initial_field_gaussian_normal_incidence_analytic(
     """
     if not np.isfinite(float(beam_width)) or float(beam_width) <= 0.0:
         return None
-    if not _is_uniform_periodic_azimuth(azimuthal_angles):
+    if not is_uniform_periodic_azimuth(azimuthal_angles):
         return None
 
     pts = np.asarray(field_points_local, dtype=np.float64)
@@ -179,7 +138,7 @@ def _compute_initial_field_gaussian_normal_incidence_analytic(
 
     sb = np.sin(beta).astype(real_compute_dtype, copy=False)
     cb = np.cos(beta).astype(real_compute_dtype, copy=False)
-    beta_w = _trapezoidal_weights(beta).astype(real_compute_dtype, copy=False)
+    beta_w = trapezoidal_weights(beta).astype(real_compute_dtype, copy=False)
 
     E0 = float(amplitude)
     w = float(beam_width)
@@ -342,7 +301,7 @@ def _compute_initial_field_gaussian_rotated_fast(
         rot_back = np.eye(3, dtype=float)
         prop_sign = float(np.sign(np.cos(float(beam.polar_angle))))
     else:
-        u, v, n0 = _beam_local_frame(float(beam.polar_angle), float(beam.azimuthal_angle))
+        n0, u, v = beam_axis_and_frame(float(beam.polar_angle), float(beam.azimuthal_angle))
         Q = np.stack([u, v, n0], axis=0)  # rows are local basis vectors in global coordinates
         local = rel @ Q.T
         rot_back = Q
@@ -880,7 +839,8 @@ def _compute_initial_field_general(
 
     E = np.zeros((pts.shape[0], 3), dtype=accum_dtype)
     H = np.zeros_like(E)
-    alpha_weights = _trapezoidal_weights(np.asarray(azimuthal_angles, float))
+    # Keep alpha quadrature consistent with RHS source projection.
+    alpha_weights = periodic_azimuthal_weights(np.asarray(azimuthal_angles, float))
 
     beta = np.asarray(pwp_te["beta"], dtype=float)
     alpha = np.asarray(pwp_te["alpha"], dtype=float)
@@ -889,7 +849,7 @@ def _compute_initial_field_general(
 
     sinb = np.sin(beta).astype(np.float64)
     cosb = np.cos(beta).astype(np.float64)
-    beta_weights = _trapezoidal_weights(beta).astype(np.float64)
+    beta_weights = trapezoidal_weights(beta).astype(np.float64)
 
     kx_all = np.asarray(pwp_te["kx"], dtype=np.float64)
     ky_all = np.asarray(pwp_te["ky"], dtype=np.float64)
