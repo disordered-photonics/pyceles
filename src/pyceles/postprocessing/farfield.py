@@ -1,0 +1,774 @@
+"""Far-field utilities for angular spectra, power fluxes, and cross sections.
+
+The routines here evaluate scattered/initial/total plane-wave patterns on an
+(`alpha`, `beta`) grid, integrate hemisphere power flow, and derive
+plane-wave-normalized scattering observables.
+"""
+
+from __future__ import annotations
+
+import warnings
+from dataclasses import dataclass
+
+import numpy as np
+import numpy.typing as npt
+from tqdm.auto import tqdm
+
+from pyceles.core.fields import (
+    GaussianBeam,
+    PlaneWave,
+    initial_field_plane_wave_pattern_normal_incidence,
+    is_normal_incidence,
+    source_jones,
+    transformation_coefficients,
+)
+from pyceles.core.indexing import iter_modes, n_modes
+from pyceles.core.spherical import spherical_functions_trigon
+
+
+@dataclass(frozen=True)
+class FarFieldPatterns:
+    """TE/TM plane-wave spectra on the common `(alpha,beta)` angular grid.
+
+    Conventions:
+    - `alpha`: azimuth in `[0, 2*pi)`
+    - `beta`: polar angle from `+z` in `[0, pi]`
+    - `coeff`: complex spectrum `g(alpha,beta)` per polarization
+    """
+
+    initial_te: dict | None
+    initial_tm: dict | None
+    scattered_te: dict
+    scattered_tm: dict
+    total_te: dict | None
+    total_tm: dict | None
+
+
+def _integrate_periodic_alpha(values: np.ndarray, alpha: np.ndarray) -> np.ndarray:
+    """Integrate azimuthal samples while enforcing 2*pi periodic closure."""
+    values = np.asarray(values)
+    alpha = np.asarray(alpha, dtype=float).reshape(-1)
+    if alpha.size < 2:
+        return np.zeros(values.shape[1:], dtype=np.result_type(values, np.float64))
+    span = alpha[-1] - alpha[0]
+    if np.isclose(span, 2.0 * np.pi):
+        return np.trapezoid(values, alpha, axis=0)
+    alpha_ext = np.concatenate([alpha, [alpha[0] + 2.0 * np.pi]])
+    values_ext = np.concatenate([values, values[0:1, ...]], axis=0)
+    return np.trapezoid(values_ext, alpha_ext, axis=0)
+
+
+def _cast_pwp_coeff_dtype(pwp: dict, dtype: np.dtype) -> dict:
+    """Return a shallow-copied PWP dict with `coeff` cast to dtype."""
+    out = dict(pwp)
+    # NumPy 2 raises if `copy=False` is requested but a copy is required.
+    # Here we allow a copy when dtype conversion/layout demands it.
+    out["coeff"] = np.asarray(out["coeff"], dtype=np.dtype(dtype))
+    return out
+
+
+def scattered_field_plane_wave_pattern(
+    positions: np.ndarray,
+    coeffs: np.ndarray,
+    k: float,
+    lmax: int,
+    polar_angles: np.ndarray,
+    azimuthal_angles: np.ndarray,
+    *,
+    dtype: npt.DTypeLike = np.complex128,
+    show_progress: bool = False,
+) -> tuple[dict, dict]:
+    """Compute far-field plane-wave pattern (PWP) of the scattered field.
+
+    Parameters
+    ----------
+    positions:
+        (Ns,3) sphere centers.
+    coeffs:
+        (Ns, Nm) scattered coefficients, CELES ordering.
+    k:
+        Medium wavenumber k_medium.
+    lmax:
+        Truncation.
+    polar_angles, azimuthal_angles:
+        1D arrays of beta and alpha.
+
+    Returns
+    -------
+    pwp_te, pwp_tm
+        Each is a dict with keys: beta, alpha, kx, ky, kz, coeff.
+        `coeff` has shape (Na, Nb).
+    """
+
+    ctype = np.dtype(dtype)
+    positions = np.asarray(positions, dtype=float)
+    coeffs = np.asarray(coeffs, dtype=ctype)
+    beta = np.asarray(polar_angles, dtype=float)
+    alpha = np.asarray(azimuthal_angles, dtype=float)
+
+    Ns = positions.shape[0]
+    if coeffs.shape[0] != Ns:
+        raise ValueError("coeffs must have shape (Ns, Nm)")
+
+    Nb = beta.size
+    Na = alpha.size
+
+    # Plane-wave grid (CELES convention)
+    agrid = alpha[:, None]
+    bgrid = beta[None, :]
+    sb = np.sin(beta)
+    cb = np.cos(beta)
+
+    kx = (k * np.sin(bgrid) * np.cos(agrid)).astype(float)
+    ky = (k * np.sin(bgrid) * np.sin(agrid)).astype(float)
+    kz = np.broadcast_to(k * np.cos(beta), kx.shape).astype(float)
+
+    # Angular functions of beta
+    PI, TAU = spherical_functions_trigon(cb, sb, lmax, xp=np)
+
+    Nm = n_modes(lmax)
+
+    # B{pol}(n,beta)
+    B_te = np.zeros((Nm, Nb), dtype=ctype)
+    B_tm = np.zeros((Nm, Nb), dtype=ctype)
+    m_of_n = np.zeros(Nm, dtype=int)
+
+    for tau, l, m, n in iter_modes(lmax):
+        m_of_n[n] = m
+        B_te[n, :] = transformation_coefficients(PI, TAU, tau, l, m, pol=1, dagger=False)
+        B_tm[n, :] = transformation_coefficients(PI, TAU, tau, l, m, pol=2, dagger=False)
+
+    # exp(i*m*alpha)
+    eima = np.exp(1j * alpha[:, None] * m_of_n[None, :]).astype(ctype, copy=False)
+
+    pwp_te = {
+        "beta": beta,
+        "alpha": alpha,
+        "kx": kx,
+        "ky": ky,
+        "kz": kz,
+        "coeff": np.zeros((Na, Nb), dtype=ctype),
+    }
+    pwp_tm = {
+        "beta": beta,
+        "alpha": alpha,
+        "kx": kx,
+        "ky": ky,
+        "kz": kz,
+        "coeff": np.zeros((Na, Nb), dtype=ctype),
+    }
+
+    sphere_iter = range(Ns)
+    if show_progress:
+        sphere_iter = tqdm(sphere_iter, desc="PWP (scattered)")
+
+    # Accumulate spheres
+    for jS in sphere_iter:
+        rj = positions[jS]
+
+        phase = np.asarray(
+            np.exp(-1j * (rj[0] * kx + rj[1] * ky + rj[2] * kz)), dtype=ctype
+        )  # (Na,Nb)
+        cj = coeffs[jS, :]
+
+        # (Na, Nm) with columns scaled by coefficients
+        beima = eima * cj[None, :]
+
+        # (Na,Nb)
+        pwp_te["coeff"] += np.asarray((beima @ B_te) * phase / (2 * np.pi), dtype=ctype)
+        pwp_tm["coeff"] += np.asarray((beima @ B_tm) * phase / (2 * np.pi), dtype=ctype)
+
+    return pwp_te, pwp_tm
+
+
+def total_field_plane_wave_pattern(
+    initial_pwp_te: dict,
+    initial_pwp_tm: dict,
+    scattered_pwp_te: dict,
+    scattered_pwp_tm: dict,
+) -> tuple[dict, dict]:
+    """Combine initial + scattered PWPs into total-field PWP."""
+
+    # shallow copies (keep grids)
+    tot_te = dict(initial_pwp_te)
+    tot_tm = dict(initial_pwp_tm)
+
+    tot_te["coeff"] = initial_pwp_te["coeff"] + scattered_pwp_te["coeff"]
+    tot_tm["coeff"] = initial_pwp_tm["coeff"] + scattered_pwp_tm["coeff"]
+
+    return tot_te, tot_tm
+
+
+def compute_far_field_patterns(
+    positions: np.ndarray,
+    coeffs: np.ndarray,
+    *,
+    k: float,
+    lmax: int,
+    polar_angles: np.ndarray,
+    azimuthal_angles: np.ndarray,
+    source: GaussianBeam | PlaneWave | None = None,
+    dtype: npt.DTypeLike = np.complex128,
+    show_progress: bool = False,
+) -> FarFieldPatterns:
+    """Compute far-field PWPs for scattered field and, when available, initial/total fields.
+
+    All returned angular grids/components are expressed in the user/source frame.
+    (Near-field internals may use rotated local frames for acceleration, but
+    far-field bins are not rotated or re-labeled.)
+    This mirrors the standard workflow: scattered PWP first, then initial PWP
+    (if source supports it), then coherent total-field composition.
+
+    Notes
+    -----
+    `polar_angles`/`azimuthal_angles` here define output sampling bins for
+    far-field PWPs. In principle they can be chosen independently from the source-projection
+    quadrature grid used to build the linear-system RHS.
+    """
+    ctype = np.dtype(dtype)
+
+    p_s_te, p_s_tm = scattered_field_plane_wave_pattern(
+        positions=positions,
+        coeffs=coeffs,
+        k=k,
+        lmax=lmax,
+        polar_angles=polar_angles,
+        azimuthal_angles=azimuthal_angles,
+        dtype=ctype,
+        show_progress=show_progress,
+    )
+
+    p_i_te = None
+    p_i_tm = None
+    p_t_te = None
+    p_t_tm = None
+
+    if isinstance(source, GaussianBeam):
+        if not is_normal_incidence(float(source.polar_angle)):
+            p_i_te, p_i_tm = source.angular_spectrum(
+                k=float(k),
+                polar_angles=np.asarray(polar_angles, dtype=float),
+                azimuthal_angles=np.asarray(azimuthal_angles, dtype=float),
+            )
+        else:
+            p_i_te, p_i_tm = initial_field_plane_wave_pattern_normal_incidence(
+                beam=source,
+                k=k,
+                polar_angles=polar_angles,
+                azimuthal_angles=azimuthal_angles,
+            )
+        if p_i_te is None or p_i_tm is None:
+            raise RuntimeError("Gaussian source must provide both TE and TM initial PWPs.")
+        p_i_te = _cast_pwp_coeff_dtype(p_i_te, ctype)
+        p_i_tm = _cast_pwp_coeff_dtype(p_i_tm, ctype)
+        p_t_te, p_t_tm = total_field_plane_wave_pattern(p_i_te, p_i_tm, p_s_te, p_s_tm)
+
+    return FarFieldPatterns(
+        initial_te=p_i_te,
+        initial_tm=p_i_tm,
+        scattered_te=p_s_te,
+        scattered_tm=p_s_tm,
+        total_te=p_t_te,
+        total_tm=p_t_tm,
+    )
+
+
+def pwp_power_decomposition(
+    initial_pwp_te: dict,
+    initial_pwp_tm: dict,
+    scattered_pwp_te: dict,
+    scattered_pwp_tm: dict,
+    *,
+    omega: float,
+    k_medium: float,
+    direction: str = "forward",
+    source: GaussianBeam | PlaneWave | None = None,
+) -> dict[str, float]:
+    """Decompose power into initial/scattered/interference/total terms.
+
+    The decomposition is computed for a selected hemisphere:
+      P_total = P_initial + P_scattered + P_interference
+    """
+    if isinstance(source, PlaneWave):
+        raise ValueError(
+            "Transmitted/reflected power fractions are undefined for PlaneWave excitation "
+            "because the incident power is infinite. Use cross sections instead."
+        )
+    total_te, total_tm = total_field_plane_wave_pattern(
+        initial_pwp_te,
+        initial_pwp_tm,
+        scattered_pwp_te,
+        scattered_pwp_tm,
+    )
+    p_initial_te = pwp_power_flux(
+        initial_pwp_te,
+        omega=omega,
+        k_medium=k_medium,
+        direction=direction,
+    )
+    p_initial_tm = pwp_power_flux(
+        initial_pwp_tm,
+        omega=omega,
+        k_medium=k_medium,
+        direction=direction,
+    )
+    P_initial = p_initial_te + p_initial_tm
+
+    p_scattered_te = pwp_power_flux(
+        scattered_pwp_te,
+        omega=omega,
+        k_medium=k_medium,
+        direction=direction,
+    )
+    p_scattered_tm = pwp_power_flux(
+        scattered_pwp_tm,
+        omega=omega,
+        k_medium=k_medium,
+        direction=direction,
+    )
+    P_scattered = p_scattered_te + p_scattered_tm
+
+    p_total_te = pwp_power_flux(
+        total_te,
+        omega=omega,
+        k_medium=k_medium,
+        direction=direction,
+    )
+    p_total_tm = pwp_power_flux(
+        total_tm,
+        omega=omega,
+        k_medium=k_medium,
+        direction=direction,
+    )
+    P_total = p_total_te + p_total_tm
+    P_interference = P_total - P_initial - P_scattered
+
+    return {
+        "P_initial": float(P_initial),
+        "P_scattered": float(P_scattered),
+        "P_interference": float(P_interference),
+        "P_total": float(P_total),
+    }
+
+
+def pwp_power_flux(
+    pwp: dict,
+    *,
+    omega: float,
+    k_medium: float,
+    direction: str,
+) -> float:
+    """Power flux through one hemisphere from a single-polarization PWP.
+
+    Parameters
+    ----------
+    pwp:
+        Plane wave pattern dict (keys: alpha, beta, coeff).
+    omega:
+        Vacuum angular wavenumber 2*pi/lambda.
+    k_medium:
+        Medium wavenumber omega*n_medium.
+    direction:
+        'forward' or 'backward'. Forward corresponds to cos(beta) >= 0.
+
+    Returns
+    -------
+    Power (float)
+    """
+
+    alpha = np.asarray(pwp["alpha"], dtype=float)
+    beta = np.asarray(pwp["beta"], dtype=float)
+    g = np.asarray(pwp["coeff"])
+
+    if direction not in {"forward", "backward"}:
+        raise ValueError("direction must be 'forward' or 'backward'")
+
+    cb = np.cos(beta)
+    # Use strict hemisphere splits to avoid double-counting beta=pi/2 samples.
+    if direction == "forward":
+        mask = cb > 0
+    else:
+        mask = cb < 0
+
+    beta_m = beta[mask]
+    g_m = g[:, mask]
+
+    integrand = np.sin(beta_m)[None, :] * (np.abs(g_m) ** 2)
+
+    # integrate alpha then beta (CELES ordering)
+    int_alpha = _integrate_periodic_alpha(integrand, alpha)
+    int_beta = np.trapezoid(int_alpha, beta_m)
+
+    pref = 2 * np.pi**2 / (omega * k_medium)
+    return float(np.real(pref * int_beta))
+
+
+def initial_power_wavebundle_normal_incidence(
+    beam: GaussianBeam,
+    *,
+    omega: float,
+    k_medium: float,
+    beta_points: int = 5001,
+) -> float:
+    """Finite incident power of a normally incident Gaussian wavebundle."""
+
+    w = float(beam.beam_width)
+    if (not np.isfinite(w)) or np.isclose(w, 0.0):
+        warnings.warn(
+            "Gaussian beam with beam_width=0 or inf is a plane-wave limit: incident power is infinite, "
+            "so transmitted/reflected power fractions are undefined. Use cross sections for PlaneWave excitation.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return float("inf")
+
+    beta = np.linspace(0.0, np.pi, beta_points)
+
+    E0 = complex(beam.amplitude)
+    polar_angle = float(beam.polar_angle)
+
+    sb = np.sin(beta)
+    cb = np.cos(beta)
+
+    direction_mask = (np.sign(cb) == np.sign(np.cos(polar_angle))).astype(float)
+
+    integrand = sb * cb**2 * np.exp(-(w**2) / 2.0 * (k_medium**2) * (sb**2)) * direction_mask
+
+    pref = (abs(E0) ** 2) * np.pi * (k_medium**3) * (w**4) / (4.0 * omega)
+    return float(np.real(pref * np.trapezoid(integrand, beta)))
+
+
+def transmitted_reflected_power(
+    source: GaussianBeam | PlaneWave,
+    initial_pwp_te: dict,
+    initial_pwp_tm: dict,
+    scattered_pwp_te: dict,
+    scattered_pwp_tm: dict,
+    *,
+    omega: float,
+    k_medium: float,
+    beta_points: int = 5001,
+) -> dict[str, float]:
+    """Compute transmitted/reflected powers and fractions for finite-power sources."""
+
+    if isinstance(source, PlaneWave):
+        raise ValueError(
+            "Transmitted/reflected power fractions are undefined for PlaneWave excitation "
+            "because the incident power is infinite. Use cross sections instead."
+        )
+    total_te, total_tm = total_field_plane_wave_pattern(
+        initial_pwp_te,
+        initial_pwp_tm,
+        scattered_pwp_te,
+        scattered_pwp_tm,
+    )
+    p_transmitted_te = pwp_power_flux(
+        total_te,
+        omega=omega,
+        k_medium=k_medium,
+        direction="forward",
+    )
+    p_transmitted_tm = pwp_power_flux(
+        total_tm,
+        omega=omega,
+        k_medium=k_medium,
+        direction="forward",
+    )
+    p_transmitted = p_transmitted_te + p_transmitted_tm
+
+    p_reflected_te = pwp_power_flux(
+        scattered_pwp_te,
+        omega=omega,
+        k_medium=k_medium,
+        direction="backward",
+    )
+    p_reflected_tm = pwp_power_flux(
+        scattered_pwp_tm,
+        omega=omega,
+        k_medium=k_medium,
+        direction="backward",
+    )
+    p_reflected = p_reflected_te + p_reflected_tm
+
+    p_initial = initial_power_wavebundle_normal_incidence(
+        source,
+        omega=omega,
+        k_medium=k_medium,
+        beta_points=beta_points,
+    )
+    if not np.isfinite(p_initial) or p_initial <= 0:
+        raise ValueError(
+            "Initial power is non-finite or non-positive; transmitted/reflected fractions are undefined."
+        )
+
+    return {
+        "P_initial": float(p_initial),
+        "P_transmitted": float(p_transmitted),
+        "P_reflected": float(p_reflected),
+        "T": float(p_transmitted / p_initial),
+        "R": float(p_reflected / p_initial),
+    }
+
+
+def _validate_plane_wave_cross_section_inputs(
+    source: PlaneWave | GaussianBeam,
+    *,
+    omega: float,
+    n_medium: complex,
+) -> tuple[float, float]:
+    """Validate plane-wave cross-section normalization inputs.
+
+    Returns
+    -------
+    n_real, k_medium
+    """
+    if not isinstance(source, PlaneWave):
+        raise ValueError("Cross section only defined for PlaneWave excitation.")
+
+    n_m = complex(n_medium)
+    if abs(n_m.imag) > 0:
+        raise ValueError("Cross section undefined for plane wave incident from absorbing medium.")
+    n_real = float(np.real(n_m))
+    if n_real <= 0:
+        raise ValueError("n_medium must be positive and real for cross-section normalization.")
+
+    k_medium = float(omega) * n_real
+    return n_real, k_medium
+
+
+def scattering_cross_section(
+    source: PlaneWave | GaussianBeam,
+    scattered_pwp_te: dict,
+    scattered_pwp_tm: dict,
+    *,
+    omega: float,
+    n_medium: complex,
+) -> dict[str, np.ndarray]:
+    """Differential scattering cross section from scattered PWPs.
+
+    Returns
+    -------
+    dict
+        Keys are:
+        - ``alpha``: azimuth samples
+        - ``beta``: polar samples
+        - ``te``: TE differential cross section, shape (Na, Nb)
+        - ``tm``: TM differential cross section, shape (Na, Nb)
+        - ``total``: ``te + tm``, shape (Na, Nb)
+
+    Notes
+    -----
+    Cross sections are defined only for plane-wave illumination (finite incident
+    intensity), with
+    ``dC_sca/dOmega = I_sca(alpha,beta) / I_inc``.
+    """
+    n_real, k_medium = _validate_plane_wave_cross_section_inputs(
+        source,
+        omega=omega,
+        n_medium=n_medium,
+    )
+
+    alpha = np.asarray(scattered_pwp_te["alpha"], dtype=float)
+    beta = np.asarray(scattered_pwp_te["beta"], dtype=float)
+    g_te = np.asarray(scattered_pwp_te["coeff"])
+    g_tm = np.asarray(scattered_pwp_tm["coeff"])
+
+    if g_te.shape != g_tm.shape:
+        raise ValueError(
+            "scattered TE/TM PWP coefficient arrays must have identical shapes. "
+            f"Got {g_te.shape} and {g_tm.shape}."
+        )
+
+    # PWP intensity per solid angle for one polarization:
+    # I_Omega = (2*pi^2 / (omega*k_medium)) * |g|^2
+    # Differential scattering cross section:
+    # dC_sca/dOmega = I_Omega / I_inc
+    a_te, a_tm = source_jones(source)
+    pol_norm2 = float(abs(a_te) ** 2 + abs(a_tm) ** 2)
+    initial_intensity = (abs(complex(source.amplitude)) ** 2) * pol_norm2 * n_real / 2.0
+    if initial_intensity <= 0.0:
+        raise ValueError(
+            "Initial plane-wave intensity must be positive for cross-section normalization."
+        )
+
+    pref = (2.0 * np.pi**2) / (float(omega) * k_medium * initial_intensity)
+    dcs_te = pref * (np.abs(g_te) ** 2)
+    dcs_tm = pref * (np.abs(g_tm) ** 2)
+    dcs_total = dcs_te + dcs_tm
+
+    return {
+        "alpha": alpha,
+        "beta": beta,
+        "te": np.asarray(dcs_te, dtype=float),
+        "tm": np.asarray(dcs_tm, dtype=float),
+        "total": np.asarray(dcs_total, dtype=float),
+    }
+
+
+def total_scattering_cross_section(
+    source: PlaneWave | GaussianBeam,
+    scattered_pwp_te: dict,
+    scattered_pwp_tm: dict,
+    *,
+    omega: float,
+    n_medium: complex,
+) -> float:
+    """Total scattering cross section from far-field PWPs.
+
+    Cross section is defined only for plane-wave excitation.
+    """
+    dcs = scattering_cross_section(
+        source,
+        scattered_pwp_te,
+        scattered_pwp_tm,
+        omega=omega,
+        n_medium=n_medium,
+    )
+    alpha = np.asarray(dcs["alpha"], dtype=float)
+    beta = np.asarray(dcs["beta"], dtype=float)
+    total = np.asarray(dcs["total"], dtype=float)
+
+    int_alpha = _integrate_periodic_alpha(total * np.sin(beta)[None, :], alpha)
+    return float(np.trapezoid(int_alpha, beta))
+
+
+def total_scattering_cross_section_from_coefficients(
+    source: PlaneWave | GaussianBeam,
+    scattered_coeffs: np.ndarray,
+    *,
+    omega: float,
+    n_medium: complex,
+) -> float:
+    """Total scattering cross section from solved scattered coefficients.
+
+    Notes
+    -----
+    In CELES SVWF normalization:
+
+    ``C_sca = (pi / k^2) * Re(x^H x)``,
+
+    where ``x`` is the stacked scattered-coefficient vector and
+    ``k = omega * n_medium``.
+    """
+    _, k_medium = _validate_plane_wave_cross_section_inputs(
+        source,
+        omega=omega,
+        n_medium=n_medium,
+    )
+    x = np.asarray(scattered_coeffs, dtype=np.complex128).reshape(-1)
+    pref = np.pi / (k_medium**2)
+    return float(np.real(pref * np.vdot(x, x)))
+
+
+def extinction_cross_section(
+    source: PlaneWave | GaussianBeam,
+    initial_coeffs: np.ndarray,
+    scattered_coeffs: np.ndarray,
+    *,
+    omega: float,
+    n_medium: complex,
+) -> float:
+    """Extinction cross section from solved incident/scattered coefficients.
+
+    Notes
+    -----
+    In CELES SVWF normalization:
+
+    ``C_ext = -(pi / k^2) * Re(b^H x)``,
+
+    where ``b`` are incident coefficients, ``x`` are scattered coefficients and
+    ``k = omega * n_medium``.
+    """
+    _, k_medium = _validate_plane_wave_cross_section_inputs(
+        source,
+        omega=omega,
+        n_medium=n_medium,
+    )
+    b = np.asarray(initial_coeffs, dtype=np.complex128).reshape(-1)
+    x = np.asarray(scattered_coeffs, dtype=np.complex128).reshape(-1)
+    if b.shape != x.shape:
+        raise ValueError(
+            "`initial_coeffs` and `scattered_coeffs` must have matching shapes. "
+            f"Got {b.shape} and {x.shape}."
+        )
+    pref = np.pi / (k_medium**2)
+    return float(np.real(-pref * np.vdot(b, x)))
+
+
+def absorption_cross_section(
+    source: PlaneWave | GaussianBeam,
+    initial_coeffs: np.ndarray,
+    scattered_coeffs: np.ndarray,
+    *,
+    omega: float,
+    n_medium: complex,
+) -> float:
+    """Absorption cross section from coefficient-based extinction/scattering."""
+    c_ext = extinction_cross_section(
+        source,
+        initial_coeffs,
+        scattered_coeffs,
+        omega=omega,
+        n_medium=n_medium,
+    )
+    c_sca = total_scattering_cross_section_from_coefficients(
+        source,
+        scattered_coeffs,
+        omega=omega,
+        n_medium=n_medium,
+    )
+    return float(c_ext - c_sca)
+
+
+def plane_wave_cross_sections(
+    source: PlaneWave | GaussianBeam,
+    initial_coeffs: np.ndarray,
+    scattered_coeffs: np.ndarray,
+    *,
+    omega: float,
+    n_medium: complex,
+    scattered_pwp_te: dict | None = None,
+    scattered_pwp_tm: dict | None = None,
+) -> dict[str, float]:
+    """Convenience wrapper returning extinction/scattering/absorption cross sections.
+
+    Returns
+    -------
+    dict
+        Always contains:
+        - ``C_ext`` (coefficient-based)
+        - ``C_sca`` (coefficient-based)
+        - ``C_abs`` (``C_ext - C_sca``)
+
+        If both scattered PWPs are provided, also includes:
+        - ``C_sca_farfield`` (angularly integrated differential cross section)
+    """
+    c_ext = extinction_cross_section(
+        source,
+        initial_coeffs,
+        scattered_coeffs,
+        omega=omega,
+        n_medium=n_medium,
+    )
+    c_sca = total_scattering_cross_section_from_coefficients(
+        source,
+        scattered_coeffs,
+        omega=omega,
+        n_medium=n_medium,
+    )
+    out = {
+        "C_ext": float(c_ext),
+        "C_sca": float(c_sca),
+        "C_abs": float(c_ext - c_sca),
+    }
+    if (scattered_pwp_te is not None) and (scattered_pwp_tm is not None):
+        out["C_sca_farfield"] = float(
+            total_scattering_cross_section(
+                source,
+                scattered_pwp_te,
+                scattered_pwp_tm,
+                omega=omega,
+                n_medium=n_medium,
+            )
+        )
+    return out
