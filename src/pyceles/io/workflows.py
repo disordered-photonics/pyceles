@@ -93,12 +93,29 @@ def save_simulation_h5(
     )
 
     ff = run.farfield
+    source_beta, source_alpha = run.config.source_angular_grids()
+    farfield_beta, farfield_alpha = run.config.farfield_angular_grids()
+    k_medium = 2.0 * np.pi / float(run.config.wavelength) * float(np.real(run.config.n_medium))
     patterns = {"scattered": {"te": ff.scattered_te, "tm": ff.scattered_tm}}
     if ff.initial_te is not None and ff.initial_tm is not None:
         patterns["initial"] = {"te": ff.initial_te, "tm": ff.initial_tm}
     if ff.total_te is not None and ff.total_tm is not None:
         patterns["total"] = {"te": ff.total_te, "tm": ff.total_tm}
-    save_far_field_h5(out_h5, patterns=patterns)
+    save_far_field_h5(
+        out_h5,
+        patterns=patterns,
+        attrs={
+            "k_medium": float(k_medium),
+            "source_beta_points": int(source_beta.size),
+            "source_alpha_points": int(source_alpha.size),
+            "farfield_beta_points": int(farfield_beta.size),
+            "farfield_alpha_points": int(farfield_alpha.size),
+            "source_farfield_grid_equal": bool(
+                np.array_equal(source_beta, farfield_beta)
+                and np.array_equal(source_alpha, farfield_alpha)
+            ),
+        },
+    )
 
     if run.farfield_basis is not None:
         for pol, ff_pol in run.farfield_basis.items():
@@ -112,8 +129,35 @@ def save_simulation_h5(
                 patterns=patt_pol,
                 group=f"far_field_basis/{pol}",
                 mode="a",
-                attrs={"polarization_channel": pol},
+                attrs={
+                    "polarization_channel": pol,
+                    "k_medium": float(k_medium),
+                    "source_beta_points": int(source_beta.size),
+                    "source_alpha_points": int(source_alpha.size),
+                    "farfield_beta_points": int(farfield_beta.size),
+                    "farfield_alpha_points": int(farfield_alpha.size),
+                    "source_farfield_grid_equal": bool(
+                        np.array_equal(source_beta, farfield_beta)
+                        and np.array_equal(source_alpha, farfield_alpha)
+                    ),
+                },
             )
+
+    same_source_farfield_grids = bool(
+        np.array_equal(source_beta, farfield_beta) and np.array_equal(source_alpha, farfield_alpha)
+    )
+    angular_grids: dict[str, object] = {
+        "source_farfield_grid_equal": same_source_farfield_grids,
+    }
+    if same_source_farfield_grids:
+        # Common path: one shared grid is enough for both source projection and far-field output.
+        angular_grids["beta"] = np.asarray(source_beta, dtype=float)
+        angular_grids["alpha"] = np.asarray(source_alpha, dtype=float)
+    else:
+        angular_grids["source_beta"] = np.asarray(source_beta, dtype=float)
+        angular_grids["source_alpha"] = np.asarray(source_alpha, dtype=float)
+        angular_grids["farfield_beta"] = np.asarray(farfield_beta, dtype=float)
+        angular_grids["farfield_alpha"] = np.asarray(farfield_alpha, dtype=float)
 
     diagnostics: dict[str, object] = {
         "polarization_jones": {
@@ -122,6 +166,7 @@ def save_simulation_h5(
             "a_tm_real": float(np.real(run.polarization_jones[1])),
             "a_tm_imag": float(np.imag(run.polarization_jones[1])),
         },
+        "angular_grids": angular_grids,
     }
     if run.power is not None:
         diagnostics["power"] = run.power

@@ -35,6 +35,8 @@ def main() -> None:
         n_medium=1.0 + 0j,
         lmax=3,
         source=source,
+        compute_dtype="complex64",
+        accum_dtype="complex128",
         polar_angles=np.linspace(0.0, np.pi, 3601, endpoint=True),
         azimuthal_angles=np.linspace(0.0, 2.0 * np.pi, 720, endpoint=False),
         solver_method="auto",

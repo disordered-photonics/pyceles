@@ -127,9 +127,9 @@ def load_solution_h5(path: str | Path, *, group: str = "solution") -> dict[str, 
 
 
 def _read_pwp(group: h5py.Group) -> dict[str, Any]:
-    """Read one plane-wave pattern group (`alpha`,`beta`,`k*`,`coeff`)."""
+    """Read one plane-wave pattern group (`alpha`,`beta`,`coeff`)."""
     out: dict[str, Any] = {}
-    for key in ("alpha", "beta", "kx", "ky", "kz", "coeff"):
+    for key in ("alpha", "beta", "coeff"):
         if key in group:
             out[key] = group[key][...]
     out["attrs"] = dict(group.attrs.items())
@@ -137,7 +137,12 @@ def _read_pwp(group: h5py.Group) -> dict[str, Any]:
 
 
 def load_far_field_h5(path: str | Path, *, group: str = "far_field") -> dict[str, Any]:
-    """Load far-field patterns saved via `save_far_field_h5`."""
+    """Load far-field patterns saved via `save_far_field_h5`.
+
+    Saved PWPs include ``alpha``, ``beta``, and ``coeff``. Cartesian wavevector
+    grids (``kx``, ``ky``, ``kz``) are intentionally not persisted; reconstruct
+    them from ``alpha``, ``beta``, and stored ``k_medium`` metadata when needed.
+    """
     out: dict[str, Any] = {"patterns": {}, "attrs": {}}
     with h5py.File(_pathlike(path), "r") as h5:
         if group not in h5:
@@ -261,9 +266,14 @@ def save_near_field_components_h5(
         _write_attrs(root, attrs)
 
 
-def _write_pwp(group: h5py.Group, pwp: Mapping[str, Any], *, compression: str | None) -> None:
-    """Write a standard PWP mapping into an HDF5 group."""
-    for key in ("alpha", "beta", "kx", "ky", "kz", "coeff"):
+def _write_pwp(
+    group: h5py.Group,
+    pwp: Mapping[str, Any],
+    *,
+    compression: str | None,
+) -> None:
+    """Write compact PWP payload (`alpha`,`beta`,`coeff`) into an HDF5 group."""
+    for key in ("alpha", "beta", "coeff"):
         if key in pwp:
             _write_dataset(group, key, pwp[key], compression=compression)
 
@@ -348,6 +358,7 @@ def save_far_field_h5(
         "scattered": {"te": pwp_s_te, "tm": pwp_s_tm},
         "total": {"te": pwp_t_te, "tm": pwp_t_tm},
       }
+    Only ``alpha``, ``beta``, and ``coeff`` are stored per polarization.
     When `drop_redundant_total=True` and both `initial` and `scattered` are
     present, a provided `total` family is omitted to avoid redundant storage.
     """
