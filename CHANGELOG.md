@@ -8,10 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Regression tests for:
+  - translation `RadialLUT` finiteness near `r=0`,
+  - near-field inside-mask behavior for scattered-field components.
 
 ### Changed
+- Package import is now silent by default; the ASCII logo is shown once per process at the start of verbose simulation runs.
+- HDF5 far-field payloads are now stored in compact form (`alpha`, `beta`, `coeff`) without persisting redundant `kx/ky/kz` arrays.
+- Simulation workflow diagnostics now persist source-vs-farfield angular-grid metadata in a compact form (shared grid stored once when equal).
+- `examples/minimal_pyceles_demo.py` now defaults to mixed precision (`compute_dtype=complex64`, `accum_dtype=complex128`) to better reflect recommended usage.
+- Plotting labels/titles were improved with math-style formatting for near-field components and far-field hemisphere captions.
 
 ### Fixed
+- Translation `RadialLUT` now guards against the spherical-Hankel singularity at `kr=0`, preventing NaN/inf contamination for small `r`.
+- Near-field scattered-field evaluation now skips interior-particle points and sanitizes inside scattered components, avoiding divergence artifacts at sphere centers and preventing overflow-related warnings.
 
 ## [0.1.0] - 2026-02-25
 
@@ -31,4 +41,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - Angular-grid API now preserves a conceptual split between source-projection quadrature and far-field output bins, while keeping one shared CELES-style default grid.
-
