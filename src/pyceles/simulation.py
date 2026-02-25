@@ -9,14 +9,10 @@ from tqdm.auto import tqdm
 
 from pyceles._logo import print_logo
 from pyceles._version import __version__
-from pyceles.core.fields import (
-    GaussianBeam,
-    PlaneWave,
-    project_source_basis_to_svwf,
-    source_jones,
-)
 from pyceles.core.indexing import n_modes
 from pyceles.core.matvec import assemble_dense_A_numpy, prepare_matvec
+from pyceles.core.projection import project_source_basis_to_svwf
+from pyceles.core.sources import GaussianBeam, PlaneWave, source_jones
 from pyceles.linear.preconditioner import make_grid_block_preconditioner
 from pyceles.linear.solvers import (
     LinearSolveResult,

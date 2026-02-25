@@ -14,15 +14,15 @@ import numpy as np
 import numpy.typing as npt
 from tqdm.auto import tqdm
 
-from pyceles.core.fields import (
+from pyceles.core.indexing import iter_modes, n_modes
+from pyceles.core.projection import transformation_coefficients
+from pyceles.core.sources import (
     GaussianBeam,
     PlaneWave,
     initial_field_plane_wave_pattern_normal_incidence,
     is_normal_incidence,
     source_jones,
-    transformation_coefficients,
 )
-from pyceles.core.indexing import iter_modes, n_modes
 from pyceles.core.spherical import spherical_functions_trigon
 
 

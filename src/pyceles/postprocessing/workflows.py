@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 
-from .nearfield import NearFieldComponents, compute_near_field_components
+from .nearfield_workflows import NearFieldComponents, compute_near_field_components
 
 if TYPE_CHECKING:
     from pyceles.simulation import SimulationResult
