@@ -21,8 +21,6 @@ Conventions
 
 - `sphere_internal_ratios` provides the per-l conversion factors used by CELES
   to convert scattered SVWF coefficients into internal (regular) coefficients.
-
-This module intentionally contains **no JAX** code.
 """
 
 from __future__ import annotations

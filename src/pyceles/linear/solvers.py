@@ -11,9 +11,6 @@ Key requirements for development/debugging:
 - determinism and correctness-first
 - progress reporting
 - reliable reporting of *true* final residuals
-
-This module intentionally contains **no JAX** code. GPU acceleration will be
-introduced later via a CuPy backend.
 """
 
 from __future__ import annotations

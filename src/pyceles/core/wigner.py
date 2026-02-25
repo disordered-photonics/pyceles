@@ -8,8 +8,6 @@ Implementation notes
 --------------------
 - Uses a Racah-style summation with log-factorials via SciPy `gammaln`.
 - Cached with `functools.cache` because many calls repeat.
-
-This file intentionally contains **no JAX** code.
 """
 
 from __future__ import annotations
