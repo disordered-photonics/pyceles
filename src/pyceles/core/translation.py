@@ -78,6 +78,12 @@ class RadialLUT:
         self._inv_dr = 1.0 / self.dr
         self._last_index = self.r_grid.size - 1
         z = (self.k * self.r_grid).astype(np.complex128)
+        # Avoid evaluating spherical Hankel at exactly kr=0 (singular y_l term).
+        # We mirror the near-field LUT policy: replace the first sample with the
+        # first positive-radius sample so interpolation for 0 < r < dr remains finite.
+        if z.size > 1:
+            z = z.copy()
+            z[0] = z[1]
         j, y = spherical_bessel_jy(2 * self.lmax, z)
         self.h = (j + 1j * y).astype(self.dtype, copy=False)  # (p, Nr)
 
