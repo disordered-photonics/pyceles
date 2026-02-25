@@ -439,6 +439,7 @@ def compute_scattered_field(
     n_medium: complex = 1.0 + 0j,
     particle_distance_resolution: float = 1.0,
     lut: NearFieldRadialLUT | None = None,
+    active_mask: np.ndarray | None = None,
     batch_size: int = 8192,
     show_progress: bool = True,
     compute_dtype: npt.DTypeLike = np.complex128,
@@ -452,6 +453,11 @@ def compute_scattered_field(
       E += a * M + b * N
       H += -i n_medium (a * N + b * M)
     where coefficients a,b come from tau=1 (M) and tau=2 (N) blocks in our ordering.
+
+    `active_mask`, when provided, marks the subset of points to evaluate.
+    Points outside the mask are left as zero. This is used by higher-level
+    workflows to skip interior-particle points where the exterior scattered
+    expansion is not physically meaningful.
     """
     pts = np.asarray(field_points, np.float64)
     pos = np.asarray(positions, np.float64)
@@ -471,11 +477,27 @@ def compute_scattered_field(
         # Source-only (no scatterers): scattered contribution is identically zero.
         return E, H
 
+    idx_eval: np.ndarray | None = None
+    if active_mask is None:
+        pts_eval = pts
+        E_eval = E
+        H_eval = H
+    else:
+        mask = np.asarray(active_mask, dtype=bool).reshape(-1)
+        if mask.shape[0] != pts.shape[0]:
+            raise ValueError(f"`active_mask` must have length {pts.shape[0]}. Got {mask.shape[0]}.")
+        idx_eval = np.flatnonzero(mask)
+        if idx_eval.size == 0:
+            return E, H
+        pts_eval = pts[idx_eval]
+        E_eval = np.zeros((pts_eval.shape[0], 3), dtype=accum_dtype)
+        H_eval = np.zeros_like(E_eval)
+
     if lut is None:
-        # estimate r_max from farthest point to any sphere
+        # estimate r_max from farthest evaluated point to any sphere
         rmax = 0.0
         for j in range(Ns):
-            r = np.linalg.norm(pts - pos[j], axis=1).max()
+            r = np.linalg.norm(pts_eval - pos[j], axis=1).max()
             rmax = max(rmax, float(r))
         lut = NearFieldRadialLUT(
             lmax=lmax,
@@ -493,9 +515,9 @@ def compute_scattered_field(
         total=Ns,
         disable=not show_progress,
     ):
-        for s in range(0, pts.shape[0], batch_size):
-            e = min(pts.shape[0], s + batch_size)
-            p = pts[s:e]
+        for s in range(0, pts_eval.shape[0], batch_size):
+            e = min(pts_eval.shape[0], s + batch_size)
+            p = pts_eval[s:e]
             R = p - pos[jS]
 
             r = np.linalg.norm(R, axis=1)
@@ -554,12 +576,16 @@ def compute_scattered_field(
                     * eimphi[:, :, None]
                 )
 
-                E[s:e] += _contract_modes(a_vec, Mv_all)
-                E[s:e] += _contract_modes(b_vec, Nv_all)
-                H[s:e] += (-1j * nM) * _contract_modes(a_vec, Nv_all)
-                H[s:e] += (-1j * nM) * _contract_modes(b_vec, Mv_all)
+                E_eval[s:e] += _contract_modes(a_vec, Mv_all)
+                E_eval[s:e] += _contract_modes(b_vec, Nv_all)
+                H_eval[s:e] += (-1j * nM) * _contract_modes(a_vec, Nv_all)
+                H_eval[s:e] += (-1j * nM) * _contract_modes(b_vec, Mv_all)
 
-    return E, H
+    if idx_eval is not None:
+        E[idx_eval] = E_eval
+        H[idx_eval] = H_eval
+        return E, H
+    return E_eval, H_eval
 
 
 def compute_internal_field(
@@ -1041,7 +1067,12 @@ def compute_near_field_components(
     scattering, and internal contributions before/after the inside replacement.
     The angular grids are the source-projection quadrature nodes for the
     incident field, not generic far-field display bins.
+    Compared to the baseline CELES workflow, scattered-field evaluation here
+    skips points known to be inside spheres, because those samples are replaced
+    by internal fields in the physical total-field definition.
     """
+
+    pts = np.asarray(field_points, dtype=float)
 
     Ei, Hi = compute_initial_field(
         field_points,
@@ -1057,6 +1088,17 @@ def compute_near_field_components(
         accum_dtype=accum_dtype,
     )
 
+    inside_hint = np.zeros(pts.shape[0], dtype=bool)
+    if radii is not None and n_particle is not None:
+        # We already know total/internal fields will replace values inside spheres.
+        # Build this cheap geometry mask up front so scattered-field evaluation can
+        # skip interior points entirely.
+        pos = np.asarray(positions, dtype=float)
+        rad = np.asarray(radii, dtype=float).reshape(-1)
+        for jS in range(pos.shape[0]):
+            R = pts - pos[jS]
+            inside_hint |= np.sum(R * R, axis=1) < (rad[jS] ** 2)
+
     Es, Hs = compute_scattered_field(
         field_points,
         positions,
@@ -1066,13 +1108,14 @@ def compute_near_field_components(
         n_medium=n_medium,
         show_progress=show_progress,
         particle_distance_resolution=lut_dr,
+        active_mask=(~inside_hint) if np.any(inside_hint) else None,
         compute_dtype=compute_dtype,
         accum_dtype=accum_dtype,
     )
 
     Eint = np.zeros_like(Ei)
     Hint = np.zeros_like(Hi)
-    inside = np.zeros(field_points.shape[0], dtype=bool)
+    inside = np.zeros(pts.shape[0], dtype=bool)
 
     Et = Ei + Es
     Ht = Hi + Hs
@@ -1091,6 +1134,11 @@ def compute_near_field_components(
             compute_dtype=compute_dtype,
             accum_dtype=accum_dtype,
         )
+        # Exterior scattered-field expansions are not physically valid inside
+        # particles and can diverge at exact sphere centers; sanitize these
+        # entries so downstream storage/downcasting remains stable.
+        Es[inside] = 0
+        Hs[inside] = 0
         Et[inside] = Eint[inside]
         Ht[inside] = Hint[inside]
 
