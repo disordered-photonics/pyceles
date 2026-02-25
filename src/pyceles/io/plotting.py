@@ -8,12 +8,28 @@ def _slice_axis_labels(plane: str) -> tuple[str, str]:
     """Return in-plane coordinate labels for a given slice normal axis."""
     p = str(plane).lower()
     if p == "x":
-        return "y", "z"
+        return r"$y$", r"$z$"
     if p == "y":
-        return "x", "z"
+        return r"$x$", r"$z$"
     if p == "z":
-        return "x", "y"
+        return r"$x$", r"$y$"
     raise ValueError("plane must be one of {'x', 'y', 'z'}")
+
+
+def _component_panel_title(component_name: str) -> str:
+    """Return a math-formatted near-field panel title."""
+    c = str(component_name).strip().lower()
+    mapping = {
+        "real ex": r"$\operatorname{Re} E_x$",
+        "real ey": r"$\operatorname{Re} E_y$",
+        "real ez": r"$\operatorname{Re} E_z$",
+        "real hx": r"$\operatorname{Re} H_x$",
+        "real hy": r"$\operatorname{Re} H_y$",
+        "real hz": r"$\operatorname{Re} H_z$",
+        "abs e": r"$|E|$",
+        "abs h": r"$|H|$",
+    }
+    return mapping.get(c, component_name)
 
 
 def near_field_component(E: np.ndarray, H: np.ndarray, component: str) -> np.ndarray:
@@ -290,12 +306,12 @@ def plot_farfield_hemispheres(
         subplot_kw={"projection": "polar"},
     )
     im0 = axes[0].pcolormesh(Af, Bf, I[:, fwd], shading="auto", cmap=cmap, vmin=vmin_f, vmax=vmax_f)
-    axes[0].set_title("Forward Hemisphere (+z)")
+    axes[0].set_title(r"Forward hemisphere ($+z$)")
     axes[0].set_ylim(0.0, 0.5 * np.pi)
     axes[0].set_ylabel(r"$\beta$")
 
     im1 = axes[1].pcolormesh(Ab, Bb, I[:, bwd], shading="auto", cmap=cmap, vmin=vmin_b, vmax=vmax_b)
-    axes[1].set_title("Backward Hemisphere (-z)")
+    axes[1].set_title(r"Backward hemisphere ($-z$)")
     axes[1].set_ylim(0.0, 0.5 * np.pi)
     axes[1].set_ylabel(r"$\pi-\beta$")
 
@@ -343,7 +359,7 @@ def plot_nearfield_panels(
             origin="lower",
             aspect="equal",
         )
-        ax.set_title(name)
+        ax.set_title(_component_panel_title(name))
         ax.set_xlabel(axis_0_label)
         ax.set_ylabel(axis_1_label)
         ax.set_aspect("equal", adjustable="box")
@@ -426,7 +442,7 @@ def plot_nearfield_panels_channels(
                 origin="lower",
                 aspect="equal",
             )
-            ax.set_title(f"{ch_name}: {name}")
+            ax.set_title(f"{ch_name}: {_component_panel_title(name)}")
             ax.set_xlabel(axis_0_label)
             ax.set_ylabel(axis_1_label)
             ax.set_aspect("equal", adjustable="box")
