@@ -1,7 +1,6 @@
-__version__ = "0.1.0"
-
 from pyceles import core, io, linear, postprocessing
 from pyceles._logo import print_logo
+from pyceles._version import __version__
 from pyceles.core.fields import (
     GaussianBeam,
     PlaneWave,
@@ -17,8 +16,6 @@ from pyceles.postprocessing.workflows import (
     mix_near_field_slices,
 )
 from pyceles.simulation import Simulation, SimulationConfig, SimulationResult
-
-print_logo(__version__)
 
 __all__ = [
     "__version__",

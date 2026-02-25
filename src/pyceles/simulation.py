@@ -7,6 +7,8 @@ import numpy as np
 import numpy.typing as npt
 from tqdm.auto import tqdm
 
+from pyceles._logo import print_logo
+from pyceles._version import __version__
 from pyceles.core.fields import (
     GaussianBeam,
     PlaneWave,
@@ -31,6 +33,16 @@ from pyceles.postprocessing.farfield import (
 
 _SOURCE_TYPES = (GaussianBeam, PlaneWave)
 _ALLOWED_COMPLEX_DTYPES = {"complex64", "complex128"}
+_STARTUP_LOGO_PRINTED = False
+
+
+def _print_startup_logo_once() -> None:
+    """Print pyceles logo once per process for verbose user-facing runs."""
+    global _STARTUP_LOGO_PRINTED
+    if _STARTUP_LOGO_PRINTED:
+        return
+    print_logo(__version__)
+    _STARTUP_LOGO_PRINTED = True
 
 
 def _as_1d_float_array(name: str, values: np.ndarray) -> np.ndarray:
@@ -681,6 +693,7 @@ class Simulation:
             solver_name == "auto" and unknowns <= int(cfg.solver_direct_max_n)
         )
         if cfg.verbose:
+            _print_startup_logo_once()
             print(
                 "System:"
                 f" particles={Ns} lmax={cfg.lmax} modes_per_particle={Nm} unknowns={unknowns}"
