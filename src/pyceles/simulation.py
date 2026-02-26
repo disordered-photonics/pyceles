@@ -22,9 +22,9 @@ from pyceles.linear.solvers import (
 from pyceles.postprocessing.farfield import (
     FarFieldPatterns,
     compute_far_field_patterns,
+    finite_beam_power_fractions,
     plane_wave_cross_sections,
     pwp_power_decomposition,
-    transmitted_reflected_power,
 )
 
 _SOURCE_TYPES = (GaussianBeam, PlaneWave)
@@ -936,7 +936,7 @@ class Simulation:
                 )
                 ff_basis[pol_key] = ff_pol
                 if ff_pol.initial_te is not None and ff_pol.initial_tm is not None:
-                    power_basis[pol_key] = transmitted_reflected_power(
+                    power_basis[pol_key] = finite_beam_power_fractions(
                         src_pol,
                         ff_pol.initial_te,
                         ff_pol.initial_tm,
@@ -944,8 +944,6 @@ class Simulation:
                         ff_pol.scattered_tm,
                         omega=omega,
                         k_medium=k,
-                        # Keep source-power normalization tied to source quadrature.
-                        beta_points=len(source_polar_angles),
                     )
                     diag_fwd_basis[pol_key] = pwp_power_decomposition(
                         direction="forward",
@@ -1008,7 +1006,7 @@ class Simulation:
                 show_progress=bool(cfg.verbose),
             )
         if ff.initial_te is not None and ff.initial_tm is not None:
-            power = transmitted_reflected_power(
+            power = finite_beam_power_fractions(
                 source,
                 ff.initial_te,
                 ff.initial_tm,
@@ -1016,8 +1014,6 @@ class Simulation:
                 ff.scattered_tm,
                 omega=omega,
                 k_medium=k,
-                # Keep source-power normalization tied to source quadrature.
-                beta_points=len(source_polar_angles),
             )
             diag_fwd = pwp_power_decomposition(
                 direction="forward",

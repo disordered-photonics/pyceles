@@ -15,6 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (facades reserved for public API entry points).
 
 ### Changed
+- Breaking: renamed finite-beam power diagnostics helpers in `postprocessing.farfield`:
+  - `initial_power_wavebundle_normal_incidence` -> `incident_power_from_pwp`
+  - `transmitted_reflected_power` -> `finite_beam_power_fractions`
+- Finite-beam transmitted/reflected fractions are now normalized from the
+  provided initial TE/TM PWP (solid-angle integration) instead of a
+  normal-incidence Gaussian closed form, making tilted-beam diagnostics
+  physically consistent with the computed source spectrum.
 - Package import is now silent by default; the ASCII logo is shown once per process at the start of verbose simulation runs.
 - HDF5 far-field payloads are now stored in compact form (`alpha`, `beta`, `coeff`) without persisting redundant `kx/ky/kz` arrays.
 - Simulation workflow diagnostics now persist source-vs-farfield angular-grid metadata in a compact form (shared grid stored once when equal).

@@ -3,7 +3,8 @@ from .farfield import (
     absorption_cross_section,
     compute_far_field_patterns,
     extinction_cross_section,
-    initial_power_wavebundle_normal_incidence,
+    finite_beam_power_fractions,
+    incident_power_from_pwp,
     plane_wave_cross_sections,
     pwp_power_decomposition,
     pwp_power_flux,
@@ -12,7 +13,6 @@ from .farfield import (
     total_field_plane_wave_pattern,
     total_scattering_cross_section,
     total_scattering_cross_section_from_coefficients,
-    transmitted_reflected_power,
 )
 from .nearfield import (
     NearFieldComponents,
@@ -49,7 +49,8 @@ __all__ = [
     "mix_near_field_slices",
     "compute_scattered_field",
     "compute_total_field",
-    "initial_power_wavebundle_normal_incidence",
+    "incident_power_from_pwp",
+    "finite_beam_power_fractions",
     "plane_wave_cross_sections",
     "poynting",
     "pwp_power_decomposition",
@@ -59,5 +60,4 @@ __all__ = [
     "total_field_plane_wave_pattern",
     "total_scattering_cross_section",
     "total_scattering_cross_section_from_coefficients",
-    "transmitted_reflected_power",
 ]

@@ -7,7 +7,6 @@ plane-wave-normalized scattering observables.
 
 from __future__ import annotations
 
-import warnings
 from dataclasses import dataclass
 
 import numpy as np
@@ -403,42 +402,34 @@ def pwp_power_flux(
     return float(np.real(pref * int_beta))
 
 
-def initial_power_wavebundle_normal_incidence(
-    beam: GaussianBeam,
+def incident_power_from_pwp(
+    initial_pwp_te: dict,
+    initial_pwp_tm: dict,
     *,
     omega: float,
     k_medium: float,
-    beta_points: int = 5001,
 ) -> float:
-    """Finite incident power of a normally incident Gaussian wavebundle."""
+    """Incident beam power from the initial TE/TM PWPs.
 
-    w = float(beam.beam_width)
-    if (not np.isfinite(w)) or np.isclose(w, 0.0):
-        warnings.warn(
-            "Gaussian beam with beam_width=0 or inf is a plane-wave limit: incident power is infinite, "
-            "so transmitted/reflected power fractions are undefined. Use cross sections for PlaneWave excitation.",
-            RuntimeWarning,
-            stacklevel=2,
+    This integrates the initial spectrum over both hemispheres. Unlike the old
+    normal-incidence Gaussian closed form, this remains consistent for tilted
+    beams because it uses the actual initial PWP provided to the solver.
+    """
+    p_initial = (
+        pwp_power_flux(initial_pwp_te, omega=omega, k_medium=k_medium, direction="forward")
+        + pwp_power_flux(initial_pwp_tm, omega=omega, k_medium=k_medium, direction="forward")
+        + pwp_power_flux(initial_pwp_te, omega=omega, k_medium=k_medium, direction="backward")
+        + pwp_power_flux(initial_pwp_tm, omega=omega, k_medium=k_medium, direction="backward")
+    )
+    if (not np.isfinite(p_initial)) or (p_initial <= 0.0):
+        raise ValueError(
+            "Incident power computed from initial PWPs is non-finite or non-positive; "
+            "transmitted/reflected fractions are undefined."
         )
-        return float("inf")
-
-    beta = np.linspace(0.0, np.pi, beta_points)
-
-    E0 = complex(beam.amplitude)
-    polar_angle = float(beam.polar_angle)
-
-    sb = np.sin(beta)
-    cb = np.cos(beta)
-
-    direction_mask = (np.sign(cb) == np.sign(np.cos(polar_angle))).astype(float)
-
-    integrand = sb * cb**2 * np.exp(-(w**2) / 2.0 * (k_medium**2) * (sb**2)) * direction_mask
-
-    pref = (abs(E0) ** 2) * np.pi * (k_medium**3) * (w**4) / (4.0 * omega)
-    return float(np.real(pref * np.trapezoid(integrand, beta)))
+    return float(p_initial)
 
 
-def transmitted_reflected_power(
+def finite_beam_power_fractions(
     source: GaussianBeam | PlaneWave,
     initial_pwp_te: dict,
     initial_pwp_tm: dict,
@@ -447,15 +438,25 @@ def transmitted_reflected_power(
     *,
     omega: float,
     k_medium: float,
-    beta_points: int = 5001,
 ) -> dict[str, float]:
-    """Compute transmitted/reflected powers and fractions for finite-power sources."""
+    """Compute transmitted/reflected powers and fractions for finite-power beams.
+
+    Normalization is always done by integrating the supplied initial PWP over
+    solid angle, so the result is consistent for both normal and tilted beams.
+    """
 
     if isinstance(source, PlaneWave):
         raise ValueError(
             "Transmitted/reflected power fractions are undefined for PlaneWave excitation "
             "because the incident power is infinite. Use cross sections instead."
         )
+    w = float(source.beam_width)
+    if (not np.isfinite(w)) or np.isclose(w, 0.0):
+        raise ValueError(
+            "Gaussian beam with beam_width=0 or inf is a plane-wave limit: incident power is infinite, "
+            "so transmitted/reflected power fractions are undefined. Use cross sections for PlaneWave excitation."
+        )
+
     total_te, total_tm = total_field_plane_wave_pattern(
         initial_pwp_te,
         initial_pwp_tm,
@@ -490,16 +491,12 @@ def transmitted_reflected_power(
     )
     p_reflected = p_reflected_te + p_reflected_tm
 
-    p_initial = initial_power_wavebundle_normal_incidence(
-        source,
+    p_initial = incident_power_from_pwp(
+        initial_pwp_te,
+        initial_pwp_tm,
         omega=omega,
         k_medium=k_medium,
-        beta_points=beta_points,
     )
-    if not np.isfinite(p_initial) or p_initial <= 0:
-        raise ValueError(
-            "Initial power is non-finite or non-positive; transmitted/reflected fractions are undefined."
-        )
 
     return {
         "P_initial": float(p_initial),

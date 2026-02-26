@@ -42,7 +42,8 @@ Users of pyceles are referred to the publications listed in the CELES and SMUTHI
     - total scattering cross section (PWP-integrated and coefficient-based)
     - extinction and absorption cross sections (coefficient-based)
 - Physical source checks:
-  - transmitted/reflected power fractions only for finite-power beams
+  - finite-beam power fractions are normalized by integrating the initial TE/TM
+    plane-wave spectrum (works for normal and tilted Gaussian beams)
   - plane-wave excitation raises when requesting power fractions
 - Geometry sanity check:
   - by default, `Simulation` enforces disjoint particle circumscribing spheres
