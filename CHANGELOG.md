@@ -18,6 +18,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Breaking: renamed finite-beam power diagnostics helpers in `postprocessing.farfield`:
   - `initial_power_wavebundle_normal_incidence` -> `incident_power_from_pwp`
   - `transmitted_reflected_power` -> `finite_beam_power_fractions`
+- Breaking: plane-wave cross-section semantics now follow SMUTHI-style cluster
+  scattering:
+  - `C_sca` in `plane_wave_cross_sections` is now far-field integrated,
+  - `scattered_pwp_te` and `scattered_pwp_tm` are now required inputs,
+  - redundant `C_sca_farfield` output key was removed,
+  - `total_scattering_cross_section_from_coefficients` was removed from the
+    public far-field API.
+- `absorption_cross_section` no longer has a coefficient-only fallback path and
+  now requires scattered TE/TM PWPs for SMUTHI-style cluster absorption
+  (`C_abs = C_ext - C_sca`).
 - Finite-beam transmitted/reflected fractions are now normalized from the
   provided initial TE/TM PWP (solid-angle integration) instead of a
   normal-incidence Gaussian closed form, making tilted-beam diagnostics

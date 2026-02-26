@@ -39,8 +39,10 @@ Users of pyceles are referred to the publications listed in the CELES and SMUTHI
   - canonical helper returning `initial/scattered/total` PWPs in one call
   - plane-wave cross sections:
     - differential scattering cross section (`dC_sca/dOmega`)
-    - total scattering cross section (PWP-integrated and coefficient-based)
-    - extinction and absorption cross sections (coefficient-based)
+    - total scattering cross section (PWP-integrated, SMUTHI-style cluster definition)
+    - extinction cross section (coefficient-based)
+    - absorption cross section (`C_abs = C_ext - C_sca`)
+    - no coefficient-only cluster `C_sca` helper is exposed
 - Physical source checks:
   - finite-beam power fractions are normalized by integrating the initial TE/TM
     plane-wave spectrum (works for normal and tilted Gaussian beams)

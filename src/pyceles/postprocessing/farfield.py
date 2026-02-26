@@ -645,37 +645,6 @@ def total_scattering_cross_section(
     return float(np.trapezoid(int_alpha, beta))
 
 
-def total_scattering_cross_section_from_coefficients(
-    source: PlaneWave | GaussianBeam,
-    scattered_coeffs: np.ndarray,
-    *,
-    omega: float,
-    n_medium: complex,
-) -> float:
-    """Total scattering cross section from solved scattered coefficients.
-
-    Notes
-    -----
-    In CELES SVWF normalization (unit-amplitude source):
-
-    ``C_sca = (pi / k^2) * Re(x^H x)``,
-
-    where ``x`` is the stacked scattered-coefficient vector and
-    ``k = omega * n_medium``. For arbitrary source amplitude/Jones magnitude,
-    this quantity is normalized by the incident intensity scale
-    ``|E0|^2 * (|a_te|^2 + |a_tm|^2)``.
-    """
-    _, k_medium = _validate_plane_wave_cross_section_inputs(
-        source,
-        omega=omega,
-        n_medium=n_medium,
-    )
-    incident_scale = _plane_wave_incident_intensity_scale(source)
-    x = np.asarray(scattered_coeffs, dtype=np.complex128).reshape(-1)
-    pref = np.pi / (k_medium**2 * incident_scale)
-    return float(np.real(pref * np.vdot(x, x)))
-
-
 def extinction_cross_section(
     source: PlaneWave | GaussianBeam,
     initial_coeffs: np.ndarray,
@@ -718,11 +687,17 @@ def absorption_cross_section(
     source: PlaneWave | GaussianBeam,
     initial_coeffs: np.ndarray,
     scattered_coeffs: np.ndarray,
+    scattered_pwp_te: dict,
+    scattered_pwp_tm: dict,
     *,
     omega: float,
     n_medium: complex,
 ) -> float:
-    """Absorption cross section from coefficient-based extinction/scattering."""
+    """Absorption cross section as ``C_ext - C_sca``.
+
+    Cross sections follow the SMUTHI/cluster convention: ``C_sca`` is obtained
+    from far-field integration, while ``C_ext`` is coefficient-based.
+    """
     c_ext = extinction_cross_section(
         source,
         initial_coeffs,
@@ -730,9 +705,10 @@ def absorption_cross_section(
         omega=omega,
         n_medium=n_medium,
     )
-    c_sca = total_scattering_cross_section_from_coefficients(
+    c_sca = total_scattering_cross_section(
         source,
-        scattered_coeffs,
+        scattered_pwp_te,
+        scattered_pwp_tm,
         omega=omega,
         n_medium=n_medium,
     )
@@ -743,24 +719,27 @@ def plane_wave_cross_sections(
     source: PlaneWave | GaussianBeam,
     initial_coeffs: np.ndarray,
     scattered_coeffs: np.ndarray,
+    scattered_pwp_te: dict,
+    scattered_pwp_tm: dict,
     *,
     omega: float,
     n_medium: complex,
-    scattered_pwp_te: dict | None = None,
-    scattered_pwp_tm: dict | None = None,
 ) -> dict[str, float]:
-    """Convenience wrapper returning extinction/scattering/absorption cross sections.
+    """Return plane-wave cross sections with SMUTHI-style cluster scattering.
 
     Returns
     -------
     dict
-        Always contains:
-        - ``C_ext`` (coefficient-based)
-        - ``C_sca`` (coefficient-based)
+        Contains:
+        - ``C_ext`` (coefficient-based optical-theorem form)
+        - ``C_sca`` (far-field-integrated cluster scattering cross section)
         - ``C_abs`` (``C_ext - C_sca``)
 
-        If both scattered PWPs are provided, also includes:
-        - ``C_sca_farfield`` (angularly integrated differential cross section)
+    Notes
+    -----
+    For multi-particle clusters solved in per-particle local SVWF bases, the
+    physical scattering cross section is obtained from angular far-field
+    integration, as done in SMUTHI.
     """
     c_ext = extinction_cross_section(
         source,
@@ -769,25 +748,15 @@ def plane_wave_cross_sections(
         omega=omega,
         n_medium=n_medium,
     )
-    c_sca = total_scattering_cross_section_from_coefficients(
+    c_sca = total_scattering_cross_section(
         source,
-        scattered_coeffs,
+        scattered_pwp_te,
+        scattered_pwp_tm,
         omega=omega,
         n_medium=n_medium,
     )
-    out = {
+    return {
         "C_ext": float(c_ext),
         "C_sca": float(c_sca),
         "C_abs": float(c_ext - c_sca),
     }
-    if (scattered_pwp_te is not None) and (scattered_pwp_tm is not None):
-        out["C_sca_farfield"] = float(
-            total_scattering_cross_section(
-                source,
-                scattered_pwp_te,
-                scattered_pwp_tm,
-                omega=omega,
-                n_medium=n_medium,
-            )
-        )
-    return out

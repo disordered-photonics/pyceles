@@ -12,7 +12,6 @@ from .farfield import (
     scattering_cross_section,
     total_field_plane_wave_pattern,
     total_scattering_cross_section,
-    total_scattering_cross_section_from_coefficients,
 )
 from .nearfield import (
     NearFieldComponents,
@@ -59,5 +58,4 @@ __all__ = [
     "scattered_field_plane_wave_pattern",
     "total_field_plane_wave_pattern",
     "total_scattering_cross_section",
-    "total_scattering_cross_section_from_coefficients",
 ]
