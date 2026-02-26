@@ -141,6 +141,44 @@ The notebook also exposes precision knobs (CELES used single precision for maxim
 - `compute_dtype`: hot-path compute dtype (`complex64` or `complex128`)
 - `accum_dtype`: accumulation/reduction dtype (at least as precise as compute)
 
+## pyceles-vs-MSTM benchmark script
+
+Use:
+- `examples/run_mstm_pyceles_cluster_benchmark.py`
+
+Purpose:
+- run the same tilted Gaussian-beam cluster setup in pyceles and MSTM v4.0,
+- generate near-field TE/TM component maps, far-field hemisphere maps from MSTM `scattering_map_model=1`, and semilogy `S11(theta)` curves from MSTM `scattering_map_model=0`,
+- write comparison metrics (RMSE, relative RMSE, Pearson correlation) to a JSON summary.
+
+Requirements:
+- you must have a compiled MSTM 4.0 executable available locally,
+- pass its path with `--mstm-exe`.
+
+Example:
+
+```bash
+python examples/run_mstm_pyceles_cluster_benchmark.py \
+  --mstm-exe <path-to-mstm-executable> \
+  --output-prefix mstm_pyceles_500_tilted_l3_dense \
+  --n-particles 500 \
+  --polar-angle 0.43 \
+  --azimuthal-angle 0.37 \
+  --lmax 3 \
+  --epsilon 1e-5 \
+  --py-solver-method gmres \
+  --n-beta 1801 \
+  --n-alpha 720 \
+  --nf-min -4000 0 -3000 \
+  --nf-max 4000 0 5000 \
+  --nf-step 40 \
+  --mstm-scattering-map-dimension 121
+```
+
+Outputs are written in:
+- `outputs/mstm` (MSTM input/output files),
+- `outputs/mstm_diagnostics` (plots and `<prefix>_summary.json`).
+
 ## Notes on performance
 
 CELES is fast because it:
