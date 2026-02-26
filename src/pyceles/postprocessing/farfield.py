@@ -536,6 +536,27 @@ def _validate_plane_wave_cross_section_inputs(
     return n_real, k_medium
 
 
+def _plane_wave_incident_intensity_scale(source: PlaneWave | GaussianBeam) -> float:
+    """Return the dimensionless incident-field scale ``|E0|^2 * (|a_te|^2 + |a_tm|^2)``.
+
+    This captures how solved coefficient vectors scale with the source amplitude
+    and Jones-vector magnitude. Cross sections must be normalized by this factor
+    to remain intensity-independent.
+    """
+    if not isinstance(source, PlaneWave):
+        raise ValueError("Cross section only defined for PlaneWave excitation.")
+
+    a_te, a_tm = source_jones(source)
+    pol_norm2 = float(abs(a_te) ** 2 + abs(a_tm) ** 2)
+    amp2 = float(abs(complex(source.amplitude)) ** 2)
+    scale = amp2 * pol_norm2
+    if (not np.isfinite(scale)) or (scale <= 0.0):
+        raise ValueError(
+            "Plane-wave incident intensity scale must be finite and positive for cross-section normalization."
+        )
+    return scale
+
+
 def scattering_cross_section(
     source: PlaneWave | GaussianBeam,
     scattered_pwp_te: dict,
@@ -583,13 +604,8 @@ def scattering_cross_section(
     # I_Omega = (2*pi^2 / (omega*k_medium)) * |g|^2
     # Differential scattering cross section:
     # dC_sca/dOmega = I_Omega / I_inc
-    a_te, a_tm = source_jones(source)
-    pol_norm2 = float(abs(a_te) ** 2 + abs(a_tm) ** 2)
-    initial_intensity = (abs(complex(source.amplitude)) ** 2) * pol_norm2 * n_real / 2.0
-    if initial_intensity <= 0.0:
-        raise ValueError(
-            "Initial plane-wave intensity must be positive for cross-section normalization."
-        )
+    incident_scale = _plane_wave_incident_intensity_scale(source)
+    initial_intensity = incident_scale * n_real / 2.0
 
     pref = (2.0 * np.pi**2) / (float(omega) * k_medium * initial_intensity)
     dcs_te = pref * (np.abs(g_te) ** 2)
@@ -643,20 +659,23 @@ def total_scattering_cross_section_from_coefficients(
 
     Notes
     -----
-    In CELES SVWF normalization:
+    In CELES SVWF normalization (unit-amplitude source):
 
     ``C_sca = (pi / k^2) * Re(x^H x)``,
 
     where ``x`` is the stacked scattered-coefficient vector and
-    ``k = omega * n_medium``.
+    ``k = omega * n_medium``. For arbitrary source amplitude/Jones magnitude,
+    this quantity is normalized by the incident intensity scale
+    ``|E0|^2 * (|a_te|^2 + |a_tm|^2)``.
     """
     _, k_medium = _validate_plane_wave_cross_section_inputs(
         source,
         omega=omega,
         n_medium=n_medium,
     )
+    incident_scale = _plane_wave_incident_intensity_scale(source)
     x = np.asarray(scattered_coeffs, dtype=np.complex128).reshape(-1)
-    pref = np.pi / (k_medium**2)
+    pref = np.pi / (k_medium**2 * incident_scale)
     return float(np.real(pref * np.vdot(x, x)))
 
 
@@ -672,18 +691,21 @@ def extinction_cross_section(
 
     Notes
     -----
-    In CELES SVWF normalization:
+    In CELES SVWF normalization (unit-amplitude source):
 
     ``C_ext = -(pi / k^2) * Re(b^H x)``,
 
     where ``b`` are incident coefficients, ``x`` are scattered coefficients and
-    ``k = omega * n_medium``.
+    ``k = omega * n_medium``. For arbitrary source amplitude/Jones magnitude,
+    this quantity is normalized by the incident intensity scale
+    ``|E0|^2 * (|a_te|^2 + |a_tm|^2)``.
     """
     _, k_medium = _validate_plane_wave_cross_section_inputs(
         source,
         omega=omega,
         n_medium=n_medium,
     )
+    incident_scale = _plane_wave_incident_intensity_scale(source)
     b = np.asarray(initial_coeffs, dtype=np.complex128).reshape(-1)
     x = np.asarray(scattered_coeffs, dtype=np.complex128).reshape(-1)
     if b.shape != x.shape:
@@ -691,7 +713,7 @@ def extinction_cross_section(
             "`initial_coeffs` and `scattered_coeffs` must have matching shapes. "
             f"Got {b.shape} and {x.shape}."
         )
-    pref = np.pi / (k_medium**2)
+    pref = np.pi / (k_medium**2 * incident_scale)
     return float(np.real(-pref * np.vdot(b, x)))
 
 
