@@ -7,12 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-- Regression tests for:
-  - translation `RadialLUT` finiteness near `r=0`,
-  - near-field inside-mask behavior for scattered-field components.
-- Architecture regression test enforcing canonical internal imports
-  (facades reserved for public API entry points).
+## [0.2.0] - 2026-02-28
 
 ### Changed
 - Breaking: renamed finite-beam power diagnostics helpers in `postprocessing.farfield`:
@@ -37,12 +32,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Simulation workflow diagnostics now persist source-vs-farfield angular-grid metadata in a compact form (shared grid stored once when equal).
 - `examples/minimal_pyceles_demo.py` now defaults to mixed precision (`compute_dtype=complex64`, `accum_dtype=complex128`) to better reflect recommended usage.
 - Plotting labels/titles were improved with math-style formatting for near-field components and far-field hemisphere captions.
+- `solve_polarization_basis=True` workflow is explicitly documented as TE/TM-only solve plus Jones-channel recombination (no redundant third mixed solve).
 - Core/postprocessing architecture was reorganized into responsibility-based modules:
   - source models and source-side helpers in `core.sources`,
   - SVWF projection kernels in `core.projection`,
   - near-field kernels in `postprocessing.nearfield_kernels`,
   - near-field orchestration in `postprocessing.nearfield_workflows`,
   while keeping `core.fields` and `postprocessing.nearfield` as public API facades.
+- LUT max-radius inference is now conservative and cheap:
+  - translation `RadialLUT` sizing switched from pairwise `O(N^2)` distance scan to `O(N)` geometry bound,
+  - near-field radial LUT sizing switched from exact `O(N*M)` sphere-point scan to an `O(N+M)` conservative bound.
 
 ### Fixed
 - Translation `RadialLUT` now guards against the spherical-Hankel singularity at `kr=0`, preventing NaN/inf contamination for small `r`.
