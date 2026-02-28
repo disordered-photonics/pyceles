@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Dtype parsing for `compute_dtype`/`accum_dtype` now accepts generic NumPy
+  dtype-like inputs (for example `np.complex64`, `np.dtype("complex64")`) in
+  simulation and near-field workflows.
+
 ## [0.2.0] - 2026-02-28
 
 ### Changed

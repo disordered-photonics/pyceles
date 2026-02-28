@@ -5,6 +5,8 @@ from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 
+from pyceles._dtypes import resolve_compute_accum_dtypes
+
 from .nearfield_workflows import NearFieldComponents, compute_near_field_components
 
 if TYPE_CHECKING:
@@ -189,6 +191,11 @@ def compute_near_field(
     # quadrature, not necessarily the far-field display grid.
     source_polar_angles, source_azimuthal_angles = run.config.source_angular_grids()
 
+    compute_dtype, accum_dtype = resolve_compute_accum_dtypes(
+        compute_dtype=run.config.compute_dtype,
+        accum_dtype=run.config.accum_dtype,
+    )
+
     nf = compute_near_field_components(
         pts_flat,
         positions=run.positions,
@@ -208,8 +215,8 @@ def compute_near_field(
             else bool(force_general_initial_field)
         ),
         lut_dr=run.config.radial_lut_dr,
-        compute_dtype=np.dtype(str(run.config.compute_dtype).lower()),
-        accum_dtype=np.dtype(str(run.config.accum_dtype).lower()),
+        compute_dtype=compute_dtype,
+        accum_dtype=accum_dtype,
     )
 
     vec_shape: tuple[int, ...]

@@ -7,6 +7,7 @@ import numpy as np
 import numpy.typing as npt
 from tqdm.auto import tqdm
 
+from pyceles._dtypes import resolve_compute_accum_dtypes
 from pyceles._logo import print_logo
 from pyceles._version import __version__
 from pyceles.core.indexing import n_modes
@@ -28,7 +29,6 @@ from pyceles.postprocessing.farfield import (
 )
 
 _SOURCE_TYPES = (GaussianBeam, PlaneWave)
-_ALLOWED_COMPLEX_DTYPES = {"complex64", "complex128"}
 _STARTUP_LOGO_PRINTED = False
 
 
@@ -451,20 +451,10 @@ class SimulationConfig:
             ws = np.asarray(self.solver_warm_start)
             if ws.ndim not in (1, 2):
                 raise ValueError("`solver_warm_start` must be 1D, 2D, or None.")
-        compute_dtype = str(self.compute_dtype).lower()
-        accum_dtype = str(self.accum_dtype).lower()
-        if compute_dtype not in _ALLOWED_COMPLEX_DTYPES:
-            raise ValueError(
-                f"`compute_dtype` must be one of {sorted(_ALLOWED_COMPLEX_DTYPES)}. Got {self.compute_dtype!r}."
-            )
-        if accum_dtype not in _ALLOWED_COMPLEX_DTYPES:
-            raise ValueError(
-                f"`accum_dtype` must be one of {sorted(_ALLOWED_COMPLEX_DTYPES)}. Got {self.accum_dtype!r}."
-            )
-        if np.dtype(accum_dtype).itemsize < np.dtype(compute_dtype).itemsize:
-            raise ValueError(
-                f"`accum_dtype` ({accum_dtype}) must be at least as precise as `compute_dtype` ({compute_dtype})."
-            )
+        resolve_compute_accum_dtypes(
+            compute_dtype=self.compute_dtype,
+            accum_dtype=self.accum_dtype,
+        )
 
         method = str(self.solver_method).lower()
         allowed = {"auto", "gmres", "bicgstab", "lgmres", "gcrotmk", "direct"}
@@ -683,8 +673,10 @@ class Simulation:
         radii = self.radii
         n_particle = self.n_particle
 
-        compute_dtype = np.dtype(str(cfg.compute_dtype).lower())
-        accum_dtype = np.dtype(str(cfg.accum_dtype).lower())
+        compute_dtype, accum_dtype = resolve_compute_accum_dtypes(
+            compute_dtype=cfg.compute_dtype,
+            accum_dtype=cfg.accum_dtype,
+        )
 
         Ns = positions.shape[0]
         Nm = n_modes(cfg.lmax)
