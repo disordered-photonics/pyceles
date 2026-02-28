@@ -7,10 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- `SimulationConfig.azimuthal_angles` default now uses periodic sampling on
+  `[0, 2*pi)` (`endpoint=False`) to keep periodic azimuth fast paths active by
+  default.
+
 ### Fixed
 - Dtype parsing for `compute_dtype`/`accum_dtype` now accepts generic NumPy
   dtype-like inputs (for example `np.complex64`, `np.dtype("complex64")`) in
   simulation and near-field workflows.
+- Simulation config validation now warns when azimuthal grids include both
+  `0` and `2*pi`, since this duplicated periodic endpoint usually wastes work
+  and may disable periodic fast-path detection.
 
 ## [0.2.0] - 2026-02-28
 

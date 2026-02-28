@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from typing import Callable, Literal
 
@@ -75,6 +76,25 @@ def _validate_angular_grid_pair(
     if azimuth[0] < -1e-12 or azimuth[-1] > 2.0 * np.pi + 1e-12:
         raise ValueError(f"`{azimuthal_name}` must lie within [0, 2*pi].")
     return polar, azimuth
+
+
+def _warn_redundant_periodic_azimuth_endpoint(*, azimuth_name: str, azimuth: np.ndarray) -> None:
+    """Warn on duplicated periodic endpoints (0 and 2*pi) in azimuth grids."""
+    if azimuth.size < 2:
+        return
+    a0 = float(azimuth[0])
+    a1 = float(azimuth[-1])
+    if (
+        np.isclose(a0, 0.0, rtol=0.0, atol=1e-12)
+        and np.isclose(a1, 2.0 * np.pi, rtol=0.0, atol=1e-12)
+        and np.isclose(a1 - a0, 2.0 * np.pi, rtol=0.0, atol=1e-12)
+    ):
+        warnings.warn(
+            f"`{azimuth_name}` includes both 0 and 2*pi. For periodic angular integrals, "
+            "prefer `endpoint=False` on [0, 2*pi) to avoid redundant work and keep periodic fast paths enabled.",
+            UserWarning,
+            stacklevel=3,
+        )
 
 
 def _normalize_geometry(
@@ -348,8 +368,12 @@ class SimulationConfig:
     source: GaussianBeam | PlaneWave | None = None
     # Shared CELES-like default angular grid. If no stage-specific grids are
     # provided, this pair is used for both source projection and far-field bins.
+    # Use periodic azimuth sampling on [0, 2*pi) (endpoint=False) so periodic
+    # fast-path detection remains active by default.
     polar_angles: np.ndarray = field(default_factory=lambda: np.linspace(0.0, np.pi, 5001))
-    azimuthal_angles: np.ndarray = field(default_factory=lambda: np.linspace(0.0, 2 * np.pi, 201))
+    azimuthal_angles: np.ndarray = field(
+        default_factory=lambda: np.linspace(0.0, 2 * np.pi, 201, endpoint=False)
+    )
     # Optional source-projection quadrature grid (RHS / initial-field projection).
     # Set both or neither.
     source_polar_angles: np.ndarray | None = None
@@ -463,11 +487,14 @@ class SimulationConfig:
                 f"`solver_method` must be one of {sorted(allowed)}. Got {self.solver_method!r}."
             )
 
-        _validate_angular_grid_pair(
+        _, az_shared = _validate_angular_grid_pair(
             polar_name="polar_angles",
             azimuthal_name="azimuthal_angles",
             polar_values=self.polar_angles,
             azimuthal_values=self.azimuthal_angles,
+        )
+        _warn_redundant_periodic_azimuth_endpoint(
+            azimuth_name="azimuthal_angles", azimuth=az_shared
         )
 
         has_source_polar = self.source_polar_angles is not None
@@ -477,11 +504,14 @@ class SimulationConfig:
                 "Set both `source_polar_angles` and `source_azimuthal_angles`, or set neither."
             )
         if has_source_polar:
-            _validate_angular_grid_pair(
+            _, az_source = _validate_angular_grid_pair(
                 polar_name="source_polar_angles",
                 azimuthal_name="source_azimuthal_angles",
                 polar_values=np.asarray(self.source_polar_angles),
                 azimuthal_values=np.asarray(self.source_azimuthal_angles),
+            )
+            _warn_redundant_periodic_azimuth_endpoint(
+                azimuth_name="source_azimuthal_angles", azimuth=az_source
             )
 
         has_farfield_polar = self.farfield_polar_angles is not None
@@ -491,11 +521,14 @@ class SimulationConfig:
                 "Set both `farfield_polar_angles` and `farfield_azimuthal_angles`, or set neither."
             )
         if has_farfield_polar:
-            _validate_angular_grid_pair(
+            _, az_farfield = _validate_angular_grid_pair(
                 polar_name="farfield_polar_angles",
                 azimuthal_name="farfield_azimuthal_angles",
                 polar_values=np.asarray(self.farfield_polar_angles),
                 azimuthal_values=np.asarray(self.farfield_azimuthal_angles),
+            )
+            _warn_redundant_periodic_azimuth_endpoint(
+                azimuth_name="farfield_azimuthal_angles", azimuth=az_farfield
             )
 
         if self.source is not None:
