@@ -37,8 +37,8 @@ def main() -> None:
         source=source,
         compute_dtype="complex64",
         accum_dtype="complex128",
-        polar_angles=np.linspace(0.0, np.pi, 3601, endpoint=True),
-        azimuthal_angles=np.linspace(0.0, 2.0 * np.pi, 720, endpoint=False),
+        polar_angles=pcl.core.uniform_polar_grid(721),
+        azimuthal_angles=pcl.core.uniform_periodic_azimuth_grid(360),
         solver_method="auto",
         verbose=True,
     )

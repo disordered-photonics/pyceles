@@ -102,8 +102,8 @@ Default behavior remains shared unless overrides are explicitly set:
 ```python
 cfg = pcl.SimulationConfig(
     source=source,
-    polar_angles=np.linspace(0.0, np.pi, 3601),
-    azimuthal_angles=np.linspace(0.0, 2.0 * np.pi, 180, endpoint=False),
+    polar_angles=pcl.core.uniform_polar_grid(3601),
+    azimuthal_angles=pcl.core.uniform_periodic_azimuth_grid(180),
     # Optional advanced overrides:
     # source_polar_angles=...,
     # source_azimuthal_angles=...,

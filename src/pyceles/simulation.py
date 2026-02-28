@@ -11,6 +11,7 @@ from tqdm.auto import tqdm
 from pyceles._dtypes import resolve_compute_accum_dtypes
 from pyceles._logo import print_logo
 from pyceles._version import __version__
+from pyceles.core.angular import uniform_periodic_azimuth_grid, uniform_polar_grid
 from pyceles.core.indexing import n_modes
 from pyceles.core.matvec import assemble_dense_A_numpy, prepare_matvec
 from pyceles.core.projection import project_source_basis_to_svwf
@@ -370,10 +371,8 @@ class SimulationConfig:
     # provided, this pair is used for both source projection and far-field bins.
     # Use periodic azimuth sampling on [0, 2*pi) (endpoint=False) so periodic
     # fast-path detection remains active by default.
-    polar_angles: np.ndarray = field(default_factory=lambda: np.linspace(0.0, np.pi, 5001))
-    azimuthal_angles: np.ndarray = field(
-        default_factory=lambda: np.linspace(0.0, 2 * np.pi, 201, endpoint=False)
-    )
+    polar_angles: np.ndarray = field(default_factory=lambda: uniform_polar_grid(5001))
+    azimuthal_angles: np.ndarray = field(default_factory=lambda: uniform_periodic_azimuth_grid(201))
     # Optional source-projection quadrature grid (RHS / initial-field projection).
     # Set both or neither.
     source_polar_angles: np.ndarray | None = None

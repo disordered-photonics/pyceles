@@ -9,6 +9,22 @@ integration so that numerical-policy fixes apply consistently across code paths.
 import numpy as np
 
 
+def uniform_polar_grid(n: int) -> np.ndarray:
+    """Return a uniform polar-angle grid on [0, pi] with endpoint included."""
+    n_i = int(n)
+    if n_i < 2:
+        raise ValueError(f"`n` must be >= 2 for polar grid. Got {n!r}.")
+    return np.linspace(0.0, np.pi, n_i, endpoint=True, dtype=float)
+
+
+def uniform_periodic_azimuth_grid(n: int) -> np.ndarray:
+    """Return a uniform periodic azimuth grid on [0, 2*pi) (endpoint excluded)."""
+    n_i = int(n)
+    if n_i < 2:
+        raise ValueError(f"`n` must be >= 2 for azimuth grid. Got {n!r}.")
+    return np.linspace(0.0, 2.0 * np.pi, n_i, endpoint=False, dtype=float)
+
+
 def trapezoidal_weights(x: np.ndarray) -> np.ndarray:
     """Return 1D trapezoidal integration weights for sample locations `x`."""
     x = np.asarray(x, dtype=float).reshape(-1)

@@ -179,8 +179,8 @@ def main() -> None:
         n_medium=float(args.n_medium) + 0j,
         lmax=int(args.lmax),
         source=source,
-        polar_angles=np.linspace(0.0, np.pi, int(args.n_beta), endpoint=True),
-        azimuthal_angles=np.linspace(0.0, 2.0 * np.pi, int(args.n_alpha), endpoint=False),
+        polar_angles=pcl.core.uniform_polar_grid(int(args.n_beta)),
+        azimuthal_angles=pcl.core.uniform_periodic_azimuth_grid(int(args.n_alpha)),
         radial_lut_dr=float(args.radial_lut_dr),
         solver_method=cast(
             Literal["auto", "gmres", "bicgstab", "lgmres", "gcrotmk", "direct"],

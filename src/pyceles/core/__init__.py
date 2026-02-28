@@ -1,5 +1,6 @@
 """Core numerical kernels and assembly helpers."""
 
+from .angular import uniform_periodic_azimuth_grid, uniform_polar_grid
 from .fields import (
     AngularSpectrumSource,
     GaussianBeam,
@@ -30,6 +31,8 @@ from .tmatrix import particle_internal_ratios, particle_T_diagonal
 __all__ = [
     "Ellipsoid",
     "AngularSpectrumSource",
+    "uniform_periodic_azimuth_grid",
+    "uniform_polar_grid",
     "GaussianBeam",
     "LayeredSphere",
     "Particle",
