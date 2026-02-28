@@ -576,7 +576,11 @@ class SimulationResult:
     the source polarization requested by the user.
 
     When `solve_polarization_basis=True`, basis and unpolarized diagnostics are
-    also provided (`*_basis`, `unpolarized`).
+    also provided (`*_basis`, `unpolarized`). In that mode the solver computes
+    TE/TM basis channels only (multi-RHS solve), then reconstructs the requested
+    Jones channel by linear combination; no third mixed solve is run.
+    `solver_result` and `solver_result_basis` therefore carry the same TE/TM
+    solve diagnostics.
     Includes both solved unknowns and derived diagnostics:
     power, cross sections, far field, basis channels, and unpolarized averages.
     """
@@ -664,9 +668,14 @@ class Simulation:
         Workflow:
         1. project source to incident SVWF coefficients,
         2. build/apply the operator for `(I - T W) x = T b`,
-        3. solve the linear system (single or TE/TM basis channels),
+        3. solve the linear system (single RHS, or TE/TM basis multi-RHS only),
         4. evaluate far-field/power/cross-section diagnostics,
         5. assemble mixed, basis, and optional unpolarized outputs.
+
+        For `solve_polarization_basis=True`, the requested Jones channel is
+        formed as `x = a_te*x_te + a_tm*x_tm` and far-field PWPs are formed by
+        coherent TE/TM basis recombination, avoiding an extra mixed solve and a
+        third full far-field evaluation.
         """
         cfg = self.config
         source = self._validate_ready_to_run()
@@ -839,6 +848,8 @@ class Simulation:
         elif bool(cfg.solve_polarization_basis):
             if A_mv is None:
                 raise RuntimeError("Internal error: A_mv not prepared for non-empty system.")
+            # Basis mode solves only pure TE/TM RHS channels. The requested Jones
+            # mixed solution is reconstructed linearly from these basis solutions.
             rhs_mat = np.column_stack([rhs_basis["te"], rhs_basis["tm"]])
             if warm_start is not None and np.ndim(warm_start) == 1:
                 warm_start = np.column_stack([warm_start, warm_start])
@@ -1006,6 +1017,8 @@ class Simulation:
                 show_progress=bool(cfg.verbose),
             )
         if ff.initial_te is not None and ff.initial_tm is not None:
+            # Power diagnostics are quadratic/intensity-like, so they are
+            # evaluated from the coherently mixed Jones channel PWPs.
             power = finite_beam_power_fractions(
                 source,
                 ff.initial_te,
