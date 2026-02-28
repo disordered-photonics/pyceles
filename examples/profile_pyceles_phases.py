@@ -200,7 +200,7 @@ def main() -> None:
     n_spheres = positions.shape[0]
     n_modes_l = n_modes(cfg.lmax)
     k = 2.0 * np.pi / float(cfg.wavelength) * float(np.real(cfg.n_medium))
-    omega = 2.0 * np.pi / float(cfg.wavelength)
+    k0 = 2.0 * np.pi / float(cfg.wavelength)
     source_polar_angles, source_azimuthal_angles = cfg.source_angular_grids()
     farfield_polar_angles, farfield_azimuthal_angles = cfg.farfield_angular_grids()
 
@@ -315,7 +315,7 @@ def main() -> None:
         radii=radii,
         n_particle=n_particle,
         k=k,
-        omega=omega,
+        k0=k0,
         coeffs=coeffs,
         rhs=rhs.reshape(n_spheres, n_modes_l),
         initial_coeffs=b,

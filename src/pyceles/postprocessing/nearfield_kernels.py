@@ -579,7 +579,7 @@ def compute_internal_field(
     coeffs:
         (Ns, Nm) scattered-field expansion coefficients (CELES ordering).
     k:
-        Medium wavenumber k_medium = omega * n_medium.
+        Medium wavenumber k_medium = k0 * n_medium.
     lmax:
         Multipole truncation.
     n_particle:
@@ -706,7 +706,7 @@ def compute_internal_field(
             E[idx] += _contract_modes(a_int, Mv_all)
             E[idx] += _contract_modes(b_int, Nv_all)
 
-            # CELES convention: H = -i * (kS/omega) * (a*N + b*M) = -i*nS*(a*N + b*M)
+            # CELES convention: H = -i * (kS/k0) * (a*N + b*M) = -i*nS*(a*N + b*M)
             H[idx] += (-1j * nS) * _contract_modes(a_int, Nv_all)
             H[idx] += (-1j * nS) * _contract_modes(b_int, Mv_all)
 

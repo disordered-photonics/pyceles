@@ -605,6 +605,11 @@ class SimulationResult:
     solve diagnostics.
     Includes both solved unknowns and derived diagnostics:
     power, cross sections, far field, basis channels, and unpolarized averages.
+
+    Naming note:
+    `k0` stores the vacuum wavenumber `2*pi/wavelength` (not angular frequency).
+    This intentionally avoids CELES-style `omega` naming ambiguity ahead of
+    dipole/LDOS workflows where true angular frequency may also appear.
     """
 
     config: SimulationConfig
@@ -612,7 +617,7 @@ class SimulationResult:
     radii: np.ndarray
     n_particle: np.ndarray
     k: float
-    omega: float
+    k0: float
     coeffs: np.ndarray
     rhs: np.ndarray
     initial_coeffs: np.ndarray
@@ -714,8 +719,9 @@ class Simulation:
         Nm = n_modes(cfg.lmax)
         unknowns = Ns * Nm
 
-        k = 2.0 * np.pi / float(cfg.wavelength) * float(np.real(cfg.n_medium))
-        omega = 2.0 * np.pi / float(cfg.wavelength)
+        # `k0` is the vacuum wavenumber; medium wavenumber is `k = k0 * Re(n_medium)`.
+        k0 = 2.0 * np.pi / float(cfg.wavelength)
+        k = k0 * float(np.real(cfg.n_medium))
 
         solver_name = str(cfg.solver_method).lower()
         will_use_direct = solver_name == "direct" or (
@@ -977,7 +983,7 @@ class Simulation:
                         ff_pol.initial_tm,
                         ff_pol.scattered_te,
                         ff_pol.scattered_tm,
-                        omega=omega,
+                        k0=k0,
                         k_medium=k,
                     )
                     diag_fwd_basis[pol_key] = pwp_power_decomposition(
@@ -986,7 +992,7 @@ class Simulation:
                         initial_pwp_tm=ff_pol.initial_tm,
                         scattered_pwp_te=ff_pol.scattered_te,
                         scattered_pwp_tm=ff_pol.scattered_tm,
-                        omega=omega,
+                        k0=k0,
                         k_medium=k,
                         source=src_pol,
                     )
@@ -996,7 +1002,7 @@ class Simulation:
                         initial_pwp_tm=ff_pol.initial_tm,
                         scattered_pwp_te=ff_pol.scattered_te,
                         scattered_pwp_tm=ff_pol.scattered_tm,
-                        omega=omega,
+                        k0=k0,
                         k_medium=k,
                         source=src_pol,
                     )
@@ -1005,7 +1011,7 @@ class Simulation:
                         src_pol,
                         b_basis[pol_key],
                         coeffs_basis[pol_key],
-                        omega=omega,
+                        k0=k0,
                         n_medium=cfg.n_medium,
                         scattered_pwp_te=ff_pol.scattered_te,
                         scattered_pwp_tm=ff_pol.scattered_tm,
@@ -1049,7 +1055,7 @@ class Simulation:
                 ff.initial_tm,
                 ff.scattered_te,
                 ff.scattered_tm,
-                omega=omega,
+                k0=k0,
                 k_medium=k,
             )
             diag_fwd = pwp_power_decomposition(
@@ -1058,7 +1064,7 @@ class Simulation:
                 initial_pwp_tm=ff.initial_tm,
                 scattered_pwp_te=ff.scattered_te,
                 scattered_pwp_tm=ff.scattered_tm,
-                omega=omega,
+                k0=k0,
                 k_medium=k,
                 source=source,
             )
@@ -1068,7 +1074,7 @@ class Simulation:
                 initial_pwp_tm=ff.initial_tm,
                 scattered_pwp_te=ff.scattered_te,
                 scattered_pwp_tm=ff.scattered_tm,
-                omega=omega,
+                k0=k0,
                 k_medium=k,
                 source=source,
             )
@@ -1077,7 +1083,7 @@ class Simulation:
                 source,
                 b,
                 x,
-                omega=omega,
+                k0=k0,
                 n_medium=cfg.n_medium,
                 scattered_pwp_te=ff.scattered_te,
                 scattered_pwp_tm=ff.scattered_tm,
@@ -1089,7 +1095,7 @@ class Simulation:
             radii=radii,
             n_particle=n_particle,
             k=k,
-            omega=omega,
+            k0=k0,
             coeffs=x,
             rhs=rhs.reshape(Ns, Nm),
             initial_coeffs=b,

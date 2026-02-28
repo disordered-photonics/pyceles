@@ -3,6 +3,9 @@
 The routines here evaluate scattered/initial/total plane-wave patterns on an
 (`alpha`, `beta`) grid, integrate hemisphere power flow, and derive
 plane-wave-normalized scattering observables.
+
+Naming note: this module uses `k0 = 2*pi/lambda` for the vacuum wavenumber.
+Older CELES-style formulas often call this quantity `omega`.
 """
 
 from __future__ import annotations
@@ -278,7 +281,7 @@ def pwp_power_decomposition(
     scattered_pwp_te: dict,
     scattered_pwp_tm: dict,
     *,
-    omega: float,
+    k0: float,
     k_medium: float,
     direction: str = "forward",
     source: GaussianBeam | PlaneWave | None = None,
@@ -301,13 +304,13 @@ def pwp_power_decomposition(
     )
     p_initial_te = pwp_power_flux(
         initial_pwp_te,
-        omega=omega,
+        k0=k0,
         k_medium=k_medium,
         direction=direction,
     )
     p_initial_tm = pwp_power_flux(
         initial_pwp_tm,
-        omega=omega,
+        k0=k0,
         k_medium=k_medium,
         direction=direction,
     )
@@ -315,13 +318,13 @@ def pwp_power_decomposition(
 
     p_scattered_te = pwp_power_flux(
         scattered_pwp_te,
-        omega=omega,
+        k0=k0,
         k_medium=k_medium,
         direction=direction,
     )
     p_scattered_tm = pwp_power_flux(
         scattered_pwp_tm,
-        omega=omega,
+        k0=k0,
         k_medium=k_medium,
         direction=direction,
     )
@@ -329,13 +332,13 @@ def pwp_power_decomposition(
 
     p_total_te = pwp_power_flux(
         total_te,
-        omega=omega,
+        k0=k0,
         k_medium=k_medium,
         direction=direction,
     )
     p_total_tm = pwp_power_flux(
         total_tm,
-        omega=omega,
+        k0=k0,
         k_medium=k_medium,
         direction=direction,
     )
@@ -353,7 +356,7 @@ def pwp_power_decomposition(
 def pwp_power_flux(
     pwp: dict,
     *,
-    omega: float,
+    k0: float,
     k_medium: float,
     direction: str,
 ) -> float:
@@ -363,10 +366,10 @@ def pwp_power_flux(
     ----------
     pwp:
         Plane wave pattern dict (keys: alpha, beta, coeff).
-    omega:
-        Vacuum angular wavenumber 2*pi/lambda.
+    k0:
+        Vacuum wavenumber `2*pi/lambda` (CELES-style code often names this `omega`).
     k_medium:
-        Medium wavenumber omega*n_medium.
+        Medium wavenumber k0*n_medium.
     direction:
         'forward' or 'backward'. Forward corresponds to cos(beta) >= 0.
 
@@ -398,7 +401,7 @@ def pwp_power_flux(
     int_alpha = _integrate_periodic_alpha(integrand, alpha)
     int_beta = np.trapezoid(int_alpha, beta_m)
 
-    pref = 2 * np.pi**2 / (omega * k_medium)
+    pref = 2 * np.pi**2 / (k0 * k_medium)
     return float(np.real(pref * int_beta))
 
 
@@ -406,7 +409,7 @@ def incident_power_from_pwp(
     initial_pwp_te: dict,
     initial_pwp_tm: dict,
     *,
-    omega: float,
+    k0: float,
     k_medium: float,
 ) -> float:
     """Incident beam power from the initial TE/TM PWPs.
@@ -416,10 +419,10 @@ def incident_power_from_pwp(
     beams because it uses the actual initial PWP provided to the solver.
     """
     p_initial = (
-        pwp_power_flux(initial_pwp_te, omega=omega, k_medium=k_medium, direction="forward")
-        + pwp_power_flux(initial_pwp_tm, omega=omega, k_medium=k_medium, direction="forward")
-        + pwp_power_flux(initial_pwp_te, omega=omega, k_medium=k_medium, direction="backward")
-        + pwp_power_flux(initial_pwp_tm, omega=omega, k_medium=k_medium, direction="backward")
+        pwp_power_flux(initial_pwp_te, k0=k0, k_medium=k_medium, direction="forward")
+        + pwp_power_flux(initial_pwp_tm, k0=k0, k_medium=k_medium, direction="forward")
+        + pwp_power_flux(initial_pwp_te, k0=k0, k_medium=k_medium, direction="backward")
+        + pwp_power_flux(initial_pwp_tm, k0=k0, k_medium=k_medium, direction="backward")
     )
     if (not np.isfinite(p_initial)) or (p_initial <= 0.0):
         raise ValueError(
@@ -436,7 +439,7 @@ def finite_beam_power_fractions(
     scattered_pwp_te: dict,
     scattered_pwp_tm: dict,
     *,
-    omega: float,
+    k0: float,
     k_medium: float,
 ) -> dict[str, float]:
     """Compute transmitted/reflected powers and fractions for finite-power beams.
@@ -465,13 +468,13 @@ def finite_beam_power_fractions(
     )
     p_transmitted_te = pwp_power_flux(
         total_te,
-        omega=omega,
+        k0=k0,
         k_medium=k_medium,
         direction="forward",
     )
     p_transmitted_tm = pwp_power_flux(
         total_tm,
-        omega=omega,
+        k0=k0,
         k_medium=k_medium,
         direction="forward",
     )
@@ -479,13 +482,13 @@ def finite_beam_power_fractions(
 
     p_reflected_te = pwp_power_flux(
         scattered_pwp_te,
-        omega=omega,
+        k0=k0,
         k_medium=k_medium,
         direction="backward",
     )
     p_reflected_tm = pwp_power_flux(
         scattered_pwp_tm,
-        omega=omega,
+        k0=k0,
         k_medium=k_medium,
         direction="backward",
     )
@@ -494,7 +497,7 @@ def finite_beam_power_fractions(
     p_initial = incident_power_from_pwp(
         initial_pwp_te,
         initial_pwp_tm,
-        omega=omega,
+        k0=k0,
         k_medium=k_medium,
     )
 
@@ -510,7 +513,7 @@ def finite_beam_power_fractions(
 def _validate_plane_wave_cross_section_inputs(
     source: PlaneWave | GaussianBeam,
     *,
-    omega: float,
+    k0: float,
     n_medium: complex,
 ) -> tuple[float, float]:
     """Validate plane-wave cross-section normalization inputs.
@@ -529,7 +532,7 @@ def _validate_plane_wave_cross_section_inputs(
     if n_real <= 0:
         raise ValueError("n_medium must be positive and real for cross-section normalization.")
 
-    k_medium = float(omega) * n_real
+    k_medium = float(k0) * n_real
     return n_real, k_medium
 
 
@@ -559,7 +562,7 @@ def scattering_cross_section(
     scattered_pwp_te: dict,
     scattered_pwp_tm: dict,
     *,
-    omega: float,
+    k0: float,
     n_medium: complex,
 ) -> dict[str, np.ndarray]:
     """Differential scattering cross section from scattered PWPs.
@@ -582,7 +585,7 @@ def scattering_cross_section(
     """
     n_real, k_medium = _validate_plane_wave_cross_section_inputs(
         source,
-        omega=omega,
+        k0=k0,
         n_medium=n_medium,
     )
 
@@ -598,13 +601,13 @@ def scattering_cross_section(
         )
 
     # PWP intensity per solid angle for one polarization:
-    # I_Omega = (2*pi^2 / (omega*k_medium)) * |g|^2
+    # I_Omega = (2*pi^2 / (k0*k_medium)) * |g|^2
     # Differential scattering cross section:
     # dC_sca/dOmega = I_Omega / I_inc
     incident_scale = _plane_wave_incident_intensity_scale(source)
     initial_intensity = incident_scale * n_real / 2.0
 
-    pref = (2.0 * np.pi**2) / (float(omega) * k_medium * initial_intensity)
+    pref = (2.0 * np.pi**2) / (float(k0) * k_medium * initial_intensity)
     dcs_te = pref * (np.abs(g_te) ** 2)
     dcs_tm = pref * (np.abs(g_tm) ** 2)
     dcs_total = dcs_te + dcs_tm
@@ -623,7 +626,7 @@ def total_scattering_cross_section(
     scattered_pwp_te: dict,
     scattered_pwp_tm: dict,
     *,
-    omega: float,
+    k0: float,
     n_medium: complex,
 ) -> float:
     """Total scattering cross section from far-field PWPs.
@@ -634,7 +637,7 @@ def total_scattering_cross_section(
         source,
         scattered_pwp_te,
         scattered_pwp_tm,
-        omega=omega,
+        k0=k0,
         n_medium=n_medium,
     )
     alpha = np.asarray(dcs["alpha"], dtype=float)
@@ -650,7 +653,7 @@ def extinction_cross_section(
     initial_coeffs: np.ndarray,
     scattered_coeffs: np.ndarray,
     *,
-    omega: float,
+    k0: float,
     n_medium: complex,
 ) -> float:
     """Extinction cross section from solved incident/scattered coefficients.
@@ -662,13 +665,13 @@ def extinction_cross_section(
     ``C_ext = -(pi / k^2) * Re(b^H x)``,
 
     where ``b`` are incident coefficients, ``x`` are scattered coefficients and
-    ``k = omega * n_medium``. For arbitrary source amplitude/Jones magnitude,
+    ``k = k0 * n_medium``. For arbitrary source amplitude/Jones magnitude,
     this quantity is normalized by the incident intensity scale
     ``|E0|^2 * (|a_te|^2 + |a_tm|^2)``.
     """
     _, k_medium = _validate_plane_wave_cross_section_inputs(
         source,
-        omega=omega,
+        k0=k0,
         n_medium=n_medium,
     )
     incident_scale = _plane_wave_incident_intensity_scale(source)
@@ -690,7 +693,7 @@ def absorption_cross_section(
     scattered_pwp_te: dict,
     scattered_pwp_tm: dict,
     *,
-    omega: float,
+    k0: float,
     n_medium: complex,
 ) -> float:
     """Absorption cross section as ``C_ext - C_sca``.
@@ -702,14 +705,14 @@ def absorption_cross_section(
         source,
         initial_coeffs,
         scattered_coeffs,
-        omega=omega,
+        k0=k0,
         n_medium=n_medium,
     )
     c_sca = total_scattering_cross_section(
         source,
         scattered_pwp_te,
         scattered_pwp_tm,
-        omega=omega,
+        k0=k0,
         n_medium=n_medium,
     )
     return float(c_ext - c_sca)
@@ -722,7 +725,7 @@ def plane_wave_cross_sections(
     scattered_pwp_te: dict,
     scattered_pwp_tm: dict,
     *,
-    omega: float,
+    k0: float,
     n_medium: complex,
 ) -> dict[str, float]:
     """Return plane-wave cross sections with SMUTHI-style cluster scattering.
@@ -745,14 +748,14 @@ def plane_wave_cross_sections(
         source,
         initial_coeffs,
         scattered_coeffs,
-        omega=omega,
+        k0=k0,
         n_medium=n_medium,
     )
     c_sca = total_scattering_cross_section(
         source,
         scattered_pwp_te,
         scattered_pwp_tm,
-        omega=omega,
+        k0=k0,
         n_medium=n_medium,
     )
     return {

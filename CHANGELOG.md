@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Angular-grid setup now uses canonical helpers:
   `core.uniform_polar_grid(n)` and
   `core.uniform_periodic_azimuth_grid(n)`.
+- Public naming now uses `k0` for vacuum wavenumber (`2*pi/lambda`) in
+  simulation/far-field APIs (instead of `omega`) to reduce ambiguity with true
+  angular frequency in future dipole/LDOS workflows.
 
 ### Fixed
 - Dtype parsing for `compute_dtype`/`accum_dtype` now accepts generic NumPy
