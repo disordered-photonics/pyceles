@@ -182,11 +182,20 @@ def _build_T_mode_diagonal(lmax: int, T_M: Array, T_N: Array) -> Array:
 
 
 def _infer_rmax(positions: Array) -> float:
-    """Maximum center-to-center separation for LUT sizing."""
+    """Conservative upper bound on center-to-center separation for LUT sizing.
 
-    positions = np.asarray(positions, dtype=float)
-    dif = positions[:, None, :] - positions[None, :, :]
-    return float(np.max(np.linalg.norm(dif, axis=2)))
+    Uses the axis-aligned bounding-box diagonal. This is O(N) in both time and
+    memory and safely upper-bounds the true maximum pair distance.
+    """
+
+    pos = np.asarray(positions, dtype=float)
+    if pos.ndim != 2 or pos.shape[1] != 3:
+        raise ValueError(f"positions must have shape (Ns,3). Got {pos.shape}.")
+    if pos.shape[0] == 0:
+        return 0.0
+    pmin = np.min(pos, axis=0)
+    pmax = np.max(pos, axis=0)
+    return float(np.linalg.norm(pmax - pmin))
 
 
 def prepare_matvec(

@@ -365,6 +365,28 @@ class NearFieldRadialLUT:
         return z, d
 
 
+def _conservative_radius_upper_bound(a: np.ndarray, b: np.ndarray) -> float:
+    """Return an O(N+M) conservative upper bound on max cross-set distance.
+
+    Uses axis-wise maxima between AABB(A) and AABB(B), which is tighter than
+    the union-box diagonal while remaining cheap and conservative.
+    """
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    if a.ndim != 2 or a.shape[1] != 3:
+        raise ValueError(f"`a` must have shape (N, 3). Got {a.shape}.")
+    if b.ndim != 2 or b.shape[1] != 3:
+        raise ValueError(f"`b` must have shape (M, 3). Got {b.shape}.")
+    if a.shape[0] == 0 or b.shape[0] == 0:
+        return 0.0
+    amin = np.min(a, axis=0)
+    amax = np.max(a, axis=0)
+    bmin = np.min(b, axis=0)
+    bmax = np.max(b, axis=0)
+    d_axis = np.maximum(np.abs(bmax - amin), np.abs(amax - bmin))
+    return float(np.linalg.norm(d_axis))
+
+
 def compute_scattered_field(
     field_points: np.ndarray,
     positions: np.ndarray,
@@ -430,11 +452,9 @@ def compute_scattered_field(
         H_eval = np.zeros_like(E_eval)
 
     if lut is None:
-        # estimate r_max from farthest evaluated point to any sphere
-        rmax = 0.0
-        for j in range(Ns):
-            r = np.linalg.norm(pts_eval - pos[j], axis=1).max()
-            rmax = max(rmax, float(r))
+        # Size the near-field radial LUT with an O(N+M) conservative bound
+        # instead of an exact O(N*M) center-point scan.
+        rmax = _conservative_radius_upper_bound(pos, pts_eval)
         lut = NearFieldRadialLUT(
             lmax=lmax,
             k=k,
