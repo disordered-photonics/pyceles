@@ -149,6 +149,7 @@ Use:
 Purpose:
 - run the same tilted Gaussian-beam cluster setup in pyceles and MSTM v4.0,
 - generate near-field TE/TM component maps, far-field hemisphere maps from MSTM `scattering_map_model=1`, and semilogy `S11(theta)` curves from MSTM `scattering_map_model=0`,
+- keep pyceles `S11` outputs in their native normalization and show MSTM curves/maps as fixed-factor rescaled overlays,
 - write comparison metrics (RMSE, relative RMSE, Pearson correlation) to a JSON summary.
 
 Requirements:
@@ -160,19 +161,19 @@ Example:
 ```bash
 python examples/run_mstm_pyceles_cluster_benchmark.py \
   --mstm-exe <path-to-mstm-executable> \
-  --output-prefix mstm_pyceles_500_tilted_l3_dense \
+  --output-prefix mstm_pyceles_500_tilted_l4_dense \
   --n-particles 500 \
   --polar-angle 0.43 \
   --azimuthal-angle 0.37 \
-  --lmax 3 \
-  --epsilon 1e-5 \
+  --lmax 4 \
+  --epsilon 1e-6 \
   --py-solver-method gmres \
   --n-beta 1801 \
   --n-alpha 720 \
   --nf-min -4000 0 -3000 \
   --nf-max 4000 0 5000 \
-  --nf-step 40 \
-  --mstm-scattering-map-dimension 121
+  --nf-step 25 \
+  --mstm-scattering-map-dimension 181
 ```
 
 Outputs are written in:

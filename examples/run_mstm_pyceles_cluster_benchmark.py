@@ -889,11 +889,11 @@ def _compare_farfield_s11(mstm_map: dict[str, Any], py_map: dict[str, Any]) -> d
         py_samples = _sample_py_intensity_at_kxy(
             kx_py, ky_py, kz_py, i_py, kx_t, ky_t, hemisphere=hemi
         )
-        py_scaled = S11_SCALE_MODEL1 * py_samples
-        metrics = _real_metrics(py_scaled, s11)
+        mstm_rescaled = s11 / S11_SCALE_MODEL1
+        metrics = _real_metrics(py_samples, mstm_rescaled)
         out[hemi] = metrics
-        combined_model.append(py_scaled)
-        combined_ref.append(s11)
+        combined_model.append(py_samples)
+        combined_ref.append(mstm_rescaled)
 
     if combined_model:
         comb_m = np.concatenate(combined_model)
@@ -1009,7 +1009,7 @@ def _plot_nearfield_component_pairs(
             meta_py.axis_h,
             meta_py.axis_v,
             ms_re,
-            title=f"MSTM-corrected Re({field_label}{cname})",
+            title=f"MSTM Re({field_label}{cname})",
             cmap="RdBu_r",
             vmin=-lim,
             vmax=lim,
@@ -1088,14 +1088,14 @@ def _plot_s11_maps_with_pyceles_helpers(
 ) -> None:
     beta = np.asarray(py_map["beta"], dtype=float)
     alpha = np.asarray(py_map["alpha"], dtype=float)
-    py_scaled = S11_SCALE_MODEL1 * np.asarray(py_map["I_unpolarized"], dtype=float)
-    mstm_on_py = _mstm_s11_on_py_grid(py_map, mstm_map)
+    py_s11 = np.asarray(py_map["I_unpolarized"], dtype=float)
+    mstm_on_py_rescaled = _mstm_s11_on_py_grid(py_map, mstm_map) / S11_SCALE_MODEL1
 
     fig_py, _ = plot_farfield_hemispheres(
         beta,
         alpha,
-        py_scaled,
-        title="pyceles S11-like map (scaled by 100*pi^2)",
+        py_s11,
+        title=r"pyceles $S_{11}$-like map",
         independent_scales=True,
     )
     out_py_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1105,8 +1105,8 @@ def _plot_s11_maps_with_pyceles_helpers(
     fig_ms, _ = plot_farfield_hemispheres(
         beta,
         alpha,
-        mstm_on_py,
-        title="MSTM S11 map remapped on pyceles grid",
+        mstm_on_py_rescaled,
+        title=r"MSTM $S_{11}$ map (rescaled)",
         independent_scales=True,
     )
     out_mstm_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1171,23 +1171,23 @@ def _sample_py_s11_at_theta(
 def _plot_s11_curve_semilogy(
     *,
     theta_deg: np.ndarray,
-    mstm_s11: np.ndarray,
-    py_s11_scaled: np.ndarray,
+    py_s11: np.ndarray,
+    mstm_s11_rescaled: np.ndarray,
     out_path: Path,
 ) -> None:
-    th_u, ms_u = _fold_theta_curve(theta_deg, mstm_s11)
-    _, py_u = _fold_theta_curve(theta_deg, py_s11_scaled)
+    th_u, py_u = _fold_theta_curve(theta_deg, py_s11)
+    _, ms_u = _fold_theta_curve(theta_deg, mstm_s11_rescaled)
     if th_u.size == 0:
         return
     x = np.deg2rad(th_u)
     eps = 1.0e-30
     fig, ax = plt.subplots(1, 1, figsize=(7.2, 4.8), constrained_layout=True)
-    ax.semilogy(x, np.maximum(py_u, eps), label="pyceles scaled (100*pi^3)", lw=1.6)
-    ax.semilogy(x, np.maximum(ms_u, eps), label="MSTM scattering_map_model=0", lw=1.6)
+    ax.semilogy(x, np.maximum(py_u, eps), label="pyceles", lw=1.6)
+    ax.semilogy(x, np.maximum(ms_u, eps), label="MSTM (rescaled)", lw=1.6)
     ax.set_xlim(0.0, np.pi)
     ax.set_xlabel(r"$\theta$ (rad)")
     ax.set_ylabel(r"$S_{11}$")
-    ax.set_title("Incident-plane scattering curve (folded to 0..pi)")
+    ax.set_title(r"Incident-plane $S_{11}(\theta)$, $\theta\in[0,\pi]$")
     ax.grid(True, which="both", alpha=0.3)
     ax.legend(loc="best")
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1442,9 +1442,9 @@ def main() -> None:
         theta0,
         incident_azimuthal_angle=float(cfg.azimuthal_angle),
     )
-    farfield_curve_cmp = _real_metrics(S11_SCALE_MODEL0 * py_curve0, s110)
+    farfield_curve_cmp = _real_metrics(py_curve0, s110 / S11_SCALE_MODEL0)
 
-    # Build corrected MSTM near-field channels for side-by-side maps.
+    # Build phase-aligned MSTM near-field channels for side-by-side maps.
     mstm_by_pol = {
         "par": {
             "E": MSTM_NEARFIELD_PHASE_CORRECTION["par"]
@@ -1500,8 +1500,8 @@ def main() -> None:
     )
     _plot_s11_curve_semilogy(
         theta_deg=theta0,
-        mstm_s11=s110,
-        py_s11_scaled=S11_SCALE_MODEL0 * py_curve0,
+        py_s11=py_curve0,
+        mstm_s11_rescaled=s110 / S11_SCALE_MODEL0,
         out_path=cfg.outdir / f"{cfg.output_prefix}_s11_model0_semilogy.png",
     )
 
