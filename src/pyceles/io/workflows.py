@@ -29,11 +29,16 @@ def save_simulation_h5(
 ) -> Path:
     """Persist geometry, solver outputs, near field, far field, and diagnostics.
 
-    If polarization-basis channels were computed (`solve_polarization_basis=True`),
+    If polarization-basis channels are present (for example from
+    `SimulationConfig(solve_polarization_basis=True)` + `Simulation.run()`
+    convenience mode),
     this workflow also stores:
     - basis coefficient solutions (`solution_basis/te`, `solution_basis/tm`)
     - basis far-field families (`far_field_basis/te`, `far_field_basis/tm`)
     - basis and unpolarized diagnostics under `diagnostics`.
+
+    For `Simulation.run_multi_sources(...)`, save each channel result
+    individually (for example `save_simulation_h5(multi["te"], ...)`).
     """
     out_h5 = Path(out_h5)
     out_h5.parent.mkdir(parents=True, exist_ok=True)

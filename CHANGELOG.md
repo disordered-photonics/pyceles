@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Public naming now uses `k0` for vacuum wavenumber (`2*pi/lambda`) in
   simulation/far-field APIs (instead of `omega`) to reduce ambiguity with true
   angular frequency in future dipole/LDOS workflows.
+- Added `Simulation.run_multi_sources(...)` as the general multi-channel API:
+  any labeled source set now runs through one shared-operator multi-RHS solve.
+- `solve_polarization_basis=True` now acts as a convenience `run()` wrapper
+  built on top of `run_multi_sources(...)` (TE/TM channels + Jones mixed
+  recombination + unpolarized diagnostics).
 
 ### Fixed
 - Dtype parsing for `compute_dtype`/`accum_dtype` now accepts generic NumPy
@@ -25,6 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Simulation config validation now warns when azimuthal grids include both
   `0` and `2*pi`, since this duplicated periodic endpoint usually wastes work
   and may disable periodic fast-path detection.
+- IO/postprocessing channel helper guidance now consistently covers both
+  `solve_polarization_basis=True` runs and per-channel
+  `run_multi_sources(...)` results (near-field channel selection and
+  far-field intensity convenience helper).
 
 ## [0.2.0] - 2026-02-28
 

@@ -577,33 +577,36 @@ def _pyceles_run(
         solver_maxiter=int(cfg.py_solver_maxiter),
         solver_restart=int(cfg.py_solver_restart),
         solver_direct_max_n=20_000,
-        solve_polarization_basis=True,
         compute_dtype=cfg.py_compute_dtype,
         accum_dtype=cfg.py_accum_dtype,
         verbose=False,
     )
 
-    run = pcl.Simulation(sim_cfg, positions=positions, radii=radii, n_particle=n_particle).run()
-    if (
-        run.power_basis is None
-        or run.decomposition_forward_basis is None
-        or run.decomposition_backward_basis is None
-    ):
-        raise RuntimeError(
-            "Expected basis power diagnostics in pyceles result, but they are missing."
-        )
-    if run.farfield_basis is None:
-        raise RuntimeError(
-            "Expected basis far-field patterns in pyceles result, but they are missing."
-        )
+    sim = pcl.Simulation(sim_cfg, positions=positions, radii=radii, n_particle=n_particle)
+    multi = sim.run_multi_sources(
+        {
+            "te": source.with_polarization("TE"),
+            "tm": source.with_polarization("TM"),
+        }
+    )
+    run_basis = {"te": multi["te"], "tm": multi["tm"]}
 
     eff_basis: dict[str, dict[str, float]] = {}
     for ch in ("te", "tm"):
-        p0 = float(run.power_basis[ch]["P_initial"])
-        s_up = float(run.decomposition_forward_basis[ch]["P_scattered"] / p0)
-        s_down = float(run.decomposition_backward_basis[ch]["P_scattered"] / p0)
-        t_frac = float(run.power_basis[ch]["T"])
-        r_frac = float(run.power_basis[ch]["R"])
+        run_ch = run_basis[ch]
+        if (
+            run_ch.power is None
+            or run_ch.decomposition_forward is None
+            or run_ch.decomposition_backward is None
+        ):
+            raise RuntimeError(
+                f"Expected finite-beam power diagnostics for channel '{ch}', but they are missing."
+            )
+        p0 = float(run_ch.power["P_initial"])
+        s_up = float(run_ch.decomposition_forward["P_scattered"] / p0)
+        s_down = float(run_ch.decomposition_backward["P_scattered"] / p0)
+        t_frac = float(run_ch.power["T"])
+        r_frac = float(run_ch.power["R"])
         q_abs = float(1.0 - t_frac - r_frac)
         q_sca = float(s_up + s_down)
         eff_basis[ch] = {
@@ -615,12 +618,12 @@ def _pyceles_run(
             "P_initial": p0,
         }
 
-    ff_te = run.farfield_basis["te"].scattered_te
+    ff_te = run_basis["te"].farfield.scattered_te
     I_te = far_field_intensity(
-        run.farfield_basis["te"].scattered_te, run.farfield_basis["te"].scattered_tm
+        run_basis["te"].farfield.scattered_te, run_basis["te"].farfield.scattered_tm
     )
     I_tm = far_field_intensity(
-        run.farfield_basis["tm"].scattered_te, run.farfield_basis["tm"].scattered_tm
+        run_basis["tm"].farfield.scattered_te, run_basis["tm"].farfield.scattered_tm
     )
     I_unpol = 0.5 * (I_te + I_tm)
     alpha = np.asarray(ff_te["alpha"], dtype=float)
@@ -629,8 +632,12 @@ def _pyceles_run(
     ky = np.sin(alpha)[:, None] * np.sin(beta)[None, :]
     kz = np.cos(beta)[None, :] * np.ones((alpha.size, 1), dtype=float)
 
-    nf_te = pcl.compute_near_field(run, points=nearfield_points, channel="te", show_progress=False)
-    nf_tm = pcl.compute_near_field(run, points=nearfield_points, channel="tm", show_progress=False)
+    nf_te = pcl.compute_near_field(
+        run_basis["te"], points=nearfield_points, channel="mixed", show_progress=False
+    )
+    nf_tm = pcl.compute_near_field(
+        run_basis["tm"], points=nearfield_points, channel="mixed", show_progress=False
+    )
     if int(cfg.mstm_near_field_model) == 1:
         e_te = np.asarray(nf_te.E_total, dtype=np.complex128)
         h_te = np.asarray(nf_te.H_total, dtype=np.complex128)
@@ -648,8 +655,8 @@ def _pyceles_run(
             f"Unsupported MSTM near-field model {cfg.mstm_near_field_model}; expected 1 or 2."
         )
 
-    iter_val = np.asarray(run.solver_result.iterations)
-    rr_val = np.asarray(run.solver_result.relative_residual)
+    iter_val = np.asarray(multi.solver_result.iterations)
+    rr_val = np.asarray(multi.solver_result.relative_residual)
     if iter_val.ndim == 0:
         iterations_out: int | list[int] = int(iter_val)
     else:
@@ -661,10 +668,10 @@ def _pyceles_run(
 
     return {
         "solver": {
-            "method": str(run.solver_result.method),
+            "method": str(multi.solver_result.method),
             "iterations": iterations_out,
             "relative_residual": rr_out,
-            "rhs_count": int(run.solver_result.rhs_count),
+            "rhs_count": int(multi.solver_result.rhs_count),
         },
         "efficiencies_basis": eff_basis,
         "farfield_map": {

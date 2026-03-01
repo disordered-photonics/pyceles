@@ -15,7 +15,12 @@ from pyceles.postprocessing.workflows import (
     mix_near_field_components,
     mix_near_field_slices,
 )
-from pyceles.simulation import Simulation, SimulationConfig, SimulationResult
+from pyceles.simulation import (
+    MultiSourceSimulationResult,
+    Simulation,
+    SimulationConfig,
+    SimulationResult,
+)
 
 __all__ = [
     "__version__",
@@ -27,6 +32,7 @@ __all__ = [
     "Simulation",
     "SimulationConfig",
     "SimulationResult",
+    "MultiSourceSimulationResult",
     "NearFieldSlice",
     "compute_near_field",
     "compute_near_field_slice",

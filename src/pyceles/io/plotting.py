@@ -4,6 +4,18 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
+def _is_pure_channel_result(run, channel: str, *, atol: float = 1e-12) -> bool:
+    """Return True when `run` already represents one pure TE/TM Jones channel."""
+    if not hasattr(run, "polarization_jones"):
+        return False
+    a_te, a_tm = run.polarization_jones
+    if channel == "te":
+        return bool(abs(complex(a_tm)) <= atol and abs(complex(a_te)) > atol)
+    if channel == "tm":
+        return bool(abs(complex(a_te)) <= atol and abs(complex(a_tm)) > atol)
+    return False
+
+
 def _slice_axis_labels(plane: str) -> tuple[str, str]:
     """Return in-plane coordinate labels for a given slice normal axis."""
     p = str(plane).lower()
@@ -87,20 +99,24 @@ def far_field_intensity_from_result(run, *, channel: str = "mixed") -> np.ndarra
     ----------
     channel:
         - ``"mixed"``: source-requested polarization state (`run.farfield`)
-        - ``"te"`` or ``"tm"``: pure basis channels (`run.farfield_basis`)
+        - ``"te"`` or ``"tm"``: pure basis channels (`run.farfield_basis`), or
+          a pure single-channel result returned by `run_multi_sources(...)`
         - ``"unpolarized"``: incoherent average ``0.5*(I_te + I_tm)``
     """
     ch = str(channel).lower()
     if ch == "mixed":
         return far_field_intensity(run.farfield.scattered_te, run.farfield.scattered_tm)
     if ch in {"te", "tm"}:
-        if run.farfield_basis is None or ch not in run.farfield_basis:
-            raise ValueError(
-                "Requested basis far-field channel, but `run.farfield_basis` is unavailable. "
-                "Run simulation with `solve_polarization_basis=True`."
-            )
-        ff = run.farfield_basis[ch]
-        return far_field_intensity(ff.scattered_te, ff.scattered_tm)
+        if run.farfield_basis is not None and ch in run.farfield_basis:
+            ff = run.farfield_basis[ch]
+            return far_field_intensity(ff.scattered_te, ff.scattered_tm)
+        if _is_pure_channel_result(run, ch):
+            return far_field_intensity(run.farfield.scattered_te, run.farfield.scattered_tm)
+        raise ValueError(
+            "Requested basis far-field channel, but no TE/TM basis payload is available on this run. "
+            "Use `solve_polarization_basis=True` with `Simulation.run()`, or use a channel result from "
+            "`Simulation.run_multi_sources(...)` and query it with `channel='mixed'`."
+        )
     if ch == "unpolarized":
         if (
             run.farfield_basis is None
@@ -109,7 +125,8 @@ def far_field_intensity_from_result(run, *, channel: str = "mixed") -> np.ndarra
         ):
             raise ValueError(
                 "Requested unpolarized intensity, but TE/TM basis far fields are unavailable. "
-                "Run simulation with `solve_polarization_basis=True`."
+                "Use `solve_polarization_basis=True` with `Simulation.run()`, or compute it from "
+                "`Simulation.run_multi_sources(...)` by averaging TE/TM channel intensities."
             )
         I_te = far_field_intensity(
             run.farfield_basis["te"].scattered_te, run.farfield_basis["te"].scattered_tm

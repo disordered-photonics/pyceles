@@ -56,8 +56,10 @@ Users of pyceles are referred to the publications listed in the CELES and SMUTHI
   - `None` geometry inputs are rejected to avoid accidental empty runs
 - Channel-aware polarization workflow:
   - source polarization accepts CELES-style `"TE"`, `"TM"` or Jones weights `(a_te, a_tm)`
-  - optional dual-basis solve (`solve_polarization_basis=True`) computes both
-    pure TE/TM channels in one simulation run (could be faster with block-Krylov solvers in PETSc)
+  - `Simulation.run_multi_sources(...)` solves any labeled source set in one
+    simulation call (shared operator, multi-RHS solve)
+  - optional dual-basis convenience mode (`solve_polarization_basis=True`) still
+    provides one mixed+basis+unpolarized `SimulationResult`
   - mixed outputs are combined from Jones weights
   - optional unpolarized diagnostics are provided when basis channels are available
 - Solver API extensions:
@@ -279,9 +281,29 @@ source = pcl.PlaneWave(
 )
 ```
 
-## Dual-Basis Solve + Unpolarized Diagnostics
+## Multi-Source Solve (Recommended)
 
-Set `solve_polarization_basis=True` to compute and store TE/TM basis channels:
+Use `run_multi_sources(...)` when you need multiple channels (for example TE/TM
+basis, dipole x/y/z, or SLM pattern sweeps) solved on the same geometry:
+
+```python
+sim = pcl.Simulation(cfg, positions=pos, radii=rad, n_particle=n_part)
+multi = sim.run_multi_sources(
+    {
+        "te": source.with_polarization("TE"),
+        "tm": source.with_polarization("TM"),
+    }
+)
+
+run_te = multi["te"]
+run_tm = multi["tm"]
+print(multi.solver_result.rhs_count)  # 2
+```
+
+## Dual-Basis Convenience Run
+
+For mixed+basis+unpolarized outputs in one `SimulationResult`, keep using the
+high-level convenience flag:
 
 ```python
 cfg = pcl.SimulationConfig(
@@ -308,6 +330,14 @@ Near-field evaluation can target mixed or basis channels:
 nf_mixed = pcl.compute_near_field_slice(run, channel="mixed")
 nf_te = pcl.compute_near_field_slice(run, channel="te")
 nf_tm = pcl.compute_near_field_slice(run, channel="tm")
+```
+
+For `run_multi_sources(...)` outputs, each channel run is already pure. Use
+`channel="mixed"` on that channel result:
+
+```python
+nf_te = pcl.compute_near_field_slice(multi["te"], channel="mixed")
+nf_tm = pcl.compute_near_field_slice(multi["tm"], channel="mixed")
 ```
 
 For far-field plotting, an unpolarized intensity convenience helper is available:
@@ -379,6 +409,8 @@ Notes:
   - mixed and basis power/cross-sections/decompositions
   - unpolarized diagnostics
   - Jones weights
+- for `run_multi_sources(...)`, save each channel run separately (for example
+  `save_simulation_h5(multi["te"], ...)`, `save_simulation_h5(multi["tm"], ...)`)
 
 Loading helpers are available via `pcl.io`:
 - `load_geometry_h5`, `load_solution_h5`, `load_far_field_h5`

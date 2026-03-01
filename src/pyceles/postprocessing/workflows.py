@@ -13,6 +13,16 @@ if TYPE_CHECKING:
     from pyceles.simulation import SimulationResult
 
 
+def _is_pure_channel_result(run: SimulationResult, channel: str, *, atol: float = 1e-12) -> bool:
+    """Return True when `run` already represents one pure TE/TM Jones channel."""
+    a_te, a_tm = run.polarization_jones
+    if channel == "te":
+        return bool(abs(complex(a_tm)) <= atol and abs(complex(a_te)) > atol)
+    if channel == "tm":
+        return bool(abs(complex(a_te)) <= atol and abs(complex(a_tm)) > atol)
+    return False
+
+
 @dataclass(frozen=True)
 class NearFieldSlice:
     """Near-field payload on a 2D slice for plotting and diagnostics.
@@ -160,7 +170,8 @@ def compute_near_field(
         - ``"mixed"``: use the source polarization requested by the user
           (default).
         - ``"te"`` / ``"tm"``: evaluate one pure basis channel. Requires
-          `run.coeffs_basis` from `solve_polarization_basis=True`.
+          `run.coeffs_basis` from `solve_polarization_basis=True`, or a pure
+          single-channel result returned by `run_multi_sources(...)`.
     """
     pts_flat, lead_shape = _reshape_field_points(points)
 
@@ -178,14 +189,22 @@ def compute_near_field(
     coeffs = run.coeffs
     source_eff = source
     if channel_key in {"te", "tm"}:
-        if run.coeffs_basis is None:
+        used_basis_payload = False
+        if run.coeffs_basis is not None and channel_key in run.coeffs_basis:
+            coeffs = run.coeffs_basis[channel_key]
+            used_basis_payload = True
+        elif _is_pure_channel_result(run, channel_key):
+            coeffs = run.coeffs
+        else:
             raise ValueError(
                 "Requested basis near-field channel, but `run.coeffs_basis` is not available. "
-                "Run simulation with `solve_polarization_basis=True`."
+                "Use `solve_polarization_basis=True` with `Simulation.run()`, or use a "
+                "channel result from `Simulation.run_multi_sources(...)` and query it with "
+                "`channel='mixed'`."
             )
-        coeffs = run.coeffs_basis[channel_key]
-        pol_label: Literal["TE", "TM"] = "TE" if channel_key == "te" else "TM"
-        source_eff = source.with_polarization(pol_label)
+        if used_basis_payload:
+            pol_label: Literal["TE", "TM"] = "TE" if channel_key == "te" else "TM"
+            source_eff = source.with_polarization(pol_label)
 
     # Initial-field near-field evaluation must use the source-projection angular
     # quadrature, not necessarily the far-field display grid.

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass, field
-from typing import Callable, Literal
+from typing import Callable, Literal, Mapping, Sequence
 
 import numpy as np
 import numpy.typing as npt
@@ -332,9 +332,13 @@ def _mix_farfield_patterns(
 class SimulationConfig:
     """High-level configuration for one homogeneous-medium many-sphere run.
 
-    Polarization/basis options:
+    Polarization/multi-source options:
     - `source.polarization` may be `"TE"`, `"TM"`, or Jones `(a_te, a_tm)`.
-    - `solve_polarization_basis=True` solves TE/TM basis channels and stores both.
+    - `Simulation.run_multi_sources(...)` solves any labeled source set in one
+      shared-operator multi-RHS solve.
+    - `solve_polarization_basis=True` keeps a convenience `run()` wrapper that
+      internally calls `run_multi_sources({"te": ..., "tm": ...})` and adds
+      mixed+basis+unpolarized outputs.
     Angular-grid policy:
     - `polar_angles`/`azimuthal_angles` define the shared CELES-style default
       grid used by source projection, near-field initial-field quadrature, and
@@ -594,8 +598,10 @@ class SimulationConfig:
 class SimulationResult:
     """Container for solved multipole coefficients and derived observables.
 
-    Mixed outputs (`coeffs`, `farfield`, `power`, `cross_sections`) correspond to
-    the source polarization requested by the user.
+    In `Simulation.run()`, mixed outputs (`coeffs`, `farfield`, `power`,
+    `cross_sections`) correspond to the source polarization requested by the
+    user. In `run_multi_sources(...)`, each channel result corresponds to its
+    own source label.
 
     When `solve_polarization_basis=True`, basis and unpolarized diagnostics are
     also provided (`*_basis`, `unpolarized`). In that mode the solver computes
@@ -639,6 +645,76 @@ class SimulationResult:
     polarization_jones: tuple[complex, complex] = (1.0 + 0j, 0.0 + 0j)
     compute_dtype: str = "complex128"
     accum_dtype: str = "complex128"
+
+
+@dataclass(frozen=True)
+class MultiSourceSimulationResult:
+    """Results from one shared-operator solve for multiple incident sources.
+
+    All channels share the same particle geometry/operator and are solved in one
+    multi-RHS call. Per-channel postprocessed runs are exposed under `runs`.
+    """
+
+    labels: tuple[str, ...]
+    sources: dict[str, GaussianBeam | PlaneWave]
+    runs: dict[str, SimulationResult]
+    solver_result: LinearSolveResult
+    initial_coeffs: dict[str, np.ndarray]
+    rhs: dict[str, np.ndarray]
+    coeffs: dict[str, np.ndarray]
+
+    def __getitem__(self, label: str) -> SimulationResult:
+        """Return one channel run by label."""
+        return self.runs[label]
+
+
+def _avg_numeric_dict(d1: Mapping[str, object], d2: Mapping[str, object]) -> dict[str, float]:
+    """Average overlapping scalar diagnostics from two channels."""
+    keys = set(d1).intersection(set(d2))
+    out: dict[str, float] = {}
+    for key in keys:
+        v1, v2 = d1[key], d2[key]
+        if isinstance(v1, (int, float, np.floating)) and isinstance(v2, (int, float, np.floating)):
+            out[key] = float(0.5 * (float(v1) + float(v2)))
+    return out
+
+
+def _single_rhs_result_from_multi(result: LinearSolveResult, col: int) -> LinearSolveResult:
+    """Extract one RHS column from a multi-RHS `LinearSolveResult`."""
+    if int(result.rhs_count) <= 1:
+        return result
+
+    x_arr = np.asarray(result.x)
+    if x_arr.ndim != 2:
+        raise ValueError(
+            f"Expected multi-RHS solver output with 2D `x` array. Got shape {x_arr.shape}."
+        )
+    if col < 0 or col >= x_arr.shape[1]:
+        raise IndexError(f"RHS column index {col} out of bounds for shape {x_arr.shape}.")
+
+    def _pick_scalar(value: int | float | np.ndarray, index: int) -> int | float:
+        arr = np.asarray(value)
+        if arr.ndim == 0:
+            return float(arr) if arr.dtype.kind == "f" else int(arr)
+        return float(arr[index]) if arr.dtype.kind == "f" else int(arr[index])
+
+    residual_history = None
+    if isinstance(result.residual_history, list):
+        if col < len(result.residual_history):
+            residual_history = result.residual_history[col]
+    elif isinstance(result.residual_history, np.ndarray):
+        residual_history = result.residual_history
+
+    return LinearSolveResult(
+        x=np.asarray(x_arr[:, col]),
+        info=int(_pick_scalar(result.info, col)),
+        residual_norm=float(_pick_scalar(result.residual_norm, col)),
+        relative_residual=float(_pick_scalar(result.relative_residual, col)),
+        iterations=int(_pick_scalar(result.iterations, col)),
+        method=str(result.method),
+        residual_history=residual_history,
+        rhs_count=1,
+    )
 
 
 class Simulation:
@@ -689,26 +765,183 @@ class Simulation:
             )
         return self.config.source
 
-    def run(self) -> SimulationResult:
-        """Solve for multipole coefficients and evaluate far-field diagnostics.
-
-        Workflow:
-        1. project source to incident SVWF coefficients,
-        2. build/apply the operator for `(I - T W) x = T b`,
-        3. solve the linear system (single RHS, or TE/TM basis multi-RHS only),
-        4. evaluate far-field/power/cross-section diagnostics,
-        5. assemble mixed, basis, and optional unpolarized outputs.
-
-        For `solve_polarization_basis=True`, the requested Jones channel is
-        formed as `x = a_te*x_te + a_tm*x_tm` and far-field PWPs are formed by
-        coherent TE/TM basis recombination, avoiding an extra mixed solve and a
-        third full far-field evaluation.
-        """
+    def _validate_source_compatibility(
+        self, source: GaussianBeam | PlaneWave, *, label: str
+    ) -> None:
+        """Validate one source against this simulation's wavelength/medium settings."""
         cfg = self.config
-        source = self._validate_ready_to_run()
+        if not isinstance(source, _SOURCE_TYPES):
+            raise TypeError(
+                f"Source '{label}' must be a PlaneWave or GaussianBeam. "
+                f"Got {type(source).__name__}."
+            )
+        wl = float(source.wavelength)
+        if not np.isclose(wl, float(cfg.wavelength), rtol=0.0, atol=0.0):
+            raise ValueError(f"Source '{label}' wavelength mismatch: {wl!r} != {cfg.wavelength!r}.")
+        n_src = complex(source.medium_n)
+        if not np.isclose(float(np.real(n_src)), float(np.real(cfg.n_medium)), rtol=0.0, atol=0.0):
+            raise ValueError(f"Source '{label}' medium_n mismatch: {n_src!r} != {cfg.n_medium!r}.")
+
+    def _normalize_sources_argument(
+        self,
+        sources: Mapping[str, GaussianBeam | PlaneWave] | Sequence[GaussianBeam | PlaneWave],
+        *,
+        labels: Sequence[str] | None = None,
+    ) -> dict[str, GaussianBeam | PlaneWave]:
+        """Normalize multi-source inputs to a deterministic labeled dictionary."""
+        if isinstance(sources, Mapping):
+            if labels is not None:
+                raise ValueError("`labels` must be omitted when `sources` is a mapping.")
+            out: dict[str, GaussianBeam | PlaneWave] = {}
+            for key, src in sources.items():
+                lbl = str(key)
+                if lbl in out:
+                    raise ValueError(f"Duplicate source label '{lbl}'.")
+                out[lbl] = src
+        else:
+            src_list = list(sources)
+            if len(src_list) == 0:
+                raise ValueError("`sources` must contain at least one source.")
+            if labels is None:
+                labels_eff = [f"source_{j}" for j in range(len(src_list))]
+            else:
+                labels_eff = [str(v) for v in labels]
+                if len(labels_eff) != len(src_list):
+                    raise ValueError(
+                        "`labels` length must match number of sources. "
+                        f"Got {len(labels_eff)} labels for {len(src_list)} sources."
+                    )
+            if len(set(labels_eff)) != len(labels_eff):
+                raise ValueError("`labels` must be unique.")
+            out = {labels_eff[j]: src_list[j] for j in range(len(src_list))}
+
+        if len(out) == 0:
+            raise ValueError("`sources` must contain at least one source.")
+        for label, src in out.items():
+            self._validate_source_compatibility(src, label=label)
+        return out
+
+    def _build_single_channel_result(
+        self,
+        *,
+        source: GaussianBeam | PlaneWave,
+        initial_coeffs: np.ndarray,
+        rhs_flat: np.ndarray,
+        coeffs: np.ndarray,
+        solver_result: LinearSolveResult,
+        k: float,
+        k0: float,
+        compute_dtype: np.dtype,
+        accum_dtype: np.dtype,
+        farfield_polar_angles: np.ndarray,
+        farfield_azimuthal_angles: np.ndarray,
+    ) -> SimulationResult:
+        """Assemble one channel `SimulationResult` from solved coefficients."""
+        cfg = self.config
         positions = self.positions
         radii = self.radii
         n_particle = self.n_particle
+        Ns = positions.shape[0]
+        Nm = n_modes(cfg.lmax)
+
+        ff = compute_far_field_patterns(
+            positions,
+            coeffs,
+            k=k,
+            lmax=cfg.lmax,
+            polar_angles=farfield_polar_angles,
+            azimuthal_angles=farfield_azimuthal_angles,
+            source=source,
+            dtype=compute_dtype,
+            show_progress=bool(cfg.verbose),
+        )
+
+        power = None
+        cross_sections = None
+        decomposition_forward = None
+        decomposition_backward = None
+        if ff.initial_te is not None and ff.initial_tm is not None:
+            power = finite_beam_power_fractions(
+                source,
+                ff.initial_te,
+                ff.initial_tm,
+                ff.scattered_te,
+                ff.scattered_tm,
+                k0=k0,
+                k_medium=k,
+            )
+            decomposition_forward = pwp_power_decomposition(
+                direction="forward",
+                initial_pwp_te=ff.initial_te,
+                initial_pwp_tm=ff.initial_tm,
+                scattered_pwp_te=ff.scattered_te,
+                scattered_pwp_tm=ff.scattered_tm,
+                k0=k0,
+                k_medium=k,
+                source=source,
+            )
+            decomposition_backward = pwp_power_decomposition(
+                direction="backward",
+                initial_pwp_te=ff.initial_te,
+                initial_pwp_tm=ff.initial_tm,
+                scattered_pwp_te=ff.scattered_te,
+                scattered_pwp_tm=ff.scattered_tm,
+                k0=k0,
+                k_medium=k,
+                source=source,
+            )
+        elif isinstance(source, PlaneWave):
+            cross_sections = plane_wave_cross_sections(
+                source,
+                initial_coeffs,
+                coeffs,
+                k0=k0,
+                n_medium=cfg.n_medium,
+                scattered_pwp_te=ff.scattered_te,
+                scattered_pwp_tm=ff.scattered_tm,
+            )
+
+        a_te, a_tm = source_jones(source)
+        return SimulationResult(
+            config=cfg,
+            positions=positions,
+            radii=radii,
+            n_particle=n_particle,
+            k=k,
+            k0=k0,
+            coeffs=np.asarray(coeffs),
+            rhs=np.asarray(rhs_flat).reshape(Ns, Nm),
+            initial_coeffs=np.asarray(initial_coeffs),
+            initial_coeffs_basis=None,
+            coeffs_basis=None,
+            solver_result=solver_result,
+            solver_result_basis=None,
+            farfield=ff,
+            farfield_basis=None,
+            power=power,
+            power_basis=None,
+            cross_sections=cross_sections,
+            cross_sections_basis=None,
+            unpolarized=None,
+            decomposition_forward=decomposition_forward,
+            decomposition_backward=decomposition_backward,
+            decomposition_forward_basis=None,
+            decomposition_backward_basis=None,
+            polarization_jones=(a_te, a_tm),
+            compute_dtype=str(compute_dtype),
+            accum_dtype=str(accum_dtype),
+        )
+
+    def _run_sources_core(
+        self, labeled_sources: Mapping[str, GaussianBeam | PlaneWave]
+    ) -> MultiSourceSimulationResult:
+        """Solve and postprocess multiple sources with one shared operator build."""
+        cfg = self.config
+        positions = self.positions
+        radii = self.radii
+        n_particle = self.n_particle
+        labels = tuple(labeled_sources.keys())
+        n_channels = len(labels)
 
         compute_dtype, accum_dtype = resolve_compute_accum_dtypes(
             compute_dtype=cfg.compute_dtype,
@@ -718,8 +951,6 @@ class Simulation:
         Ns = positions.shape[0]
         Nm = n_modes(cfg.lmax)
         unknowns = Ns * Nm
-
-        # `k0` is the vacuum wavenumber; medium wavenumber is `k = k0 * Re(n_medium)`.
         k0 = 2.0 * np.pi / float(cfg.wavelength)
         k = k0 * float(np.real(cfg.n_medium))
 
@@ -731,7 +962,7 @@ class Simulation:
             _print_startup_logo_once()
             print(
                 "System:"
-                f" particles={Ns} lmax={cfg.lmax} modes_per_particle={Nm} unknowns={unknowns}"
+                f" particles={Ns} lmax={cfg.lmax} modes_per_particle={Nm} unknowns={unknowns} channels={n_channels}"
             )
             print(f"Dtypes: compute={compute_dtype.name} accum={accum_dtype.name}")
             dense_bytes = estimate_dense_matrix_bytes(unknowns, dtype=compute_dtype)
@@ -760,25 +991,25 @@ class Simulation:
                     f"source beta/alpha={source_polar_angles.size}/{source_azimuthal_angles.size}, "
                     f"farfield beta/alpha={farfield_polar_angles.size}/{farfield_azimuthal_angles.size}"
                 )
-        a_te, a_tm = source_jones(source)
 
-        b_basis = {
-            key: val.astype(accum_dtype, copy=False)
-            for key, val in project_source_basis_to_svwf(
+        initial_coeffs: dict[str, np.ndarray] = {}
+        for label in labels:
+            src = labeled_sources[label]
+            basis = project_source_basis_to_svwf(
                 positions,
                 cfg.lmax,
-                source,
+                src,
                 polar_angles=source_polar_angles,
                 azimuthal_angles=source_azimuthal_angles,
                 dtype=compute_dtype,
-            ).items()
-        }
-        b = np.asarray(a_te * b_basis["te"] + a_tm * b_basis["tm"], dtype=accum_dtype)
+            )
+            a_te, a_tm = source_jones(src)
+            initial_coeffs[label] = np.asarray(
+                a_te * basis["te"] + a_tm * basis["tm"], dtype=accum_dtype
+            )
 
-        rhs = np.zeros((unknowns,), dtype=accum_dtype)
-        rhs_basis = {
-            "te": np.zeros((unknowns,), dtype=accum_dtype),
-            "tm": np.zeros((unknowns,), dtype=accum_dtype),
+        rhs_flat: dict[str, np.ndarray] = {
+            label: np.zeros((unknowns,), dtype=accum_dtype) for label in labels
         }
         prepared = None
         A_mv = None
@@ -796,11 +1027,8 @@ class Simulation:
                 operator_dtype=compute_dtype,
             )
             A_mv = prepared.apply_A
-            rhs = prepared.rhs_Tb(b.reshape(Ns * Nm))
-            rhs_basis = {
-                "te": prepared.rhs_Tb(b_basis["te"].reshape(Ns * Nm)),
-                "tm": prepared.rhs_Tb(b_basis["tm"].reshape(Ns * Nm)),
-            }
+            for label in labels:
+                rhs_flat[label] = prepared.rhs_Tb(initial_coeffs[label].reshape(Ns * Nm))
             if will_use_direct:
                 A_dense = assemble_dense_A_numpy(
                     prepared,
@@ -809,7 +1037,10 @@ class Simulation:
                     store_blocks=False,
                 )
 
-        warm_start = None
+        rhs_matrix = np.column_stack([rhs_flat[label] for label in labels])
+        rhs_arg = rhs_matrix[:, 0] if n_channels == 1 else rhs_matrix
+
+        warm_start: np.ndarray | None = None
         if cfg.solver_warm_start is not None:
             ws = np.asarray(cfg.solver_warm_start, dtype=compute_dtype)
             if ws.ndim == 1:
@@ -817,16 +1048,26 @@ class Simulation:
                     raise ValueError(
                         f"`solver_warm_start` length must match unknown count ({unknowns}). Got {ws.size}."
                     )
-                warm_start = ws
+                warm_start = np.repeat(ws[:, None], n_channels, axis=1) if n_channels > 1 else ws
             elif ws.ndim == 2:
                 if ws.shape[0] != unknowns:
                     raise ValueError(
                         f"`solver_warm_start` first dimension must match unknown count ({unknowns}). "
                         f"Got {ws.shape}."
                     )
-                warm_start = ws
+                if ws.shape[1] == n_channels:
+                    warm_start = ws
+                elif ws.shape[1] == 1 and n_channels > 1:
+                    warm_start = np.repeat(ws, n_channels, axis=1)
+                else:
+                    raise ValueError(
+                        "`solver_warm_start` 2D second dimension must be 1 or match the number of channels. "
+                        f"Got {ws.shape[1]} for {n_channels} channels."
+                    )
             else:
                 raise ValueError("`solver_warm_start` must be 1D or 2D.")
+        if n_channels == 1 and warm_start is not None and np.ndim(warm_start) == 2:
+            warm_start = np.asarray(warm_start)[:, 0]
 
         solver_preconditioner = cfg.solver_preconditioner
         if (
@@ -854,62 +1095,17 @@ class Simulation:
                     f"particles/block(min,mean,max)=({sizes.min()},{sizes.mean():.1f},{sizes.max()})"
                 )
 
-        solver_basis = None
-        coeffs_basis = None
         if unknowns == 0:
-            if bool(cfg.solve_polarization_basis):
-                solver_basis = _make_empty_solver_result(
-                    dtype=compute_dtype, nrhs=2, method=cfg.solver_method
-                )
-                coeffs_basis = {
-                    "te": np.zeros((Ns, Nm), dtype=compute_dtype),
-                    "tm": np.zeros((Ns, Nm), dtype=compute_dtype),
-                }
-                x = np.asarray(
-                    a_te * coeffs_basis["te"] + a_tm * coeffs_basis["tm"],
-                    dtype=accum_dtype,
-                )
-                solver_result = solver_basis
-            else:
-                solver_result = _make_empty_solver_result(
-                    dtype=compute_dtype, nrhs=1, method=cfg.solver_method
-                )
-                x = np.zeros((Ns, Nm), dtype=accum_dtype)
-        elif bool(cfg.solve_polarization_basis):
-            if A_mv is None:
-                raise RuntimeError("Internal error: A_mv not prepared for non-empty system.")
-            # Basis mode solves only pure TE/TM RHS channels. The requested Jones
-            # mixed solution is reconstructed linearly from these basis solutions.
-            rhs_mat = np.column_stack([rhs_basis["te"], rhs_basis["tm"]])
-            if warm_start is not None and np.ndim(warm_start) == 1:
-                warm_start = np.column_stack([warm_start, warm_start])
-            solver_basis = solve_linear_system(
-                A_mv,
-                rhs_mat,
-                method=cfg.solver_method,
-                A_dense=A_dense,
-                x0=warm_start,
-                preconditioner=solver_preconditioner,
-                rtol=float(cfg.solver_rtol),
-                atol=0.0,
-                restart=int(cfg.solver_restart),
-                maxiter=int(cfg.solver_maxiter),
-                direct_max_n=int(cfg.solver_direct_max_n),
-                dtype=compute_dtype,
-                show_progress=bool(cfg.verbose),
+            solver_result = _make_empty_solver_result(
+                dtype=compute_dtype, nrhs=n_channels, method=cfg.solver_method
             )
-            x_mat = np.asarray(solver_basis.x).reshape(unknowns, 2)
-            x_te = x_mat[:, 0].reshape(Ns, Nm)
-            x_tm = x_mat[:, 1].reshape(Ns, Nm)
-            coeffs_basis = {"te": x_te, "tm": x_tm}
-            x = np.asarray(a_te * x_te + a_tm * x_tm, dtype=accum_dtype)
-            solver_result = solver_basis
+            x_matrix = np.zeros((unknowns, n_channels), dtype=compute_dtype)
         else:
             if A_mv is None:
                 raise RuntimeError("Internal error: A_mv not prepared for non-empty system.")
             solver_result = solve_linear_system(
                 A_mv,
-                rhs,
+                rhs_arg,
                 method=cfg.solver_method,
                 A_dense=A_dense,
                 x0=warm_start,
@@ -922,160 +1118,154 @@ class Simulation:
                 dtype=compute_dtype,
                 show_progress=bool(cfg.verbose),
             )
-            x = np.asarray(solver_result.x).reshape(Ns, Nm)
+            x_arr = np.asarray(solver_result.x)
+            x_matrix = (
+                x_arr.reshape(unknowns, 1)
+                if n_channels == 1
+                else x_arr.reshape(unknowns, n_channels)
+            )
+
+        coeffs: dict[str, np.ndarray] = {}
+        rhs_out: dict[str, np.ndarray] = {}
+        runs: dict[str, SimulationResult] = {}
+        for j, label in enumerate(labels):
+            x_col = x_matrix[:, j].reshape(Ns, Nm)
+            coeffs[label] = x_col
+            rhs_out[label] = np.asarray(rhs_flat[label]).reshape(Ns, Nm)
+            solver_col = (
+                solver_result
+                if n_channels == 1
+                else _single_rhs_result_from_multi(solver_result, j)
+            )
+            runs[label] = self._build_single_channel_result(
+                source=labeled_sources[label],
+                initial_coeffs=initial_coeffs[label],
+                rhs_flat=rhs_flat[label],
+                coeffs=x_col,
+                solver_result=solver_col,
+                k=k,
+                k0=k0,
+                compute_dtype=compute_dtype,
+                accum_dtype=accum_dtype,
+                farfield_polar_angles=farfield_polar_angles,
+                farfield_azimuthal_angles=farfield_azimuthal_angles,
+            )
+
+        return MultiSourceSimulationResult(
+            labels=labels,
+            sources=dict(labeled_sources),
+            runs=runs,
+            solver_result=solver_result,
+            initial_coeffs=initial_coeffs,
+            rhs=rhs_out,
+            coeffs=coeffs,
+        )
+
+    def run_multi_sources(
+        self,
+        sources: Mapping[str, GaussianBeam | PlaneWave] | Sequence[GaussianBeam | PlaneWave],
+        *,
+        labels: Sequence[str] | None = None,
+    ) -> MultiSourceSimulationResult:
+        """Solve multiple incident sources in one shared-operator simulation call.
+
+        Parameters
+        ----------
+        sources:
+            Either a mapping `{label: source}` (recommended) or a sequence of
+            sources. Sequence inputs can be labeled via `labels`; otherwise
+            `source_0`, `source_1`, ... are used.
+        labels:
+            Optional labels for sequence inputs.
+
+        Returns
+        -------
+        MultiSourceSimulationResult
+            Per-channel `SimulationResult` objects plus shared multi-RHS solver
+            diagnostics (`solver_result`).
+        """
+        labeled = self._normalize_sources_argument(sources, labels=labels)
+        return self._run_sources_core(labeled)
+
+    def run(self) -> SimulationResult:
+        """Run one simulation for `config.source`.
+
+        If `solve_polarization_basis=False`, this is a single-channel solve.
+        If `solve_polarization_basis=True`, TE/TM channels are solved through
+        `run_multi_sources(...)` and then combined into the requested Jones
+        channel, while basis and unpolarized diagnostics are retained.
+        """
+        cfg = self.config
+        source = self._validate_ready_to_run()
+
+        if not bool(cfg.solve_polarization_basis):
+            multi = self.run_multi_sources({"mixed": source})
+            return multi["mixed"]
+
+        basis_sources = {
+            "te": source.with_polarization("TE"),
+            "tm": source.with_polarization("TM"),
+        }
+        basis_multi = self.run_multi_sources(basis_sources)
+        run_te = basis_multi["te"]
+        run_tm = basis_multi["tm"]
+
+        a_te, a_tm = source_jones(source)
+        compute_dtype = np.dtype(run_te.compute_dtype)
+        accum_dtype = np.dtype(run_te.accum_dtype)
+
+        b_te = np.asarray(basis_multi.initial_coeffs["te"])
+        b_tm = np.asarray(basis_multi.initial_coeffs["tm"])
+        rhs_te = np.asarray(basis_multi.rhs["te"])
+        rhs_tm = np.asarray(basis_multi.rhs["tm"])
+        x_te = np.asarray(basis_multi.coeffs["te"])
+        x_tm = np.asarray(basis_multi.coeffs["tm"])
+
+        b = np.asarray(a_te * b_te + a_tm * b_tm, dtype=accum_dtype)
+        rhs = np.asarray(a_te * rhs_te + a_tm * rhs_tm, dtype=accum_dtype)
+        x = np.asarray(a_te * x_te + a_tm * x_tm, dtype=accum_dtype)
+
+        ff_basis = {"te": run_te.farfield, "tm": run_tm.farfield}
+        ff = _mix_farfield_patterns(
+            ff_basis["te"],
+            ff_basis["tm"],
+            a_te=a_te,
+            a_tm=a_tm,
+            dtype=compute_dtype,
+        )
 
         power = None
-        power_basis = None
         cross_sections = None
-        cross_sections_basis = None
-        unpolarized = None
-        diag_fwd = None
-        diag_bwd = None
-        diag_fwd_basis = None
-        diag_bwd_basis = None
-        ff_basis = None
-
-        def _avg_numeric_dict(d1: dict, d2: dict) -> dict:
-            """Average TE/TM scalar diagnostics for incoherent unpolarized reports.
-
-            Unpolarized observables combine intensity-like quantities, not complex
-            fields. This helper is used for scalar summaries such as total powers
-            and cross sections when both pure basis channels are available.
-            """
-            keys = set(d1).intersection(set(d2))
-            out = {}
-            for k_ in keys:
-                v1, v2 = d1[k_], d2[k_]
-                if isinstance(v1, (int, float, np.floating)) and isinstance(
-                    v2, (int, float, np.floating)
-                ):
-                    out[k_] = float(0.5 * (float(v1) + float(v2)))
-            return out
-
-        if coeffs_basis is not None:
-            ff_basis = {}
-            power_basis = {}
-            cross_sections_basis = {}
-            diag_fwd_basis = {}
-            diag_bwd_basis = {}
-            pol_pairs: tuple[tuple[str, Literal["TE", "TM"]], ...] = (
-                ("te", "TE"),
-                ("tm", "TM"),
-            )
-            for pol_key, pol_label in pol_pairs:
-                src_pol = source.with_polarization(pol_label)
-                ff_pol = compute_far_field_patterns(
-                    positions,
-                    coeffs_basis[pol_key],
-                    k=k,
-                    lmax=cfg.lmax,
-                    polar_angles=farfield_polar_angles,
-                    azimuthal_angles=farfield_azimuthal_angles,
-                    source=src_pol,
-                    dtype=compute_dtype,
-                    show_progress=bool(cfg.verbose),
-                )
-                ff_basis[pol_key] = ff_pol
-                if ff_pol.initial_te is not None and ff_pol.initial_tm is not None:
-                    power_basis[pol_key] = finite_beam_power_fractions(
-                        src_pol,
-                        ff_pol.initial_te,
-                        ff_pol.initial_tm,
-                        ff_pol.scattered_te,
-                        ff_pol.scattered_tm,
-                        k0=k0,
-                        k_medium=k,
-                    )
-                    diag_fwd_basis[pol_key] = pwp_power_decomposition(
-                        direction="forward",
-                        initial_pwp_te=ff_pol.initial_te,
-                        initial_pwp_tm=ff_pol.initial_tm,
-                        scattered_pwp_te=ff_pol.scattered_te,
-                        scattered_pwp_tm=ff_pol.scattered_tm,
-                        k0=k0,
-                        k_medium=k,
-                        source=src_pol,
-                    )
-                    diag_bwd_basis[pol_key] = pwp_power_decomposition(
-                        direction="backward",
-                        initial_pwp_te=ff_pol.initial_te,
-                        initial_pwp_tm=ff_pol.initial_tm,
-                        scattered_pwp_te=ff_pol.scattered_te,
-                        scattered_pwp_tm=ff_pol.scattered_tm,
-                        k0=k0,
-                        k_medium=k,
-                        source=src_pol,
-                    )
-                elif isinstance(src_pol, PlaneWave):
-                    cross_sections_basis[pol_key] = plane_wave_cross_sections(
-                        src_pol,
-                        b_basis[pol_key],
-                        coeffs_basis[pol_key],
-                        k0=k0,
-                        n_medium=cfg.n_medium,
-                        scattered_pwp_te=ff_pol.scattered_te,
-                        scattered_pwp_tm=ff_pol.scattered_tm,
-                    )
-            # Reuse TE/TM basis PWPs to build the requested Jones channel and
-            # avoid a third full far-field evaluation pass.
-            ff = _mix_farfield_patterns(
-                ff_basis["te"],
-                ff_basis["tm"],
-                a_te=a_te,
-                a_tm=a_tm,
-                dtype=compute_dtype,
-            )
-            if "te" in cross_sections_basis and "tm" in cross_sections_basis:
-                unpolarized = {
-                    "cross_sections": _avg_numeric_dict(
-                        cross_sections_basis["te"], cross_sections_basis["tm"]
-                    )
-                }
-            if "te" in power_basis and "tm" in power_basis:
-                unpolarized = dict(unpolarized or {})
-                unpolarized["power"] = _avg_numeric_dict(power_basis["te"], power_basis["tm"])
-        else:
-            ff = compute_far_field_patterns(
-                positions,
-                x,
-                k=k,
-                lmax=cfg.lmax,
-                polar_angles=farfield_polar_angles,
-                azimuthal_angles=farfield_azimuthal_angles,
-                source=source,
-                dtype=compute_dtype,
-                show_progress=bool(cfg.verbose),
-            )
+        decomposition_forward = None
+        decomposition_backward = None
         if ff.initial_te is not None and ff.initial_tm is not None:
-            # Power diagnostics are quadratic/intensity-like, so they are
-            # evaluated from the coherently mixed Jones channel PWPs.
             power = finite_beam_power_fractions(
                 source,
                 ff.initial_te,
                 ff.initial_tm,
                 ff.scattered_te,
                 ff.scattered_tm,
-                k0=k0,
-                k_medium=k,
+                k0=run_te.k0,
+                k_medium=run_te.k,
             )
-            diag_fwd = pwp_power_decomposition(
+            decomposition_forward = pwp_power_decomposition(
                 direction="forward",
                 initial_pwp_te=ff.initial_te,
                 initial_pwp_tm=ff.initial_tm,
                 scattered_pwp_te=ff.scattered_te,
                 scattered_pwp_tm=ff.scattered_tm,
-                k0=k0,
-                k_medium=k,
+                k0=run_te.k0,
+                k_medium=run_te.k,
                 source=source,
             )
-            diag_bwd = pwp_power_decomposition(
+            decomposition_backward = pwp_power_decomposition(
                 direction="backward",
                 initial_pwp_te=ff.initial_te,
                 initial_pwp_tm=ff.initial_tm,
                 scattered_pwp_te=ff.scattered_te,
                 scattered_pwp_tm=ff.scattered_tm,
-                k0=k0,
-                k_medium=k,
+                k0=run_te.k0,
+                k_medium=run_te.k,
                 source=source,
             )
         elif isinstance(source, PlaneWave):
@@ -1083,37 +1273,64 @@ class Simulation:
                 source,
                 b,
                 x,
-                k0=k0,
+                k0=run_te.k0,
                 n_medium=cfg.n_medium,
                 scattered_pwp_te=ff.scattered_te,
                 scattered_pwp_tm=ff.scattered_tm,
             )
 
+        power_basis = None
+        cross_sections_basis = None
+        decomposition_forward_basis = None
+        decomposition_backward_basis = None
+        unpolarized = None
+
+        if run_te.power is not None and run_tm.power is not None:
+            power_basis = {"te": run_te.power, "tm": run_tm.power}
+            unpolarized = dict(unpolarized or {})
+            unpolarized["power"] = _avg_numeric_dict(run_te.power, run_tm.power)
+        if run_te.cross_sections is not None and run_tm.cross_sections is not None:
+            cross_sections_basis = {"te": run_te.cross_sections, "tm": run_tm.cross_sections}
+            unpolarized = dict(unpolarized or {})
+            unpolarized["cross_sections"] = _avg_numeric_dict(
+                run_te.cross_sections, run_tm.cross_sections
+            )
+        if run_te.decomposition_forward is not None and run_tm.decomposition_forward is not None:
+            decomposition_forward_basis = {
+                "te": run_te.decomposition_forward,
+                "tm": run_tm.decomposition_forward,
+            }
+        if run_te.decomposition_backward is not None and run_tm.decomposition_backward is not None:
+            decomposition_backward_basis = {
+                "te": run_te.decomposition_backward,
+                "tm": run_tm.decomposition_backward,
+            }
+
         return SimulationResult(
             config=cfg,
-            positions=positions,
-            radii=radii,
-            n_particle=n_particle,
-            k=k,
-            k0=k0,
+            positions=self.positions,
+            radii=self.radii,
+            n_particle=self.n_particle,
+            k=run_te.k,
+            k0=run_te.k0,
             coeffs=x,
-            rhs=rhs.reshape(Ns, Nm),
+            rhs=rhs,
             initial_coeffs=b,
-            initial_coeffs_basis=b_basis if coeffs_basis is not None else None,
-            coeffs_basis=coeffs_basis,
-            solver_result=solver_result,
-            solver_result_basis=solver_basis,
+            initial_coeffs_basis={"te": b_te, "tm": b_tm},
+            coeffs_basis={"te": x_te, "tm": x_tm},
+            solver_result=basis_multi.solver_result,
+            solver_result_basis=basis_multi.solver_result,
             farfield=ff,
             farfield_basis=ff_basis,
             power=power,
-            power_basis=power_basis if power_basis else None,
+            power_basis=power_basis,
             cross_sections=cross_sections,
-            cross_sections_basis=cross_sections_basis if cross_sections_basis else None,
+            cross_sections_basis=cross_sections_basis,
             unpolarized=unpolarized,
-            decomposition_forward=diag_fwd,
-            decomposition_backward=diag_bwd,
-            decomposition_forward_basis=diag_fwd_basis if diag_fwd_basis else None,
-            decomposition_backward_basis=diag_bwd_basis if diag_bwd_basis else None,
+            decomposition_forward=decomposition_forward,
+            decomposition_backward=decomposition_backward,
+            decomposition_forward_basis=decomposition_forward_basis,
+            decomposition_backward_basis=decomposition_backward_basis,
             polarization_jones=(a_te, a_tm),
             compute_dtype=str(compute_dtype),
             accum_dtype=str(accum_dtype),
