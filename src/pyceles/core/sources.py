@@ -9,6 +9,7 @@ import numpy as np
 import numpy.typing as npt
 
 from .angular import beam_axis_and_frame
+from .geometry_bounds import conservative_cross_set_max_distance
 from .indexing import index_vswf, n_modes
 from .projection import (
     incident_coeffs_from_angular_spectrum,
@@ -70,18 +71,6 @@ def _normalize_dipole_collection_inputs(
     return pos, mom
 
 
-def _conservative_cross_set_distance_upper_bound(a: np.ndarray, b: np.ndarray) -> float:
-    """Cheap O(N+M) upper bound on max pair distance between point sets."""
-    if a.shape[0] == 0 or b.shape[0] == 0:
-        return 0.0
-    amin = np.min(a, axis=0)
-    amax = np.max(a, axis=0)
-    bmin = np.min(b, axis=0)
-    bmax = np.max(b, axis=0)
-    d_axis = np.maximum(np.abs(bmax - amin), np.abs(amax - bmin))
-    return float(np.linalg.norm(d_axis))
-
-
 def _dipole_outgoing_coeff_vector(
     *,
     lmax: int,
@@ -139,7 +128,7 @@ def _dipole_incident_coeffs_from_outgoing(
         )
 
     ab5 = translation_ab5_table(int(lmax), dtype=dtype)
-    r_max = _conservative_cross_set_distance_upper_bound(pos_rcv, pos_dip)
+    r_max = conservative_cross_set_max_distance(pos_rcv, pos_dip)
     radial_lut = RadialLUT(
         lmax=int(lmax),
         k=float(k_medium),
@@ -199,7 +188,16 @@ def polarization_to_jones(polarization: PolarizationInput) -> tuple[complex, com
 
 
 def source_jones(source: Any) -> tuple[complex, complex]:
-    """Return source polarization as Jones-like TE/TM weights."""
+    """Return source polarization as Jones-like TE/TM weights.
+
+    Local dipole sources do not define TE/TM Jones metadata; this helper raises
+    for `DipoleSource`/`DipoleCollection`.
+    """
+    if isinstance(source, (DipoleSource, DipoleCollection)):
+        raise TypeError(
+            "Dipole sources do not define TE/TM Jones polarization metadata. "
+            "Use dipole-moment vectors/orientations instead."
+        )
     if hasattr(source, "jones_coefficients"):
         return source.jones_coefficients()
     return polarization_to_jones(getattr(source, "polarization", "TE"))
@@ -532,6 +530,12 @@ class DipoleSource:
 
     The dipole is represented internally by an outgoing SVWF expansion centered
     at `position` with only `l=1` electric modes populated.
+
+    Note
+    ----
+    The current implementation still enforces real `medium_n`. This is a
+    solver-policy legacy inherited from the original beam-only CELES-style
+    workflow, not a fundamental limitation of local dipole sources.
     """
 
     wavelength: float
@@ -548,7 +552,8 @@ class DipoleSource:
             raise ValueError(f"medium_n must have positive real part. Got {n!r}")
         if abs(n.imag) > 0:
             raise ValueError(
-                "DipoleSource currently requires real `medium_n` in the homogeneous solver path."
+                "DipoleSource currently requires real `medium_n` in this homogeneous solver path "
+                "(legacy policy from the original beam-only workflow, not a dipole-physics limit)."
             )
         _as_complex_triplet("dipole_moment", self.dipole_moment)
         _as_float_triplet("position", self.position)
@@ -558,8 +563,11 @@ class DipoleSource:
             raise ValueError(f"`radial_lut_dr` must be > 0. Got {self.radial_lut_dr!r}.")
 
     def jones_coefficients(self) -> tuple[complex, complex]:
-        """Placeholder Jones payload for APIs expecting polarization metadata."""
-        return 1.0 + 0.0j, 0.0 + 0.0j
+        """Dipoles do not define TE/TM Jones polarization states."""
+        raise TypeError(
+            "DipoleSource does not define TE/TM Jones polarization metadata. "
+            "Use `dipole_moment` orientation/components instead."
+        )
 
     def with_polarization(self, polarization: PolarizationInput) -> "DipoleSource":
         """Dipoles are not TE/TM sources; this method is unsupported by design."""
@@ -576,6 +584,36 @@ class DipoleSource:
         """Return amplitude-scaled dipole moment array with shape (1, 3)."""
         mu = _as_complex_triplet("dipole_moment", self.dipole_moment)
         return (complex(self.amplitude) * mu).reshape(1, 3)
+
+    def angular_frequency(self) -> float:
+        """Return omega = 2*pi/lambda in pyceles unit conventions."""
+        return float(2.0 * np.pi / float(self.wavelength))
+
+    def dissipated_power_homogeneous_background(self) -> float:
+        """Power radiated in equivalent homogeneous background (SMUTHI convention)."""
+        omega = self.angular_frequency()
+        k = float(np.real(complex(self.medium_n))) * omega
+        mu = self.dipole_moments().reshape(3)
+        mu2 = float(np.sum(np.abs(mu) ** 2))
+        return float(mu2 * k * (omega**3) / (12.0 * np.pi))
+
+    def cartesian_basis_sources(
+        self,
+        *,
+        labels: tuple[str, str, str] = ("px", "py", "pz"),
+        moment_magnitude: complex = 1.0 + 0j,
+    ) -> dict[str, "DipoleSource"]:
+        """Return three orthogonal dipole-orientation sources at same position."""
+        if len(labels) != 3:
+            raise ValueError(f"`labels` must have length 3. Got {labels!r}.")
+        m = complex(moment_magnitude)
+        if not np.isfinite(m.real) or not np.isfinite(m.imag):
+            raise ValueError(f"`moment_magnitude` must be finite. Got {moment_magnitude!r}.")
+        return {
+            str(labels[0]): replace(self, dipole_moment=(m, 0.0 + 0j, 0.0 + 0j)),
+            str(labels[1]): replace(self, dipole_moment=(0.0 + 0j, m, 0.0 + 0j)),
+            str(labels[2]): replace(self, dipole_moment=(0.0 + 0j, 0.0 + 0j, m)),
+        }
 
     def outgoing_coeffs(
         self,
@@ -628,7 +666,14 @@ class DipoleSource:
 
 @dataclass(frozen=True)
 class DipoleCollection:
-    """Collection of electric point dipoles in a homogeneous medium."""
+    """Collection of electric point dipoles in a homogeneous medium.
+
+    Note
+    ----
+    The current implementation still enforces real `medium_n`. This is a
+    solver-policy legacy inherited from the original beam-only CELES-style
+    workflow, not a fundamental limitation of local dipole sources.
+    """
 
     wavelength: float
     medium_n: complex = 1.0 + 0j
@@ -646,7 +691,8 @@ class DipoleCollection:
             raise ValueError(f"medium_n must have positive real part. Got {n!r}")
         if abs(n.imag) > 0:
             raise ValueError(
-                "DipoleCollection currently requires real `medium_n` in the homogeneous solver path."
+                "DipoleCollection currently requires real `medium_n` in this homogeneous solver path "
+                "(legacy policy from the original beam-only workflow, not a dipole-physics limit)."
             )
         _normalize_dipole_collection_inputs(self.positions, self.dipole_moments)
         if not np.isfinite(float(self.amplitude)):
@@ -655,8 +701,11 @@ class DipoleCollection:
             raise ValueError(f"`radial_lut_dr` must be > 0. Got {self.radial_lut_dr!r}.")
 
     def jones_coefficients(self) -> tuple[complex, complex]:
-        """Placeholder Jones payload for APIs expecting polarization metadata."""
-        return 1.0 + 0.0j, 0.0 + 0.0j
+        """Dipoles do not define TE/TM Jones polarization states."""
+        raise TypeError(
+            "DipoleCollection does not define TE/TM Jones polarization metadata. "
+            "Use vector dipole moments/orientations instead."
+        )
 
     def with_polarization(self, polarization: PolarizationInput) -> "DipoleCollection":
         """Dipoles are not TE/TM sources; this method is unsupported by design."""
@@ -674,6 +723,22 @@ class DipoleCollection:
         """Return amplitude-scaled dipole moments with shape (Nd, 3)."""
         _, mom = _normalize_dipole_collection_inputs(self.positions, self.dipole_moments)
         return complex(self.amplitude) * mom
+
+    def angular_frequency(self) -> float:
+        """Return omega = 2*pi/lambda in pyceles unit conventions."""
+        return float(2.0 * np.pi / float(self.wavelength))
+
+    def dissipated_power_homogeneous_background_per_dipole(self) -> np.ndarray:
+        """Per-dipole homogeneous-background dissipated power (SMUTHI convention)."""
+        omega = self.angular_frequency()
+        k = float(np.real(complex(self.medium_n))) * omega
+        mu = self.dipole_moments_array()
+        mu2 = np.sum(np.abs(mu) ** 2, axis=1)
+        return np.asarray(mu2 * k * (omega**3) / (12.0 * np.pi), dtype=float)
+
+    def dissipated_power_homogeneous_background(self) -> float:
+        """Total homogeneous-background dissipated power for collection."""
+        return float(np.sum(self.dissipated_power_homogeneous_background_per_dipole()))
 
     def outgoing_coeffs(
         self,

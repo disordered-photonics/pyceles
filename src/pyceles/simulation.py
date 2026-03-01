@@ -620,6 +620,8 @@ class SimulationResult:
     solve diagnostics.
     Includes both solved unknowns and derived diagnostics:
     power, cross sections, far field, basis channels, and unpolarized averages.
+    `polarization_jones` is populated only for propagating TE/TM sources
+    (`PlaneWave`, `GaussianBeam`). For local dipole sources it is `None`.
 
     Naming note:
     `k0` stores the vacuum wavenumber `2*pi/wavelength` (not angular frequency).
@@ -651,7 +653,7 @@ class SimulationResult:
     decomposition_backward: dict[str, float] | None
     decomposition_forward_basis: dict[str, dict[str, float]] | None
     decomposition_backward_basis: dict[str, dict[str, float]] | None
-    polarization_jones: tuple[complex, complex] = (1.0 + 0j, 0.0 + 0j)
+    polarization_jones: tuple[complex, complex] | None = None
     compute_dtype: str = "complex128"
     accum_dtype: str = "complex128"
 
@@ -921,7 +923,9 @@ class Simulation:
                 scattered_pwp_tm=ff.scattered_tm,
             )
 
-        a_te, a_tm = source_jones(source)
+        pol_jones: tuple[complex, complex] | None = None
+        if isinstance(source, (GaussianBeam, PlaneWave)):
+            pol_jones = source_jones(source)
         return SimulationResult(
             config=cfg,
             positions=positions,
@@ -947,7 +951,7 @@ class Simulation:
             decomposition_backward=decomposition_backward,
             decomposition_forward_basis=None,
             decomposition_backward_basis=None,
-            polarization_jones=(a_te, a_tm),
+            polarization_jones=pol_jones,
             compute_dtype=str(compute_dtype),
             accum_dtype=str(accum_dtype),
         )

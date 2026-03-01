@@ -312,9 +312,29 @@ source = pcl.DipoleCollection(
 ```
 
 Current scope/limits:
-- homogeneous medium is still restricted to real `n_medium` in this solver path
+- homogeneous medium is still restricted to real `n_medium` in this solver path.
+  This is inherited from pyceles' original beam-only (CELES-like) workflow and
+  is not a fundamental dipole-physics limitation.
 - `solve_polarization_basis=True` is not defined for dipole sources
-- far-field helper currently provides scattered PWP only for dipole sources
+- dipole homogeneous-background dissipated-power helpers are available:
+  - `DipoleSource.dissipated_power_homogeneous_background()`
+  - `DipoleCollection.dissipated_power_homogeneous_background()`
+  - `DipoleCollection.dissipated_power_homogeneous_background_per_dipole()`
+- dipole far-field helper provides direct (`initial`), particle-scattered, and
+  coherent total (`initial + scattered`) PWPs
+- dipole `SimulationResult` objects do not carry TE/TM Jones metadata
+  (`polarization_jones=None`)
+
+To solve one dipole position in x/y/z orientations with one multi-RHS call:
+
+```python
+dip = pcl.DipoleSource(
+    wavelength=550.0,
+    medium_n=1.0 + 0j,
+    position=(0.0, 0.0, 0.0),
+)
+multi = sim.run_multi_sources(dip.cartesian_basis_sources())  # px, py, pz
+```
 
 ## Multi-Source Solve (Recommended)
 

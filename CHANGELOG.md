@@ -16,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   normalization, reusing pyceles translation kernels).
 - Near-field initial-field evaluation now supports dipole sources directly and
   masks exact dipole-center samples as `NaN` to avoid singular-point artifacts.
+- Dipole source convenience helpers:
+  - Cartesian orientation triplet generation via
+    `DipoleSource.cartesian_basis_sources(...)`
+  - homogeneous-background dissipated-power helpers for single dipoles and
+    dipole collections.
+- Added `examples/run_smuthi_dipole_diagnostic.py` for SMUTHI-vs-pyceles dipole
+  and dipole-collection cross-checks with JSON reference-value output.
 
 ### Changed
 - `SimulationConfig.azimuthal_angles` default now uses periodic sampling on
@@ -27,6 +34,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Public naming now uses `k0` for vacuum wavenumber (`2*pi/lambda`) in
   simulation/far-field APIs (instead of `omega`) to reduce ambiguity with true
   angular frequency in future dipole/LDOS workflows.
+- Dipole far-field outputs now include direct (`initial`) and coherent total
+  (`initial + scattered`) PWPs in addition to particle-scattered PWPs.
+- `SimulationResult.polarization_jones` is now reserved for propagating TE/TM
+  sources and set to `None` for local dipole sources to avoid misleading
+  placeholder metadata.
 - Added `Simulation.run_multi_sources(...)` as the general multi-channel API:
   any labeled source set now runs through one shared-operator multi-RHS solve.
 - `solve_polarization_basis=True` now acts as a convenience `run()` wrapper
@@ -46,6 +58,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   far-field intensity convenience helper).
 - `solve_polarization_basis=True` is now explicitly restricted to propagating
   TE/TM sources (`PlaneWave`/`GaussianBeam`), and raises for dipole sources.
+- Conservative LUT-radius helper logic is now centralized in
+  `core.geometry_bounds`, removing duplicate cross-set bound implementations.
+- Dipole-source documentation/error messages now explicitly note that the
+  current real-`n_medium` requirement is a legacy beam-era solver policy, not
+  a fundamental local-source physics limitation.
 
 ## [0.2.0] - 2026-02-28
 

@@ -53,6 +53,7 @@ import numpy as np
 import numpy.typing as npt
 from tqdm.auto import tqdm
 
+from .geometry_bounds import conservative_set_diameter
 from .indexing import n_modes
 from .particles import Particle, Sphere
 from .tmatrix import particle_T_diagonal, sphere_T_diagonal
@@ -188,14 +189,7 @@ def _infer_rmax(positions: Array) -> float:
     memory and safely upper-bounds the true maximum pair distance.
     """
 
-    pos = np.asarray(positions, dtype=float)
-    if pos.ndim != 2 or pos.shape[1] != 3:
-        raise ValueError(f"positions must have shape (Ns,3). Got {pos.shape}.")
-    if pos.shape[0] == 0:
-        return 0.0
-    pmin = np.min(pos, axis=0)
-    pmax = np.max(pos, axis=0)
-    return float(np.linalg.norm(pmax - pmin))
+    return conservative_set_diameter(np.asarray(positions, dtype=float))
 
 
 def prepare_matvec(

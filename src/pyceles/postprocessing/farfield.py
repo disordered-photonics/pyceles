@@ -222,8 +222,8 @@ def compute_far_field_patterns(
     far-field bins are not rotated or re-labeled.)
     This mirrors the standard workflow: scattered PWP first, then initial PWP
     (if source supports it), then coherent total-field composition.
-    Local dipole sources currently provide scattered PWPs only (no initial/total
-    channel in this helper).
+    For dipole sources, `initial_*` denotes the direct dipole-emission PWP
+    and `total_* = initial_* + scattered_*`.
 
     Notes
     -----
@@ -267,6 +267,20 @@ def compute_far_field_patterns(
             raise RuntimeError("Gaussian source must provide both TE and TM initial PWPs.")
         p_i_te = _cast_pwp_coeff_dtype(p_i_te, ctype)
         p_i_tm = _cast_pwp_coeff_dtype(p_i_tm, ctype)
+        p_t_te, p_t_tm = total_field_plane_wave_pattern(p_i_te, p_i_tm, p_s_te, p_s_tm)
+    elif isinstance(source, (DipoleSource, DipoleCollection)):
+        dip_pos = np.asarray(source.dipole_positions(), dtype=float).reshape(-1, 3)
+        dip_coeffs = np.asarray(source.outgoing_coeffs(1, dtype=ctype), dtype=ctype)
+        p_i_te, p_i_tm = scattered_field_plane_wave_pattern(
+            positions=dip_pos,
+            coeffs=dip_coeffs,
+            k=k,
+            lmax=1,
+            polar_angles=polar_angles,
+            azimuthal_angles=azimuthal_angles,
+            dtype=ctype,
+            show_progress=False,
+        )
         p_t_te, p_t_tm = total_field_plane_wave_pattern(p_i_te, p_i_tm, p_s_te, p_s_tm)
 
     return FarFieldPatterns(

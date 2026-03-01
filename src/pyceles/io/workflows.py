@@ -164,15 +164,14 @@ def save_simulation_h5(
         angular_grids["farfield_beta"] = np.asarray(farfield_beta, dtype=float)
         angular_grids["farfield_alpha"] = np.asarray(farfield_alpha, dtype=float)
 
-    diagnostics: dict[str, object] = {
-        "polarization_jones": {
+    diagnostics: dict[str, object] = {"angular_grids": angular_grids}
+    if run.polarization_jones is not None:
+        diagnostics["polarization_jones"] = {
             "a_te_real": float(np.real(run.polarization_jones[0])),
             "a_te_imag": float(np.imag(run.polarization_jones[0])),
             "a_tm_real": float(np.real(run.polarization_jones[1])),
             "a_tm_imag": float(np.imag(run.polarization_jones[1])),
-        },
-        "angular_grids": angular_grids,
-    }
+        }
     if run.power is not None:
         diagnostics["power"] = run.power
     if run.cross_sections is not None:
