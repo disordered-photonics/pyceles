@@ -14,7 +14,7 @@ repos:
     rev: v1.18.2
     hooks:
       - id: mypy
-        name: mypy (src+examples)
-        args: [--config-file=pyproject.toml, src, examples]
+        name: mypy (src+examples+tests)
+        args: [--config-file=pyproject.toml, src, examples, tests]
         pass_filenames: false
         additional_dependencies: ["numpy~=2.4", "scipy~=1.17"]

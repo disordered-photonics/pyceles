@@ -30,6 +30,3 @@ dist/
 # Ignore generated outputs (big)
 /outputs/
 /notebooks/outputs/
-
-# Temporarily ignore tests (remove when ready)
-/tests/

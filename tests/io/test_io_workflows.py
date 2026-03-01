@@ -1,0 +1,184 @@
+from typing import Any, cast
+
+import numpy as np
+
+from pyceles.core.fields import PlaneWave
+from pyceles.io.workflows import load_simulation_h5, save_simulation_h5
+from pyceles.linear.solvers import LinearSolveResult
+from pyceles.postprocessing.farfield import FarFieldPatterns
+from pyceles.postprocessing.workflows import NearFieldSlice
+from pyceles.simulation import Simulation, SimulationConfig, SimulationResult
+
+
+def _dummy_pwp(alpha: np.ndarray, beta: np.ndarray) -> dict:
+    coeff = np.ones((alpha.size, beta.size), dtype=np.complex128)
+    agrid = alpha[:, None]
+    bgrid = beta[None, :]
+    return {
+        "alpha": alpha,
+        "beta": beta,
+        "kx": np.sin(bgrid) * np.cos(agrid),
+        "ky": np.sin(bgrid) * np.sin(agrid),
+        "kz": np.cos(bgrid) * np.ones_like(agrid),
+        "coeff": coeff,
+    }
+
+
+def test_save_simulation_h5_writes_basis_and_diagnostics(tmp_path):
+    alpha = np.linspace(0.0, 2.0 * np.pi, 13, endpoint=False)
+    beta = np.linspace(0.0, np.pi, 21)
+    pwp = _dummy_pwp(alpha, beta)
+
+    ff = FarFieldPatterns(
+        initial_te=pwp,
+        initial_tm=pwp,
+        scattered_te=pwp,
+        scattered_tm=pwp,
+        total_te=pwp,
+        total_tm=pwp,
+    )
+    ff_basis = {"te": ff, "tm": ff}
+
+    source = PlaneWave(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        polarization=(1.0 + 0j, 1.0j),
+        polar_angle=0.2,
+        azimuthal_angle=0.3,
+    )
+    cfg = SimulationConfig(
+        wavelength=550.0,
+        n_medium=1.0 + 0j,
+        lmax=1,
+        source=source,
+        solver_method="direct",
+        verbose=False,
+    )
+
+    run = SimulationResult(
+        config=cfg,
+        positions=np.array([[0.0, 0.0, 0.0]], dtype=float),
+        radii=np.array([100.0], dtype=float),
+        n_particle=np.array([1.5 + 0.0j], dtype=np.complex128),
+        k=2.0 * np.pi / 550.0,
+        k0=2.0 * np.pi / 550.0,
+        coeffs=np.ones((1, 6), dtype=np.complex128),
+        rhs=np.ones((1, 6), dtype=np.complex128),
+        initial_coeffs=np.ones((1, 6), dtype=np.complex128),
+        initial_coeffs_basis={
+            "te": np.ones((1, 6), dtype=np.complex128),
+            "tm": np.ones((1, 6), dtype=np.complex128),
+        },
+        coeffs_basis={
+            "te": np.ones((1, 6), dtype=np.complex128),
+            "tm": np.ones((1, 6), dtype=np.complex128),
+        },
+        solver_result=LinearSolveResult(
+            x=np.ones((6, 2), dtype=np.complex128),
+            info=np.array([0, 0], dtype=int),
+            residual_norm=np.array([1e-6, 1e-6], dtype=float),
+            relative_residual=np.array([1e-5, 1e-5], dtype=float),
+            iterations=np.array([5, 5], dtype=int),
+            method="gmres",
+            residual_history=[np.array([1.0, 0.5], dtype=float), np.array([1.0, 0.5], dtype=float)],
+            rhs_count=2,
+        ),
+        solver_result_basis=None,
+        farfield=ff,
+        farfield_basis=ff_basis,
+        power={"T": 1.0, "R": 0.0},
+        power_basis={"te": {"T": 1.0}, "tm": {"T": 1.0}},
+        cross_sections={"C_sca": 1.0, "C_ext": 2.0, "C_abs": 1.0},
+        cross_sections_basis={"te": {"C_sca": 1.0}, "tm": {"C_sca": 1.0}},
+        unpolarized={"cross_sections": {"C_sca": 1.0}},
+        decomposition_forward={"P_total": 1.0},
+        decomposition_backward={"P_total": 0.0},
+        decomposition_forward_basis={"te": {"P_total": 1.0}, "tm": {"P_total": 1.0}},
+        decomposition_backward_basis={"te": {"P_total": 0.0}, "tm": {"P_total": 0.0}},
+        polarization_jones=(1.0 + 0j, 1.0j),
+        compute_dtype="complex128",
+        accum_dtype="complex128",
+    )
+
+    X, Z = np.meshgrid(np.linspace(-1.0, 1.0, 4), np.linspace(-1.0, 1.0, 3), indexing="xy")
+    zero = np.zeros(X.shape + (3,), dtype=np.complex128)
+    near = NearFieldSlice(
+        axis_0=X,
+        axis_1=Z,
+        inside=np.zeros_like(X, dtype=bool),
+        field_maps={"total": (zero, zero)},
+        plane="y",
+        plane_value=0.0,
+        axis_0_label="x",
+        axis_1_label="z",
+    )
+
+    out = save_simulation_h5(run, near, tmp_path / "run_full.h5")
+
+    import h5py
+
+    with h5py.File(out, "r") as h5:
+        assert "solution_basis" in h5
+        assert "solution_basis/te" in h5
+        assert "far_field_basis/te" in h5
+        assert "far_field_basis/tm" in h5
+        assert "diagnostics" in h5
+        assert "cross_sections" in h5["diagnostics"]
+        assert "power_basis" in h5["diagnostics"]
+        assert "unpolarized" in h5["diagnostics"]
+
+    loaded = load_simulation_h5(out)
+    assert "geometry" in loaded
+    assert "solution" in loaded
+    assert "far_field" in loaded
+    assert "diagnostics" in loaded
+    assert "solution_basis" in loaded
+    assert "far_field_basis" in loaded
+
+
+def test_no_scatterer_run_roundtrip_io_workflow(tmp_path):
+    source = PlaneWave(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        polarization="TE",
+        polar_angle=0.2,
+        azimuthal_angle=0.3,
+    )
+    cfg = SimulationConfig(
+        wavelength=550.0,
+        n_medium=1.0 + 0j,
+        lmax=3,
+        source=source,
+        solver_method="gmres",
+        verbose=False,
+    )
+    sim = Simulation(
+        cfg,
+        positions=np.zeros((0, 3), dtype=float),
+        radii=np.zeros((0,), dtype=float),
+        n_particle=np.zeros((0,), dtype=np.complex128),
+    )
+    run = sim.run()
+
+    X, Z = np.meshgrid(np.linspace(-1.0, 1.0, 4), np.linspace(-1.0, 1.0, 3), indexing="xy")
+    zero = np.zeros(X.shape + (3,), dtype=np.complex128)
+    near = NearFieldSlice(
+        axis_0=X,
+        axis_1=Z,
+        inside=np.zeros_like(X, dtype=bool),
+        field_maps={"initial": (zero, zero), "scattered": (zero, zero), "total": (zero, zero)},
+        plane="y",
+        plane_value=0.0,
+        axis_0_label="x",
+        axis_1_label="z",
+    )
+
+    out = save_simulation_h5(run, near, tmp_path / "no_scatter.h5")
+    loaded = cast(dict[str, Any], load_simulation_h5(out))
+    geometry = cast(dict[str, Any], loaded["geometry"])
+    solution = cast(dict[str, Any], loaded["solution"])
+
+    assert np.asarray(geometry["positions"]).shape == (0, 3)
+    assert np.asarray(solution["coeffs"]).shape[0] == 0
+    assert "far_field" in loaded
+    assert "diagnostics" in loaded
