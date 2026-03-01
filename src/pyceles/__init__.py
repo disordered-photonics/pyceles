@@ -2,6 +2,8 @@ from pyceles import core, io, linear, postprocessing
 from pyceles._logo import print_logo
 from pyceles._version import __version__
 from pyceles.core.fields import (
+    DipoleCollection,
+    DipoleSource,
     GaussianBeam,
     PlaneWave,
     project_source_basis_to_svwf,
@@ -27,6 +29,8 @@ __all__ = [
     "print_logo",
     "GaussianBeam",
     "PlaneWave",
+    "DipoleSource",
+    "DipoleCollection",
     "project_source_basis_to_svwf",
     "project_source_to_svwf",
     "Simulation",

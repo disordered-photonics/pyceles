@@ -14,8 +14,14 @@ from pyceles._version import __version__
 from pyceles.core.angular import uniform_periodic_azimuth_grid, uniform_polar_grid
 from pyceles.core.indexing import n_modes
 from pyceles.core.matvec import assemble_dense_A_numpy, prepare_matvec
-from pyceles.core.projection import project_source_basis_to_svwf
-from pyceles.core.sources import GaussianBeam, PlaneWave, source_jones
+from pyceles.core.projection import project_source_to_svwf
+from pyceles.core.sources import (
+    DipoleCollection,
+    DipoleSource,
+    GaussianBeam,
+    PlaneWave,
+    source_jones,
+)
 from pyceles.linear.preconditioner import make_grid_block_preconditioner
 from pyceles.linear.solvers import (
     LinearSolveResult,
@@ -30,7 +36,7 @@ from pyceles.postprocessing.farfield import (
     pwp_power_decomposition,
 )
 
-_SOURCE_TYPES = (GaussianBeam, PlaneWave)
+_SOURCE_TYPES = (GaussianBeam, PlaneWave, DipoleSource, DipoleCollection)
 _STARTUP_LOGO_PRINTED = False
 
 
@@ -333,7 +339,10 @@ class SimulationConfig:
     """High-level configuration for one homogeneous-medium many-sphere run.
 
     Polarization/multi-source options:
-    - `source.polarization` may be `"TE"`, `"TM"`, or Jones `(a_te, a_tm)`.
+    - Propagating sources (`PlaneWave`, `GaussianBeam`) use
+      `source.polarization` as `"TE"`, `"TM"`, or Jones `(a_te, a_tm)`.
+    - Local sources (`DipoleSource`, `DipoleCollection`) use dipole moments
+      and positions instead of TE/TM polarization labels.
     - `Simulation.run_multi_sources(...)` solves any labeled source set in one
       shared-operator multi-RHS solve.
     - `solve_polarization_basis=True` keeps a convenience `run()` wrapper that
@@ -370,7 +379,7 @@ class SimulationConfig:
     wavelength: float = 550.0
     n_medium: complex = 1.0 + 0j
     lmax: int = 3
-    source: GaussianBeam | PlaneWave | None = None
+    source: GaussianBeam | PlaneWave | DipoleSource | DipoleCollection | None = None
     # Shared CELES-like default angular grid. If no stage-specific grids are
     # provided, this pair is used for both source projection and far-field bins.
     # Use periodic azimuth sampling on [0, 2*pi) (endpoint=False) so periodic
@@ -537,7 +546,7 @@ class SimulationConfig:
         if self.source is not None:
             if not isinstance(self.source, _SOURCE_TYPES):
                 raise TypeError(
-                    "`source` must be a PlaneWave or GaussianBeam. "
+                    "`source` must be one of PlaneWave, GaussianBeam, DipoleSource, or DipoleCollection. "
                     f"Got {type(self.source).__name__}."
                 )
             source_wavelength = float(self.source.wavelength)
@@ -547,7 +556,7 @@ class SimulationConfig:
                     "Configuration mismatch: `source.wavelength` must match `SimulationConfig.wavelength` "
                     f"({source_wavelength!r} != {self.wavelength!r})."
                 )
-            if not np.isclose(source_n_medium.real, n_medium.real, rtol=0.0, atol=0.0):
+            if not np.isclose(source_n_medium, n_medium, rtol=0.0, atol=0.0):
                 raise ValueError(
                     "Configuration mismatch: `source.medium_n` must match `SimulationConfig.n_medium` "
                     f"({source_n_medium!r} != {n_medium!r})."
@@ -656,7 +665,7 @@ class MultiSourceSimulationResult:
     """
 
     labels: tuple[str, ...]
-    sources: dict[str, GaussianBeam | PlaneWave]
+    sources: dict[str, GaussianBeam | PlaneWave | DipoleSource | DipoleCollection]
     runs: dict[str, SimulationResult]
     solver_result: LinearSolveResult
     initial_coeffs: dict[str, np.ndarray]
@@ -756,7 +765,9 @@ class Simulation:
                     "`check_circumscribing_sphere_overlap=False`."
                 )
 
-    def _validate_ready_to_run(self) -> GaussianBeam | PlaneWave:
+    def _validate_ready_to_run(
+        self,
+    ) -> GaussianBeam | PlaneWave | DipoleSource | DipoleCollection:
         """Ensure excitation is defined before assembling and solving the system."""
         if self.config.source is None:
             raise ValueError(
@@ -766,33 +777,38 @@ class Simulation:
         return self.config.source
 
     def _validate_source_compatibility(
-        self, source: GaussianBeam | PlaneWave, *, label: str
+        self,
+        source: GaussianBeam | PlaneWave | DipoleSource | DipoleCollection,
+        *,
+        label: str,
     ) -> None:
         """Validate one source against this simulation's wavelength/medium settings."""
         cfg = self.config
         if not isinstance(source, _SOURCE_TYPES):
             raise TypeError(
-                f"Source '{label}' must be a PlaneWave or GaussianBeam. "
+                "Source "
+                f"'{label}' must be one of PlaneWave, GaussianBeam, DipoleSource, DipoleCollection. "
                 f"Got {type(source).__name__}."
             )
         wl = float(source.wavelength)
         if not np.isclose(wl, float(cfg.wavelength), rtol=0.0, atol=0.0):
             raise ValueError(f"Source '{label}' wavelength mismatch: {wl!r} != {cfg.wavelength!r}.")
         n_src = complex(source.medium_n)
-        if not np.isclose(float(np.real(n_src)), float(np.real(cfg.n_medium)), rtol=0.0, atol=0.0):
+        if not np.isclose(n_src, complex(cfg.n_medium), rtol=0.0, atol=0.0):
             raise ValueError(f"Source '{label}' medium_n mismatch: {n_src!r} != {cfg.n_medium!r}.")
 
     def _normalize_sources_argument(
         self,
-        sources: Mapping[str, GaussianBeam | PlaneWave] | Sequence[GaussianBeam | PlaneWave],
+        sources: Mapping[str, GaussianBeam | PlaneWave | DipoleSource | DipoleCollection]
+        | Sequence[GaussianBeam | PlaneWave | DipoleSource | DipoleCollection],
         *,
         labels: Sequence[str] | None = None,
-    ) -> dict[str, GaussianBeam | PlaneWave]:
+    ) -> dict[str, GaussianBeam | PlaneWave | DipoleSource | DipoleCollection]:
         """Normalize multi-source inputs to a deterministic labeled dictionary."""
         if isinstance(sources, Mapping):
             if labels is not None:
                 raise ValueError("`labels` must be omitted when `sources` is a mapping.")
-            out: dict[str, GaussianBeam | PlaneWave] = {}
+            out: dict[str, GaussianBeam | PlaneWave | DipoleSource | DipoleCollection] = {}
             for key, src in sources.items():
                 lbl = str(key)
                 if lbl in out:
@@ -824,7 +840,7 @@ class Simulation:
     def _build_single_channel_result(
         self,
         *,
-        source: GaussianBeam | PlaneWave,
+        source: GaussianBeam | PlaneWave | DipoleSource | DipoleCollection,
         initial_coeffs: np.ndarray,
         rhs_flat: np.ndarray,
         coeffs: np.ndarray,
@@ -860,7 +876,11 @@ class Simulation:
         cross_sections = None
         decomposition_forward = None
         decomposition_backward = None
-        if ff.initial_te is not None and ff.initial_tm is not None:
+        if (
+            ff.initial_te is not None
+            and ff.initial_tm is not None
+            and isinstance(source, GaussianBeam)
+        ):
             power = finite_beam_power_fractions(
                 source,
                 ff.initial_te,
@@ -933,7 +953,8 @@ class Simulation:
         )
 
     def _run_sources_core(
-        self, labeled_sources: Mapping[str, GaussianBeam | PlaneWave]
+        self,
+        labeled_sources: Mapping[str, GaussianBeam | PlaneWave | DipoleSource | DipoleCollection],
     ) -> MultiSourceSimulationResult:
         """Solve and postprocess multiple sources with one shared operator build."""
         cfg = self.config
@@ -995,7 +1016,7 @@ class Simulation:
         initial_coeffs: dict[str, np.ndarray] = {}
         for label in labels:
             src = labeled_sources[label]
-            basis = project_source_basis_to_svwf(
+            initial_coeffs[label] = project_source_to_svwf(
                 positions,
                 cfg.lmax,
                 src,
@@ -1003,10 +1024,7 @@ class Simulation:
                 azimuthal_angles=source_azimuthal_angles,
                 dtype=compute_dtype,
             )
-            a_te, a_tm = source_jones(src)
-            initial_coeffs[label] = np.asarray(
-                a_te * basis["te"] + a_tm * basis["tm"], dtype=accum_dtype
-            )
+            initial_coeffs[label] = np.asarray(initial_coeffs[label], dtype=accum_dtype)
 
         rhs_flat: dict[str, np.ndarray] = {
             label: np.zeros((unknowns,), dtype=accum_dtype) for label in labels
@@ -1163,7 +1181,8 @@ class Simulation:
 
     def run_multi_sources(
         self,
-        sources: Mapping[str, GaussianBeam | PlaneWave] | Sequence[GaussianBeam | PlaneWave],
+        sources: Mapping[str, GaussianBeam | PlaneWave | DipoleSource | DipoleCollection]
+        | Sequence[GaussianBeam | PlaneWave | DipoleSource | DipoleCollection],
         *,
         labels: Sequence[str] | None = None,
     ) -> MultiSourceSimulationResult:
@@ -1193,7 +1212,9 @@ class Simulation:
         If `solve_polarization_basis=False`, this is a single-channel solve.
         If `solve_polarization_basis=True`, TE/TM channels are solved through
         `run_multi_sources(...)` and then combined into the requested Jones
-        channel, while basis and unpolarized diagnostics are retained.
+        channel, while basis and unpolarized diagnostics are retained. This
+        convenience mode applies only to propagating TE/TM sources
+        (`PlaneWave`/`GaussianBeam`).
         """
         cfg = self.config
         source = self._validate_ready_to_run()
@@ -1201,6 +1222,11 @@ class Simulation:
         if not bool(cfg.solve_polarization_basis):
             multi = self.run_multi_sources({"mixed": source})
             return multi["mixed"]
+        if not isinstance(source, (GaussianBeam, PlaneWave)):
+            raise ValueError(
+                "`solve_polarization_basis=True` is only defined for TE/TM polarization sources "
+                "(PlaneWave or GaussianBeam)."
+            )
 
         basis_sources = {
             "te": source.with_polarization("TE"),
@@ -1238,7 +1264,11 @@ class Simulation:
         cross_sections = None
         decomposition_forward = None
         decomposition_backward = None
-        if ff.initial_te is not None and ff.initial_tm is not None:
+        if (
+            ff.initial_te is not None
+            and ff.initial_tm is not None
+            and isinstance(source, GaussianBeam)
+        ):
             power = finite_beam_power_fractions(
                 source,
                 ff.initial_te,

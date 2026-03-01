@@ -62,6 +62,12 @@ Users of pyceles are referred to the publications listed in the CELES and SMUTHI
     provides one mixed+basis+unpolarized `SimulationResult`
   - mixed outputs are combined from Jones weights
   - optional unpolarized diagnostics are provided when basis channels are available
+- Local electric dipole sources:
+  - `pcl.DipoleSource` and `pcl.DipoleCollection`
+  - dipole RHS assembly uses outgoing `l=1` SVWF coefficients translated to each
+    sphere center (SMUTHI-style concept, pyceles translation kernels)
+  - near-field initial field supports dipoles and masks exact dipole-center
+    grid hits as `NaN`
 - Solver API extensions:
   - matrix-matrix solves (`A @ X`) with multiple RHS columns
   - warm start vectors/matrices (`solver_warm_start`)
@@ -280,6 +286,35 @@ source = pcl.PlaneWave(
     azimuthal_angle=0.1,
 )
 ```
+
+## Local Dipole Sources
+
+Use dipole moments/orientations directly (no TE/TM polarization basis):
+
+```python
+source = pcl.DipoleSource(
+    wavelength=550.0,
+    medium_n=1.0 + 0j,
+    position=(0.0, 0.0, 0.0),
+    dipole_moment=(1.0 + 0j, 0.0 + 0j, 0.0 + 0j),  # x-oriented
+)
+```
+
+For multiple dipoles in one source channel:
+
+```python
+source = pcl.DipoleCollection(
+    wavelength=550.0,
+    medium_n=1.0 + 0j,
+    positions=np.array([[0, 0, 0], [200, 0, 0]], dtype=float),
+    dipole_moments=np.array([[1, 0, 0], [0, 1, 0]], dtype=np.complex128),
+)
+```
+
+Current scope/limits:
+- homogeneous medium is still restricted to real `n_medium` in this solver path
+- `solve_polarization_basis=True` is not defined for dipole sources
+- far-field helper currently provides scattered PWP only for dipole sources
 
 ## Multi-Source Solve (Recommended)
 

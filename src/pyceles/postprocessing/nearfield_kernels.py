@@ -15,6 +15,8 @@ from pyceles.core.angular import (
 )
 from pyceles.core.indexing import index_vswf, n_modes
 from pyceles.core.sources import (
+    DipoleCollection,
+    DipoleSource,
     GaussianBeam,
     PlaneWave,
     PolarizationInput,
@@ -795,6 +797,35 @@ def _compute_initial_field_general(
     """General alpha-beta quadrature evaluator kept for flexible fallback paths."""
     pts = np.asarray(field_points, np.float64)
     nM = complex(n_medium)
+
+    if isinstance(beam, (DipoleSource, DipoleCollection)):
+        dip_pos = np.asarray(beam.dipole_positions(), dtype=float).reshape(-1, 3)
+        dip_coeffs = np.asarray(beam.outgoing_coeffs(1, dtype=compute_dtype), dtype=compute_dtype)
+        E, H = compute_scattered_field(
+            pts,
+            dip_pos,
+            dip_coeffs,
+            k=float(k),
+            lmax=1,
+            n_medium=nM,
+            particle_distance_resolution=float(getattr(beam, "radial_lut_dr", 1.0)),
+            batch_size=int(batch_size),
+            show_progress=show_progress,
+            compute_dtype=compute_dtype,
+            accum_dtype=accum_dtype,
+        )
+        # Explicitly mask exact singular points if a sampling point hits a dipole center.
+        if dip_pos.shape[0] > 0 and pts.shape[0] > 0:
+            hit = np.any(
+                np.all(np.isclose(pts[:, None, :], dip_pos[None, :, :], atol=1e-12), axis=2),
+                axis=1,
+            )
+            if np.any(hit):
+                E = np.asarray(E, dtype=accum_dtype).copy()
+                H = np.asarray(H, dtype=accum_dtype).copy()
+                E[hit] = np.nan + 0j
+                H[hit] = np.nan + 0j
+        return np.asarray(E, dtype=accum_dtype), np.asarray(H, dtype=accum_dtype)
 
     if isinstance(beam, PlaneWave):
         alpha_pw = float(beam.azimuthal_angle)

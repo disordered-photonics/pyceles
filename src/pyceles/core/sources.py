@@ -2,21 +2,166 @@ from __future__ import annotations
 
 """Incident-source models and source-side field helpers."""
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal, Protocol, Tuple
 
 import numpy as np
 import numpy.typing as npt
 
 from .angular import beam_axis_and_frame
+from .indexing import index_vswf, n_modes
 from .projection import (
     incident_coeffs_from_angular_spectrum,
     incident_coeffs_planewave,
     incident_coeffs_wavebundle_normal_incidence,
 )
+from .translation import RadialLUT, translation_ab5_table, translation_block
 
 Polarization = Literal["TE", "TM"]
 PolarizationInput = Polarization | tuple[complex, complex] | list[complex] | np.ndarray
+
+
+def _as_complex_triplet(
+    name: str, values: tuple[complex, complex, complex] | np.ndarray
+) -> np.ndarray:
+    """Normalize one 3-component complex vector and validate finiteness."""
+    arr = np.asarray(values, dtype=np.complex128).reshape(-1)
+    if arr.size != 3:
+        raise ValueError(
+            f"`{name}` must have exactly 3 entries. Got shape {np.asarray(values).shape}."
+        )
+    if not np.all(np.isfinite(arr.real)) or not np.all(np.isfinite(arr.imag)):
+        raise ValueError(f"`{name}` must contain only finite values.")
+    return arr
+
+
+def _as_float_triplet(name: str, values: tuple[float, float, float] | np.ndarray) -> np.ndarray:
+    """Normalize one 3-component float vector and validate finiteness."""
+    arr = np.asarray(values, dtype=float).reshape(-1)
+    if arr.size != 3:
+        raise ValueError(
+            f"`{name}` must have exactly 3 entries. Got shape {np.asarray(values).shape}."
+        )
+    if not np.all(np.isfinite(arr)):
+        raise ValueError(f"`{name}` must contain only finite values.")
+    return arr
+
+
+def _normalize_dipole_collection_inputs(
+    positions: np.ndarray,
+    dipole_moments: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Validate and normalize dipole collection arrays."""
+    pos = np.asarray(positions, dtype=float)
+    mom = np.asarray(dipole_moments, dtype=np.complex128)
+    if pos.ndim != 2 or pos.shape[1] != 3:
+        raise ValueError(f"`positions` must have shape (Nd, 3). Got {pos.shape}.")
+    if mom.ndim != 2 or mom.shape[1] != 3:
+        raise ValueError(f"`dipole_moments` must have shape (Nd, 3). Got {mom.shape}.")
+    if pos.shape[0] != mom.shape[0]:
+        raise ValueError(
+            "`positions` and `dipole_moments` must have the same first dimension. "
+            f"Got {pos.shape[0]} and {mom.shape[0]}."
+        )
+    if not np.all(np.isfinite(pos)):
+        raise ValueError("`positions` must contain only finite values.")
+    if not np.all(np.isfinite(mom.real)) or not np.all(np.isfinite(mom.imag)):
+        raise ValueError("`dipole_moments` must contain only finite values.")
+    return pos, mom
+
+
+def _conservative_cross_set_distance_upper_bound(a: np.ndarray, b: np.ndarray) -> float:
+    """Cheap O(N+M) upper bound on max pair distance between point sets."""
+    if a.shape[0] == 0 or b.shape[0] == 0:
+        return 0.0
+    amin = np.min(a, axis=0)
+    amax = np.max(a, axis=0)
+    bmin = np.min(b, axis=0)
+    bmax = np.max(b, axis=0)
+    d_axis = np.maximum(np.abs(bmax - amin), np.abs(amax - bmin))
+    return float(np.linalg.norm(d_axis))
+
+
+def _dipole_outgoing_coeff_vector(
+    *,
+    lmax: int,
+    k0: float,
+    k_medium: float,
+    dipole_moment: np.ndarray,
+    dtype: np.dtype,
+) -> np.ndarray:
+    """Outgoing SVWF coefficients for one electric point dipole.
+
+    This follows SMUTHI's homogeneous-medium dipole normalization:
+    the source is represented as an outgoing SVWF expansion centered at the
+    dipole location, with only electric (`tau=2`) `l=1` modes populated.
+    """
+    Nm = n_modes(int(lmax))
+    out = np.zeros((Nm,), dtype=dtype)
+    if int(lmax) < 1:
+        return out
+
+    mx, my, mz = dipole_moment
+    c_xy = 1.0 / (2.0 * np.sqrt(3.0))
+    c_z = 1.0 / np.sqrt(6.0)
+    pref = (1j * float(k_medium) * (float(k0) ** 2)) / np.pi
+
+    out[index_vswf(1, -1, 2, int(lmax))] = pref * c_xy * (mx + 1j * my)
+    out[index_vswf(1, 0, 2, int(lmax))] = pref * c_z * mz
+    out[index_vswf(1, 1, 2, int(lmax))] = pref * c_xy * (mx - 1j * my)
+    return out
+
+
+def _dipole_incident_coeffs_from_outgoing(
+    *,
+    receiver_positions: np.ndarray,
+    dipole_positions: np.ndarray,
+    outgoing_coeffs: np.ndarray,
+    lmax: int,
+    k_medium: float,
+    radial_lut_dr: float,
+    dtype: np.dtype,
+) -> np.ndarray:
+    """Translate outgoing dipole multipoles to regular SVWFs at receiver centers."""
+    pos_rcv = np.asarray(receiver_positions, dtype=float)
+    pos_dip = np.asarray(dipole_positions, dtype=float)
+    coeffs_dip = np.asarray(outgoing_coeffs, dtype=dtype)
+    Ns = int(pos_rcv.shape[0])
+    Nm = n_modes(int(lmax))
+    out = np.zeros((Ns, Nm), dtype=dtype)
+    if Ns == 0 or pos_dip.shape[0] == 0:
+        return out
+
+    if np.any(np.all(np.isclose(pos_rcv[:, None, :], pos_dip[None, :, :], atol=1e-12), axis=2)):
+        raise ValueError(
+            "Dipole and receiver center coincide for at least one pair. "
+            "Dipole-to-center translation is singular at zero separation."
+        )
+
+    ab5 = translation_ab5_table(int(lmax), dtype=dtype)
+    r_max = _conservative_cross_set_distance_upper_bound(pos_rcv, pos_dip)
+    radial_lut = RadialLUT(
+        lmax=int(lmax),
+        k=float(k_medium),
+        r_max=float(r_max),
+        dr=float(radial_lut_dr),
+        dtype=dtype,
+    )
+
+    for j in range(pos_dip.shape[0]):
+        c_out = coeffs_dip[j]
+        for i in range(Ns):
+            rvec = pos_rcv[i] - pos_dip[j]
+            Wij = translation_block(
+                int(lmax),
+                float(k_medium),
+                rvec,
+                ab5=ab5,
+                radial_lut=radial_lut,
+            )
+            out[i] += np.asarray(Wij @ c_out, dtype=dtype)
+
+    return out
 
 
 def polarization_to_jones(polarization: PolarizationInput) -> tuple[complex, complex]:
@@ -379,6 +524,210 @@ class PlaneWave:
     ) -> np.ndarray:
         """Project plane-wave source to incident SVWF coefficients."""
         return incident_coeffs_planewave(positions, lmax, self, dtype=dtype)
+
+
+@dataclass(frozen=True)
+class DipoleSource:
+    """Single electric point dipole in a homogeneous medium.
+
+    The dipole is represented internally by an outgoing SVWF expansion centered
+    at `position` with only `l=1` electric modes populated.
+    """
+
+    wavelength: float
+    medium_n: complex = 1.0 + 0j
+    dipole_moment: tuple[complex, complex, complex] = (1.0 + 0j, 0.0 + 0j, 0.0 + 0j)
+    position: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    amplitude: float = 1.0
+    radial_lut_dr: float = 1.0
+    polarization: PolarizationInput = "TE"
+
+    def __post_init__(self) -> None:
+        n = complex(self.medium_n)
+        if not (n.real > 0):
+            raise ValueError(f"medium_n must have positive real part. Got {n!r}")
+        if abs(n.imag) > 0:
+            raise ValueError(
+                "DipoleSource currently requires real `medium_n` in the homogeneous solver path."
+            )
+        _as_complex_triplet("dipole_moment", self.dipole_moment)
+        _as_float_triplet("position", self.position)
+        if not np.isfinite(float(self.amplitude)):
+            raise ValueError(f"`amplitude` must be finite. Got {self.amplitude!r}.")
+        if float(self.radial_lut_dr) <= 0.0:
+            raise ValueError(f"`radial_lut_dr` must be > 0. Got {self.radial_lut_dr!r}.")
+
+    def jones_coefficients(self) -> tuple[complex, complex]:
+        """Placeholder Jones payload for APIs expecting polarization metadata."""
+        return 1.0 + 0.0j, 0.0 + 0.0j
+
+    def with_polarization(self, polarization: PolarizationInput) -> "DipoleSource":
+        """Dipoles are not TE/TM sources; this method is unsupported by design."""
+        raise TypeError(
+            "DipoleSource does not define TE/TM polarization states. "
+            "Use `dipole_moment` orientation/components instead."
+        )
+
+    def dipole_positions(self) -> np.ndarray:
+        """Return dipole center array with shape (1, 3)."""
+        return _as_float_triplet("position", self.position).reshape(1, 3)
+
+    def dipole_moments(self) -> np.ndarray:
+        """Return amplitude-scaled dipole moment array with shape (1, 3)."""
+        mu = _as_complex_triplet("dipole_moment", self.dipole_moment)
+        return (complex(self.amplitude) * mu).reshape(1, 3)
+
+    def outgoing_coeffs(
+        self,
+        lmax: int,
+        *,
+        dtype: npt.DTypeLike = np.complex128,
+    ) -> np.ndarray:
+        """Return outgoing SVWF coefficients at the dipole center (shape (1, Nm))."""
+        ctype = np.dtype(dtype)
+        k0 = 2.0 * np.pi / float(self.wavelength)
+        k = k0 * float(np.real(complex(self.medium_n)))
+        coeff = _dipole_outgoing_coeff_vector(
+            lmax=int(lmax),
+            k0=float(k0),
+            k_medium=float(k),
+            dipole_moment=self.dipole_moments().reshape(3),
+            dtype=ctype,
+        )
+        return coeff.reshape(1, -1)
+
+    def incident_coeffs(
+        self,
+        positions: np.ndarray,
+        lmax: int,
+        *,
+        polar_angles: np.ndarray | None = None,
+        azimuthal_angles: np.ndarray | None = None,
+        dtype: npt.DTypeLike = np.complex128,
+    ) -> np.ndarray:
+        """Project dipole field to regular SVWF coefficients at receiver centers."""
+        del polar_angles, azimuthal_angles
+        ctype = np.dtype(dtype)
+        pos_rcv = np.asarray(positions, dtype=float).reshape(-1, 3)
+        Nm = n_modes(int(lmax))
+        if pos_rcv.shape[0] == 0:
+            return np.zeros((0, Nm), dtype=ctype)
+
+        k0 = 2.0 * np.pi / float(self.wavelength)
+        k = k0 * float(np.real(complex(self.medium_n)))
+        return _dipole_incident_coeffs_from_outgoing(
+            receiver_positions=pos_rcv,
+            dipole_positions=self.dipole_positions(),
+            outgoing_coeffs=self.outgoing_coeffs(int(lmax), dtype=ctype),
+            lmax=int(lmax),
+            k_medium=float(k),
+            radial_lut_dr=float(self.radial_lut_dr),
+            dtype=ctype,
+        )
+
+
+@dataclass(frozen=True)
+class DipoleCollection:
+    """Collection of electric point dipoles in a homogeneous medium."""
+
+    wavelength: float
+    medium_n: complex = 1.0 + 0j
+    positions: np.ndarray = field(default_factory=lambda: np.zeros((0, 3), dtype=float))
+    dipole_moments: np.ndarray = field(
+        default_factory=lambda: np.zeros((0, 3), dtype=np.complex128)
+    )
+    amplitude: float = 1.0
+    radial_lut_dr: float = 1.0
+    polarization: PolarizationInput = "TE"
+
+    def __post_init__(self) -> None:
+        n = complex(self.medium_n)
+        if not (n.real > 0):
+            raise ValueError(f"medium_n must have positive real part. Got {n!r}")
+        if abs(n.imag) > 0:
+            raise ValueError(
+                "DipoleCollection currently requires real `medium_n` in the homogeneous solver path."
+            )
+        _normalize_dipole_collection_inputs(self.positions, self.dipole_moments)
+        if not np.isfinite(float(self.amplitude)):
+            raise ValueError(f"`amplitude` must be finite. Got {self.amplitude!r}.")
+        if float(self.radial_lut_dr) <= 0.0:
+            raise ValueError(f"`radial_lut_dr` must be > 0. Got {self.radial_lut_dr!r}.")
+
+    def jones_coefficients(self) -> tuple[complex, complex]:
+        """Placeholder Jones payload for APIs expecting polarization metadata."""
+        return 1.0 + 0.0j, 0.0 + 0.0j
+
+    def with_polarization(self, polarization: PolarizationInput) -> "DipoleCollection":
+        """Dipoles are not TE/TM sources; this method is unsupported by design."""
+        raise TypeError(
+            "DipoleCollection does not define TE/TM polarization states. "
+            "Use vector dipole moments/orientations instead."
+        )
+
+    def dipole_positions(self) -> np.ndarray:
+        """Return dipole centers with shape (Nd, 3)."""
+        pos, _ = _normalize_dipole_collection_inputs(self.positions, self.dipole_moments)
+        return pos
+
+    def dipole_moments_array(self) -> np.ndarray:
+        """Return amplitude-scaled dipole moments with shape (Nd, 3)."""
+        _, mom = _normalize_dipole_collection_inputs(self.positions, self.dipole_moments)
+        return complex(self.amplitude) * mom
+
+    def outgoing_coeffs(
+        self,
+        lmax: int,
+        *,
+        dtype: npt.DTypeLike = np.complex128,
+    ) -> np.ndarray:
+        """Return outgoing SVWF coefficients per dipole, shape (Nd, Nm)."""
+        ctype = np.dtype(dtype)
+        pos = self.dipole_positions()
+        mom = self.dipole_moments_array()
+        Nm = n_modes(int(lmax))
+        out = np.zeros((pos.shape[0], Nm), dtype=ctype)
+        if pos.shape[0] == 0:
+            return out
+        k0 = 2.0 * np.pi / float(self.wavelength)
+        k = k0 * float(np.real(complex(self.medium_n)))
+        for j in range(pos.shape[0]):
+            out[j] = _dipole_outgoing_coeff_vector(
+                lmax=int(lmax),
+                k0=float(k0),
+                k_medium=float(k),
+                dipole_moment=mom[j],
+                dtype=ctype,
+            )
+        return out
+
+    def incident_coeffs(
+        self,
+        positions: np.ndarray,
+        lmax: int,
+        *,
+        polar_angles: np.ndarray | None = None,
+        azimuthal_angles: np.ndarray | None = None,
+        dtype: npt.DTypeLike = np.complex128,
+    ) -> np.ndarray:
+        """Project dipole-collection field to regular SVWF coefficients."""
+        del polar_angles, azimuthal_angles
+        ctype = np.dtype(dtype)
+        pos_rcv = np.asarray(positions, dtype=float).reshape(-1, 3)
+        Nm = n_modes(int(lmax))
+        if pos_rcv.shape[0] == 0:
+            return np.zeros((0, Nm), dtype=ctype)
+        k0 = 2.0 * np.pi / float(self.wavelength)
+        k = k0 * float(np.real(complex(self.medium_n)))
+        return _dipole_incident_coeffs_from_outgoing(
+            receiver_positions=pos_rcv,
+            dipole_positions=self.dipole_positions(),
+            outgoing_coeffs=self.outgoing_coeffs(int(lmax), dtype=ctype),
+            lmax=int(lmax),
+            k_medium=float(k),
+            radial_lut_dr=float(self.radial_lut_dr),
+            dtype=ctype,
+        )
 
 
 def initial_field_plane_wave_pattern_normal_incidence(

@@ -19,6 +19,8 @@ from tqdm.auto import tqdm
 from pyceles.core.indexing import iter_modes, n_modes
 from pyceles.core.projection import transformation_coefficients
 from pyceles.core.sources import (
+    DipoleCollection,
+    DipoleSource,
     GaussianBeam,
     PlaneWave,
     initial_field_plane_wave_pattern_normal_incidence,
@@ -209,7 +211,7 @@ def compute_far_field_patterns(
     lmax: int,
     polar_angles: np.ndarray,
     azimuthal_angles: np.ndarray,
-    source: GaussianBeam | PlaneWave | None = None,
+    source: GaussianBeam | PlaneWave | DipoleSource | DipoleCollection | None = None,
     dtype: npt.DTypeLike = np.complex128,
     show_progress: bool = False,
 ) -> FarFieldPatterns:
@@ -220,6 +222,8 @@ def compute_far_field_patterns(
     far-field bins are not rotated or re-labeled.)
     This mirrors the standard workflow: scattered PWP first, then initial PWP
     (if source supports it), then coherent total-field composition.
+    Local dipole sources currently provide scattered PWPs only (no initial/total
+    channel in this helper).
 
     Notes
     -----

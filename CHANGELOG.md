@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Local electric-source models:
+  - `DipoleSource` for one point electric dipole
+  - `DipoleCollection` for multiple dipoles
+- Dipole excitation now projects to particle RHS coefficients through outgoing
+  `l=1` SVWF coefficients translated to each sphere center (SMUTHI-aligned
+  normalization, reusing pyceles translation kernels).
+- Near-field initial-field evaluation now supports dipole sources directly and
+  masks exact dipole-center samples as `NaN` to avoid singular-point artifacts.
+
 ### Changed
 - `SimulationConfig.azimuthal_angles` default now uses periodic sampling on
   `[0, 2*pi)` (`endpoint=False`) to keep periodic azimuth fast paths active by
@@ -34,6 +44,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `solve_polarization_basis=True` runs and per-channel
   `run_multi_sources(...)` results (near-field channel selection and
   far-field intensity convenience helper).
+- `solve_polarization_basis=True` is now explicitly restricted to propagating
+  TE/TM sources (`PlaneWave`/`GaussianBeam`), and raises for dipole sources.
 
 ## [0.2.0] - 2026-02-28
 

@@ -18,6 +18,8 @@ from .projection import (
 )
 from .sources import (
     AngularSpectrumSource,
+    DipoleCollection,
+    DipoleSource,
     GaussianBeam,
     PlaneWave,
     Polarization,
@@ -31,6 +33,8 @@ from .sources import (
 
 __all__ = [
     "AngularSpectrumSource",
+    "DipoleSource",
+    "DipoleCollection",
     "GaussianBeam",
     "PlaneWave",
     "Polarization",
