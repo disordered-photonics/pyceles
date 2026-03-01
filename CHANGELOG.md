@@ -21,8 +21,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `DipoleSource.cartesian_basis_sources(...)`
   - homogeneous-background dissipated-power helpers for single dipoles and
     dipole collections.
-- Added `examples/run_smuthi_dipole_diagnostic.py` for SMUTHI-vs-pyceles dipole
-  and dipole-collection cross-checks with JSON reference-value output.
 - Added dipole power/LDOS helpers:
   - `compute_dipole_power_ldos(...)`
   - `compute_dipole_ldos_enhancement(...)`

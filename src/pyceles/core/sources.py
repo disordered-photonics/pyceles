@@ -591,16 +591,19 @@ class DipoleSource:
         return (complex(self.amplitude) * mu).reshape(1, 3)
 
     def angular_frequency(self) -> float:
-        """Return omega = 2*pi/lambda in pyceles unit conventions."""
+        """Return `k0 = 2*pi/lambda` in pyceles unit conventions.
+
+        The method name is kept for historical compatibility.
+        """
         return float(2.0 * np.pi / float(self.wavelength))
 
     def dissipated_power_homogeneous_background(self) -> float:
         """Power radiated in equivalent homogeneous background (SMUTHI convention)."""
-        omega = self.angular_frequency()
-        k = float(np.real(complex(self.medium_n))) * omega
+        k0 = self.angular_frequency()
+        k = float(np.real(complex(self.medium_n))) * k0
         mu = self.dipole_moments().reshape(3)
         mu2 = float(np.sum(np.abs(mu) ** 2))
-        return float(mu2 * k * (omega**3) / (12.0 * np.pi))
+        return float(mu2 * k * (k0**3) / (12.0 * np.pi))
 
     def cartesian_basis_sources(
         self,
@@ -730,16 +733,19 @@ class DipoleCollection:
         return complex(self.amplitude) * mom
 
     def angular_frequency(self) -> float:
-        """Return omega = 2*pi/lambda in pyceles unit conventions."""
+        """Return `k0 = 2*pi/lambda` in pyceles unit conventions.
+
+        The method name is kept for historical compatibility.
+        """
         return float(2.0 * np.pi / float(self.wavelength))
 
     def dissipated_power_homogeneous_background_per_dipole(self) -> np.ndarray:
         """Per-dipole homogeneous-background dissipated power (SMUTHI convention)."""
-        omega = self.angular_frequency()
-        k = float(np.real(complex(self.medium_n))) * omega
+        k0 = self.angular_frequency()
+        k = float(np.real(complex(self.medium_n))) * k0
         mu = self.dipole_moments_array()
         mu2 = np.sum(np.abs(mu) ** 2, axis=1)
-        return np.asarray(mu2 * k * (omega**3) / (12.0 * np.pi), dtype=float)
+        return np.asarray(mu2 * k * (k0**3) / (12.0 * np.pi), dtype=float)
 
     def dissipated_power_homogeneous_background(self) -> float:
         """Total homogeneous-background dissipated power for collection."""

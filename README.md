@@ -1,11 +1,11 @@
 # pyceles
 
-**pyceles** is a Python reimplementation of the MATLAB **CELES** package for the electromagnetic
-simulation of large ensemble of particles using the T-matrix method.
+pyceles is a Python reimplementation of the MATLAB CELES package for electromagnetic
+simulation of large particle ensembles with the T-matrix method.
 The code starts as a pure NumPy + SciPy reference implementation, with accelerator backends planned.
 
 This repository focuses on:
-- Correctness first (CELES conventions, reproducible notebooks/tests)
+- Correctness first (CELES conventions, reproducible examples/notebooks)
 - A clean NumPy + SciPy reference implementation
 - Performance via vectorization + CELES-style caching/LUTs (no MEX build)
 - A future optional GPU backend (CuPy, or possibly Numba and/or PETSc) without duplicating code paths
