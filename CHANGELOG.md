@@ -23,6 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     dipole collections.
 - Added `examples/run_smuthi_dipole_diagnostic.py` for SMUTHI-vs-pyceles dipole
   and dipole-collection cross-checks with JSON reference-value output.
+- Added dipole power/LDOS helpers:
+  - `compute_dipole_power_ldos(...)`
+  - `compute_dipole_ldos_enhancement(...)`
+  evaluating particle-scattered fields at dipole positions without direct
+  self-field sampling at `r=0`.
 
 ### Changed
 - `SimulationConfig.azimuthal_angles` default now uses periodic sampling on

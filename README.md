@@ -300,6 +300,10 @@ source = pcl.DipoleSource(
 )
 ```
 
+`dipole_moment` is a complex 3-vector. You can treat it as
+`dipole_moment = amplitude * direction`, where `direction` can itself be
+complex (relative component phases / elliptical source orientation).
+
 For multiple dipoles in one source channel:
 
 ```python
@@ -332,6 +336,18 @@ Current scope/limits:
   `|p| ~ k0^-3 = (wavelength / (2*pi))^3`. For `wavelength=550` (nm units),
   this is about `6.7e5`; values around `1e6` to `1e7` are often convenient in
   examples when you want near-field magnitudes around `O(1)`.
+
+Power/LDOS helpers (single dipole or dipole collections):
+
+```python
+res = pcl.compute_dipole_power_ldos(run)
+print(res.power_total, res.power_homogeneous, res.enhancement)  # P, P0, P/P0
+
+purcell = pcl.compute_dipole_ldos_enhancement(run)  # scalar for one dipole
+```
+
+These helpers evaluate the particle-scattered field at dipole positions and do
+not sample direct self-fields at `r=0`.
 
 To solve one dipole position in x/y/z orientations with one multi-RHS call:
 

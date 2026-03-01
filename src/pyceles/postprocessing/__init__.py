@@ -1,3 +1,8 @@
+from .dipole_metrics import (
+    DipolePowerLDOSResult,
+    compute_dipole_ldos_enhancement,
+    compute_dipole_power_ldos,
+)
 from .farfield import (
     FarFieldPatterns,
     absorption_cross_section,
@@ -32,6 +37,7 @@ from .workflows import (
 )
 
 __all__ = [
+    "DipolePowerLDOSResult",
     "FarFieldPatterns",
     "NearFieldRadialLUT",
     "NearFieldComponents",
@@ -48,6 +54,8 @@ __all__ = [
     "mix_near_field_slices",
     "compute_scattered_field",
     "compute_total_field",
+    "compute_dipole_power_ldos",
+    "compute_dipole_ldos_enhancement",
     "incident_power_from_pwp",
     "finite_beam_power_fractions",
     "plane_wave_cross_sections",

@@ -10,6 +10,11 @@ from pyceles.core.fields import (
     project_source_to_svwf,
 )
 from pyceles.io.workflows import load_simulation_h5, save_simulation_h5
+from pyceles.postprocessing.dipole_metrics import (
+    DipolePowerLDOSResult,
+    compute_dipole_ldos_enhancement,
+    compute_dipole_power_ldos,
+)
 from pyceles.postprocessing.workflows import (
     NearFieldSlice,
     compute_near_field,
@@ -38,8 +43,11 @@ __all__ = [
     "SimulationResult",
     "MultiSourceSimulationResult",
     "NearFieldSlice",
+    "DipolePowerLDOSResult",
     "compute_near_field",
     "compute_near_field_slice",
+    "compute_dipole_power_ldos",
+    "compute_dipole_ldos_enhancement",
     "mix_near_field_components",
     "mix_near_field_slices",
     "save_simulation_h5",
