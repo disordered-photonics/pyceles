@@ -798,6 +798,25 @@ class Simulation:
         n_src = complex(source.medium_n)
         if not np.isclose(n_src, complex(cfg.n_medium), rtol=0.0, atol=0.0):
             raise ValueError(f"Source '{label}' medium_n mismatch: {n_src!r} != {cfg.n_medium!r}.")
+        if isinstance(source, (DipoleSource, DipoleCollection)):
+            dip_pos = np.asarray(source.dipole_positions(), dtype=float).reshape(-1, 3)
+            if dip_pos.size > 0 and self.positions.shape[0] > 0:
+                # Current dipole workflow models local sources in the homogeneous
+                # host and translates to sphere centers. It does not implement an
+                # interior-source formulation for dipoles embedded inside particles.
+                deltas = dip_pos[:, None, :] - self.positions[None, :, :]
+                dist = np.linalg.norm(deltas, axis=2)
+                inside = dist < self.radii[None, :]
+                if np.any(inside):
+                    j, i = np.argwhere(inside)[0]
+                    warnings.warn(
+                        "Untested configuration: dipole center lies inside a particle circumscribing sphere. "
+                        f"Source '{label}', dipole index {int(j)}, particle index {int(i)}. "
+                        "Current pyceles dipole formulation is validated for dipoles in the homogeneous host "
+                        "outside particles; interior dipole placement may produce unreliable results.",
+                        UserWarning,
+                        stacklevel=3,
+                    )
 
     def _normalize_sources_argument(
         self,
