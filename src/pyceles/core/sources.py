@@ -536,6 +536,11 @@ class DipoleSource:
     The current implementation still enforces real `medium_n`. This is a
     solver-policy legacy inherited from the original beam-only CELES-style
     workflow, not a fundamental limitation of local dipole sources.
+
+    Magnitude convention
+    --------------------
+    `dipole_moment` follows the same length-unit system as geometry/wavelength.
+    A useful reference magnitude is `|p| ~ k0^-3 = (wavelength/(2*pi))^3`.
     """
 
     wavelength: float

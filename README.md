@@ -324,6 +324,14 @@ Current scope/limits:
   coherent total (`initial + scattered`) PWPs
 - dipole `SimulationResult` objects do not carry TE/TM Jones metadata
   (`polarization_jones=None`)
+- dipole centers are expected in the homogeneous host medium (outside particle
+  circumscribing spheres). Interior-embedded dipoles are currently untested and
+  may be unreliable in the present solver path.
+- dipole moments are interpreted in the same length-unit convention used by
+  geometry and wavelength. A practical reference scale is
+  `|p| ~ k0^-3 = (wavelength / (2*pi))^3`. For `wavelength=550` (nm units),
+  this is about `6.7e5`; values around `1e6` to `1e7` are often convenient in
+  examples when you want near-field magnitudes around `O(1)`.
 
 To solve one dipole position in x/y/z orientations with one multi-RHS call:
 

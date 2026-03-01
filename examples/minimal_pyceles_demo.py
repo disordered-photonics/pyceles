@@ -14,10 +14,33 @@ def _render_outputs(
     *,
     out_dir: Path,
     stem: str,
+    auto_nearfield_limits: bool = False,
 ) -> None:
     pcl.save_simulation_h5(run, nf, out_dir / f"{stem}.h5")
 
     E, H = nf.field_maps["total"]
+    real_limits = (-2.0, 2.0)
+    abs_limits = (0.0, 2.0)
+    if auto_nearfield_limits:
+        # Use robust percentiles to avoid one-point near-singular spikes
+        # dominating the full color scale in dipole slice visualizations.
+        real_samples = np.concatenate(
+            [np.abs(np.real(E)).reshape(-1), np.abs(np.real(H)).reshape(-1)]
+        )
+        real_samples = real_samples[np.isfinite(real_samples)]
+        abs_samples = np.concatenate(
+            [
+                np.sqrt(np.sum(np.abs(E) ** 2, axis=-1)).reshape(-1),
+                np.sqrt(np.sum(np.abs(H) ** 2, axis=-1)).reshape(-1),
+            ]
+        )
+        abs_samples = abs_samples[np.isfinite(abs_samples)]
+        real_peak = float(np.percentile(real_samples, 99.5)) if real_samples.size > 0 else 1e-12
+        abs_peak = float(np.percentile(abs_samples, 99.5)) if abs_samples.size > 0 else 1e-12
+        real_peak = max(real_peak, 1e-12)
+        abs_peak = max(abs_peak, 1e-12)
+        real_limits = (-real_peak, real_peak)
+        abs_limits = (0.0, abs_peak)
     fig_nf, _ = pcl.io.plot_nearfield_panels(
         nf.axis_0,
         nf.axis_1,
@@ -27,6 +50,8 @@ def _render_outputs(
         run.radii,
         plane=nf.plane,
         plane_value=nf.plane_value,
+        real_limits=real_limits,
+        abs_limits=abs_limits,
     )
     fig_nf.savefig(out_dir / f"{stem}_nearfield.png", dpi=200)
     plt.close(fig_nf)
@@ -144,7 +169,13 @@ def main() -> None:
     out_dir = Path("outputs")
     out_dir.mkdir(parents=True, exist_ok=True)
     _render_outputs(run, nf, out_dir=out_dir, stem="minimal_pyceles_demo_planewave")
-    _render_outputs(run_dip, nf_dip, out_dir=out_dir, stem="minimal_pyceles_demo_dipoles")
+    _render_outputs(
+        run_dip,
+        nf_dip,
+        out_dir=out_dir,
+        stem="minimal_pyceles_demo_dipoles",
+        auto_nearfield_limits=True,
+    )
 
 
 if __name__ == "__main__":

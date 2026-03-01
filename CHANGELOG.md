@@ -44,6 +44,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `solve_polarization_basis=True` now acts as a convenience `run()` wrapper
   built on top of `run_multi_sources(...)` (TE/TM channels + Jones mixed
   recombination + unpolarized diagnostics).
+- `examples/minimal_pyceles_demo.py` now includes a dipole-collection run on
+  the same 4-particle geometry and uses autoscaled near-field panel limits for
+  that dipole case.
 
 ### Fixed
 - Dtype parsing for `compute_dtype`/`accum_dtype` now accepts generic NumPy
@@ -63,6 +66,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dipole-source documentation/error messages now explicitly note that the
   current real-`n_medium` requirement is a legacy beam-era solver policy, not
   a fundamental local-source physics limitation.
+- README and source docstrings now document practical dipole-moment magnitude
+  scaling (`|p| ~ k0^-3`) for readable near-field amplitudes in example units.
+- Dipole-source validation now warns when dipole centers are placed inside
+  particle circumscribing spheres (currently untested in the homogeneous-host
+  dipole formulation and potentially unreliable).
 
 ## [0.2.0] - 2026-02-28
 
