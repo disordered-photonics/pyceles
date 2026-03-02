@@ -19,12 +19,11 @@ from tqdm.auto import tqdm
 from pyceles.core.indexing import iter_modes, n_modes
 from pyceles.core.projection import transformation_coefficients
 from pyceles.core.sources import (
+    AngularSpectrumSource,
     DipoleCollection,
     DipoleSource,
-    GaussianBeam,
     PlaneWave,
-    initial_field_plane_wave_pattern_normal_incidence,
-    is_normal_incidence,
+    Source,
     source_jones,
 )
 from pyceles.core.spherical import spherical_functions_trigon
@@ -211,7 +210,7 @@ def compute_far_field_patterns(
     lmax: int,
     polar_angles: np.ndarray,
     azimuthal_angles: np.ndarray,
-    source: GaussianBeam | PlaneWave | DipoleSource | DipoleCollection | None = None,
+    source: Source | None = None,
     dtype: npt.DTypeLike = np.complex128,
     show_progress: bool = False,
 ) -> FarFieldPatterns:
@@ -249,26 +248,7 @@ def compute_far_field_patterns(
     p_t_te = None
     p_t_tm = None
 
-    if isinstance(source, GaussianBeam):
-        if not is_normal_incidence(float(source.polar_angle)):
-            p_i_te, p_i_tm = source.angular_spectrum(
-                k=float(k),
-                polar_angles=np.asarray(polar_angles, dtype=float),
-                azimuthal_angles=np.asarray(azimuthal_angles, dtype=float),
-            )
-        else:
-            p_i_te, p_i_tm = initial_field_plane_wave_pattern_normal_incidence(
-                beam=source,
-                k=k,
-                polar_angles=polar_angles,
-                azimuthal_angles=azimuthal_angles,
-            )
-        if p_i_te is None or p_i_tm is None:
-            raise RuntimeError("Gaussian source must provide both TE and TM initial PWPs.")
-        p_i_te = _cast_pwp_coeff_dtype(p_i_te, ctype)
-        p_i_tm = _cast_pwp_coeff_dtype(p_i_tm, ctype)
-        p_t_te, p_t_tm = total_field_plane_wave_pattern(p_i_te, p_i_tm, p_s_te, p_s_tm)
-    elif isinstance(source, (DipoleSource, DipoleCollection)):
+    if isinstance(source, (DipoleSource, DipoleCollection)):
         dip_pos = np.asarray(source.dipole_positions(), dtype=float).reshape(-1, 3)
         dip_coeffs = np.asarray(source.outgoing_coeffs(1, dtype=ctype), dtype=ctype)
         p_i_te, p_i_tm = scattered_field_plane_wave_pattern(
@@ -281,6 +261,15 @@ def compute_far_field_patterns(
             dtype=ctype,
             show_progress=False,
         )
+        p_t_te, p_t_tm = total_field_plane_wave_pattern(p_i_te, p_i_tm, p_s_te, p_s_tm)
+    elif isinstance(source, AngularSpectrumSource):
+        p_i_te, p_i_tm = source.angular_spectrum(
+            k=float(k),
+            polar_angles=np.asarray(polar_angles, dtype=float),
+            azimuthal_angles=np.asarray(azimuthal_angles, dtype=float),
+        )
+        p_i_te = _cast_pwp_coeff_dtype(p_i_te, ctype)
+        p_i_tm = _cast_pwp_coeff_dtype(p_i_tm, ctype)
         p_t_te, p_t_tm = total_field_plane_wave_pattern(p_i_te, p_i_tm, p_s_te, p_s_tm)
 
     return FarFieldPatterns(
@@ -302,7 +291,7 @@ def pwp_power_decomposition(
     k0: float,
     k_medium: float,
     direction: str = "forward",
-    source: GaussianBeam | PlaneWave | None = None,
+    source: Source | None = None,
 ) -> dict[str, float]:
     """Decompose power into initial/scattered/interference/total terms.
 
@@ -451,7 +440,7 @@ def incident_power_from_pwp(
 
 
 def finite_beam_power_fractions(
-    source: GaussianBeam | PlaneWave,
+    source: Source,
     initial_pwp_te: dict,
     initial_pwp_tm: dict,
     scattered_pwp_te: dict,
@@ -471,10 +460,10 @@ def finite_beam_power_fractions(
             "Transmitted/reflected power fractions are undefined for PlaneWave excitation "
             "because the incident power is infinite. Use cross sections instead."
         )
-    w = float(source.beam_width)
+    w = float(getattr(source, "beam_width", np.inf))
     if (not np.isfinite(w)) or np.isclose(w, 0.0):
         raise ValueError(
-            "Gaussian beam with beam_width=0 or inf is a plane-wave limit: incident power is infinite, "
+            "Source with beam_width=0 or inf is in a plane-wave limit: incident power is infinite, "
             "so transmitted/reflected power fractions are undefined. Use cross sections for PlaneWave excitation."
         )
 
@@ -529,7 +518,7 @@ def finite_beam_power_fractions(
 
 
 def _validate_plane_wave_cross_section_inputs(
-    source: PlaneWave | GaussianBeam,
+    source: Source,
     *,
     k0: float,
     n_medium: complex,
@@ -554,7 +543,7 @@ def _validate_plane_wave_cross_section_inputs(
     return n_real, k_medium
 
 
-def _plane_wave_incident_intensity_scale(source: PlaneWave | GaussianBeam) -> float:
+def _plane_wave_incident_intensity_scale(source: Source) -> float:
     """Return the dimensionless incident-field scale ``|E0|^2 * (|a_te|^2 + |a_tm|^2)``.
 
     This captures how solved coefficient vectors scale with the source amplitude
@@ -576,7 +565,7 @@ def _plane_wave_incident_intensity_scale(source: PlaneWave | GaussianBeam) -> fl
 
 
 def scattering_cross_section(
-    source: PlaneWave | GaussianBeam,
+    source: Source,
     scattered_pwp_te: dict,
     scattered_pwp_tm: dict,
     *,
@@ -640,7 +629,7 @@ def scattering_cross_section(
 
 
 def total_scattering_cross_section(
-    source: PlaneWave | GaussianBeam,
+    source: Source,
     scattered_pwp_te: dict,
     scattered_pwp_tm: dict,
     *,
@@ -667,7 +656,7 @@ def total_scattering_cross_section(
 
 
 def extinction_cross_section(
-    source: PlaneWave | GaussianBeam,
+    source: Source,
     initial_coeffs: np.ndarray,
     scattered_coeffs: np.ndarray,
     *,
@@ -705,7 +694,7 @@ def extinction_cross_section(
 
 
 def absorption_cross_section(
-    source: PlaneWave | GaussianBeam,
+    source: Source,
     initial_coeffs: np.ndarray,
     scattered_coeffs: np.ndarray,
     scattered_pwp_te: dict,
@@ -737,7 +726,7 @@ def absorption_cross_section(
 
 
 def plane_wave_cross_sections(
-    source: PlaneWave | GaussianBeam,
+    source: Source,
     initial_coeffs: np.ndarray,
     scattered_coeffs: np.ndarray,
     scattered_pwp_te: dict,

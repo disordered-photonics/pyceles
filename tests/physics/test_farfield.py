@@ -3,7 +3,7 @@ from typing import Any
 import numpy as np
 import pytest
 
-from pyceles.core.fields import GaussianBeam, PlaneWave
+from pyceles.core.fields import GaussianBeam, PlaneWave, SLMSource
 from pyceles.core.tmatrix import mie_cross_sections
 from pyceles.postprocessing.farfield import (
     absorption_cross_section,
@@ -582,8 +582,54 @@ def test_simulation_dual_basis_jones_mixing_consistency():
     )
     assert run.cross_sections_basis is not None
     assert "te" in run.cross_sections_basis and "tm" in run.cross_sections_basis
+    assert run.cross_sections is not None
+    assert "C_sca" in run.cross_sections
     assert run.unpolarized is not None
     assert "cross_sections" in run.unpolarized
+
+
+def test_simulation_dual_basis_supports_slm_wrapped_gaussian_source():
+    base = GaussianBeam(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        polarization=(1.0 + 0.0j, 0.5j),
+        polar_angle=0.2,
+        azimuthal_angle=0.4,
+        beam_width=1400.0,
+        focal_point=(0.0, 0.0, 0.0),
+        amplitude=1.0,
+    )
+
+    def phase_ramp(alpha_grid: np.ndarray, beta_grid: np.ndarray) -> np.ndarray:
+        k = 2.0 * np.pi / base.wavelength * np.real(base.medium_n)
+        return np.exp(-1j * k * np.sin(beta_grid) * np.cos(alpha_grid) * 50.0)
+
+    source = SLMSource(base_source=base, modulation=phase_ramp)
+    cfg = SimulationConfig(
+        wavelength=550.0,
+        n_medium=1.0 + 0j,
+        lmax=3,
+        source=source,
+        solver_method="direct",
+        solve_polarization_basis=True,
+        verbose=False,
+    )
+    sim = Simulation(
+        cfg,
+        positions=np.array([[0.0, 0.0, 0.0]], dtype=float),
+        radii=np.array([60.0], dtype=float),
+        n_particle=np.array([1.5 + 0.01j], dtype=np.complex128),
+    )
+    run = sim.run()
+    assert run.coeffs_basis is not None
+    assert run.polarization_jones is not None
+    np.testing.assert_allclose(
+        run.coeffs,
+        run.polarization_jones[0] * run.coeffs_basis["te"]
+        + run.polarization_jones[1] * run.coeffs_basis["tm"],
+        rtol=1e-10,
+        atol=1e-10,
+    )
 
 
 def test_simulation_dual_basis_mixed_precision_runs_without_numpy2_copy_errors():

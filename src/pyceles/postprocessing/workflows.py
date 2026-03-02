@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Literal
 import numpy as np
 
 from pyceles._dtypes import resolve_compute_accum_dtypes
-from pyceles.core.sources import GaussianBeam, PlaneWave
+from pyceles.core.sources import source_jones
 
 from .nearfield_workflows import NearFieldComponents, compute_near_field_components
 
@@ -17,7 +17,11 @@ if TYPE_CHECKING:
 def _is_pure_channel_result(run: SimulationResult, channel: str, *, atol: float = 1e-12) -> bool:
     """Return True when `run` already represents one pure TE/TM Jones channel."""
     src = run.config.source
-    if not isinstance(src, (GaussianBeam, PlaneWave)):
+    if src is None:
+        return False
+    try:
+        source_jones(src)
+    except TypeError:
         return False
     if run.polarization_jones is None:
         return False

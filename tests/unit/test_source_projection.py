@@ -5,6 +5,7 @@ import numpy as np
 from pyceles.core.fields import (
     GaussianBeam,
     PlaneWave,
+    SLMSource,
     incident_coeffs_planewave,
     incident_coeffs_wavebundle_normal_incidence,
     initial_field_plane_wave_pattern_normal_incidence,
@@ -190,3 +191,84 @@ def test_planewave_jones_mixes_basis_linearly():
     )
     ref = basis["te"] + 1.0j * basis["tm"]
     np.testing.assert_allclose(got, ref, rtol=1e-13, atol=1e-13)
+
+
+def test_slm_source_identity_modulation_matches_base_projection():
+    positions = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [100.0, -20.0, 40.0],
+            [-80.0, 35.0, 15.0],
+        ],
+        dtype=float,
+    )
+    base = GaussianBeam(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        polarization=(1.0 + 0.0j, -0.5j),
+        polar_angle=0.33,
+        azimuthal_angle=0.5,
+        beam_width=1600.0,
+        focal_point=(5.0, -3.0, 12.0),
+        amplitude=1.1,
+    )
+    source = SLMSource(base_source=base, modulation=1.0 + 0.0j)
+    lmax = 3
+    polar = np.linspace(0.0, np.pi, 201)
+    azimuthal = np.linspace(0.0, 2.0 * np.pi, 121, endpoint=False)
+
+    got = project_source_to_svwf(
+        positions,
+        lmax,
+        source,
+        polar_angles=polar,
+        azimuthal_angles=azimuthal,
+    )
+    ref = project_source_to_svwf(
+        positions,
+        lmax,
+        base,
+        polar_angles=polar,
+        azimuthal_angles=azimuthal,
+    )
+    np.testing.assert_allclose(got, ref, rtol=5e-12, atol=5e-12)
+
+
+def test_slm_source_phase_ramp_matches_focal_shift_in_angular_spectrum():
+    base = GaussianBeam(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        polarization=(1.0 + 0.0j, 0.7 - 0.2j),
+        polar_angle=0.2,
+        azimuthal_angle=0.7,
+        beam_width=1800.0,
+        focal_point=(0.0, 0.0, 0.0),
+        amplitude=1.0,
+    )
+    k = 2.0 * np.pi / base.wavelength * np.real(base.medium_n)
+    dx = 120.0
+
+    def modulation(alpha_grid: np.ndarray, beta_grid: np.ndarray) -> np.ndarray:
+        return np.exp(-1j * k * np.sin(beta_grid) * np.cos(alpha_grid) * dx)
+
+    slm = SLMSource(base_source=base, modulation=modulation)
+    shifted = GaussianBeam(
+        wavelength=base.wavelength,
+        medium_n=base.medium_n,
+        polarization=base.polarization,
+        polar_angle=base.polar_angle,
+        azimuthal_angle=base.azimuthal_angle,
+        beam_width=base.beam_width,
+        focal_point=(dx, 0.0, 0.0),
+        amplitude=base.amplitude,
+    )
+
+    polar = np.linspace(0.0, np.pi, 181)
+    azimuthal = np.linspace(0.0, 2.0 * np.pi, 161, endpoint=False)
+    te_slm, tm_slm = slm.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
+    te_shift, tm_shift = shifted.angular_spectrum(
+        k=k, polar_angles=polar, azimuthal_angles=azimuthal
+    )
+
+    np.testing.assert_allclose(te_slm["coeff"], te_shift["coeff"], rtol=1e-11, atol=1e-11)
+    np.testing.assert_allclose(tm_slm["coeff"], tm_shift["coeff"], rtol=1e-11, atol=1e-11)

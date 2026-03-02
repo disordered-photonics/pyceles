@@ -6,6 +6,7 @@ from pyceles.core.fields import (
     DipoleSource,
     GaussianBeam,
     PlaneWave,
+    SLMSource,
     project_source_basis_to_svwf,
     project_source_to_svwf,
 )
@@ -35,6 +36,7 @@ __all__ = [
     "print_logo",
     "GaussianBeam",
     "PlaneWave",
+    "SLMSource",
     "DipoleSource",
     "DipoleCollection",
     "project_source_basis_to_svwf",

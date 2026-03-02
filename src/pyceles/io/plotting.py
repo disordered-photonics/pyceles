@@ -3,13 +3,17 @@ from __future__ import annotations
 import matplotlib.pyplot as plt
 import numpy as np
 
-from pyceles.core.sources import GaussianBeam, PlaneWave
+from pyceles.core.sources import source_jones
 
 
 def _is_pure_channel_result(run, channel: str, *, atol: float = 1e-12) -> bool:
     """Return True when `run` already represents one pure TE/TM Jones channel."""
     src = getattr(getattr(run, "config", None), "source", None)
-    if not isinstance(src, (GaussianBeam, PlaneWave)):
+    if src is None:
+        return False
+    try:
+        source_jones(src)
+    except TypeError:
         return False
     if not hasattr(run, "polarization_jones"):
         return False

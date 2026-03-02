@@ -18,8 +18,8 @@ from pyceles.core.projection import project_source_to_svwf
 from pyceles.core.sources import (
     DipoleCollection,
     DipoleSource,
-    GaussianBeam,
     PlaneWave,
+    Source,
     source_jones,
 )
 from pyceles.linear.preconditioner import make_grid_block_preconditioner
@@ -38,7 +38,6 @@ from pyceles.postprocessing.farfield import (
     pwp_power_decomposition,
 )
 
-_SOURCE_TYPES = (GaussianBeam, PlaneWave, DipoleSource, DipoleCollection)
 _STARTUP_LOGO_PRINTED = False
 
 
@@ -104,6 +103,20 @@ def _warn_redundant_periodic_azimuth_endpoint(*, azimuth_name: str, azimuth: np.
             UserWarning,
             stacklevel=3,
         )
+
+
+def _supports_finite_beam_power(source: Source) -> bool:
+    """Return True when finite-beam power fractions are well-defined for source."""
+    if isinstance(source, PlaneWave):
+        return False
+    beam_width = getattr(source, "beam_width", None)
+    if beam_width is None:
+        return False
+    try:
+        w = float(beam_width)
+    except (TypeError, ValueError):
+        return False
+    return bool(np.isfinite(w) and (not np.isclose(w, 0.0)))
 
 
 def _normalize_geometry(
@@ -341,7 +354,8 @@ class SimulationConfig:
     """High-level configuration for one homogeneous-medium many-sphere run.
 
     Polarization/multi-source options:
-    - Propagating sources (`PlaneWave`, `GaussianBeam`) use
+    - Propagating TE/TM sources (for example `PlaneWave`, `GaussianBeam`,
+      `SLMSource`) use
       `source.polarization` as `"TE"`, `"TM"`, or Jones `(a_te, a_tm)`.
     - Local sources (`DipoleSource`, `DipoleCollection`) use dipole moments
       and positions instead of TE/TM polarization labels.
@@ -387,7 +401,7 @@ class SimulationConfig:
     wavelength: float = 550.0
     n_medium: complex = 1.0 + 0j
     lmax: int = 3
-    source: GaussianBeam | PlaneWave | DipoleSource | DipoleCollection | None = None
+    source: Source | None = None
     # Shared CELES-like default angular grid. If no stage-specific grids are
     # provided, this pair is used for both source projection and far-field bins.
     # Use periodic azimuth sampling on [0, 2*pi) (endpoint=False) so periodic
@@ -555,9 +569,10 @@ class SimulationConfig:
             )
 
         if self.source is not None:
-            if not isinstance(self.source, _SOURCE_TYPES):
+            if not isinstance(self.source, Source):
                 raise TypeError(
-                    "`source` must be one of PlaneWave, GaussianBeam, DipoleSource, or DipoleCollection. "
+                    "`source` must satisfy the pyceles Source protocol "
+                    "(wavelength/medium_n + incident_coeffs/with_polarization APIs). "
                     f"Got {type(self.source).__name__}."
                 )
             source_wavelength = float(self.source.wavelength)
@@ -636,8 +651,8 @@ class SimulationResult:
     solve is still performed and postprocessing can be skipped; far-field
     payloads are returned as empty arrays and power/cross-section diagnostics
     remain `None`.
-    `polarization_jones` is populated only for propagating TE/TM sources
-    (`PlaneWave`, `GaussianBeam`). For local dipole sources it is `None`.
+    `polarization_jones` is populated for propagating TE/TM sources that expose
+    Jones metadata. For local dipole sources it is `None`.
 
     Naming note:
     `k0` stores the vacuum wavenumber `2*pi/wavelength` (not angular frequency).
@@ -685,7 +700,7 @@ class SolvedSourcesResult:
     """
 
     labels: tuple[str, ...]
-    sources: dict[str, GaussianBeam | PlaneWave | DipoleSource | DipoleCollection]
+    sources: dict[str, Source]
     solver_result: LinearSolveResult
     initial_coeffs: dict[str, np.ndarray]
     rhs: dict[str, np.ndarray]
@@ -705,7 +720,7 @@ class MultiSourceSimulationResult:
     """
 
     labels: tuple[str, ...]
-    sources: dict[str, GaussianBeam | PlaneWave | DipoleSource | DipoleCollection]
+    sources: dict[str, Source]
     runs: dict[str, SimulationResult]
     solver_result: LinearSolveResult
     initial_coeffs: dict[str, np.ndarray]
@@ -839,7 +854,7 @@ class Simulation:
 
     def _validate_ready_to_run(
         self,
-    ) -> GaussianBeam | PlaneWave | DipoleSource | DipoleCollection:
+    ) -> Source:
         """Ensure excitation is defined before assembling and solving the system."""
         if self.config.source is None:
             raise ValueError(
@@ -850,16 +865,16 @@ class Simulation:
 
     def _validate_source_compatibility(
         self,
-        source: GaussianBeam | PlaneWave | DipoleSource | DipoleCollection,
+        source: Source,
         *,
         label: str,
     ) -> None:
         """Validate one source against this simulation's wavelength/medium settings."""
         cfg = self.config
-        if not isinstance(source, _SOURCE_TYPES):
+        if not isinstance(source, Source):
             raise TypeError(
-                "Source "
-                f"'{label}' must be one of PlaneWave, GaussianBeam, DipoleSource, DipoleCollection. "
+                f"Source '{label}' must satisfy the pyceles Source protocol "
+                "(wavelength/medium_n + incident_coeffs/with_polarization APIs). "
                 f"Got {type(source).__name__}."
             )
         wl = float(source.wavelength)
@@ -890,16 +905,15 @@ class Simulation:
 
     def _normalize_sources_argument(
         self,
-        sources: Mapping[str, GaussianBeam | PlaneWave | DipoleSource | DipoleCollection]
-        | Sequence[GaussianBeam | PlaneWave | DipoleSource | DipoleCollection],
+        sources: Mapping[str, Source] | Sequence[Source],
         *,
         labels: Sequence[str] | None = None,
-    ) -> dict[str, GaussianBeam | PlaneWave | DipoleSource | DipoleCollection]:
+    ) -> dict[str, Source]:
         """Normalize multi-source inputs to a deterministic labeled dictionary."""
         if isinstance(sources, Mapping):
             if labels is not None:
                 raise ValueError("`labels` must be omitted when `sources` is a mapping.")
-            out: dict[str, GaussianBeam | PlaneWave | DipoleSource | DipoleCollection] = {}
+            out: dict[str, Source] = {}
             for key, src in sources.items():
                 lbl = str(key)
                 if lbl in out:
@@ -931,7 +945,7 @@ class Simulation:
     def _build_single_channel_result(
         self,
         *,
-        source: GaussianBeam | PlaneWave | DipoleSource | DipoleCollection,
+        source: Source,
         initial_coeffs: np.ndarray,
         rhs_flat: np.ndarray,
         coeffs: np.ndarray,
@@ -968,10 +982,20 @@ class Simulation:
                 dtype=compute_dtype,
                 show_progress=bool(cfg.verbose),
             )
-            if (
+            if isinstance(source, PlaneWave):
+                cross_sections = plane_wave_cross_sections(
+                    source,
+                    initial_coeffs,
+                    coeffs,
+                    k0=k0,
+                    n_medium=cfg.n_medium,
+                    scattered_pwp_te=ff.scattered_te,
+                    scattered_pwp_tm=ff.scattered_tm,
+                )
+            elif (
                 ff.initial_te is not None
                 and ff.initial_tm is not None
-                and isinstance(source, GaussianBeam)
+                and _supports_finite_beam_power(source)
             ):
                 power = finite_beam_power_fractions(
                     source,
@@ -1002,22 +1026,14 @@ class Simulation:
                     k_medium=k,
                     source=source,
                 )
-            elif isinstance(source, PlaneWave):
-                cross_sections = plane_wave_cross_sections(
-                    source,
-                    initial_coeffs,
-                    coeffs,
-                    k0=k0,
-                    n_medium=cfg.n_medium,
-                    scattered_pwp_te=ff.scattered_te,
-                    scattered_pwp_tm=ff.scattered_tm,
-                )
         else:
             ff = _empty_farfield_patterns(compute_dtype)
 
         pol_jones: tuple[complex, complex] | None = None
-        if isinstance(source, (GaussianBeam, PlaneWave)):
+        try:
             pol_jones = source_jones(source)
+        except TypeError:
+            pol_jones = None
         config_out = cfg if cfg.source is source else replace(cfg, source=source)
         return SimulationResult(
             config=config_out,
@@ -1051,7 +1067,7 @@ class Simulation:
 
     def _solve_sources_core(
         self,
-        labeled_sources: Mapping[str, GaussianBeam | PlaneWave | DipoleSource | DipoleCollection],
+        labeled_sources: Mapping[str, Source],
         *,
         solver_compute_final_residual: bool | None = None,
     ) -> SolvedSourcesResult:
@@ -1302,8 +1318,7 @@ class Simulation:
 
     def solve_sources(
         self,
-        sources: Mapping[str, GaussianBeam | PlaneWave | DipoleSource | DipoleCollection]
-        | Sequence[GaussianBeam | PlaneWave | DipoleSource | DipoleCollection],
+        sources: Mapping[str, Source] | Sequence[Source],
         *,
         labels: Sequence[str] | None = None,
         solver_compute_final_residual: bool | None = None,
@@ -1436,8 +1451,8 @@ class Simulation:
         If `solve_polarization_basis=True`, TE/TM channels are solved through
         `solve_sources(...)` and then combined into the requested Jones
         channel, while basis and unpolarized diagnostics are retained. This
-        convenience mode applies only to propagating TE/TM sources
-        (`PlaneWave`/`GaussianBeam`).
+        convenience mode applies to propagating TE/TM sources that expose Jones
+        metadata and `with_polarization('TE'/'TM')`.
 
         Parameters
         ----------
@@ -1451,22 +1466,24 @@ class Simulation:
             solved = self.solve_sources({"mixed": source})
             multi = self.postprocess_sources(solved, include_farfield=include_farfield)
             return multi["mixed"]
-        if not isinstance(source, (GaussianBeam, PlaneWave)):
+        try:
+            a_te, a_tm = source_jones(source)
+            src_te = source.with_polarization("TE")
+            src_tm = source.with_polarization("TM")
+        except TypeError as exc:
             raise ValueError(
                 "`solve_polarization_basis=True` is only defined for TE/TM polarization sources "
-                "(PlaneWave or GaussianBeam)."
-            )
+                "that expose Jones metadata and `with_polarization('TE'/'TM')`."
+            ) from exc
 
         basis_sources = {
-            "te": source.with_polarization("TE"),
-            "tm": source.with_polarization("TM"),
+            "te": src_te,
+            "tm": src_tm,
         }
         basis_solved = self.solve_sources(basis_sources)
         basis_multi = self.postprocess_sources(basis_solved, include_farfield=include_farfield)
         run_te = basis_multi["te"]
         run_tm = basis_multi["tm"]
-
-        a_te, a_tm = source_jones(source)
         compute_dtype = np.dtype(run_te.compute_dtype)
         accum_dtype = np.dtype(run_te.accum_dtype)
 
@@ -1497,51 +1514,51 @@ class Simulation:
         cross_sections = None
         decomposition_forward = None
         decomposition_backward = None
-        if (
-            include_farfield
-            and ff.initial_te is not None
-            and ff.initial_tm is not None
-            and isinstance(source, GaussianBeam)
-        ):
-            power = finite_beam_power_fractions(
-                source,
-                ff.initial_te,
-                ff.initial_tm,
-                ff.scattered_te,
-                ff.scattered_tm,
-                k0=run_te.k0,
-                k_medium=run_te.k,
-            )
-            decomposition_forward = pwp_power_decomposition(
-                direction="forward",
-                initial_pwp_te=ff.initial_te,
-                initial_pwp_tm=ff.initial_tm,
-                scattered_pwp_te=ff.scattered_te,
-                scattered_pwp_tm=ff.scattered_tm,
-                k0=run_te.k0,
-                k_medium=run_te.k,
-                source=source,
-            )
-            decomposition_backward = pwp_power_decomposition(
-                direction="backward",
-                initial_pwp_te=ff.initial_te,
-                initial_pwp_tm=ff.initial_tm,
-                scattered_pwp_te=ff.scattered_te,
-                scattered_pwp_tm=ff.scattered_tm,
-                k0=run_te.k0,
-                k_medium=run_te.k,
-                source=source,
-            )
-        elif include_farfield and isinstance(source, PlaneWave):
-            cross_sections = plane_wave_cross_sections(
-                source,
-                b,
-                x,
-                k0=run_te.k0,
-                n_medium=cfg.n_medium,
-                scattered_pwp_te=ff.scattered_te,
-                scattered_pwp_tm=ff.scattered_tm,
-            )
+        if include_farfield:
+            if isinstance(source, PlaneWave):
+                cross_sections = plane_wave_cross_sections(
+                    source,
+                    b,
+                    x,
+                    k0=run_te.k0,
+                    n_medium=cfg.n_medium,
+                    scattered_pwp_te=ff.scattered_te,
+                    scattered_pwp_tm=ff.scattered_tm,
+                )
+            elif (
+                ff.initial_te is not None
+                and ff.initial_tm is not None
+                and _supports_finite_beam_power(source)
+            ):
+                power = finite_beam_power_fractions(
+                    source,
+                    ff.initial_te,
+                    ff.initial_tm,
+                    ff.scattered_te,
+                    ff.scattered_tm,
+                    k0=run_te.k0,
+                    k_medium=run_te.k,
+                )
+                decomposition_forward = pwp_power_decomposition(
+                    direction="forward",
+                    initial_pwp_te=ff.initial_te,
+                    initial_pwp_tm=ff.initial_tm,
+                    scattered_pwp_te=ff.scattered_te,
+                    scattered_pwp_tm=ff.scattered_tm,
+                    k0=run_te.k0,
+                    k_medium=run_te.k,
+                    source=source,
+                )
+                decomposition_backward = pwp_power_decomposition(
+                    direction="backward",
+                    initial_pwp_te=ff.initial_te,
+                    initial_pwp_tm=ff.initial_tm,
+                    scattered_pwp_te=ff.scattered_te,
+                    scattered_pwp_tm=ff.scattered_tm,
+                    k0=run_te.k0,
+                    k_medium=run_te.k,
+                    source=source,
+                )
 
         power_basis = None
         cross_sections_basis = None
