@@ -51,6 +51,38 @@ def _component_panel_title(component_name: str) -> str:
     return mapping.get(c, component_name)
 
 
+def _imshow_extent_from_center_grids(axis_0: np.ndarray, axis_1: np.ndarray) -> list[float]:
+    """Return edge-based imshow extent for center-sampled Cartesian grids.
+
+    Near-field slices store coordinate arrays at pixel centers. Matplotlib's
+    `imshow(..., extent=...)` expects outer image edges. Converting center
+    coordinates to edge coordinates avoids a visual half-pixel offset between
+    field pixels and geometric overlays.
+    """
+
+    def _line_edges(values: np.ndarray) -> tuple[float, float]:
+        line = np.asarray(values, dtype=float).reshape(-1)
+        if line.size == 0:
+            raise ValueError("Cannot infer image extent from an empty axis.")
+        if line.size == 1:
+            span = 1.0
+        else:
+            d = np.abs(np.diff(line))
+            d = d[np.isfinite(d) & (d > 0.0)]
+            span = float(np.median(d)) if d.size > 0 else 1.0
+        lo = float(np.min(line)) - 0.5 * span
+        hi = float(np.max(line)) + 0.5 * span
+        return lo, hi
+
+    a0 = np.asarray(axis_0, dtype=float)
+    a1 = np.asarray(axis_1, dtype=float)
+    a0_line = a0[0, :] if a0.ndim == 2 else a0
+    a1_line = a1[:, 0] if a1.ndim == 2 else a1
+    x0, x1 = _line_edges(a0_line)
+    y0, y1 = _line_edges(a1_line)
+    return [x0, x1, y0, y1]
+
+
 def near_field_component(E: np.ndarray, H: np.ndarray, component: str) -> np.ndarray:
     """Extract a scalar map from vector near fields.
 
@@ -217,9 +249,10 @@ def plot_field_component(
     axis_1_label: str = "axis 1",
 ):
     """Plot one scalar field map over a 2D slice grid with equal aspect."""
+    extent = _imshow_extent_from_center_grids(axis_0, axis_1)
     im = ax.imshow(
         F,
-        extent=[axis_0.min(), axis_0.max(), axis_1.min(), axis_1.max()],
+        extent=extent,
         origin="lower",
         cmap=cmap,
         vmin=vmin,
@@ -272,9 +305,10 @@ def plot_poynting(
 ):
     """Plot 2D Poynting-vector quiver, optionally over intensity background."""
     if intensity is not None:
+        extent = _imshow_extent_from_center_grids(axis_0, axis_1)
         ax.imshow(
             intensity,
-            extent=[axis_0.min(), axis_0.max(), axis_1.min(), axis_1.max()],
+            extent=extent,
             origin="lower",
             aspect="auto",
             cmap=intensity_cmap,
@@ -366,6 +400,7 @@ def plot_nearfield_panels(
 ):
     """Plot 8 near-field panels with sphere overlays."""
     axis_0_label, axis_1_label = _slice_axis_labels(plane)
+    extent = _imshow_extent_from_center_grids(axis_0, axis_1)
     component_names = [
         "real Ex",
         "real Ey",
@@ -382,7 +417,7 @@ def plot_nearfield_panels(
     for ax, (name, F) in zip(axes.flat, components):
         im = ax.imshow(
             F,
-            extent=[axis_0.min(), axis_0.max(), axis_1.min(), axis_1.max()],
+            extent=extent,
             origin="lower",
             aspect="equal",
         )
@@ -440,6 +475,7 @@ def plot_nearfield_panels_channels(
 
     channels = list(channel_fields.items())
     axis_0_label, axis_1_label = _slice_axis_labels(plane)
+    extent = _imshow_extent_from_center_grids(axis_0, axis_1)
     component_names = [
         "real Ex",
         "real Ey",
@@ -465,7 +501,7 @@ def plot_nearfield_panels_channels(
         for ax, (name, F) in zip(block_axes.flat, components):
             im = ax.imshow(
                 F,
-                extent=[axis_0.min(), axis_0.max(), axis_1.min(), axis_1.max()],
+                extent=extent,
                 origin="lower",
                 aspect="equal",
             )

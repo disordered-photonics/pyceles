@@ -1,9 +1,11 @@
 import numpy as np
+from matplotlib import pyplot as plt
 
 from pyceles.io.plotting import (
     far_field_intensity,
     far_field_intensity_from_result,
     near_field_component,
+    plot_field_component,
     plot_nearfield_panels_channels,
     unpolarized_near_field_intensity,
 )
@@ -75,3 +77,12 @@ def test_unpolarized_near_field_intensity_is_incoherent_average():
     Iu = unpolarized_near_field_intensity(E_te, E_tm)
     expected = 0.5 * (np.sum(np.abs(E_te) ** 2, axis=-1) + np.sum(np.abs(E_tm) ** 2, axis=-1))
     np.testing.assert_allclose(Iu, expected)
+
+
+def test_plot_field_component_uses_center_based_extent_edges():
+    axis_0, axis_1 = np.meshgrid(np.array([0.0, 1.0, 2.0]), np.array([10.0, 11.0]), indexing="xy")
+    F = np.zeros(axis_0.shape, dtype=float)
+    fig, ax = plt.subplots()
+    im = plot_field_component(ax, axis_0, axis_1, F)
+    np.testing.assert_allclose(im.get_extent(), [-0.5, 2.5, 9.5, 11.5], rtol=0.0, atol=1e-12)
+    plt.close(fig)
