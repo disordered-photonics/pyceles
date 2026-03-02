@@ -18,6 +18,7 @@ from pyceles.core.matvec import (
     make_prepared_A_and_rhs,
     prepare_matvec,
 )
+from pyceles.linear.preconditioner import make_grid_block_preconditioner
 from pyceles.linear.solvers import solve_linear_system
 from pyceles.postprocessing.farfield import compute_far_field_patterns
 
@@ -136,6 +137,18 @@ def main() -> None:
         default="both",
         help="Profile solver with translation block cache off/on or both.",
     )
+    parser.add_argument(
+        "--preconditioner-mode",
+        choices=("none", "grid_block", "both"),
+        default="none",
+        help="Profile solver with no preconditioner, grid-block preconditioner, or both.",
+    )
+    parser.add_argument(
+        "--preconditioner-subdivisions",
+        type=int,
+        default=2,
+        help="Grid subdivisions per axis for built-in grid_block preconditioner.",
+    )
     parser.add_argument("--top-n", type=int, default=80)
     parser.add_argument("--out-dir", type=Path, default=Path("outputs/profiling"))
     parser.add_argument("--quiet", action="store_true")
@@ -222,6 +235,14 @@ def main() -> None:
     else:
         cache_flags = [False, True]
 
+    preconditioner_kinds: list[Literal["none", "grid_block"]]
+    if args.preconditioner_mode == "none":
+        preconditioner_kinds = ["none"]
+    elif args.preconditioner_mode == "grid_block":
+        preconditioner_kinds = ["grid_block"]
+    else:
+        preconditioner_kinds = ["none", "grid_block"]
+
     cache_bytes_est = estimate_translation_cache_bytes(
         n_spheres,
         cfg.lmax,
@@ -249,42 +270,69 @@ def main() -> None:
             operator_dtype=np.dtype(cfg.compute_dtype),
         )
         A_mv, rhs = make_prepared_A_and_rhs(prepared, rhs_input)
-        phase_name = f"solver_cache_{'on' if cache_on else 'off'}"
-        if not args.quiet:
-            print(f"Profiling phase: {phase_name}")
-        solver_res, solver_summary = _profile_phase(
-            phase=phase_name,
-            out_dir=out_dir,
-            top_n=args.top_n,
-            fn=solve_linear_system,
-            A_mv=A_mv,
-            b=rhs,
-            method=cfg.solver_method,
-            A_dense=None,
-            rtol=cfg.solver_rtol,
-            atol=0.0,
-            restart=cfg.solver_restart,
-            maxiter=cfg.solver_maxiter,
-            direct_max_n=cfg.solver_direct_max_n,
-            dtype=np.dtype(cfg.compute_dtype),
-            show_progress=not args.quiet,
+        n_unknowns = int(rhs.shape[0])
+        solver_name = str(cfg.solver_method).lower()
+        will_use_direct = solver_name == "direct" or (
+            solver_name == "auto" and n_unknowns <= int(cfg.solver_direct_max_n)
         )
-        solver_runs.append(
-            {
-                "cache_translation_blocks": bool(cache_on),
-                "solver_result": {
-                    "method": str(solver_res.method),
-                    "iterations": int(solver_res.iterations),
-                    "info": int(solver_res.info),
-                    "relative_residual": float(solver_res.relative_residual),
-                    "residual_norm": float(solver_res.residual_norm),
-                },
-                "summary": solver_summary,
-            }
-        )
-        if primary_solver_res is None:
-            primary_solver_res = solver_res
-            primary_rhs = rhs
+        for precond_kind in preconditioner_kinds:
+            preconditioner = None
+            preconditioner_build_s: float | None = None
+            preconditioner_effective: str = precond_kind
+            if precond_kind == "grid_block":
+                if will_use_direct:
+                    # Direct solves ignore preconditioners; record this explicitly.
+                    preconditioner_effective = "ignored_for_direct"
+                else:
+                    t_pc0 = time.perf_counter()
+                    preconditioner = make_grid_block_preconditioner(
+                        prepared,
+                        subdivisions=int(args.preconditioner_subdivisions),
+                        cubic_bbox=True,
+                        max_block_unknowns=None,
+                        show_progress=not args.quiet,
+                    )
+                    preconditioner_build_s = float(time.perf_counter() - t_pc0)
+
+            phase_name = f"solver_cache_{'on' if cache_on else 'off'}_pc_{preconditioner_effective}"
+            if not args.quiet:
+                print(f"Profiling phase: {phase_name}")
+            solver_res, solver_summary = _profile_phase(
+                phase=phase_name,
+                out_dir=out_dir,
+                top_n=args.top_n,
+                fn=solve_linear_system,
+                A_mv=A_mv,
+                b=rhs,
+                method=cfg.solver_method,
+                A_dense=None,
+                preconditioner=preconditioner,
+                rtol=cfg.solver_rtol,
+                atol=0.0,
+                restart=cfg.solver_restart,
+                maxiter=cfg.solver_maxiter,
+                direct_max_n=cfg.solver_direct_max_n,
+                dtype=np.dtype(cfg.compute_dtype),
+                show_progress=not args.quiet,
+            )
+            solver_runs.append(
+                {
+                    "cache_translation_blocks": bool(cache_on),
+                    "preconditioner": str(preconditioner_effective),
+                    "preconditioner_build_s": preconditioner_build_s,
+                    "solver_result": {
+                        "method": str(solver_res.method),
+                        "iterations": int(solver_res.iterations),
+                        "info": int(solver_res.info),
+                        "relative_residual": float(solver_res.relative_residual),
+                        "residual_norm": float(solver_res.residual_norm),
+                    },
+                    "summary": solver_summary,
+                }
+            )
+            if primary_solver_res is None:
+                primary_solver_res = solver_res
+                primary_rhs = rhs
 
     if primary_solver_res is None or primary_rhs is None:
         raise RuntimeError("No solver profile run was executed.")
@@ -382,6 +430,8 @@ def main() -> None:
             "compute_dtype": compute_dtype_name,
             "accum_dtype": accum_dtype_name,
             "cache_mode": str(args.cache_mode),
+            "preconditioner_mode": str(args.preconditioner_mode),
+            "preconditioner_subdivisions": int(args.preconditioner_subdivisions),
         },
         "estimated_translation_cache_bytes": int(cache_bytes_est),
         "solver_runs": solver_runs,

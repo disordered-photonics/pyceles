@@ -724,7 +724,7 @@ def test_simulation_dual_basis_avoids_redundant_mixed_solve_and_farfield(monkeyp
     assert int(run.solver_result.rhs_count) == 2
 
 
-def test_run_multi_sources_te_tm_matches_single_runs():
+def test_solve_sources_te_tm_matches_single_runs():
     source = PlaneWave(
         wavelength=550.0,
         medium_n=1.0 + 0j,
@@ -749,12 +749,13 @@ def test_run_multi_sources_te_tm_matches_single_runs():
         radii=np.array([60.0], dtype=float),
         n_particle=np.array([1.5 + 0.01j], dtype=np.complex128),
     )
-    multi = sim.run_multi_sources(
+    solved = sim.solve_sources(
         {
             "te": source.with_polarization("TE"),
             "tm": source.with_polarization("TM"),
         }
     )
+    multi = sim.postprocess_sources(solved)
     run_te_single = Simulation(
         SimulationConfig(**{**cfg.__dict__, "source": source.with_polarization("TE")}),
         positions=np.array([[0.0, 0.0, 0.0]], dtype=float),
@@ -773,7 +774,7 @@ def test_run_multi_sources_te_tm_matches_single_runs():
     np.testing.assert_allclose(multi["tm"].coeffs, run_tm_single.coeffs, rtol=1e-6, atol=1e-7)
 
 
-def test_run_multi_sources_sequence_labels():
+def test_solve_sources_sequence_labels():
     src0 = PlaneWave(
         wavelength=550.0,
         medium_n=1.0 + 0j,
@@ -796,9 +797,53 @@ def test_run_multi_sources_sequence_labels():
         radii=np.array([40.0], dtype=float),
         n_particle=np.array([1.45 + 0.01j], dtype=np.complex128),
     )
-    multi = sim.run_multi_sources([src0, src1], labels=["first", "second"])
+    solved = sim.solve_sources([src0, src1], labels=["first", "second"])
+    multi = sim.postprocess_sources(solved)
     assert tuple(multi.labels) == ("first", "second")
     assert set(multi.runs) == {"first", "second"}
+
+
+def test_postprocess_sources_include_farfield_false_keeps_solve_outputs():
+    src0 = PlaneWave(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        polarization="TE",
+        polar_angle=0.4,
+        azimuthal_angle=0.3,
+        amplitude=1.0,
+    )
+    src1 = src0.with_polarization("TM")
+    sim = Simulation(
+        SimulationConfig(
+            wavelength=550.0,
+            n_medium=1.0 + 0j,
+            lmax=2,
+            source=src0,
+            solver_method="direct",
+            verbose=False,
+        ),
+        positions=np.array([[0.0, 0.0, 0.0]], dtype=float),
+        radii=np.array([40.0], dtype=float),
+        n_particle=np.array([1.45 + 0.01j], dtype=np.complex128),
+    )
+
+    solved = sim.solve_sources([src0, src1], labels=["first", "second"])
+    multi_solve_only = sim.postprocess_sources(solved, include_farfield=False)
+    multi_full = sim.postprocess_sources(solved)
+
+    for label in ("first", "second"):
+        run0 = multi_solve_only[label]
+        run1 = multi_full[label]
+        np.testing.assert_allclose(run0.coeffs, run1.coeffs, rtol=1e-7, atol=1e-9)
+        np.testing.assert_allclose(run0.rhs, run1.rhs, rtol=1e-7, atol=1e-9)
+        assert run0.power is None
+        assert run0.cross_sections is None
+        assert run0.farfield.initial_te is None
+        assert run0.farfield.initial_tm is None
+        assert run0.farfield.total_te is None
+        assert run0.farfield.total_tm is None
+        assert int(run0.farfield.scattered_te["coeff"].size) == 0
+        assert int(run0.farfield.scattered_tm["coeff"].size) == 0
 
 
 def test_simulation_supports_no_particle_source_only_run():

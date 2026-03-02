@@ -107,7 +107,8 @@ def far_field_intensity_from_result(run, *, channel: str = "mixed") -> np.ndarra
     channel:
         - ``"mixed"``: source-requested polarization state (`run.farfield`)
         - ``"te"`` or ``"tm"``: pure basis channels (`run.farfield_basis`), or
-          a pure single-channel result returned by `run_multi_sources(...)`
+          a pure single-channel result returned by
+          `postprocess_sources(solve_sources(...))`
         - ``"unpolarized"``: incoherent average ``0.5*(I_te + I_tm)``
     """
     ch = str(channel).lower()
@@ -122,7 +123,8 @@ def far_field_intensity_from_result(run, *, channel: str = "mixed") -> np.ndarra
         raise ValueError(
             "Requested basis far-field channel, but no TE/TM basis payload is available on this run. "
             "Use `solve_polarization_basis=True` with `Simulation.run()`, or use a channel result from "
-            "`Simulation.run_multi_sources(...)` and query it with `channel='mixed'`."
+            "`Simulation.postprocess_sources(Simulation.solve_sources(...))` and query it with "
+            "`channel='mixed'`."
         )
     if ch == "unpolarized":
         if (
@@ -133,7 +135,8 @@ def far_field_intensity_from_result(run, *, channel: str = "mixed") -> np.ndarra
             raise ValueError(
                 "Requested unpolarized intensity, but TE/TM basis far fields are unavailable. "
                 "Use `solve_polarization_basis=True` with `Simulation.run()`, or compute it from "
-                "`Simulation.run_multi_sources(...)` by averaging TE/TM channel intensities."
+                "`Simulation.postprocess_sources(Simulation.solve_sources(...))` by averaging "
+                "TE/TM channel intensities."
             )
         I_te = far_field_intensity(
             run.farfield_basis["te"].scattered_te, run.farfield_basis["te"].scattered_tm

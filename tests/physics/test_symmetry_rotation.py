@@ -87,12 +87,13 @@ def test_single_sphere_normal_incidence_unpolarized_scattering_is_azimuthally_sy
         radii=np.array([90.0], dtype=float),
         n_particle=np.array([1.48 + 0.01j], dtype=np.complex128),
     )
-    multi = sim.run_multi_sources(
+    solved = sim.solve_sources(
         {
             "te": source.with_polarization("TE"),
             "tm": source.with_polarization("TM"),
         }
     )
+    multi = sim.postprocess_sources(solved)
     I = 0.5 * (_scattered_intensity(multi["te"]) + _scattered_intensity(multi["tm"]))
 
     mean_beta = np.mean(I, axis=0)

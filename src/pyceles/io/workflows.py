@@ -37,7 +37,8 @@ def save_simulation_h5(
     - basis far-field families (`far_field_basis/te`, `far_field_basis/tm`)
     - basis and unpolarized diagnostics under `diagnostics`.
 
-    For `Simulation.run_multi_sources(...)`, save each channel result
+    For `Simulation.solve_sources(...)` + `Simulation.postprocess_sources(...)`,
+    save each channel result
     individually (for example `save_simulation_h5(multi["te"], ...)`).
     """
     out_h5 = Path(out_h5)

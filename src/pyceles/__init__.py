@@ -27,6 +27,7 @@ from pyceles.simulation import (
     Simulation,
     SimulationConfig,
     SimulationResult,
+    SolvedSourcesResult,
 )
 
 __all__ = [
@@ -41,6 +42,7 @@ __all__ = [
     "Simulation",
     "SimulationConfig",
     "SimulationResult",
+    "SolvedSourcesResult",
     "MultiSourceSimulationResult",
     "NearFieldSlice",
     "DipolePowerLDOSResult",

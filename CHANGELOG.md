@@ -42,10 +42,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `SimulationResult.polarization_jones` is now reserved for propagating TE/TM
   sources and set to `None` for local dipole sources to avoid misleading
   placeholder metadata.
-- Added `Simulation.run_multi_sources(...)` as the general multi-channel API:
-  any labeled source set now runs through one shared-operator multi-RHS solve.
+- Breaking: introduced explicit phase split for multi-source workflows:
+  - `Simulation.solve_sources(...)` is now the canonical solve-only API,
+  - `Simulation.postprocess_sources(...)` performs optional channel postprocessing
+    (far field, power, cross sections),
+  - `Simulation.run_multi_sources(...)` was removed.
 - `solve_polarization_basis=True` now acts as a convenience `run()` wrapper
-  built on top of `run_multi_sources(...)` (TE/TM channels + Jones mixed
+  built on top of `solve_sources(...)` + `postprocess_sources(...)` (TE/TM channels + Jones mixed
   recombination + unpolarized diagnostics).
 - `examples/minimal_pyceles_demo.py` now includes a dipole-collection run on
   the same 4-particle geometry and uses autoscaled near-field panel limits for
@@ -60,7 +63,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and may disable periodic fast-path detection.
 - IO/postprocessing channel helper guidance now consistently covers both
   `solve_polarization_basis=True` runs and per-channel
-  `run_multi_sources(...)` results (near-field channel selection and
+  `postprocess_sources(solve_sources(...))` results (near-field channel selection and
   far-field intensity convenience helper).
 - `solve_polarization_basis=True` is now explicitly restricted to propagating
   TE/TM sources (`PlaneWave`/`GaussianBeam`), and raises for dipole sources.

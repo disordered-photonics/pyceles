@@ -354,7 +354,11 @@ class NearFieldRadialLUT:
 
     def interp(self, l: int, r: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Linearly interpolate precomputed radial kernels at requested radii."""
-        # linear interp in r domain, r>=0
+        # Keep this tiny kernel local: the LUT radius grid is uniform, so we can
+        # jump in O(1) to each interval via floor(r/dr) and reuse the same
+        # interpolation weights for both radial arrays (`h` and `dxxz`).
+        # Generic interpolation helpers would add avoidable index-search overhead
+        # in this hot inner loop.
         r = np.asarray(r, np.float64)
         ri = self.ri
         idx = np.clip((r / self.dr).astype(np.int64), 0, len(ri) - 2)

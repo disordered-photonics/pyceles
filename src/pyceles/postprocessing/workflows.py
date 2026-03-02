@@ -177,7 +177,8 @@ def compute_near_field(
           (default).
         - ``"te"`` / ``"tm"``: evaluate one pure basis channel. Requires
           `run.coeffs_basis` from `solve_polarization_basis=True`, or a pure
-          single-channel result returned by `run_multi_sources(...)`.
+          single-channel result from
+          `postprocess_sources(solve_sources(...))`.
     """
     pts_flat, lead_shape = _reshape_field_points(points)
 
@@ -205,7 +206,8 @@ def compute_near_field(
             raise ValueError(
                 "Requested basis near-field channel, but `run.coeffs_basis` is not available. "
                 "Use `solve_polarization_basis=True` with `Simulation.run()`, or use a "
-                "channel result from `Simulation.run_multi_sources(...)` and query it with "
+                "channel result from "
+                "`Simulation.postprocess_sources(Simulation.solve_sources(...))` and query it with "
                 "`channel='mixed'`."
             )
         if used_basis_payload:

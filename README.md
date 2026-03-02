@@ -56,8 +56,10 @@ Users of pyceles are referred to the publications listed in the CELES and SMUTHI
   - `None` geometry inputs are rejected to avoid accidental empty runs
 - Channel-aware polarization workflow:
   - source polarization accepts CELES-style `"TE"`, `"TM"` or Jones weights `(a_te, a_tm)`
-  - `Simulation.run_multi_sources(...)` solves any labeled source set in one
-    simulation call (shared operator, multi-RHS solve)
+  - `Simulation.solve_sources(...)` is the canonical solve-only API for any
+    labeled source set (shared operator, multi-RHS solve)
+  - `Simulation.postprocess_sources(...)` turns solved channels into
+    per-channel `SimulationResult` outputs (optionally with far-field diagnostics)
   - optional dual-basis convenience mode (`solve_polarization_basis=True`) still
     provides one mixed+basis+unpolarized `SimulationResult`
   - mixed outputs are combined from Jones weights
@@ -219,6 +221,8 @@ Reproduce:
 ```bash
 python examples/profile_pyceles_phases.py --n-particles 500 --lmax 3 --dx 40 --compute-dtype complex128 --accum-dtype complex128 --out-dir outputs/profiling_py312_c128a128 --quiet
 python examples/profile_pyceles_phases.py --n-particles 500 --lmax 3 --dx 40 --compute-dtype complex64 --accum-dtype complex128 --out-dir outputs/profiling_py312_c64a128 --quiet
+# optional: compare no-preconditioner vs grid_block in the same run
+python examples/profile_pyceles_phases.py --n-particles 500 --lmax 3 --dx 40 --preconditioner-mode both --preconditioner-subdivisions 2 --cache-mode off --out-dir outputs/profiling_py312_precond_compare --quiet
 ```
 
 Phase wall times:
@@ -357,26 +361,30 @@ dip = pcl.DipoleSource(
     medium_n=1.0 + 0j,
     position=(0.0, 0.0, 0.0),
 )
-multi = sim.run_multi_sources(dip.cartesian_basis_sources())  # px, py, pz
+solved = sim.solve_sources(dip.cartesian_basis_sources())  # px, py, pz
+multi = sim.postprocess_sources(solved, include_farfield=False)
 ```
 
 ## Multi-Source Solve (Recommended)
 
-Use `run_multi_sources(...)` when you need multiple channels (for example TE/TM
-basis, dipole x/y/z, or SLM pattern sweeps) solved on the same geometry:
+Use `solve_sources(...)` when you need multiple channels (for example TE/TM
+basis, dipole x/y/z, or SLM pattern sweeps) on the same geometry.
+Then call `postprocess_sources(...)` when you need channel-level far-field or
+power diagnostics:
 
 ```python
 sim = pcl.Simulation(cfg, positions=pos, radii=rad, n_particle=n_part)
-multi = sim.run_multi_sources(
+solved = sim.solve_sources(
     {
         "te": source.with_polarization("TE"),
         "tm": source.with_polarization("TM"),
     }
 )
+multi = sim.postprocess_sources(solved)
 
 run_te = multi["te"]
 run_tm = multi["tm"]
-print(multi.solver_result.rhs_count)  # 2
+print(solved.solver_result.rhs_count)  # 2
 ```
 
 ## Dual-Basis Convenience Run
@@ -411,7 +419,7 @@ nf_te = pcl.compute_near_field_slice(run, channel="te")
 nf_tm = pcl.compute_near_field_slice(run, channel="tm")
 ```
 
-For `run_multi_sources(...)` outputs, each channel run is already pure. Use
+For `postprocess_sources(solve_sources(...))` outputs, each channel run is already pure. Use
 `channel="mixed"` on that channel result:
 
 ```python
@@ -488,7 +496,7 @@ Notes:
   - mixed and basis power/cross-sections/decompositions
   - unpolarized diagnostics
   - Jones weights
-- for `run_multi_sources(...)`, save each channel run separately (for example
+- for `postprocess_sources(solve_sources(...))`, save each channel run separately (for example
   `save_simulation_h5(multi["te"], ...)`, `save_simulation_h5(multi["tm"], ...)`)
 
 Loading helpers are available via `pcl.io`:

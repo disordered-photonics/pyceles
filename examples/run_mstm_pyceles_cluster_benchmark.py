@@ -583,12 +583,13 @@ def _pyceles_run(
     )
 
     sim = pcl.Simulation(sim_cfg, positions=positions, radii=radii, n_particle=n_particle)
-    multi = sim.run_multi_sources(
+    solved = sim.solve_sources(
         {
             "te": source.with_polarization("TE"),
             "tm": source.with_polarization("TM"),
         }
     )
+    multi = sim.postprocess_sources(solved)
     run_basis = {"te": multi["te"], "tm": multi["tm"]}
 
     eff_basis: dict[str, dict[str, float]] = {}
