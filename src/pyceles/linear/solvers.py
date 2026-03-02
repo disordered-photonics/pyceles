@@ -39,6 +39,7 @@ class LinearSolveResult:
 
 
 GmresResult = LinearSolveResult
+DenseLUFactorization = tuple[np.ndarray, np.ndarray]
 
 
 def estimate_dense_matrix_bytes(n: int, *, dtype: npt.DTypeLike = np.complex128) -> int:
@@ -48,6 +49,22 @@ def estimate_dense_matrix_bytes(n: int, *, dtype: npt.DTypeLike = np.complex128)
     if n < 0:
         raise ValueError("n must be non-negative")
     return n * n * np.dtype(dtype).itemsize
+
+
+def factorize_dense_matrix(
+    A_dense: np.ndarray,
+    *,
+    dtype: npt.DTypeLike = np.complex128,
+) -> DenseLUFactorization:
+    """Return LU factorization payload for repeated direct solves."""
+    import scipy.linalg
+
+    solve_dtype = np.dtype(dtype)
+    A = np.asarray(A_dense, dtype=solve_dtype)
+    if A.ndim != 2 or A.shape[0] != A.shape[1]:
+        raise ValueError(f"`A_dense` must be a square 2D matrix. Got shape {A.shape}.")
+    lu, piv = scipy.linalg.lu_factor(A, overwrite_a=False, check_finite=False)
+    return np.asarray(lu), np.asarray(piv)
 
 
 def _apply_operator(op: Callable[[np.ndarray], np.ndarray], x: np.ndarray) -> np.ndarray:
@@ -505,6 +522,7 @@ def direct_dense_scipy(
     b: np.ndarray,
     *,
     A_dense: Optional[np.ndarray] = None,
+    A_factorized: DenseLUFactorization | None = None,
     max_n: int = 15000,
     dtype: npt.DTypeLike = np.complex128,
     show_progress: bool = True,
@@ -512,6 +530,14 @@ def direct_dense_scipy(
     """Dense direct solve by explicit matrix assembly.
 
     This is intended only for small systems.
+
+    Parameters
+    ----------
+    A_dense:
+        Optional preassembled dense matrix.
+    A_factorized:
+        Optional LU factorization payload `(lu, piv)` for repeated solves on
+        the same operator. If provided, factorization is not recomputed.
 
     Notes
     -----
@@ -539,29 +565,44 @@ def direct_dense_scipy(
             "Use an iterative method or raise `max_n` explicitly."
         )
 
-    if A_dense is not None:
-        A = np.asarray(A_dense, dtype=solve_dtype)
-        if A.shape != (n, n):
-            raise ValueError(f"A_dense must have shape ({n},{n}), got {A.shape}.")
+    if A_factorized is not None:
+        lu, piv = A_factorized
+        lu_arr = np.asarray(lu, dtype=solve_dtype)
+        piv_arr = np.asarray(piv, dtype=np.int32).reshape(-1)
+        if lu_arr.shape != (n, n):
+            raise ValueError(
+                f"`A_factorized[0]` (LU matrix) must have shape ({n},{n}). Got {lu_arr.shape}."
+            )
+        if piv_arr.shape != (n,):
+            raise ValueError(
+                f"`A_factorized[1]` (pivot vector) must have shape ({n},). Got {piv_arr.shape}."
+            )
     else:
-        A = np.empty((n, n), dtype=solve_dtype)
-        eye = np.eye(n, dtype=solve_dtype)
-        col_iter = range(n)
-        if show_progress:
-            col_iter = tqdm(col_iter, desc="Assemble A (dense via matvec)")
-        for j in col_iter:
-            A[:, j] = np.asarray(A_mv(eye[:, j]), dtype=solve_dtype)
+        if A_dense is not None:
+            A = np.asarray(A_dense, dtype=solve_dtype)
+            if A.shape != (n, n):
+                raise ValueError(f"A_dense must have shape ({n},{n}), got {A.shape}.")
+        else:
+            A = np.empty((n, n), dtype=solve_dtype)
+            eye = np.eye(n, dtype=solve_dtype)
+            col_iter = range(n)
+            if show_progress:
+                col_iter = tqdm(col_iter, desc="Assemble A (dense via matvec)")
+            for j in col_iter:
+                A[:, j] = np.asarray(A_mv(eye[:, j]), dtype=solve_dtype)
+        lu_arr, piv_arr = scipy.linalg.lu_factor(A, overwrite_a=False, check_finite=False)
 
-    x_mat = scipy.linalg.solve(
-        A, b_mat, assume_a="gen", overwrite_a=False, overwrite_b=False, check_finite=False
+    x_mat = scipy.linalg.lu_solve(
+        (lu_arr, piv_arr),
+        b_mat,
+        overwrite_b=False,
+        check_finite=False,
     )
     if squeezed:
         x = x_mat[:, 0]
-        return _finalize_result(
-            lambda v: A @ np.asarray(v), b_mat[:, 0], x, info=0, iterations=1, method="direct"
-        )
+        return _finalize_result(A_mv, b_mat[:, 0], x, info=0, iterations=1, method="direct")
     return _finalize_multi_result(
-        lambda v: A @ np.asarray(v),
+        A_mv,
         b_mat,
         x_mat,
         info=np.zeros((x_mat.shape[1],), dtype=int),
@@ -577,6 +618,7 @@ def solve_linear_system(
     *,
     method: str = "auto",
     A_dense: Optional[np.ndarray] = None,
+    A_factorized: DenseLUFactorization | None = None,
     x0: Optional[np.ndarray] = None,
     preconditioner: Optional[Callable[[np.ndarray], np.ndarray]] = None,
     rtol: float = 1e-6,
@@ -591,7 +633,9 @@ def solve_linear_system(
 
     Supported methods: `auto`, `gmres`, `bicgstab`, `lgmres`, `gcrotmk`, `direct`.
     If `method` resolves to `direct`, an optional preassembled `A_dense` can be
-    supplied to avoid expensive column-by-column assembly via `A_mv`.
+    supplied to avoid expensive column-by-column assembly via `A_mv`, and an
+    optional `A_factorized=(lu, piv)` payload can be supplied to reuse LU
+    factorization across repeated direct solves.
 
     Parameters
     ----------
@@ -637,6 +681,7 @@ def solve_linear_system(
             A_mv,
             b_mat if nrhs > 1 else b_mat[:, 0],
             A_dense=A_dense,
+            A_factorized=A_factorized,
             max_n=direct_max_n,
             dtype=dtype,
             show_progress=show_progress,
@@ -659,6 +704,7 @@ def solve_linear_system(
                 b_mat[:, j],
                 method=m,
                 A_dense=A_dense,
+                A_factorized=A_factorized,
                 x0=x0_j,
                 preconditioner=preconditioner,
                 rtol=rtol,

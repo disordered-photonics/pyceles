@@ -724,6 +724,49 @@ def test_simulation_dual_basis_avoids_redundant_mixed_solve_and_farfield(monkeyp
     assert int(run.solver_result.rhs_count) == 2
 
 
+def test_solve_sources_reuses_dense_lu_factorization(monkeypatch):
+    import pyceles.simulation as simulation_module
+
+    lu_factor_calls = 0
+    factorize_dense_matrix_real = simulation_module.factorize_dense_matrix
+
+    def _factorize_wrapped(A_dense, **kwargs):
+        nonlocal lu_factor_calls
+        lu_factor_calls += 1
+        return factorize_dense_matrix_real(A_dense, **kwargs)
+
+    monkeypatch.setattr(simulation_module, "factorize_dense_matrix", _factorize_wrapped)
+
+    source = PlaneWave(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        polarization=(1.0 + 0.0j, 1.0j),
+        polar_angle=0.4,
+        azimuthal_angle=0.3,
+        amplitude=1.0,
+    )
+    cfg = SimulationConfig(
+        wavelength=550.0,
+        n_medium=1.0 + 0j,
+        lmax=3,
+        source=source,
+        solver_method="direct",
+        verbose=False,
+    )
+    sim = Simulation(
+        cfg,
+        positions=np.array([[0.0, 0.0, 0.0]], dtype=float),
+        radii=np.array([60.0], dtype=float),
+        n_particle=np.array([1.5 + 0.01j], dtype=np.complex128),
+    )
+
+    solved0 = sim.solve_sources({"te": source.with_polarization("TE")})
+    solved1 = sim.solve_sources({"tm": source.with_polarization("TM")})
+
+    assert lu_factor_calls == 1
+    assert solved0.coeffs["te"].shape == solved1.coeffs["tm"].shape
+
+
 def test_solve_sources_te_tm_matches_single_runs():
     source = PlaneWave(
         wavelength=550.0,

@@ -50,6 +50,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `solve_polarization_basis=True` now acts as a convenience `run()` wrapper
   built on top of `solve_sources(...)` + `postprocess_sources(...)` (TE/TM channels + Jones mixed
   recombination + unpolarized diagnostics).
+- Direct-solver repeated solves on the same `Simulation` instance now reuse a
+  cached LU factorization of the dense operator in addition to reusing the
+  dense matrix assembly.
 - `examples/minimal_pyceles_demo.py` now includes a dipole-collection run on
   the same 4-particle geometry and uses autoscaled near-field panel limits for
   that dipole case.

@@ -24,8 +24,10 @@ from pyceles.core.sources import (
 )
 from pyceles.linear.preconditioner import make_grid_block_preconditioner
 from pyceles.linear.solvers import (
+    DenseLUFactorization,
     LinearSolveResult,
     estimate_dense_matrix_bytes,
+    factorize_dense_matrix,
     solve_linear_system,
 )
 from pyceles.postprocessing.farfield import (
@@ -809,6 +811,8 @@ class Simulation:
         self._prepared_operator_dtype: np.dtype | None = None
         self._dense_operator_cache: np.ndarray | None = None
         self._dense_operator_dtype: np.dtype | None = None
+        self._dense_lu_cache: DenseLUFactorization | None = None
+        self._dense_lu_dtype: np.dtype | None = None
         if bool(self.config.check_circumscribing_sphere_overlap):
             overlap = _first_overlapping_circumscribing_pair(
                 self.positions,
@@ -1129,6 +1133,8 @@ class Simulation:
                 self._prepared_operator_dtype = np.dtype(compute_dtype)
                 self._dense_operator_cache = None
                 self._dense_operator_dtype = None
+                self._dense_lu_cache = None
+                self._dense_lu_dtype = None
             else:
                 prepared = self._prepared_operator_cache
             if prepared is None:
@@ -1153,6 +1159,21 @@ class Simulation:
                     self._dense_operator_dtype = np.dtype(compute_dtype)
                 else:
                     A_dense = self._dense_operator_cache
+                need_dense_lu = (
+                    self._dense_lu_cache is None
+                    or self._dense_lu_dtype is None
+                    or self._dense_lu_dtype != compute_dtype
+                )
+                if need_dense_lu:
+                    if A_dense is None:
+                        raise RuntimeError("Internal error: direct solve requires dense operator.")
+                    # Cache LU once per (geometry, config, dtype) so repeated
+                    # direct solves with changed RHS avoid O(n^3) refactorization.
+                    self._dense_lu_cache = factorize_dense_matrix(A_dense, dtype=compute_dtype)
+                    self._dense_lu_dtype = np.dtype(compute_dtype)
+                A_lu = self._dense_lu_cache
+            else:
+                A_lu = None
 
         rhs_matrix = np.column_stack([rhs_flat[label] for label in labels])
         rhs_arg = rhs_matrix[:, 0] if n_channels == 1 else rhs_matrix
@@ -1225,6 +1246,7 @@ class Simulation:
                 rhs_arg,
                 method=cfg.solver_method,
                 A_dense=A_dense,
+                A_factorized=A_lu,
                 x0=warm_start,
                 preconditioner=solver_preconditioner,
                 rtol=float(cfg.solver_rtol),

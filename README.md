@@ -485,6 +485,8 @@ Notes:
 - For many-sphere systems, `n = N_spheres * n_modes(lmax)`.
 - `SimulationConfig.solver_direct_max_n` is the high-level knob passed to the
   low-level solver's `direct_max_n/max_n` guard.
+- Repeated direct solves on the same `Simulation` instance (for changed RHS/source)
+  reuse both dense `A` and its LU factorization.
 - If `solver_preconditioner` (custom callable) is set, keep
   `solver_preconditioner_kind="none"` to avoid ambiguous configuration.
 

@@ -4,6 +4,7 @@ from pyceles.io.hdf5 import load_solution_h5, save_solution_h5
 from pyceles.linear.solvers import (
     direct_dense_scipy,
     estimate_dense_matrix_bytes,
+    factorize_dense_matrix,
     gcrotmk_scipy,
     gmres_scipy,
     lgmres_scipy,
@@ -43,6 +44,25 @@ def test_direct_dense_uses_preassembled_matrix():
     A = np.array([[2.0 + 0j, 1.0 - 1.0j], [0.5 + 0.2j, 3.0 + 0j]], dtype=np.complex128)
     b = np.array([1.0 + 0j, -2.0 + 0.5j], dtype=np.complex128)
     out = direct_dense_scipy(lambda x: x.copy(), b, A_dense=A, max_n=16, show_progress=False)
+    np.testing.assert_allclose(A @ out.x, b, atol=1e-12, rtol=1e-12)
+    assert out.info == 0
+    assert out.method == "direct"
+
+
+def test_direct_dense_uses_precomputed_lu_factorization():
+    A = np.array(
+        [[2.0 + 0j, 1.0 - 1.0j], [0.5 + 0.2j, 3.0 + 0j]],
+        dtype=np.complex128,
+    )
+    b = np.array([1.0 + 0j, -2.0 + 0.5j], dtype=np.complex128)
+    lu = factorize_dense_matrix(A, dtype=np.complex128)
+    out = direct_dense_scipy(
+        lambda x: A @ np.asarray(x),
+        b,
+        A_factorized=lu,
+        max_n=16,
+        show_progress=False,
+    )
     np.testing.assert_allclose(A @ out.x, b, atol=1e-12, rtol=1e-12)
     assert out.info == 0
     assert out.method == "direct"
@@ -92,6 +112,22 @@ def test_solve_linear_system_supports_multi_rhs_direct():
         B,
         method="direct",
         A_dense=A,
+        show_progress=False,
+    )
+    np.testing.assert_allclose(A @ out.x, B, atol=1e-12, rtol=1e-12)
+    assert out.rhs_count == 2
+    assert np.asarray(out.info).shape == (2,)
+
+
+def test_solve_linear_system_supports_multi_rhs_direct_with_precomputed_lu():
+    A = np.array([[3.0 + 0j, 1.0 + 0j], [0.0 + 0j, 2.0 + 0j]], dtype=np.complex128)
+    B = np.array([[1.0 + 0j, 2.0 + 0j], [3.0 + 0j, -1.0 + 0j]], dtype=np.complex128)
+    lu = factorize_dense_matrix(A, dtype=np.complex128)
+    out = solve_linear_system(
+        lambda x: A @ np.asarray(x),
+        B,
+        method="direct",
+        A_factorized=lu,
         show_progress=False,
     )
     np.testing.assert_allclose(A @ out.x, B, atol=1e-12, rtol=1e-12)

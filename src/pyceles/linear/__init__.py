@@ -4,11 +4,13 @@ from .preconditioner import (
     regular_grid_partition,
 )
 from .solvers import (
+    DenseLUFactorization,
     GmresResult,
     LinearSolveResult,
     bicgstab_scipy,
     direct_dense_scipy,
     estimate_dense_matrix_bytes,
+    factorize_dense_matrix,
     gcrotmk_scipy,
     gmres_scipy,
     lgmres_scipy,
@@ -16,11 +18,13 @@ from .solvers import (
 )
 
 __all__ = [
+    "DenseLUFactorization",
     "GmresResult",
     "LinearSolveResult",
     "bicgstab_scipy",
     "direct_dense_scipy",
     "estimate_dense_matrix_bytes",
+    "factorize_dense_matrix",
     "gcrotmk_scipy",
     "gmres_scipy",
     "lgmres_scipy",
