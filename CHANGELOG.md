@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Added `SLMSource` (angular-spectrum wrapper source) for complex
+  phase/amplitude modulation of propagating TE/TM beams on `(alpha, beta)`
+  grids.
 - Local electric-source models:
   - `DipoleSource` for one point electric dipole
   - `DipoleCollection` for multiple dipoles
@@ -50,6 +53,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `solve_polarization_basis=True` now acts as a convenience `run()` wrapper
   built on top of `solve_sources(...)` + `postprocess_sources(...)` (TE/TM channels + Jones mixed
   recombination + unpolarized diagnostics).
+- Source handling across solve/far-field/plotting workflows now follows source
+  capabilities (`Source`/`AngularSpectrumSource` + Jones metadata) instead of
+  hard-coded concrete-class checks, so wrapper propagating sources (for example
+  `SLMSource`) participate in the same TE/TM basis workflows.
 - Direct-solver repeated solves on the same `Simulation` instance now reuse a
   cached LU factorization of the dense operator in addition to reusing the
   dense matrix assembly.
@@ -76,8 +83,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `solve_polarization_basis=True` runs and per-channel
   `postprocess_sources(solve_sources(...))` results (near-field channel selection and
   far-field intensity convenience helper).
-- `solve_polarization_basis=True` is now explicitly restricted to propagating
-  TE/TM sources (`PlaneWave`/`GaussianBeam`), and raises for dipole sources.
+- `solve_polarization_basis=True` remains undefined for local dipole sources,
+  and is now validated by TE/TM-source capabilities instead of concrete type
+  names.
 - Conservative LUT-radius helper logic is now centralized in
   `core.geometry_bounds`, removing duplicate cross-set bound implementations.
 - Dipole-source documentation/error messages now explicitly note that the

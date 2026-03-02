@@ -56,6 +56,8 @@ Users of pyceles are referred to the publications listed in the CELES and SMUTHI
   - `None` geometry inputs are rejected to avoid accidental empty runs
 - Channel-aware polarization workflow:
   - source polarization accepts CELES-style `"TE"`, `"TM"` or Jones weights `(a_te, a_tm)`
+  - `SLMSource(base_source, modulation)` wrapper for angular-spectrum complex modulation
+    (phase/amplitude masks on TE/TM plane-wave amplitudes)
   - `Simulation.solve_sources(...)` is the canonical solve-only API for any
     labeled source set (shared operator, multi-RHS solve)
   - `Simulation.postprocess_sources(...)` turns solved channels into
@@ -281,6 +283,20 @@ is an explicit tradeoff for systems where RAM is plentiful.
 All propagating sources support:
 - `polarization="TE"` or `"TM"`
 - `polarization=(a_te, a_tm)` with complex Jones-like amplitudes
+
+An SLM-style modulation wrapper is available for angular-spectrum sources:
+
+```python
+source = pcl.SLMSource(
+    base_source=pcl.GaussianBeam(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        polarization=(1.0 + 0j, 0.3j),
+        beam_width=1800.0,
+    ),
+    modulation=lambda alpha, beta: np.exp(-1j * 0.2 * np.cos(alpha) * np.sin(beta)),
+)
+```
 
 Example:
 
