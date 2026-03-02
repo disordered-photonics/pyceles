@@ -53,9 +53,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Direct-solver repeated solves on the same `Simulation` instance now reuse a
   cached LU factorization of the dense operator in addition to reusing the
   dense matrix assembly.
+- Added `solver_compute_final_residual` control (config + per-call override in
+  `solve_sources(...)`) so repeated direct multi-source workflows can skip
+  final residual diagnostics when speed is preferred.
+- Direct solver runs now print an explicit solve-phase status line (setup mode,
+  RHS count, residual-check mode) so verbose output no longer jumps from dense
+  assembly directly to postprocessing logs.
 - `examples/minimal_pyceles_demo.py` now includes a dipole-collection run on
   the same 4-particle geometry and uses autoscaled near-field panel limits for
   that dipole case.
+- `examples/minimal_pyceles_demo.py` now also computes a coarse dipole LDOS
+  enhancement map (`px`, `py`, `pz`, averaged) on the same y-slice.
 
 ### Fixed
 - Dtype parsing for `compute_dtype`/`accum_dtype` now accepts generic NumPy

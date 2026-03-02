@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
+import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
+from tqdm.auto import tqdm
 
 import pyceles as pcl
 
@@ -67,6 +70,120 @@ def _render_outputs(
     )
     fig_ff.savefig(out_dir / f"{stem}_farfield.png", dpi=200)
     plt.close(fig_ff)
+
+
+def _render_quick_ldos_map(
+    sim: pcl.Simulation,
+    *,
+    out_dir: Path,
+    stem: str,
+    x_min: float = -700.0,
+    x_max: float = 700.0,
+    z_min: float = -500.0,
+    z_max: float = 500.0,
+    dx: float = 100.0,
+    plane_value: float = 0.0,
+    moment_magnitude: complex = 1.0 + 0j,
+) -> None:
+    """Compute and plot a coarse dipole-LDOS map on a y-slice."""
+    cfg = sim.config
+    sim_map = pcl.Simulation(
+        replace(cfg, verbose=False),
+        positions=sim.positions,
+        radii=sim.radii,
+        n_particle=sim.n_particle,
+    )
+    x = np.arange(float(x_min), float(x_max) + 0.5 * float(dx), float(dx), dtype=float)
+    z = np.arange(float(z_min), float(z_max) + 0.5 * float(dx), float(dx), dtype=float)
+    xx, zz = np.meshgrid(x, z)
+    points = np.stack([xx, np.full_like(xx, float(plane_value)), zz], axis=-1)
+    points_flat = points.reshape(-1, 3)
+
+    inside = np.zeros((points_flat.shape[0],), dtype=bool)
+    if sim_map.positions.shape[0] > 0:
+        dr = points_flat[:, None, :] - sim_map.positions[None, :, :]
+        inside = np.any(np.linalg.norm(dr, axis=2) < sim_map.radii[None, :], axis=1)
+    inside = inside.reshape(xx.shape)
+
+    ldos_px = np.full(xx.shape, np.nan, dtype=float)
+    ldos_py = np.full(xx.shape, np.nan, dtype=float)
+    ldos_pz = np.full(xx.shape, np.nan, dtype=float)
+
+    valid_ids = np.argwhere(~inside)
+    for i, j in tqdm(valid_ids, desc="LDOS map pixels", unit="px", leave=False):
+        probe = pcl.DipoleSource(
+            wavelength=float(cfg.wavelength),
+            medium_n=complex(cfg.n_medium),
+            position=(float(xx[i, j]), float(plane_value), float(zz[i, j])),
+            dipole_moment=(moment_magnitude, 0.0 + 0j, 0.0 + 0j),
+        )
+        solved = sim_map.solve_sources(
+            probe.cartesian_basis_sources(
+                labels=("px", "py", "pz"),
+                moment_magnitude=moment_magnitude,
+            ),
+            solver_compute_final_residual=False,
+        )
+        multi = sim_map.postprocess_sources(solved, include_farfield=False)
+        ldos_px[i, j] = float(
+            pcl.compute_dipole_ldos_enhancement(multi["px"], channel="mixed", show_progress=False)
+        )
+        ldos_py[i, j] = float(
+            pcl.compute_dipole_ldos_enhancement(multi["py"], channel="mixed", show_progress=False)
+        )
+        ldos_pz[i, j] = float(
+            pcl.compute_dipole_ldos_enhancement(multi["pz"], channel="mixed", show_progress=False)
+        )
+
+    ldos_avg = (ldos_px + ldos_py + ldos_pz) / 3.0
+    panel_data = [
+        (ldos_px, "Projected LDOS/Purcell enhancement (px)"),
+        (ldos_py, "Projected LDOS/Purcell enhancement (py)"),
+        (ldos_pz, "Projected LDOS/Purcell enhancement (pz)"),
+        (ldos_avg, "Orientation-averaged enhancement"),
+    ]
+    finite_vals = np.concatenate([arr[np.isfinite(arr)] for arr, _ in panel_data])
+    if finite_vals.size > 0:
+        delta = max(1e-6, float(np.max(np.abs(finite_vals - 1.0))))
+    else:
+        delta = 1e-3
+    vmin = 1.0 - delta
+    vmax = 1.0 + delta
+    norm = mcolors.TwoSlopeNorm(vmin=vmin, vcenter=1.0, vmax=vmax)
+
+    fig, axes = plt.subplots(1, 4, figsize=(22, 4.6), constrained_layout=True)
+    panel_data = [
+        (ldos_px, "LDOS enhancement (px)"),
+        (ldos_py, "LDOS enhancement (py)"),
+        (ldos_pz, "LDOS enhancement (pz)"),
+        (ldos_avg, "LDOS enhancement (avg)"),
+    ]
+    for ax, (data, title) in zip(np.ravel(axes), panel_data):
+        im = pcl.io.plot_field_component(
+            ax,
+            xx,
+            zz,
+            data,
+            title=title,
+            cmap="coolwarm",
+            vmin=vmin,
+            vmax=vmax,
+            axis_0_label="x",
+            axis_1_label="z",
+        )
+        im.set_norm(norm)
+        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        pcl.io.plot_spheres(
+            ax,
+            sim_map.positions,
+            sim_map.radii,
+            plane="y",
+            plane_value=float(plane_value),
+            alpha=0.7,
+            color="w",
+        )
+    fig.savefig(out_dir / f"{stem}_ldos.png", dpi=200)
+    plt.close(fig)
 
 
 def main() -> None:
@@ -143,13 +260,14 @@ def main() -> None:
     cfg_dip = pcl.SimulationConfig(
         wavelength=550.0,
         n_medium=1.0 + 0j,
-        lmax=3,
+        lmax=4,
         source=dipoles,
-        compute_dtype="complex64",
+        compute_dtype="complex128",
         accum_dtype="complex128",
         polar_angles=pcl.core.uniform_polar_grid(721),
         azimuthal_angles=pcl.core.uniform_periodic_azimuth_grid(360),
-        solver_method="auto",
+        solver_method="direct",
+        solver_compute_final_residual=False,
         verbose=True,
     )
     sim_dip = pcl.Simulation(cfg_dip, positions=positions, radii=radii, n_particle=n_particle)
@@ -175,6 +293,13 @@ def main() -> None:
         out_dir=out_dir,
         stem="minimal_pyceles_demo_dipoles",
         auto_nearfield_limits=True,
+    )
+    _render_quick_ldos_map(
+        sim_dip,
+        out_dir=out_dir,
+        stem="minimal_pyceles_demo_dipoles",
+        plane_value=0.0,
+        dx=100.0,
     )
 
 
