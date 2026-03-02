@@ -368,6 +368,10 @@ class SimulationConfig:
     Solver extensibility options:
     - `solver_warm_start`: optional initial guess for iterative/direct solves,
       shape `(unknowns,)` or `(unknowns, nrhs)`.
+    - `solver_compute_final_residual`: if `True`, report final
+      `||Ax-b||/||b||` diagnostics after each solve; disable for
+      high-throughput repeated direct solves when this extra check is not
+      needed.
     - `solver_preconditioner`: optional callable preconditioner operator.
     - `solver_preconditioner_kind`: built-in preconditioner selection
       (`"none"` or `"grid_block"`).
@@ -403,6 +407,7 @@ class SimulationConfig:
     solver_method: Literal["auto", "gmres", "bicgstab", "lgmres", "gcrotmk", "direct"] = "direct"
     solver_direct_max_n: int = 15_000
     solver_rtol: float = 1e-5
+    solver_compute_final_residual: bool = True
     solver_restart: int = 100
     solver_maxiter: int = 1000
     solver_warm_start: np.ndarray | None = None
@@ -443,6 +448,8 @@ class SimulationConfig:
             raise ValueError("`force_general_initial_field` must be a boolean.")
         if float(self.solver_rtol) <= 0.0:
             raise ValueError(f"`solver_rtol` must be > 0. Got {self.solver_rtol!r}.")
+        if not isinstance(self.solver_compute_final_residual, (bool, np.bool_)):
+            raise ValueError("`solver_compute_final_residual` must be a boolean.")
         if int(self.solver_restart) < 1:
             raise ValueError(f"`solver_restart` must be >= 1. Got {self.solver_restart!r}.")
         if int(self.solver_maxiter) < 1:
@@ -1045,6 +1052,8 @@ class Simulation:
     def _solve_sources_core(
         self,
         labeled_sources: Mapping[str, GaussianBeam | PlaneWave | DipoleSource | DipoleCollection],
+        *,
+        solver_compute_final_residual: bool | None = None,
     ) -> SolvedSourcesResult:
         """Solve labeled sources with one shared operator build (solve-only)."""
         cfg = self.config
@@ -1053,6 +1062,11 @@ class Simulation:
         n_particle = self.n_particle
         labels = tuple(labeled_sources.keys())
         n_channels = len(labels)
+        compute_final_residual = (
+            bool(cfg.solver_compute_final_residual)
+            if solver_compute_final_residual is None
+            else bool(solver_compute_final_residual)
+        )
 
         compute_dtype, accum_dtype = resolve_compute_accum_dtypes(
             compute_dtype=cfg.compute_dtype,
@@ -1257,6 +1271,7 @@ class Simulation:
                 direct_max_n=int(cfg.solver_direct_max_n),
                 dtype=compute_dtype,
                 show_progress=bool(cfg.verbose),
+                compute_final_residual=compute_final_residual,
             )
             x_arr = np.asarray(solver_result.x)
             x_matrix = (
@@ -1291,6 +1306,7 @@ class Simulation:
         | Sequence[GaussianBeam | PlaneWave | DipoleSource | DipoleCollection],
         *,
         labels: Sequence[str] | None = None,
+        solver_compute_final_residual: bool | None = None,
     ) -> SolvedSourcesResult:
         """Canonical solve-only API for one labeled source set.
 
@@ -1302,6 +1318,9 @@ class Simulation:
             `source_0`, `source_1`, ... are used.
         labels:
             Optional labels for sequence inputs.
+        solver_compute_final_residual:
+            Optional override for final residual diagnostics at this call.
+            `None` uses `SimulationConfig.solver_compute_final_residual`.
 
         Returns
         -------
@@ -1310,7 +1329,10 @@ class Simulation:
             coefficients, and multi-RHS solver diagnostics.
         """
         labeled = self._normalize_sources_argument(sources, labels=labels)
-        return self._solve_sources_core(labeled)
+        return self._solve_sources_core(
+            labeled,
+            solver_compute_final_residual=solver_compute_final_residual,
+        )
 
     def postprocess_sources(
         self,

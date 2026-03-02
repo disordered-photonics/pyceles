@@ -124,16 +124,21 @@ def _finalize_result(
     iterations: int,
     method: str,
     residual_history: Optional[list[float]] = None,
+    compute_final_residual: bool = True,
 ) -> LinearSolveResult:
     """Finalize single-RHS diagnostics using true residual `||Ax-b||/||b||`."""
-    # Compute final residual in complex128 for stable diagnostics even when
-    # the iterative solve used a lower-precision operator dtype.
-    x_ref = np.asarray(x, dtype=np.complex128)
-    b_ref = np.asarray(b, dtype=np.complex128)
-    residual = np.asarray(A_mv(x_ref), dtype=np.complex128) - b_ref
-    residual_norm = float(np.linalg.norm(residual))
-    b_norm = float(np.linalg.norm(b_ref))
-    relative_residual = residual_norm / b_norm if b_norm > 0 else residual_norm
+    if compute_final_residual:
+        # Compute final residual in complex128 for stable diagnostics even when
+        # the iterative solve used a lower-precision operator dtype.
+        x_ref = np.asarray(x, dtype=np.complex128)
+        b_ref = np.asarray(b, dtype=np.complex128)
+        residual = np.asarray(A_mv(x_ref), dtype=np.complex128) - b_ref
+        residual_norm = float(np.linalg.norm(residual))
+        b_norm = float(np.linalg.norm(b_ref))
+        relative_residual = residual_norm / b_norm if b_norm > 0 else residual_norm
+    else:
+        residual_norm = float("nan")
+        relative_residual = float("nan")
     return LinearSolveResult(
         x=np.asarray(x),
         info=int(info),
@@ -157,19 +162,25 @@ def _finalize_multi_result(
     iterations: np.ndarray,
     method: str,
     residual_history: list[np.ndarray | None] | None = None,
+    compute_final_residual: bool = True,
 ) -> LinearSolveResult:
     """Finalize multi-RHS diagnostics with per-column true residuals."""
-    x_ref = np.asarray(x, dtype=np.complex128)
-    b_ref = np.asarray(b, dtype=np.complex128)
-    residual = np.asarray(_apply_operator(A_mv, x_ref), dtype=np.complex128) - b_ref
-    residual_norm = np.linalg.norm(residual, axis=0)
-    b_norm = np.linalg.norm(b_ref, axis=0)
-    relative_residual = np.divide(
-        residual_norm,
-        b_norm,
-        out=np.asarray(residual_norm, dtype=float),
-        where=b_norm > 0,
-    )
+    if compute_final_residual:
+        x_ref = np.asarray(x, dtype=np.complex128)
+        b_ref = np.asarray(b, dtype=np.complex128)
+        residual = np.asarray(_apply_operator(A_mv, x_ref), dtype=np.complex128) - b_ref
+        residual_norm = np.linalg.norm(residual, axis=0)
+        b_norm = np.linalg.norm(b_ref, axis=0)
+        relative_residual = np.divide(
+            residual_norm,
+            b_norm,
+            out=np.asarray(residual_norm, dtype=float),
+            where=b_norm > 0,
+        )
+    else:
+        nrhs = int(np.asarray(x).shape[1])
+        residual_norm = np.full((nrhs,), np.nan, dtype=float)
+        relative_residual = np.full((nrhs,), np.nan, dtype=float)
     return LinearSolveResult(
         x=np.asarray(x),
         info=np.asarray(info, dtype=int),
@@ -293,6 +304,7 @@ def gmres_scipy(
     maxiter: Optional[int] = None,
     callback: Optional[Callable[[float], None]] = None,
     show_progress: bool = True,
+    compute_final_residual: bool = True,
 ) -> GmresResult:
     """Solve Ax=b via SciPy GMRES using a matvec callable.
 
@@ -365,6 +377,7 @@ def gmres_scipy(
         iterations=iterations,
         method="gmres",
         residual_history=history,
+        compute_final_residual=compute_final_residual,
     )
 
 
@@ -378,6 +391,7 @@ def bicgstab_scipy(
     atol: float = 0.0,
     maxiter: Optional[int] = None,
     show_progress: bool = True,
+    compute_final_residual: bool = True,
 ) -> LinearSolveResult:
     """Solve one RHS using BiCGSTAB on the matrix-free scattering operator."""
     from scipy.sparse.linalg import bicgstab
@@ -416,6 +430,7 @@ def bicgstab_scipy(
         iterations=iterations,
         method="bicgstab",
         residual_history=history,
+        compute_final_residual=compute_final_residual,
     )
 
 
@@ -429,6 +444,7 @@ def lgmres_scipy(
     atol: float = 0.0,
     maxiter: Optional[int] = None,
     show_progress: bool = True,
+    compute_final_residual: bool = True,
 ) -> LinearSolveResult:
     """Solve one RHS using LGMRES on the matrix-free scattering operator."""
     from scipy.sparse.linalg import lgmres
@@ -465,6 +481,7 @@ def lgmres_scipy(
         iterations=iterations,
         method="lgmres",
         residual_history=history if history else None,
+        compute_final_residual=compute_final_residual,
     )
 
 
@@ -478,6 +495,7 @@ def gcrotmk_scipy(
     atol: float = 0.0,
     maxiter: Optional[int] = None,
     show_progress: bool = True,
+    compute_final_residual: bool = True,
 ) -> LinearSolveResult:
     """Solve one RHS using GCROTMK on the matrix-free scattering operator."""
     from scipy.sparse.linalg import gcrotmk
@@ -514,6 +532,7 @@ def gcrotmk_scipy(
         iterations=iterations,
         method="gcrotmk",
         residual_history=history if history else None,
+        compute_final_residual=compute_final_residual,
     )
 
 
@@ -526,6 +545,7 @@ def direct_dense_scipy(
     max_n: int = 15000,
     dtype: npt.DTypeLike = np.complex128,
     show_progress: bool = True,
+    compute_final_residual: bool = True,
 ) -> LinearSolveResult:
     """Dense direct solve by explicit matrix assembly.
 
@@ -559,13 +579,22 @@ def direct_dense_scipy(
         raise ValueError(f"`b` must be 1D or 2D. Got shape {b_arr.shape}.")
 
     n = b_mat.shape[0]
+    nrhs = b_mat.shape[1]
     if n > int(max_n):
         raise ValueError(
             f"Direct dense solve disabled for n={n} (> max_n={max_n}). "
             "Use an iterative method or raise `max_n` explicitly."
         )
 
+    A_for_residual: np.ndarray | None = None
+    if A_dense is not None:
+        A_for_residual = np.asarray(A_dense, dtype=solve_dtype)
+        if A_for_residual.shape != (n, n):
+            raise ValueError(f"A_dense must have shape ({n},{n}), got {A_for_residual.shape}.")
+
+    setup_mode = "assemble+factorize"
     if A_factorized is not None:
+        setup_mode = "reuse_lu"
         lu, piv = A_factorized
         lu_arr = np.asarray(lu, dtype=solve_dtype)
         piv_arr = np.asarray(piv, dtype=np.int32).reshape(-1)
@@ -578,11 +607,7 @@ def direct_dense_scipy(
                 f"`A_factorized[1]` (pivot vector) must have shape ({n},). Got {piv_arr.shape}."
             )
     else:
-        if A_dense is not None:
-            A = np.asarray(A_dense, dtype=solve_dtype)
-            if A.shape != (n, n):
-                raise ValueError(f"A_dense must have shape ({n},{n}), got {A.shape}.")
-        else:
+        if A_for_residual is None:
             A = np.empty((n, n), dtype=solve_dtype)
             eye = np.eye(n, dtype=solve_dtype)
             col_iter = range(n)
@@ -590,25 +615,50 @@ def direct_dense_scipy(
                 col_iter = tqdm(col_iter, desc="Assemble A (dense via matvec)")
             for j in col_iter:
                 A[:, j] = np.asarray(A_mv(eye[:, j]), dtype=solve_dtype)
-        lu_arr, piv_arr = scipy.linalg.lu_factor(A, overwrite_a=False, check_finite=False)
+            A_for_residual = A
+        else:
+            setup_mode = "factorize_dense"
+        lu_arr, piv_arr = scipy.linalg.lu_factor(
+            A_for_residual, overwrite_a=False, check_finite=False
+        )
 
+    if show_progress:
+        residual_mode = "on" if compute_final_residual else "off"
+        print(
+            "[solver] Direct dense solve:"
+            f" n={n} nrhs={nrhs} setup={setup_mode} final_residual_check={residual_mode}"
+        )
+    t0 = time.perf_counter()
     x_mat = scipy.linalg.lu_solve(
         (lu_arr, piv_arr),
         b_mat,
         overwrite_b=False,
         check_finite=False,
     )
+    if show_progress:
+        dt = time.perf_counter() - t0
+        print(f"[solver] Direct dense solve completed in {dt:.3f} s")
+    residual_op = (lambda v: A_for_residual @ np.asarray(v)) if A_for_residual is not None else A_mv
     if squeezed:
         x = x_mat[:, 0]
-        return _finalize_result(A_mv, b_mat[:, 0], x, info=0, iterations=1, method="direct")
+        return _finalize_result(
+            residual_op,
+            b_mat[:, 0],
+            x,
+            info=0,
+            iterations=1,
+            method="direct",
+            compute_final_residual=compute_final_residual,
+        )
     return _finalize_multi_result(
-        A_mv,
+        residual_op,
         b_mat,
         x_mat,
         info=np.zeros((x_mat.shape[1],), dtype=int),
         iterations=np.ones((x_mat.shape[1],), dtype=int),
         method="direct",
         residual_history=[None] * x_mat.shape[1],
+        compute_final_residual=compute_final_residual,
     )
 
 
@@ -628,6 +678,7 @@ def solve_linear_system(
     direct_max_n: int = 15000,
     dtype: npt.DTypeLike = np.complex128,
     show_progress: bool = True,
+    compute_final_residual: bool = True,
 ) -> LinearSolveResult:
     """Solve Ax=b with selected method.
 
@@ -646,6 +697,9 @@ def solve_linear_system(
     preconditioner:
         Optional callable approximating `M^{-1}` for iterative methods.
         It can accept vectors and may optionally accept batched `(n, nrhs)` inputs.
+    compute_final_residual:
+        If `True`, compute and store final true residual diagnostics
+        `||Ax-b||/||b||` after the solve.
     """
 
     b_arr = np.asarray(b, dtype=np.dtype(dtype))
@@ -685,6 +739,7 @@ def solve_linear_system(
             max_n=direct_max_n,
             dtype=dtype,
             show_progress=show_progress,
+            compute_final_residual=compute_final_residual,
         )
         if squeezed:
             return out
@@ -714,6 +769,7 @@ def solve_linear_system(
                 direct_max_n=direct_max_n,
                 dtype=dtype,
                 show_progress=show_progress,
+                compute_final_residual=compute_final_residual,
             )
             xs.append(np.asarray(rj.x).reshape(-1))
             infos.append(int(rj.info))
@@ -730,6 +786,7 @@ def solve_linear_system(
             iterations=np.asarray(iters, dtype=int),
             method=m,
             residual_history=histories,
+            compute_final_residual=compute_final_residual,
         )
 
     b_vec = b_mat[:, 0]
@@ -746,6 +803,7 @@ def solve_linear_system(
             restart=restart,
             maxiter=maxiter,
             show_progress=show_progress,
+            compute_final_residual=compute_final_residual,
         )
     if m == "bicgstab":
         return bicgstab_scipy(
@@ -757,6 +815,7 @@ def solve_linear_system(
             atol=atol,
             maxiter=maxiter,
             show_progress=show_progress,
+            compute_final_residual=compute_final_residual,
         )
     if m == "lgmres":
         return lgmres_scipy(
@@ -768,6 +827,7 @@ def solve_linear_system(
             atol=atol,
             maxiter=maxiter,
             show_progress=show_progress,
+            compute_final_residual=compute_final_residual,
         )
     if m == "gcrotmk":
         return gcrotmk_scipy(
@@ -779,6 +839,7 @@ def solve_linear_system(
             atol=atol,
             maxiter=maxiter,
             show_progress=show_progress,
+            compute_final_residual=compute_final_residual,
         )
     raise ValueError(
         f"Unknown method '{method}'. Use one of auto/gmres/bicgstab/lgmres/gcrotmk/direct."

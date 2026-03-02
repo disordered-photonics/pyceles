@@ -487,6 +487,12 @@ Notes:
   low-level solver's `direct_max_n/max_n` guard.
 - Repeated direct solves on the same `Simulation` instance (for changed RHS/source)
   reuse both dense `A` and its LU factorization.
+- `SimulationConfig.solver_compute_final_residual` controls whether pyceles
+  computes final true residual diagnostics `||Ax-b||/||b||` after each solve.
+  Keep it `True` by default; set it `False` for high-throughput repeated direct
+  solves (for example LDOS maps) when you want maximum speed.
+- `Simulation.solve_sources(..., solver_compute_final_residual=...)` can override
+  the above per call.
 - If `solver_preconditioner` (custom callable) is set, keep
   `solver_preconditioner_kind="none"` to avoid ambiguous configuration.
 
