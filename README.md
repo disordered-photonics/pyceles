@@ -227,15 +227,18 @@ python examples/profile_pyceles_phases.py --n-particles 500 --lmax 3 --dx 40 --p
 
 Phase wall times:
 - `complex128/complex128`:
-  - Solver (translation block cache OFF): `367.7 s`
-  - Solver (translation block cache ON): `30.5 s`
-  - Far-field postprocessing: `21.7 s`
-  - Near-field postprocessing: `171.0 s`
+  - Solver (translation block cache OFF): `366.5 s`
+  - Solver (translation block cache ON): `30.3 s`
+  - Far-field postprocessing: `22.2 s`
+  - Near-field postprocessing: `171.3 s`
 - `complex64/complex128`:
-  - Solver (translation block cache OFF): `314.4 s` (about `-14.5%`)
-  - Solver (translation block cache ON): `25.6 s` (about `-16.2%`)
-  - Far-field postprocessing: `18.7 s` (about `-14.0%`)
-  - Near-field postprocessing: `138.0 s` (about `-19.3%`)
+  - Solver (translation block cache OFF): `313.7 s` (about `-14.4%`)
+  - Solver (translation block cache ON): `25.6 s` (about `-15.6%`)
+  - Far-field postprocessing: `19.7 s` (about `-11.6%`)
+  - Near-field postprocessing: `136.3 s` (about `-20.4%`)
+- `grid_block` preconditioner (cache OFF, `complex128/complex128`, subdivisions=2):
+  - Solver without preconditioner: `362.3 s`
+  - Solver with `grid_block`: `241.8 s` (about `-33.3%`, `~1.50x` faster)
   
 ## Cumulative Optimization Notes
 
