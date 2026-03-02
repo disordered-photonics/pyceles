@@ -144,3 +144,44 @@ def test_dipole_near_field_masks_exact_source_position():
     assert np.all(np.isnan(nf.H_total[0]))
     assert np.all(np.isfinite(nf.E_total[1]))
     assert np.all(np.isfinite(nf.H_total[1]))
+
+
+def test_dipole_ldos_uses_channel_source_from_postprocess_sources():
+    base_source = pcl.DipoleCollection(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        positions=np.array([[0.0, 0.0, 0.0], [120.0, 0.0, 0.0]], dtype=float),
+        dipole_moments=np.array(
+            [[1.0 + 0j, 0.0 + 0j, 0.0 + 0j], [0.0 + 0j, 1.0 + 0j, 0.0 + 0j]],
+            dtype=np.complex128,
+        ),
+    )
+    cfg = pcl.SimulationConfig(
+        wavelength=550.0,
+        n_medium=1.0 + 0j,
+        lmax=1,
+        source=base_source,
+        solver_method="direct",
+        verbose=False,
+    )
+    positions, radii, n_particle = _empty_geometry()
+    sim = pcl.Simulation(cfg, positions=positions, radii=radii, n_particle=n_particle)
+
+    probe = pcl.DipoleSource(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        position=(30.0, 0.0, -40.0),
+        dipole_moment=(1.0 + 0j, 0.0 + 0j, 0.0 + 0j),
+    )
+    solved = sim.solve_sources(probe.cartesian_basis_sources(labels=("px", "py", "pz")))
+    multi = sim.postprocess_sources(solved, include_farfield=False)
+
+    assert isinstance(multi["px"].config.source, pcl.DipoleSource)
+    assert isinstance(multi["py"].config.source, pcl.DipoleSource)
+    assert isinstance(multi["pz"].config.source, pcl.DipoleSource)
+    np.testing.assert_allclose(
+        pcl.compute_dipole_ldos_enhancement(multi["px"]),
+        1.0,
+        rtol=1e-13,
+        atol=0.0,
+    )

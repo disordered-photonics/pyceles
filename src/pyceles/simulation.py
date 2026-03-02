@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable, Literal, Mapping, Sequence
 
 import numpy as np
@@ -1011,8 +1011,9 @@ class Simulation:
         pol_jones: tuple[complex, complex] | None = None
         if isinstance(source, (GaussianBeam, PlaneWave)):
             pol_jones = source_jones(source)
+        config_out = cfg if cfg.source is source else replace(cfg, source=source)
         return SimulationResult(
-            config=cfg,
+            config=config_out,
             positions=positions,
             radii=radii,
             n_particle=n_particle,
