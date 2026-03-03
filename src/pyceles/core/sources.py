@@ -8,7 +8,7 @@ from typing import Any, Callable, Literal, Protocol, Tuple, runtime_checkable
 import numpy as np
 import numpy.typing as npt
 
-from .angular import beam_axis_and_frame
+from .angular import beam_axis_and_frame, trapezoidal_weights
 from .geometry_bounds import conservative_cross_set_max_distance
 from .indexing import index_vswf, n_modes
 from .projection import (
@@ -493,6 +493,135 @@ def _gaussian_angular_spectrum_coeffs(
     return pwp_te, pwp_tm
 
 
+def _bessel_ring_beta_kernel(beta: np.ndarray, beta0: float) -> np.ndarray:
+    """Return a narrow beta-kernel approximating delta(beta-beta0).
+
+    The returned kernel is scaled so that:
+        sum_j kernel[j] * wb[j] = 1
+    where wb are the same beta quadrature weights used in source projection:
+        wb = trapezoidal_weights(beta) * sin(beta).
+    This keeps ring-strength approximately grid-invariant.
+    """
+    b = np.asarray(beta, dtype=float).reshape(-1)
+    if b.size < 2:
+        raise ValueError("`polar_angles` must contain at least two samples for BesselBeam.")
+    if float(beta0) < float(b[0]) or float(beta0) > float(b[-1]):
+        raise ValueError(
+            f"`cone_angle`={beta0!r} must lie within supplied polar grid range "
+            f"[{float(b[0])!r}, {float(b[-1])!r}]."
+        )
+
+    wb = trapezoidal_weights(b) * np.sin(b)
+    ker = np.zeros_like(b, dtype=float)
+    atol = 1e-14
+
+    if np.isclose(beta0, b[0], atol=atol, rtol=0.0):
+        if wb[0] <= 0.0:
+            raise ValueError(
+                "BesselBeam cone intersects beta endpoint with zero quadrature weight."
+            )
+        ker[0] = 1.0 / wb[0]
+        return ker
+    if np.isclose(beta0, b[-1], atol=atol, rtol=0.0):
+        if wb[-1] <= 0.0:
+            raise ValueError(
+                "BesselBeam cone intersects beta endpoint with zero quadrature weight."
+            )
+        ker[-1] = 1.0 / wb[-1]
+        return ker
+
+    j1 = int(np.searchsorted(b, beta0, side="left"))
+    if j1 <= 0:
+        j1 = 1
+    if j1 >= b.size:
+        j1 = b.size - 1
+    j0 = j1 - 1
+    b0 = float(b[j0])
+    b1 = float(b[j1])
+    if not (b1 > b0):
+        raise ValueError("`polar_angles` must be strictly increasing for BesselBeam.")
+    t = (float(beta0) - b0) / (b1 - b0)
+    p0 = 1.0 - t
+    p1 = t
+    if wb[j0] <= 0.0 or wb[j1] <= 0.0:
+        raise ValueError(
+            "BesselBeam cone too close to beta endpoints for current polar grid; "
+            "use a denser grid away from 0/pi."
+        )
+    ker[j0] = p0 / wb[j0]
+    ker[j1] = p1 / wb[j1]
+    return ker
+
+
+def _bessel_angular_spectrum_coeffs(
+    *,
+    beam,
+    k: float,
+    polar_angles: np.ndarray,
+    azimuthal_angles: np.ndarray,
+    polarization_override: Polarization | None = None,
+) -> tuple[dict, dict]:
+    """Evaluate exact non-paraxial Bessel-beam ring spectrum on one alpha-beta grid."""
+    if polarization_override is None:
+        a_te, a_tm = source_jones(beam)
+        pure = _pure_polarization_label(a_te, a_tm)
+        if pure is None:
+            te_te, te_tm = _bessel_angular_spectrum_coeffs(
+                beam=beam,
+                k=k,
+                polar_angles=polar_angles,
+                azimuthal_angles=azimuthal_angles,
+                polarization_override="TE",
+            )
+            tm_te, tm_tm = _bessel_angular_spectrum_coeffs(
+                beam=beam,
+                k=k,
+                polar_angles=polar_angles,
+                azimuthal_angles=azimuthal_angles,
+                polarization_override="TM",
+            )
+            pwp_te = dict(te_te)
+            pwp_tm = dict(te_tm)
+            pwp_te["coeff"] = a_te * np.asarray(te_te["coeff"]) + a_tm * np.asarray(tm_te["coeff"])
+            pwp_tm["coeff"] = a_te * np.asarray(te_tm["coeff"]) + a_tm * np.asarray(tm_tm["coeff"])
+            return pwp_te, pwp_tm
+        polarization_override = pure
+
+    beta = np.asarray(polar_angles, dtype=float).reshape(-1)
+    alpha = np.asarray(azimuthal_angles, dtype=float).reshape(-1)
+    agrid, bgrid = np.meshgrid(alpha, beta, indexing="ij")
+    sb = np.sin(bgrid)
+    cb = np.cos(bgrid)
+    ca = np.cos(agrid)
+    sa = np.sin(agrid)
+    kx = k * sb * ca
+    ky = k * sb * sa
+    kz = k * cb
+
+    ring = _bessel_ring_beta_kernel(beta, float(beam.cone_angle))
+    if not bool(beam.forward_only):
+        ring = ring + _bessel_ring_beta_kernel(beta, float(np.pi - float(beam.cone_angle)))
+
+    m = int(beam.order_m)
+    az_phase = float(beam.azimuthal_phase)
+    phase_mode = np.exp(1j * (m * agrid + az_phase))
+    cx, cy, cz = _as_float_triplet("center", beam.center)
+    phase_center = np.exp(-1j * (kx * cx + ky * cy + kz * cz))
+    envelope = float(beam.amplitude) * phase_mode * phase_center * ring[None, :]
+
+    pol = str(polarization_override or getattr(beam, "polarization", "TE")).lower()
+    if pol == "te":
+        coeff_te = envelope
+        coeff_tm = np.zeros_like(envelope)
+    else:
+        coeff_te = np.zeros_like(envelope)
+        coeff_tm = envelope
+
+    pwp_te = {"beta": beta, "alpha": alpha, "kx": kx, "ky": ky, "kz": kz, "coeff": coeff_te}
+    pwp_tm = {"beta": beta, "alpha": alpha, "kx": kx, "ky": ky, "kz": kz, "coeff": coeff_tm}
+    return pwp_te, pwp_tm
+
+
 @dataclass(frozen=True)
 class GaussianBeam:
     """Gaussian wavebundle source in a homogeneous medium.
@@ -576,6 +705,116 @@ class GaussianBeam:
         if azimuthal_angles is None:
             raise ValueError(
                 "Tilted GaussianBeam projection requires both `polar_angles` and `azimuthal_angles`."
+            )
+        k = 2.0 * np.pi / float(self.wavelength) * float(np.real(complex(self.medium_n)))
+        return incident_coeffs_from_angular_spectrum(
+            positions,
+            lmax,
+            self,
+            k=k,
+            polar_angles=np.asarray(polar_angles, dtype=float),
+            azimuthal_angles=np.asarray(azimuthal_angles, dtype=float),
+            dtype=dtype,
+        )
+
+
+@dataclass(frozen=True)
+class BesselBeam:
+    """Exact non-paraxial ideal Bessel beam via ring angular spectrum.
+
+    This source is represented by a cone-supported plane-wave spectrum at
+    `beta=cone_angle` with azimuthal phase factor `exp(i*m*alpha)`. The
+    representation is non-paraxial and TE/TM Jones-compatible.
+
+    Notes
+    -----
+    - This is an ideal Bessel beam with infinite total incident power.
+      Accordingly, finite-beam power-fraction diagnostics are not defined.
+    - `forward_only=True` keeps the +z cone only and requires
+      `cone_angle < pi/2`.
+    """
+
+    wavelength: float
+    medium_n: complex = 1.0 + 0j
+    order_m: int = 0
+    cone_angle: float = 0.2
+    polarization: PolarizationInput = "TE"
+    amplitude: float = 1.0
+    azimuthal_phase: float = 0.0
+    center: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+    forward_only: bool = True
+
+    def __post_init__(self) -> None:
+        n = complex(self.medium_n)
+        if abs(n.imag) > 0:
+            raise ValueError(
+                "Embedding medium refractive index must be real for an incident field coming from infinity. "
+                f"Got medium_n={n!r}"
+            )
+        if not (n.real > 0):
+            raise ValueError(f"medium_n must be positive. Got {n!r}")
+        polarization_to_jones(self.polarization)
+        _as_float_triplet("center", self.center)
+        if not np.isfinite(float(self.amplitude)):
+            raise ValueError(f"`amplitude` must be finite. Got {self.amplitude!r}.")
+        if not np.isfinite(float(self.azimuthal_phase)):
+            raise ValueError(f"`azimuthal_phase` must be finite. Got {self.azimuthal_phase!r}.")
+        try:
+            m_float = float(self.order_m)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"`order_m` must be an integer. Got {self.order_m!r}.") from exc
+        if not np.isfinite(m_float) or (not np.isclose(m_float, round(m_float), atol=0.0)):
+            raise ValueError(f"`order_m` must be an integer. Got {self.order_m!r}.")
+        cone = float(self.cone_angle)
+        if not (cone > 0.0 and cone < np.pi):
+            raise ValueError(f"`cone_angle` must lie in (0, pi). Got {self.cone_angle!r}.")
+        if bool(self.forward_only) and cone >= (0.5 * np.pi):
+            raise ValueError(
+                "`forward_only=True` requires `cone_angle < pi/2` (positive kz cone). "
+                f"Got cone_angle={self.cone_angle!r}."
+            )
+
+    def jones_coefficients(self) -> tuple[complex, complex]:
+        """Return normalized TE/TM Jones weights for this Bessel beam state."""
+        return polarization_to_jones(self.polarization)
+
+    def with_polarization(self, polarization: PolarizationInput) -> "BesselBeam":
+        """Clone beam with updated TE/TM polarization state."""
+        return replace(self, polarization=polarization)
+
+    def has_finite_incident_power(self) -> bool:
+        """Ideal Bessel beams are infinite-power sources."""
+        return False
+
+    def angular_spectrum(
+        self,
+        *,
+        k: float,
+        polar_angles: np.ndarray,
+        azimuthal_angles: np.ndarray,
+    ) -> tuple[dict, dict]:
+        """Return TE/TM angular spectrum concentrated on the Bessel cone ring."""
+        return _bessel_angular_spectrum_coeffs(
+            beam=self,
+            k=float(k),
+            polar_angles=np.asarray(polar_angles, dtype=float),
+            azimuthal_angles=np.asarray(azimuthal_angles, dtype=float),
+            polarization_override=None,
+        )
+
+    def incident_coeffs(
+        self,
+        positions: np.ndarray,
+        lmax: int,
+        *,
+        polar_angles: np.ndarray | None = None,
+        azimuthal_angles: np.ndarray | None = None,
+        dtype: npt.DTypeLike = np.complex128,
+    ) -> np.ndarray:
+        """Project Bessel beam to incident SVWF coefficients via angular spectrum."""
+        if polar_angles is None or azimuthal_angles is None:
+            raise ValueError(
+                "BesselBeam projection requires both `polar_angles` and `azimuthal_angles`."
             )
         k = 2.0 * np.pi / float(self.wavelength) * float(np.real(complex(self.medium_n)))
         return incident_coeffs_from_angular_spectrum(

@@ -342,7 +342,7 @@ class SimulationConfig:
 
     Polarization/multi-source options:
     - Propagating TE/TM sources (for example `PlaneWave`, `GaussianBeam`,
-      `SLMSource`) use
+      `SLMSource`, `BesselBeam`) use
       `source.polarization` as `"TE"`, `"TM"`, or Jones `(a_te, a_tm)`.
     - Local sources (`DipoleSource`, `DipoleCollection`) use dipole moments
       and positions instead of TE/TM polarization labels.

@@ -3,7 +3,7 @@ from typing import Any
 import numpy as np
 import pytest
 
-from pyceles.core.fields import GaussianBeam, PlaneWave, SLMSource
+from pyceles.core.fields import BesselBeam, GaussianBeam, PlaneWave, SLMSource
 from pyceles.core.tmatrix import mie_cross_sections
 from pyceles.postprocessing.farfield import (
     absorption_cross_section,
@@ -630,6 +630,49 @@ def test_simulation_dual_basis_supports_slm_wrapped_gaussian_source():
         rtol=1e-10,
         atol=1e-10,
     )
+
+
+def test_simulation_dual_basis_supports_bessel_beam_source():
+    source = BesselBeam(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        order_m=1,
+        cone_angle=0.5,
+        polarization=(1.0 + 0.0j, -0.7j),
+        amplitude=1.0,
+        azimuthal_phase=0.2,
+        center=(0.0, 0.0, 0.0),
+        forward_only=True,
+    )
+    cfg = SimulationConfig(
+        wavelength=550.0,
+        n_medium=1.0 + 0j,
+        lmax=3,
+        source=source,
+        solver_method="direct",
+        solve_polarization_basis=True,
+        polar_angles=np.linspace(0.0, np.pi, 361),
+        azimuthal_angles=np.linspace(0.0, 2.0 * np.pi, 241, endpoint=False),
+        verbose=False,
+    )
+    sim = Simulation(
+        cfg,
+        positions=np.array([[0.0, 0.0, 0.0]], dtype=float),
+        radii=np.array([60.0], dtype=float),
+        n_particle=np.array([1.5 + 0.01j], dtype=np.complex128),
+    )
+    run = sim.run()
+    assert run.coeffs_basis is not None
+    assert run.polarization_jones is not None
+    np.testing.assert_allclose(
+        run.coeffs,
+        run.polarization_jones[0] * run.coeffs_basis["te"]
+        + run.polarization_jones[1] * run.coeffs_basis["tm"],
+        rtol=1e-10,
+        atol=1e-10,
+    )
+    assert run.power is None
+    assert run.cross_sections is None
 
 
 def test_simulation_dual_basis_mixed_precision_runs_without_numpy2_copy_errors():

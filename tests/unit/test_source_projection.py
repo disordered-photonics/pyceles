@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from pyceles.core.fields import (
+    BesselBeam,
     GaussianBeam,
     PlaneWave,
     SLMSource,
@@ -272,3 +273,77 @@ def test_slm_source_phase_ramp_matches_focal_shift_in_angular_spectrum():
 
     np.testing.assert_allclose(te_slm["coeff"], te_shift["coeff"], rtol=1e-11, atol=1e-11)
     np.testing.assert_allclose(tm_slm["coeff"], tm_shift["coeff"], rtol=1e-11, atol=1e-11)
+
+
+def test_bessel_beam_angular_spectrum_support_concentrates_on_cone():
+    source = BesselBeam(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        order_m=2,
+        cone_angle=0.63,
+        polarization="TE",
+        amplitude=1.0,
+        azimuthal_phase=0.2,
+        center=(0.0, 0.0, 0.0),
+        forward_only=True,
+    )
+    k = 2.0 * np.pi / source.wavelength * np.real(source.medium_n)
+    polar = np.linspace(0.0, np.pi, 361)
+    azimuthal = np.linspace(0.0, 2.0 * np.pi, 181, endpoint=False)
+    te, tm = source.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
+
+    np.testing.assert_allclose(tm["coeff"], 0.0, rtol=0.0, atol=0.0)
+    beta_activity = np.sum(np.abs(te["coeff"]), axis=0)
+    active = np.where(beta_activity > (1e-10 * np.max(beta_activity)))[0]
+    assert active.size <= 2
+    beta_mean = float(np.sum(polar[active] * beta_activity[active]) / np.sum(beta_activity[active]))
+    assert abs(beta_mean - source.cone_angle) <= float(np.max(np.diff(polar)))
+
+
+def test_bessel_beam_oam_phase_advances_with_order_m():
+    source = BesselBeam(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        order_m=3,
+        cone_angle=0.52,
+        polarization="TE",
+        amplitude=1.0,
+        azimuthal_phase=0.0,
+        center=(0.0, 0.0, 0.0),
+        forward_only=True,
+    )
+    k = 2.0 * np.pi / source.wavelength * np.real(source.medium_n)
+    polar = np.linspace(0.0, np.pi, 401)
+    azimuthal = np.linspace(0.0, 2.0 * np.pi, 241, endpoint=False)
+    te, _ = source.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
+
+    beta_activity = np.sum(np.abs(te["coeff"]), axis=0)
+    j = int(np.argmax(beta_activity))
+    c = np.asarray(te["coeff"][:, j], dtype=np.complex128)
+    da = float(azimuthal[1] - azimuthal[0])
+    expected = np.exp(1j * source.order_m * da)
+    ratio = c[1:] / c[:-1]
+    np.testing.assert_allclose(ratio, expected, rtol=1e-10, atol=1e-10)
+
+
+def test_bessel_beam_m0_is_cylindrically_symmetric_in_alpha():
+    source = BesselBeam(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        order_m=0,
+        cone_angle=0.44,
+        polarization=(1.0 + 0.0j, 0.6 - 0.3j),
+        amplitude=1.0,
+        center=(0.0, 0.0, 0.0),
+        forward_only=True,
+    )
+    k = 2.0 * np.pi / source.wavelength * np.real(source.medium_n)
+    polar = np.linspace(0.0, np.pi, 321)
+    azimuthal = np.linspace(0.0, 2.0 * np.pi, 181, endpoint=False)
+    te, tm = source.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
+
+    amp = np.sqrt(np.abs(te["coeff"]) ** 2 + np.abs(tm["coeff"]) ** 2)
+    beta_activity = np.sum(amp, axis=0)
+    active = np.where(beta_activity > (1e-10 * np.max(beta_activity)))[0]
+    profile = np.sum(amp[:, active], axis=1)
+    assert float(np.std(profile)) <= 1e-10 * float(np.max(np.abs(profile)))

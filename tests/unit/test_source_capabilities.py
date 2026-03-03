@@ -10,6 +10,7 @@ from _source_contract_helper import assert_source_compliance
 
 from pyceles.core.indexing import n_modes
 from pyceles.core.sources import (
+    BesselBeam,
     DipoleCollection,
     DipoleSource,
     GaussianBeam,
@@ -112,6 +113,21 @@ def _infinite_gaussian() -> GaussianBeam:
         ),
         (
             lambda: SLMSource(base_source=_infinite_gaussian(), modulation=1.0 + 0.0j),
+            True,
+            False,
+            True,
+        ),
+        (
+            lambda: BesselBeam(
+                wavelength=550.0,
+                medium_n=1.0 + 0j,
+                order_m=1,
+                cone_angle=0.5,
+                polarization=(1.0 + 0.0j, 0.2 - 0.3j),
+                amplitude=1.0,
+                center=(0.0, 0.0, 0.0),
+                forward_only=True,
+            ),
             True,
             False,
             True,

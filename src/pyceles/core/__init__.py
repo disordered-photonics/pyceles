@@ -3,6 +3,7 @@
 from .angular import uniform_periodic_azimuth_grid, uniform_polar_grid
 from .fields import (
     AngularSpectrumSource,
+    BesselBeam,
     DipoleCollection,
     DipoleSource,
     GaussianBeam,
@@ -34,6 +35,7 @@ from .tmatrix import particle_internal_ratios, particle_T_diagonal
 __all__ = [
     "Ellipsoid",
     "AngularSpectrumSource",
+    "BesselBeam",
     "DipoleSource",
     "DipoleCollection",
     "uniform_periodic_azimuth_grid",

@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added a reusable source-compliance test helper and contract tests to ensure
   built-in/new source classes expose required `Source` protocol methods and
   capability metadata.
+- Added `BesselBeam` as an exact non-paraxial cone-ring angular-spectrum source
+  with OAM order (`order_m`) and TE/TM Jones compatibility.
 - Added `SLMSource` (angular-spectrum wrapper source) for complex
   phase/amplitude modulation of propagating TE/TM beams on `(alpha, beta)`
   grids.
