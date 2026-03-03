@@ -1,4 +1,8 @@
+import matplotlib
 import numpy as np
+
+matplotlib.use("Agg", force=True)
+
 from matplotlib import pyplot as plt
 
 from pyceles.io.plotting import (

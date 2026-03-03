@@ -44,9 +44,12 @@ Users of pyceles are referred to the publications listed in the CELES and SMUTHI
     - absorption cross section (`C_abs = C_ext - C_sca`)
     - no coefficient-only cluster `C_sca` helper is exposed
 - Physical source checks:
+  - finite-beam-only diagnostics use source capability
+    `has_finite_incident_power()`
+  - built-in `PlaneWave` and plane-wave-limit beams (`beam_width=0/inf`) are
+    treated as infinite-power excitation and rejected for beam-power fractions
   - finite-beam power fractions are normalized by integrating the initial TE/TM
     plane-wave spectrum (works for normal and tilted Gaussian beams)
-  - plane-wave excitation raises when requesting power fractions
 - Geometry sanity check:
   - by default, `Simulation` enforces disjoint particle circumscribing spheres
     (required by T-matrix superposition), can be disabled via `check_circumscribing_sphere_overlap=False`
@@ -82,6 +85,20 @@ Users of pyceles are referred to the publications listed in the CELES and SMUTHI
   - one shared CELES-style default grid (`polar_angles`, `azimuthal_angles`)
   - optional split grids for source projection and far-field outputs
     (`source_*`, `farfield_*`)
+
+## Source capability contract
+
+New source classes should satisfy the internal `Source` protocol in
+`pyceles.core.sources` and explicitly implement:
+- `incident_coeffs(...)`
+- `with_polarization(...)` and `jones_coefficients()` for TE/TM propagating sources
+- `has_finite_incident_power()` for finite-power diagnostics policy
+
+Finite-beam-only diagnostics (`finite_beam_power_fractions`,
+`pwp_power_decomposition` when source-aware, solver-side T/R reporting) are
+enabled only when `has_finite_incident_power()` returns `True`.
+This keeps policy centralized and avoids class-name-specific special cases as
+new source wrappers/classes are added.
 
 ## Angular-grid policy (shared defaults, split API)
 

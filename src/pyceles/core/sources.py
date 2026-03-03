@@ -248,7 +248,14 @@ class AngularSpectrumSource(Protocol):
 
 @runtime_checkable
 class Source(Protocol):
-    """Unified incident-source protocol (channel-aware TE/TM excitation)."""
+    """Unified incident-source protocol (channel-aware TE/TM excitation).
+
+    Capability contract
+    -------------------
+    New source implementations should satisfy this protocol explicitly.
+    In particular, `has_finite_incident_power()` drives finite-beam-only
+    diagnostics (transmitted/reflected fractions, power decompositions).
+    """
 
     @property
     def wavelength(self) -> float: ...
@@ -270,6 +277,10 @@ class Source(Protocol):
         """Return a source copy with updated polarization state."""
         ...
 
+    def has_finite_incident_power(self) -> bool:
+        """Return True when incident-power-normalized beam diagnostics are valid."""
+        ...
+
     def incident_coeffs(
         self,
         positions: np.ndarray,
@@ -281,6 +292,97 @@ class Source(Protocol):
     ) -> np.ndarray:
         """Project this source to incident SVWF coefficients on all spheres."""
         ...
+
+
+@dataclass(frozen=True)
+class SourceCapabilities:
+    """Internal source capability summary used across solver/postprocessing paths."""
+
+    supports_jones_polarization: bool
+    supports_angular_spectrum: bool
+    finite_incident_power: bool
+
+
+def _legacy_finite_incident_power_fallback(source: Any) -> bool:
+    """Conservative finite-power fallback for legacy/custom source objects."""
+    if isinstance(source, PlaneWave):
+        return False
+    beam_width = getattr(source, "beam_width", None)
+    if beam_width is None:
+        return False
+    try:
+        w = float(beam_width)
+    except (TypeError, ValueError):
+        return False
+    return bool(np.isfinite(w) and (not np.isclose(w, 0.0)))
+
+
+def source_has_finite_incident_power(source: Source) -> bool:
+    """Return True when finite-power beam diagnostics are physically defined.
+
+    Contract:
+    - New source classes should implement `has_finite_incident_power()`.
+    - Legacy/custom classes without that method fall back to the historical
+      `beam_width` heuristic for compatibility.
+    """
+    method = getattr(source, "has_finite_incident_power", None)
+    if callable(method):
+        return bool(method())
+    return _legacy_finite_incident_power_fallback(source)
+
+
+def source_capabilities(source: Source) -> SourceCapabilities:
+    """Return canonical source capabilities used by pyceles internals."""
+    supports_jones = True
+    try:
+        source_jones(source)
+    except TypeError:
+        supports_jones = False
+    return SourceCapabilities(
+        supports_jones_polarization=supports_jones,
+        supports_angular_spectrum=isinstance(source, AngularSpectrumSource),
+        finite_incident_power=source_has_finite_incident_power(source),
+    )
+
+
+def finite_power_policy_error(source: Source, *, diagnostic: str) -> ValueError:
+    """Build a consistent error for diagnostics requiring finite incident power."""
+    cls = type(source).__name__
+    method = getattr(source, "has_finite_incident_power", None)
+    if isinstance(source, PlaneWave):
+        reason = "PlaneWave excitation has infinite incident power."
+    elif callable(method):
+        beam_width = getattr(source, "beam_width", None)
+        if beam_width is not None:
+            try:
+                w = float(beam_width)
+            except (TypeError, ValueError):
+                w = np.nan
+            if (not np.isfinite(w)) or np.isclose(w, 0.0):
+                reason = f"{cls} is in a plane-wave limit (beam_width={beam_width!r})."
+            else:
+                reason = f"{cls}.has_finite_incident_power() reported non-finite incident power."
+        else:
+            reason = f"{cls}.has_finite_incident_power() reported non-finite incident power."
+    else:
+        beam_width = getattr(source, "beam_width", None)
+        if beam_width is not None:
+            reason = f"{cls} is in a plane-wave limit (beam_width={beam_width!r})."
+        else:
+            reason = (
+                f"{cls} does not advertise finite incident power for beam-normalized diagnostics."
+            )
+    return ValueError(
+        f"{diagnostic} is undefined for infinite-power sources. "
+        f"{reason} Use plane-wave cross sections when applicable."
+    )
+
+
+def ensure_finite_power_diagnostics_supported(source: Source, *, diagnostic: str) -> None:
+    """Raise a consistent error when a finite-power-only diagnostic is requested."""
+    if source_has_finite_incident_power(source):
+        return
+    raise finite_power_policy_error(source, diagnostic=diagnostic)
 
 
 def _gaussian_angular_spectrum_coeffs(
@@ -430,6 +532,11 @@ class GaussianBeam:
         """Clone beam with a new polarization while keeping geometric settings."""
         return replace(self, polarization=polarization)
 
+    def has_finite_incident_power(self) -> bool:
+        """Return True when this beam has finite incident power."""
+        w = float(self.beam_width)
+        return bool(np.isfinite(w) and (not np.isclose(w, 0.0)))
+
     def angular_spectrum(
         self,
         *,
@@ -549,6 +656,14 @@ class SLMSource:
     def with_polarization(self, polarization: PolarizationInput) -> "SLMSource":
         return replace(self, base_source=self.base_source.with_polarization(polarization))
 
+    def has_finite_incident_power(self) -> bool:
+        """Delegate finite-power capability to base source when available."""
+        base = self.base_source
+        method = getattr(base, "has_finite_incident_power", None)
+        if callable(method):
+            return bool(method())
+        return _legacy_finite_incident_power_fallback(base)
+
     def _modulation_weights(
         self, *, alpha: np.ndarray, beta: np.ndarray, dtype: npt.DTypeLike
     ) -> np.ndarray:
@@ -657,6 +772,10 @@ class PlaneWave:
         """Clone plane wave with new polarization and unchanged propagation."""
         return replace(self, polarization=polarization)
 
+    def has_finite_incident_power(self) -> bool:
+        """Plane waves carry infinite incident power in homogeneous media."""
+        return False
+
     def incident_coeffs(
         self,
         positions: np.ndarray,
@@ -726,6 +845,10 @@ class DipoleSource:
             "DipoleSource does not define TE/TM polarization states. "
             "Use `dipole_moment` orientation/components instead."
         )
+
+    def has_finite_incident_power(self) -> bool:
+        """Beam-power diagnostics do not apply to local dipole emitters."""
+        return False
 
     def dipole_positions(self) -> np.ndarray:
         """Return dipole center array with shape (1, 3)."""
@@ -867,6 +990,10 @@ class DipoleCollection:
             "DipoleCollection does not define TE/TM polarization states. "
             "Use vector dipole moments/orientations instead."
         )
+
+    def has_finite_incident_power(self) -> bool:
+        """Beam-power diagnostics do not apply to local dipole emitters."""
+        return False
 
     def dipole_positions(self) -> np.ndarray:
         """Return dipole centers with shape (Nd, 3)."""

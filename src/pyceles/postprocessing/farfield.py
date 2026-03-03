@@ -24,6 +24,7 @@ from pyceles.core.sources import (
     DipoleSource,
     PlaneWave,
     Source,
+    ensure_finite_power_diagnostics_supported,
     source_jones,
 )
 from pyceles.core.spherical import spherical_functions_trigon
@@ -297,11 +298,14 @@ def pwp_power_decomposition(
 
     The decomposition is computed for a selected hemisphere:
       P_total = P_initial + P_scattered + P_interference
+
+    When `source` is provided, this diagnostic is allowed only for sources
+    with finite incident power (see `Source.has_finite_incident_power()`).
     """
-    if isinstance(source, PlaneWave):
-        raise ValueError(
-            "Transmitted/reflected power fractions are undefined for PlaneWave excitation "
-            "because the incident power is infinite. Use cross sections instead."
+    if source is not None:
+        ensure_finite_power_diagnostics_supported(
+            source,
+            diagnostic="Power decomposition",
         )
     total_te, total_tm = total_field_plane_wave_pattern(
         initial_pwp_te,
@@ -453,19 +457,13 @@ def finite_beam_power_fractions(
 
     Normalization is always done by integrating the supplied initial PWP over
     solid angle, so the result is consistent for both normal and tilted beams.
+    This is defined only when `source.has_finite_incident_power()` is true.
     """
 
-    if isinstance(source, PlaneWave):
-        raise ValueError(
-            "Transmitted/reflected power fractions are undefined for PlaneWave excitation "
-            "because the incident power is infinite. Use cross sections instead."
-        )
-    w = float(getattr(source, "beam_width", np.inf))
-    if (not np.isfinite(w)) or np.isclose(w, 0.0):
-        raise ValueError(
-            "Source with beam_width=0 or inf is in a plane-wave limit: incident power is infinite, "
-            "so transmitted/reflected power fractions are undefined. Use cross sections for PlaneWave excitation."
-        )
+    ensure_finite_power_diagnostics_supported(
+        source,
+        diagnostic="Finite-beam power fractions",
+    )
 
     total_te, total_tm = total_field_plane_wave_pattern(
         initial_pwp_te,

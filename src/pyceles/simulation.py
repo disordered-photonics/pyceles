@@ -20,6 +20,7 @@ from pyceles.core.sources import (
     DipoleSource,
     PlaneWave,
     Source,
+    source_has_finite_incident_power,
     source_jones,
 )
 from pyceles.linear.preconditioner import make_grid_block_preconditioner
@@ -103,20 +104,6 @@ def _warn_redundant_periodic_azimuth_endpoint(*, azimuth_name: str, azimuth: np.
             UserWarning,
             stacklevel=3,
         )
-
-
-def _supports_finite_beam_power(source: Source) -> bool:
-    """Return True when finite-beam power fractions are well-defined for source."""
-    if isinstance(source, PlaneWave):
-        return False
-    beam_width = getattr(source, "beam_width", None)
-    if beam_width is None:
-        return False
-    try:
-        w = float(beam_width)
-    except (TypeError, ValueError):
-        return False
-    return bool(np.isfinite(w) and (not np.isclose(w, 0.0)))
 
 
 def _normalize_geometry(
@@ -995,7 +982,7 @@ class Simulation:
             elif (
                 ff.initial_te is not None
                 and ff.initial_tm is not None
-                and _supports_finite_beam_power(source)
+                and source_has_finite_incident_power(source)
             ):
                 power = finite_beam_power_fractions(
                     source,
@@ -1528,7 +1515,7 @@ class Simulation:
             elif (
                 ff.initial_te is not None
                 and ff.initial_tm is not None
-                and _supports_finite_beam_power(source)
+                and source_has_finite_incident_power(source)
             ):
                 power = finite_beam_power_fractions(
                     source,

@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Added a reusable source-compliance test helper and contract tests to ensure
+  built-in/new source classes expose required `Source` protocol methods and
+  capability metadata.
 - Added `SLMSource` (angular-spectrum wrapper source) for complex
   phase/amplitude modulation of propagating TE/TM beams on `(alpha, beta)`
   grids.
@@ -31,6 +34,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   self-field sampling at `r=0`.
 
 ### Changed
+- Source capability contract now includes
+  `Source.has_finite_incident_power()`, used as the canonical policy gate for
+  finite-beam-only diagnostics across simulation and far-field workflows.
+- Infinite-power diagnostics restrictions are now centralized through
+  shared source-policy helpers instead of duplicated per-module checks.
 - `SimulationConfig.azimuthal_angles` default now uses periodic sampling on
   `[0, 2*pi)` (`endpoint=False`) to keep periodic azimuth fast paths active by
   default.
