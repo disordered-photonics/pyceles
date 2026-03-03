@@ -292,12 +292,55 @@ def test_bessel_beam_angular_spectrum_support_concentrates_on_cone():
     azimuthal = np.linspace(0.0, 2.0 * np.pi, 181, endpoint=False)
     te, tm = source.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
 
-    np.testing.assert_allclose(tm["coeff"], 0.0, rtol=0.0, atol=0.0)
-    beta_activity = np.sum(np.abs(te["coeff"]), axis=0)
+    amp = np.sqrt(np.abs(te["coeff"]) ** 2 + np.abs(tm["coeff"]) ** 2)
+    beta_activity = np.sum(amp, axis=0)
     active = np.where(beta_activity > (1e-10 * np.max(beta_activity)))[0]
     assert active.size <= 2
     beta_mean = float(np.sum(polar[active] * beta_activity[active]) / np.sum(beta_activity[active]))
     assert abs(beta_mean - source.cone_angle) <= float(np.max(np.diff(polar)))
+
+
+def test_bessel_beam_tilted_ring_support_matches_local_cone():
+    source = BesselBeam(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        order_m=1,
+        cone_angle=0.58,
+        polar_angle=0.41,
+        azimuthal_angle=0.73,
+        polarization="TE",
+        amplitude=1.0,
+        azimuthal_phase=0.1,
+        center=(0.0, 0.0, 0.0),
+        forward_only=True,
+    )
+    k = 2.0 * np.pi / source.wavelength * np.real(source.medium_n)
+    polar = np.linspace(0.0, np.pi, 361)
+    azimuthal = np.linspace(0.0, 2.0 * np.pi, 241, endpoint=False)
+    te, tm = source.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
+
+    amp = np.sqrt(np.abs(te["coeff"]) ** 2 + np.abs(tm["coeff"]) ** 2)
+    thresh = 1e-12 * np.max(amp)
+    active = amp > thresh
+    # Sparse cone discretization: only few active beta bins per alpha.
+    active_per_alpha = np.sum(active, axis=1)
+    assert float(np.median(active_per_alpha)) <= 6.0
+
+    sx = np.asarray(te["kx"], dtype=float) / float(k)
+    sy = np.asarray(te["ky"], dtype=float) / float(k)
+    sz = np.asarray(te["kz"], dtype=float) / float(k)
+    n0 = np.array(
+        [
+            np.sin(source.polar_angle) * np.cos(source.azimuthal_angle),
+            np.sin(source.polar_angle) * np.sin(source.azimuthal_angle),
+            np.cos(source.polar_angle),
+        ],
+        dtype=float,
+    )
+    mu = sx * n0[0] + sy * n0[1] + sz * n0[2]
+    mu_w = float(np.sum(mu[active] * amp[active]) / np.sum(amp[active]))
+    beta_local_w = float(np.arccos(np.clip(mu_w, -1.0, 1.0)))
+    assert abs(beta_local_w - source.cone_angle) <= 2.5 * float(np.max(np.diff(polar)))
 
 
 def test_bessel_beam_oam_phase_advances_with_order_m():

@@ -553,6 +553,136 @@ def _bessel_ring_beta_kernel(beta: np.ndarray, beta0: float) -> np.ndarray:
     return ker
 
 
+def _bessel_add_beta_spike(
+    *,
+    kernel: np.ndarray,
+    beta: np.ndarray,
+    wb: np.ndarray,
+    beta_star: float,
+    scale: float,
+) -> None:
+    """Deposit one weighted beta spike onto the discrete beta quadrature grid."""
+    if scale == 0.0:
+        return
+    b = np.asarray(beta, dtype=float).reshape(-1)
+    atol = 1e-14
+    if np.isclose(beta_star, b[0], atol=atol, rtol=0.0):
+        if wb[0] <= 0.0:
+            raise ValueError(
+                "Tilted Bessel ring intersects beta endpoint with zero quadrature weight."
+            )
+        kernel[0] += scale / wb[0]
+        return
+    if np.isclose(beta_star, b[-1], atol=atol, rtol=0.0):
+        if wb[-1] <= 0.0:
+            raise ValueError(
+                "Tilted Bessel ring intersects beta endpoint with zero quadrature weight."
+            )
+        kernel[-1] += scale / wb[-1]
+        return
+
+    j1 = int(np.searchsorted(b, beta_star, side="left"))
+    j1 = min(max(1, j1), b.size - 1)
+    j0 = j1 - 1
+    b0 = float(b[j0])
+    b1 = float(b[j1])
+    if not (b1 > b0):
+        raise ValueError("`polar_angles` must be strictly increasing for BesselBeam.")
+    if wb[j0] <= 0.0 or wb[j1] <= 0.0:
+        raise ValueError(
+            "Tilted Bessel ring intersects beta samples with zero quadrature weight; "
+            "use a denser polar grid away from 0/pi."
+        )
+    t = (float(beta_star) - b0) / (b1 - b0)
+    p0 = 1.0 - t
+    p1 = t
+    kernel[j0] += scale * p0 / wb[j0]
+    kernel[j1] += scale * p1 / wb[j1]
+
+
+def _bessel_beta_roots_for_alpha(
+    *,
+    alpha_value: float,
+    polar_angle: float,
+    azimuthal_angle: float,
+    cone_cos: float,
+) -> list[tuple[float, float]]:
+    """Return `(beta_root, jacobian_weight)` intersections for one alpha slice."""
+    theta0 = float(polar_angle)
+    phi0 = float(azimuthal_angle)
+    d_alpha = float(alpha_value - phi0)
+    A = float(np.sin(theta0) * np.cos(d_alpha))
+    B = float(np.cos(theta0))
+    R = float(np.hypot(A, B))
+    if R <= 1e-15:
+        return []
+    c = float(cone_cos)
+    if abs(c) > R + 1e-12:
+        return []
+    ratio = float(np.clip(c / R, -1.0, 1.0))
+    gamma = float(np.arccos(ratio))
+    delta = float(np.arctan2(A, B))
+
+    roots: list[tuple[float, float]] = []
+    for base in (delta - gamma, delta + gamma):
+        for k in (-1, 0, 1):
+            beta_star = float(base + 2.0 * np.pi * k)
+            if beta_star < -1e-12 or beta_star > np.pi + 1e-12:
+                continue
+            beta_star = float(np.clip(beta_star, 0.0, np.pi))
+            fp = float(A * np.cos(beta_star) - B * np.sin(beta_star))
+            if abs(fp) <= 1e-14:
+                continue
+            # delta(beta_local-cone) = sin(cone) * delta(f-c) / |f'(beta)|
+            w = float(np.sin(np.arccos(abs(c))) / abs(fp))
+            roots.append((beta_star, w))
+
+    deduped: list[tuple[float, float]] = []
+    for beta_star, w in sorted(roots, key=lambda t: t[0]):
+        if deduped and abs(beta_star - deduped[-1][0]) < 1e-10:
+            deduped[-1] = (deduped[-1][0], deduped[-1][1] + w)
+        else:
+            deduped.append((beta_star, w))
+    return deduped
+
+
+def _bessel_tilted_ring_kernel(
+    *,
+    alpha: np.ndarray,
+    beta: np.ndarray,
+    polar_angle: float,
+    azimuthal_angle: float,
+    cone_angle: float,
+    forward_only: bool,
+) -> np.ndarray:
+    """Return sparse `(Na,Nb)` ring kernel for a tilted Bessel cone."""
+    alpha_arr = np.asarray(alpha, dtype=float).reshape(-1)
+    beta_arr = np.asarray(beta, dtype=float).reshape(-1)
+    wb = trapezoidal_weights(beta_arr) * np.sin(beta_arr)
+    ring = np.zeros((alpha_arr.size, beta_arr.size), dtype=float)
+
+    cone_cos = float(np.cos(float(cone_angle)))
+    cone_signs = (1.0,) if bool(forward_only) else (1.0, -1.0)
+    for ia, alpha_value in enumerate(alpha_arr):
+        row = ring[ia]
+        for sign in cone_signs:
+            roots = _bessel_beta_roots_for_alpha(
+                alpha_value=float(alpha_value),
+                polar_angle=float(polar_angle),
+                azimuthal_angle=float(azimuthal_angle),
+                cone_cos=sign * cone_cos,
+            )
+            for beta_star, w in roots:
+                _bessel_add_beta_spike(
+                    kernel=row,
+                    beta=beta_arr,
+                    wb=wb,
+                    beta_star=beta_star,
+                    scale=float(w),
+                )
+    return ring
+
+
 def _bessel_angular_spectrum_coeffs(
     *,
     beam,
@@ -598,24 +728,66 @@ def _bessel_angular_spectrum_coeffs(
     ky = k * sb * sa
     kz = k * cb
 
-    ring = _bessel_ring_beta_kernel(beta, float(beam.cone_angle))
-    if not bool(beam.forward_only):
-        ring = ring + _bessel_ring_beta_kernel(beta, float(np.pi - float(beam.cone_angle)))
+    n0, u, v = beam_axis_and_frame(float(beam.polar_angle), float(beam.azimuthal_angle))
+    s = np.stack([sb * ca, sb * sa, cb], axis=2)  # (Na,Nb,3)
+    sx_l = np.einsum("abi,i->ab", s, u)
+    sy_l = np.einsum("abi,i->ab", s, v)
+    sz_l = np.einsum("abi,i->ab", s, n0)
+    alpha_l = np.arctan2(sy_l, sx_l)
+    cos_beta_l = np.clip(sz_l, -1.0, 1.0)
+    sin_beta_l = np.sqrt(np.maximum(0.0, 1.0 - cos_beta_l**2))
+
+    if is_normal_incidence(float(beam.polar_angle)):
+        ring_1d = _bessel_ring_beta_kernel(beta, float(beam.cone_angle))
+        if not bool(beam.forward_only):
+            ring_1d = ring_1d + _bessel_ring_beta_kernel(
+                beta, float(np.pi - float(beam.cone_angle))
+            )
+        ring = np.broadcast_to(ring_1d[None, :], (alpha.size, beta.size))
+    else:
+        ring = _bessel_tilted_ring_kernel(
+            alpha=alpha,
+            beta=beta,
+            polar_angle=float(beam.polar_angle),
+            azimuthal_angle=float(beam.azimuthal_angle),
+            cone_angle=float(beam.cone_angle),
+            forward_only=bool(beam.forward_only),
+        )
 
     m = int(beam.order_m)
     az_phase = float(beam.azimuthal_phase)
-    phase_mode = np.exp(1j * (m * agrid + az_phase))
+    phase_mode = np.exp(1j * (m * alpha_l + az_phase))
     cx, cy, cz = _as_float_triplet("center", beam.center)
     phase_center = np.exp(-1j * (kx * cx + ky * cy + kz * cz))
-    envelope = float(beam.amplitude) * phase_mode * phase_center * ring[None, :]
+    envelope = float(beam.amplitude) * phase_mode * phase_center * ring
 
     pol = str(polarization_override or getattr(beam, "polarization", "TE")).lower()
     if pol == "te":
-        coeff_te = envelope
-        coeff_tm = np.zeros_like(envelope)
+        g_te_l = envelope
+        g_tm_l = np.zeros_like(envelope)
     else:
-        coeff_te = np.zeros_like(envelope)
-        coeff_tm = envelope
+        g_te_l = np.zeros_like(envelope)
+        g_tm_l = envelope
+
+    ephi_g = np.stack([-sa, ca, np.zeros_like(agrid)], axis=2)
+    etheta_g = np.stack([cb * ca, cb * sa, -sb], axis=2)
+    sin_alpha_l = np.sin(alpha_l)
+    cos_alpha_l = np.cos(alpha_l)
+    ephi_l = (-sin_alpha_l)[..., None] * u[None, None, :] + cos_alpha_l[..., None] * v[
+        None, None, :
+    ]
+    etheta_l = (
+        (cos_beta_l * cos_alpha_l)[..., None] * u[None, None, :]
+        + (cos_beta_l * sin_alpha_l)[..., None] * v[None, None, :]
+        - sin_beta_l[..., None] * n0[None, None, :]
+    )
+    m11 = np.einsum("abi,abi->ab", ephi_g, ephi_l)
+    m12 = np.einsum("abi,abi->ab", ephi_g, etheta_l)
+    m21 = np.einsum("abi,abi->ab", etheta_g, ephi_l)
+    m22 = np.einsum("abi,abi->ab", etheta_g, etheta_l)
+
+    coeff_te = m11 * g_te_l + m12 * g_tm_l
+    coeff_tm = m21 * g_te_l + m22 * g_tm_l
 
     pwp_te = {"beta": beta, "alpha": alpha, "kx": kx, "ky": ky, "kz": kz, "coeff": coeff_te}
     pwp_tm = {"beta": beta, "alpha": alpha, "kx": kx, "ky": ky, "kz": kz, "coeff": coeff_tm}
@@ -723,21 +895,24 @@ class BesselBeam:
     """Exact non-paraxial ideal Bessel beam via ring angular spectrum.
 
     This source is represented by a cone-supported plane-wave spectrum at
-    `beta=cone_angle` with azimuthal phase factor `exp(i*m*alpha)`. The
-    representation is non-paraxial and TE/TM Jones-compatible.
+    `beta_local=cone_angle` around its beam axis with azimuthal phase factor
+    `exp(i*m*alpha_local)`. The representation is non-paraxial and TE/TM
+    Jones-compatible.
 
     Notes
     -----
     - This is an ideal Bessel beam with infinite total incident power.
       Accordingly, finite-beam power-fraction diagnostics are not defined.
-    - `forward_only=True` keeps the +z cone only and requires
-      `cone_angle < pi/2`.
+    - `forward_only=True` keeps the +axis cone only and requires
+      `cone_angle < pi/2` in the local beam frame.
     """
 
     wavelength: float
     medium_n: complex = 1.0 + 0j
     order_m: int = 0
     cone_angle: float = 0.2
+    polar_angle: float = 0.0
+    azimuthal_angle: float = 0.0
     polarization: PolarizationInput = "TE"
     amplitude: float = 1.0
     azimuthal_phase: float = 0.0
@@ -759,6 +934,12 @@ class BesselBeam:
             raise ValueError(f"`amplitude` must be finite. Got {self.amplitude!r}.")
         if not np.isfinite(float(self.azimuthal_phase)):
             raise ValueError(f"`azimuthal_phase` must be finite. Got {self.azimuthal_phase!r}.")
+        if not np.isfinite(float(self.polar_angle)):
+            raise ValueError(f"`polar_angle` must be finite. Got {self.polar_angle!r}.")
+        if not np.isfinite(float(self.azimuthal_angle)):
+            raise ValueError(f"`azimuthal_angle` must be finite. Got {self.azimuthal_angle!r}.")
+        if float(self.polar_angle) < 0.0 or float(self.polar_angle) > np.pi:
+            raise ValueError(f"`polar_angle` must lie in [0, pi]. Got {self.polar_angle!r}.")
         try:
             m_float = float(self.order_m)
         except (TypeError, ValueError) as exc:

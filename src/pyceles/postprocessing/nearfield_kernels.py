@@ -920,10 +920,13 @@ def _compute_initial_field_general(
         alpha_w = alpha_weights[ja]
         if alpha_w == 0.0:
             continue
-        kx = kx_all[ja, :]
-        ky = ky_all[ja, :]
-        kz = kz_all[ja, :]
-        V = V_all[ja, :, :]
+        active_beta = np.flatnonzero((w_te_all[ja, :] != 0) | (w_tm_all[ja, :] != 0))
+        if active_beta.size == 0:
+            continue
+        kx = kx_all[ja, active_beta]
+        ky = ky_all[ja, active_beta]
+        kz = kz_all[ja, active_beta]
+        V = V_all[ja, active_beta, :]
         for s in range(0, Np, batch_size_eff):
             e = min(Np, s + batch_size_eff)
             p = pts[s:e, :]

@@ -64,7 +64,8 @@ Users of pyceles are referred to the publications listed in the CELES and SMUTHI
   - `SLMSource(base_source, modulation)` wrapper for angular-spectrum complex modulation
     (phase/amplitude masks on TE/TM plane-wave amplitudes)
   - `BesselBeam` exact non-paraxial cone-ring angular-spectrum source
-    (`order_m` OAM phase, TE/TM Jones-compatible)
+    (`order_m` OAM phase, tiltable axis via `polar_angle`/`azimuthal_angle`,
+    TE/TM Jones-compatible)
   - `Simulation.solve_sources(...)` is the canonical solve-only API for any
     labeled source set (shared operator, multi-RHS solve)
   - `Simulation.postprocess_sources(...)` turns solved channels into

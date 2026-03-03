@@ -116,22 +116,27 @@ def incident_coeffs_from_pwp(
     for ia, alpha_a in enumerate(alpha):
         if wa[ia] == 0.0:
             continue
+        gte_row = gte[ia, :]
+        gtm_row = gtm[ia, :]
+        active_beta = np.flatnonzero((gte_row != 0) | (gtm_row != 0))
+        if active_beta.size == 0:
+            continue
 
         phase = np.exp(
             1j
             * (
-                pos[:, 0][:, None] * kx[ia, :][None, :]
-                + pos[:, 1][:, None] * ky[ia, :][None, :]
-                + pos[:, 2][:, None] * kz[ia, :][None, :]
+                pos[:, 0][:, None] * kx[ia, active_beta][None, :]
+                + pos[:, 1][:, None] * ky[ia, active_beta][None, :]
+                + pos[:, 2][:, None] * kz[ia, active_beta][None, :]
             )
         )  # (Ns,Nb)
 
-        g1 = gte[ia, :][None, :] * Bdag_pol1
-        g2 = gtm[ia, :][None, :] * Bdag_pol2
-        mode_beta = (g1 + g2) * wb[None, :]  # (Nm,Nb)
+        g1 = gte_row[active_beta][None, :] * Bdag_pol1[:, active_beta]
+        g2 = gtm_row[active_beta][None, :] * Bdag_pol2[:, active_beta]
+        mode_beta = (g1 + g2) * wb[active_beta][None, :]  # (Nm,Nb_active)
 
         mode_weight = np.exp(-1j * m_of_mode * alpha_a) * wa[ia]
-        contrib = phase @ mode_beta.T  # (Ns,Nm)
+        contrib = phase @ mode_beta.T  # (Ns,Nm), reduced Nb when sparse
         aI += contrib * mode_weight[None, :]
 
     return np.asarray(4.0 * aI, dtype=ctype)

@@ -123,6 +123,8 @@ def _infinite_gaussian() -> GaussianBeam:
                 medium_n=1.0 + 0j,
                 order_m=1,
                 cone_angle=0.5,
+                polar_angle=0.3,
+                azimuthal_angle=0.4,
                 polarization=(1.0 + 0.0j, 0.2 - 0.3j),
                 amplitude=1.0,
                 center=(0.0, 0.0, 0.0),

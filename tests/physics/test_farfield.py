@@ -638,6 +638,8 @@ def test_simulation_dual_basis_supports_bessel_beam_source():
         medium_n=1.0 + 0j,
         order_m=1,
         cone_angle=0.5,
+        polar_angle=0.37,
+        azimuthal_angle=0.62,
         polarization=(1.0 + 0.0j, -0.7j),
         amplitude=1.0,
         azimuthal_phase=0.2,
