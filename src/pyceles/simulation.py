@@ -20,7 +20,6 @@ from pyceles.core.sources import (
     DipoleSource,
     PlaneWave,
     Source,
-    source_has_finite_incident_power,
     source_jones,
 )
 from pyceles.linear.preconditioner import make_grid_block_preconditioner
@@ -982,7 +981,7 @@ class Simulation:
             elif (
                 ff.initial_te is not None
                 and ff.initial_tm is not None
-                and source_has_finite_incident_power(source)
+                and source.has_finite_incident_power()
             ):
                 power = finite_beam_power_fractions(
                     source,
@@ -1515,7 +1514,7 @@ class Simulation:
             elif (
                 ff.initial_te is not None
                 and ff.initial_tm is not None
-                and source_has_finite_incident_power(source)
+                and source.has_finite_incident_power()
             ):
                 power = finite_beam_power_fractions(
                     source,

@@ -4,17 +4,22 @@ from __future__ import annotations
 
 Canonical implementations live in:
 - `pyceles.core.sources`
+- `pyceles.core.conversions`
 - `pyceles.core.projection`
 """
 
+from .conversions import (
+    angular_spectrum_to_svwf_regular,
+    pwp_to_svwf_regular,
+    svwf_outgoing_to_pwp,
+    svwf_regular_to_pwp,
+    transformation_coefficients,
+)
 from .projection import (
-    incident_coeffs_from_angular_spectrum,
-    incident_coeffs_from_pwp,
     incident_coeffs_planewave,
     incident_coeffs_wavebundle_normal_incidence,
     project_source_basis_to_svwf,
     project_source_to_svwf,
-    transformation_coefficients,
 )
 from .sources import (
     AngularSpectrumSource,
@@ -27,7 +32,6 @@ from .sources import (
     PolarizationInput,
     SLMSource,
     Source,
-    initial_field_plane_wave_pattern_normal_incidence,
     is_normal_incidence,
     polarization_to_jones,
     source_jones,
@@ -44,11 +48,12 @@ __all__ = [
     "Polarization",
     "PolarizationInput",
     "Source",
-    "incident_coeffs_from_angular_spectrum",
-    "incident_coeffs_from_pwp",
+    "pwp_to_svwf_regular",
+    "angular_spectrum_to_svwf_regular",
+    "svwf_regular_to_pwp",
+    "svwf_outgoing_to_pwp",
     "incident_coeffs_planewave",
     "incident_coeffs_wavebundle_normal_incidence",
-    "initial_field_plane_wave_pattern_normal_incidence",
     "is_normal_incidence",
     "polarization_to_jones",
     "project_source_basis_to_svwf",

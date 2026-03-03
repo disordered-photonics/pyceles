@@ -9,10 +9,11 @@ import numpy as np
 import numpy.typing as npt
 
 from .angular import beam_axis_and_frame, trapezoidal_weights
+from .conversions import angular_spectrum_to_svwf_regular
 from .geometry_bounds import conservative_cross_set_max_distance
 from .indexing import index_vswf, n_modes
+from .polarization import pure_polarization_label
 from .projection import (
-    incident_coeffs_from_angular_spectrum,
     incident_coeffs_planewave,
     incident_coeffs_wavebundle_normal_incidence,
 )
@@ -101,34 +102,34 @@ def _dipole_outgoing_coeff_vector(
     return out
 
 
-def _dipole_incident_coeffs_from_outgoing(
+def _incident_coeffs_from_outgoing_expansion(
     *,
     receiver_positions: np.ndarray,
-    dipole_positions: np.ndarray,
+    source_positions: np.ndarray,
     outgoing_coeffs: np.ndarray,
     lmax: int,
     k_medium: float,
     radial_lut_dr: float,
     dtype: np.dtype,
 ) -> np.ndarray:
-    """Translate outgoing dipole multipoles to regular SVWFs at receiver centers."""
+    """Translate outgoing multipoles to regular SVWFs at receiver centers."""
     pos_rcv = np.asarray(receiver_positions, dtype=float)
-    pos_dip = np.asarray(dipole_positions, dtype=float)
-    coeffs_dip = np.asarray(outgoing_coeffs, dtype=dtype)
+    pos_src = np.asarray(source_positions, dtype=float)
+    coeffs_src = np.asarray(outgoing_coeffs, dtype=dtype)
     Ns = int(pos_rcv.shape[0])
     Nm = n_modes(int(lmax))
     out = np.zeros((Ns, Nm), dtype=dtype)
-    if Ns == 0 or pos_dip.shape[0] == 0:
+    if Ns == 0 or pos_src.shape[0] == 0:
         return out
 
-    if np.any(np.all(np.isclose(pos_rcv[:, None, :], pos_dip[None, :, :], atol=1e-12), axis=2)):
+    if np.any(np.all(np.isclose(pos_rcv[:, None, :], pos_src[None, :, :], atol=1e-12), axis=2)):
         raise ValueError(
-            "Dipole and receiver center coincide for at least one pair. "
-            "Dipole-to-center translation is singular at zero separation."
+            "Outgoing source center and receiver center coincide for at least one pair. "
+            "Outgoing-to-regular translation is singular at zero separation."
         )
 
     ab5 = translation_ab5_table(int(lmax), dtype=dtype)
-    r_max = conservative_cross_set_max_distance(pos_rcv, pos_dip)
+    r_max = conservative_cross_set_max_distance(pos_rcv, pos_src)
     radial_lut = RadialLUT(
         lmax=int(lmax),
         k=float(k_medium),
@@ -137,10 +138,10 @@ def _dipole_incident_coeffs_from_outgoing(
         dtype=dtype,
     )
 
-    for j in range(pos_dip.shape[0]):
-        c_out = coeffs_dip[j]
+    for j in range(pos_src.shape[0]):
+        c_out = coeffs_src[j]
         for i in range(Ns):
-            rvec = pos_rcv[i] - pos_dip[j]
+            rvec = pos_rcv[i] - pos_src[j]
             Wij = translation_block(
                 int(lmax),
                 float(k_medium),
@@ -201,17 +202,6 @@ def source_jones(source: Any) -> tuple[complex, complex]:
     if hasattr(source, "jones_coefficients"):
         return source.jones_coefficients()
     return polarization_to_jones(getattr(source, "polarization", "TE"))
-
-
-def _pure_polarization_label(
-    a_te: complex, a_tm: complex, *, atol: float = 1e-15
-) -> Polarization | None:
-    """Return pure-channel label when Jones weights represent TE-only or TM-only."""
-    if abs(a_tm) <= atol and abs(a_te) > atol:
-        return "TE"
-    if abs(a_te) <= atol and abs(a_tm) > atol:
-        return "TM"
-    return None
 
 
 def is_normal_incidence(polar_angle: float, *, atol: float = 1e-12) -> bool:
@@ -303,34 +293,6 @@ class SourceCapabilities:
     finite_incident_power: bool
 
 
-def _legacy_finite_incident_power_fallback(source: Any) -> bool:
-    """Conservative finite-power fallback for legacy/custom source objects."""
-    if isinstance(source, PlaneWave):
-        return False
-    beam_width = getattr(source, "beam_width", None)
-    if beam_width is None:
-        return False
-    try:
-        w = float(beam_width)
-    except (TypeError, ValueError):
-        return False
-    return bool(np.isfinite(w) and (not np.isclose(w, 0.0)))
-
-
-def source_has_finite_incident_power(source: Source) -> bool:
-    """Return True when finite-power beam diagnostics are physically defined.
-
-    Contract:
-    - New source classes should implement `has_finite_incident_power()`.
-    - Legacy/custom classes without that method fall back to the historical
-      `beam_width` heuristic for compatibility.
-    """
-    method = getattr(source, "has_finite_incident_power", None)
-    if callable(method):
-        return bool(method())
-    return _legacy_finite_incident_power_fallback(source)
-
-
 def source_capabilities(source: Source) -> SourceCapabilities:
     """Return canonical source capabilities used by pyceles internals."""
     supports_jones = True
@@ -341,7 +303,7 @@ def source_capabilities(source: Source) -> SourceCapabilities:
     return SourceCapabilities(
         supports_jones_polarization=supports_jones,
         supports_angular_spectrum=isinstance(source, AngularSpectrumSource),
-        finite_incident_power=source_has_finite_incident_power(source),
+        finite_incident_power=bool(source.has_finite_incident_power()),
     )
 
 
@@ -380,7 +342,7 @@ def finite_power_policy_error(source: Source, *, diagnostic: str) -> ValueError:
 
 def ensure_finite_power_diagnostics_supported(source: Source, *, diagnostic: str) -> None:
     """Raise a consistent error when a finite-power-only diagnostic is requested."""
-    if source_has_finite_incident_power(source):
+    if source.has_finite_incident_power():
         return
     raise finite_power_policy_error(source, diagnostic=diagnostic)
 
@@ -396,7 +358,7 @@ def _gaussian_angular_spectrum_coeffs(
     """Evaluate Gaussian-beam TE/TM angular-spectrum coefficients on a grid."""
     if polarization_override is None:
         a_te, a_tm = source_jones(beam)
-        pure = _pure_polarization_label(a_te, a_tm)
+        pure = pure_polarization_label(a_te, a_tm)
         if pure is None:
             te_te, te_tm = _gaussian_angular_spectrum_coeffs(
                 beam=beam,
@@ -694,7 +656,7 @@ def _bessel_angular_spectrum_coeffs(
     """Evaluate exact non-paraxial Bessel-beam ring spectrum on one alpha-beta grid."""
     if polarization_override is None:
         a_te, a_tm = source_jones(beam)
-        pure = _pure_polarization_label(a_te, a_tm)
+        pure = pure_polarization_label(a_te, a_tm)
         if pure is None:
             te_te, te_tm = _bessel_angular_spectrum_coeffs(
                 beam=beam,
@@ -879,7 +841,7 @@ class GaussianBeam:
                 "Tilted GaussianBeam projection requires both `polar_angles` and `azimuthal_angles`."
             )
         k = 2.0 * np.pi / float(self.wavelength) * float(np.real(complex(self.medium_n)))
-        return incident_coeffs_from_angular_spectrum(
+        return angular_spectrum_to_svwf_regular(
             positions,
             lmax,
             self,
@@ -998,7 +960,7 @@ class BesselBeam:
                 "BesselBeam projection requires both `polar_angles` and `azimuthal_angles`."
             )
         k = 2.0 * np.pi / float(self.wavelength) * float(np.real(complex(self.medium_n)))
-        return incident_coeffs_from_angular_spectrum(
+        return angular_spectrum_to_svwf_regular(
             positions,
             lmax,
             self,
@@ -1077,12 +1039,8 @@ class SLMSource:
         return replace(self, base_source=self.base_source.with_polarization(polarization))
 
     def has_finite_incident_power(self) -> bool:
-        """Delegate finite-power capability to base source when available."""
-        base = self.base_source
-        method = getattr(base, "has_finite_incident_power", None)
-        if callable(method):
-            return bool(method())
-        return _legacy_finite_incident_power_fallback(base)
+        """Delegate finite-power capability to base source."""
+        return bool(self.base_source.has_finite_incident_power())
 
     def _modulation_weights(
         self, *, alpha: np.ndarray, beta: np.ndarray, dtype: npt.DTypeLike
@@ -1150,7 +1108,7 @@ class SLMSource:
                 "SLMSource projection requires both `polar_angles` and `azimuthal_angles`."
             )
         k = 2.0 * np.pi / float(self.wavelength) * float(np.real(complex(self.medium_n)))
-        return incident_coeffs_from_angular_spectrum(
+        return angular_spectrum_to_svwf_regular(
             positions,
             lmax,
             self,
@@ -1350,9 +1308,9 @@ class DipoleSource:
 
         k0 = 2.0 * np.pi / float(self.wavelength)
         k = k0 * float(np.real(complex(self.medium_n)))
-        return _dipole_incident_coeffs_from_outgoing(
+        return _incident_coeffs_from_outgoing_expansion(
             receiver_positions=pos_rcv,
-            dipole_positions=self.dipole_positions(),
+            source_positions=self.dipole_positions(),
             outgoing_coeffs=self.outgoing_coeffs(int(lmax), dtype=ctype),
             lmax=int(lmax),
             k_medium=float(k),
@@ -1488,90 +1446,12 @@ class DipoleCollection:
             return np.zeros((0, Nm), dtype=ctype)
         k0 = 2.0 * np.pi / float(self.wavelength)
         k = k0 * float(np.real(complex(self.medium_n)))
-        return _dipole_incident_coeffs_from_outgoing(
+        return _incident_coeffs_from_outgoing_expansion(
             receiver_positions=pos_rcv,
-            dipole_positions=self.dipole_positions(),
+            source_positions=self.dipole_positions(),
             outgoing_coeffs=self.outgoing_coeffs(int(lmax), dtype=ctype),
             lmax=int(lmax),
             k_medium=float(k),
             radial_lut_dr=float(self.radial_lut_dr),
             dtype=ctype,
         )
-
-
-def initial_field_plane_wave_pattern_normal_incidence(
-    *,
-    beam,
-    k: float,
-    polar_angles,
-    azimuthal_angles,
-    polarization_override: Polarization | None = None,
-):
-    """Initial field plane-wave pattern for a normal-incidence Gaussian beam.
-
-    Returns
-    -------
-    tuple[dict, dict]
-        `(pwp_te, pwp_tm)` where each has keys `beta, alpha, kx, ky, kz, coeff`
-        and `coeff` has shape `(Na, Nb)`.
-    """
-    beta = np.asarray(polar_angles, float)
-    alpha = np.asarray(azimuthal_angles, float)
-
-    agrid = alpha[:, None]
-    bgrid = beta[None, :]
-    kx = k * np.sin(bgrid) * np.cos(agrid)
-    ky = k * np.sin(bgrid) * np.sin(agrid)
-    kz = np.broadcast_to(k * np.cos(bgrid), kx.shape)
-
-    RG = np.asarray(getattr(beam, "focal_point", (0.0, 0.0, 0.0)), float)
-    E0 = float(getattr(beam, "amplitude", 1.0))
-    w = float(getattr(beam, "beam_width", np.inf))
-    polar_angle = float(getattr(beam, "polar_angle", 0.0))
-    az_angle = float(getattr(beam, "azimuthal_angle", 0.0))
-    if polarization_override is None:
-        a_te, a_tm = source_jones(beam)
-        pure = _pure_polarization_label(a_te, a_tm)
-        if pure is None:
-            common_kwargs = {
-                "beam": beam,
-                "k": k,
-                "polar_angles": polar_angles,
-                "azimuthal_angles": azimuthal_angles,
-            }
-            te_te, te_tm = initial_field_plane_wave_pattern_normal_incidence(
-                polarization_override="TE",
-                **common_kwargs,
-            )
-            tm_te, tm_tm = initial_field_plane_wave_pattern_normal_incidence(
-                polarization_override="TM",
-                **common_kwargs,
-            )
-            pwp_te = dict(te_te)
-            pwp_tm = dict(te_tm)
-            pwp_te["coeff"] = a_te * np.asarray(te_te["coeff"]) + a_tm * np.asarray(tm_te["coeff"])
-            pwp_tm["coeff"] = a_te * np.asarray(te_tm["coeff"]) + a_tm * np.asarray(tm_tm["coeff"])
-            return pwp_te, pwp_tm
-        polarization_override = pure
-
-    pol = str(polarization_override or getattr(beam, "polarization", "TE")).lower()
-
-    emnikrg = np.exp(-1j * (kx * RG[0] + ky * RG[1] + kz * RG[2]))
-    pref_scalar = E0 * (k**2) * (w**2) / (4 * np.pi)
-    sin_beta = np.sin(beta)[None, :]
-    gaussian_envelope = np.exp(-(w**2) / 4 * (k**2) * (sin_beta**2))
-    pref = pref_scalar * np.cos(beta)[None, :] * gaussian_envelope
-    pref = pref * (np.sign(np.cos(beta))[None, :] == np.sign(np.cos(polar_angle)))
-    eikrg_pref = emnikrg * pref
-
-    if pol == "te":
-        alphaG = az_angle
-    else:
-        alphaG = az_angle - np.pi / 2
-
-    coeff_te = np.cos(alpha[:, None] - alphaG) * eikrg_pref
-    coeff_tm = np.sign(np.cos(polar_angle)) * (np.sin(alpha[:, None] - alphaG) * eikrg_pref)
-
-    pwp_te = {"beta": beta, "alpha": alpha, "kx": kx, "ky": ky, "kz": kz, "coeff": coeff_te}
-    pwp_tm = {"beta": beta, "alpha": alpha, "kx": kx, "ky": ky, "kz": kz, "coeff": coeff_tm}
-    return pwp_te, pwp_tm

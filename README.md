@@ -66,6 +66,9 @@ Users of pyceles are referred to the publications listed in the CELES and SMUTHI
   - `BesselBeam` exact non-paraxial cone-ring angular-spectrum source
     (`order_m` OAM phase, tiltable axis via `polar_angle`/`azimuthal_angle`,
     TE/TM Jones-compatible)
+  - canonical conversion helpers:
+    `pwp_to_svwf_regular`, `angular_spectrum_to_svwf_regular`,
+    `svwf_regular_to_pwp`, `svwf_outgoing_to_pwp`
   - `Simulation.solve_sources(...)` is the canonical solve-only API for any
     labeled source set (shared operator, multi-RHS solve)
   - `Simulation.postprocess_sources(...)` turns solved channels into

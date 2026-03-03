@@ -14,10 +14,8 @@ from dataclasses import dataclass
 
 import numpy as np
 import numpy.typing as npt
-from tqdm.auto import tqdm
 
-from pyceles.core.indexing import iter_modes, n_modes
-from pyceles.core.projection import transformation_coefficients
+from pyceles.core.conversions import svwf_outgoing_to_pwp
 from pyceles.core.sources import (
     AngularSpectrumSource,
     DipoleCollection,
@@ -27,7 +25,6 @@ from pyceles.core.sources import (
     ensure_finite_power_diagnostics_supported,
     source_jones,
 )
-from pyceles.core.spherical import spherical_functions_trigon
 
 
 @dataclass(frozen=True)
@@ -104,85 +101,16 @@ def scattered_field_plane_wave_pattern(
         `coeff` has shape (Na, Nb).
     """
 
-    ctype = np.dtype(dtype)
-    positions = np.asarray(positions, dtype=float)
-    coeffs = np.asarray(coeffs, dtype=ctype)
-    beta = np.asarray(polar_angles, dtype=float)
-    alpha = np.asarray(azimuthal_angles, dtype=float)
-
-    Ns = positions.shape[0]
-    if coeffs.shape[0] != Ns:
-        raise ValueError("coeffs must have shape (Ns, Nm)")
-
-    Nb = beta.size
-    Na = alpha.size
-
-    # Plane-wave grid (CELES convention)
-    agrid = alpha[:, None]
-    bgrid = beta[None, :]
-    sb = np.sin(beta)
-    cb = np.cos(beta)
-
-    kx = (k * np.sin(bgrid) * np.cos(agrid)).astype(float)
-    ky = (k * np.sin(bgrid) * np.sin(agrid)).astype(float)
-    kz = np.broadcast_to(k * np.cos(beta), kx.shape).astype(float)
-
-    # Angular functions of beta
-    PI, TAU = spherical_functions_trigon(cb, sb, lmax, xp=np)
-
-    Nm = n_modes(lmax)
-
-    # B{pol}(n,beta)
-    B_te = np.zeros((Nm, Nb), dtype=ctype)
-    B_tm = np.zeros((Nm, Nb), dtype=ctype)
-    m_of_n = np.zeros(Nm, dtype=int)
-
-    for tau, l, m, n in iter_modes(lmax):
-        m_of_n[n] = m
-        B_te[n, :] = transformation_coefficients(PI, TAU, tau, l, m, pol=1, dagger=False)
-        B_tm[n, :] = transformation_coefficients(PI, TAU, tau, l, m, pol=2, dagger=False)
-
-    # exp(i*m*alpha)
-    eima = np.exp(1j * alpha[:, None] * m_of_n[None, :]).astype(ctype, copy=False)
-
-    pwp_te = {
-        "beta": beta,
-        "alpha": alpha,
-        "kx": kx,
-        "ky": ky,
-        "kz": kz,
-        "coeff": np.zeros((Na, Nb), dtype=ctype),
-    }
-    pwp_tm = {
-        "beta": beta,
-        "alpha": alpha,
-        "kx": kx,
-        "ky": ky,
-        "kz": kz,
-        "coeff": np.zeros((Na, Nb), dtype=ctype),
-    }
-
-    sphere_iter = range(Ns)
-    if show_progress:
-        sphere_iter = tqdm(sphere_iter, desc="PWP (scattered)")
-
-    # Accumulate spheres
-    for jS in sphere_iter:
-        rj = positions[jS]
-
-        phase = np.asarray(
-            np.exp(-1j * (rj[0] * kx + rj[1] * ky + rj[2] * kz)), dtype=ctype
-        )  # (Na,Nb)
-        cj = coeffs[jS, :]
-
-        # (Na, Nm) with columns scaled by coefficients
-        beima = eima * cj[None, :]
-
-        # (Na,Nb)
-        pwp_te["coeff"] += np.asarray((beima @ B_te) * phase / (2 * np.pi), dtype=ctype)
-        pwp_tm["coeff"] += np.asarray((beima @ B_tm) * phase / (2 * np.pi), dtype=ctype)
-
-    return pwp_te, pwp_tm
+    return svwf_outgoing_to_pwp(
+        positions=np.asarray(positions, dtype=float),
+        coeffs=np.asarray(coeffs, dtype=np.dtype(dtype)),
+        k=float(k),
+        lmax=int(lmax),
+        polar_angles=np.asarray(polar_angles, dtype=float),
+        azimuthal_angles=np.asarray(azimuthal_angles, dtype=float),
+        dtype=np.dtype(dtype),
+        show_progress=bool(show_progress),
+    )
 
 
 def total_field_plane_wave_pattern(

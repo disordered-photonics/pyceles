@@ -21,7 +21,6 @@ from pyceles.core.sources import (
     GaussianBeam,
     PlaneWave,
     PolarizationInput,
-    initial_field_plane_wave_pattern_normal_incidence,
     is_normal_incidence,
     polarization_to_jones,
 )
@@ -841,11 +840,10 @@ def _compute_initial_field_general(
             azimuthal_angles=np.asarray(azimuthal_angles, float),
         )
     else:
-        pwp_te, pwp_tm = initial_field_plane_wave_pattern_normal_incidence(
-            beam=beam,
-            k=float(k),
-            polar_angles=np.asarray(polar_angles, float),
-            azimuthal_angles=np.asarray(azimuthal_angles, float),
+        raise TypeError(
+            "Initial-field evaluation is unavailable for source type "
+            f"{type(beam).__name__}. Supported initial-field sources are PlaneWave, "
+            "DipoleSource/DipoleCollection, and angular-spectrum sources."
         )
 
     E = np.zeros((pts.shape[0], 3), dtype=accum_dtype)

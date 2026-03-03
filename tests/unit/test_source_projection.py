@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from pyceles.core.conversions import pwp_to_svwf_regular
 from pyceles.core.fields import (
     BesselBeam,
     GaussianBeam,
@@ -9,7 +10,6 @@ from pyceles.core.fields import (
     SLMSource,
     incident_coeffs_planewave,
     incident_coeffs_wavebundle_normal_incidence,
-    initial_field_plane_wave_pattern_normal_incidence,
     project_source_basis_to_svwf,
     project_source_to_svwf,
 )
@@ -82,37 +82,6 @@ def test_project_source_to_svwf_matches_gaussian_formula():
     np.testing.assert_allclose(got, ref, rtol=0.0, atol=0.0)
 
 
-def test_gaussian_angular_spectrum_normal_matches_legacy_pwp():
-    source_ref = GaussianBeam(
-        wavelength=550.0,
-        medium_n=1.0 + 0j,
-        polarization="TE",
-        polar_angle=0.0,
-        azimuthal_angle=0.4,
-        beam_width=2000.0,
-        focal_point=(3.0, -5.0, 2.0),
-        amplitude=1.2,
-    )
-    polar = np.linspace(0.0, np.pi, 301)
-    azimuthal = np.linspace(0.0, 2.0 * np.pi, 121, endpoint=False)
-    k = 2.0 * np.pi / source_ref.wavelength * np.real(source_ref.medium_n)
-
-    te_ref, tm_ref = initial_field_plane_wave_pattern_normal_incidence(
-        beam=source_ref,
-        k=k,
-        polar_angles=polar,
-        azimuthal_angles=azimuthal,
-    )
-    te_new, tm_new = source_ref.angular_spectrum(
-        k=k,
-        polar_angles=polar,
-        azimuthal_angles=azimuthal,
-    )
-
-    np.testing.assert_allclose(te_new["coeff"], te_ref["coeff"], rtol=5e-7, atol=5e-9)
-    np.testing.assert_allclose(tm_new["coeff"], tm_ref["coeff"], rtol=5e-7, atol=5e-9)
-
-
 def test_gaussian_angular_spectrum_projection_parity_normal():
     positions = np.array(
         [
@@ -145,6 +114,63 @@ def test_gaussian_angular_spectrum_projection_parity_normal():
         azimuthal_angles=azimuthal,
     )
     np.testing.assert_allclose(got, ref, rtol=3e-3, atol=3e-6)
+
+
+def test_pwp_to_svwf_regular_rejects_te_tm_grid_mismatch():
+    alpha = np.linspace(0.0, 2.0 * np.pi, 17, endpoint=False)
+    beta = np.linspace(0.0, np.pi, 21)
+    agrid = alpha[:, None]
+    bgrid = beta[None, :]
+    k = 2.0 * np.pi / 550.0
+    pwp_te = {
+        "alpha": alpha,
+        "beta": beta,
+        "kx": k * np.sin(bgrid) * np.cos(agrid),
+        "ky": k * np.sin(bgrid) * np.sin(agrid),
+        "kz": np.broadcast_to(k * np.cos(bgrid), (alpha.size, beta.size)),
+        "coeff": np.ones((alpha.size, beta.size), dtype=np.complex128),
+    }
+    pwp_tm = dict(pwp_te)
+    pwp_tm["alpha"] = alpha + 1e-3
+
+    with np.testing.assert_raises_regex(ValueError, "azimuth grids must be identical"):
+        pwp_to_svwf_regular(
+            np.array([[0.0, 0.0, 0.0]], dtype=float),
+            1,
+            k=k,
+            pwp_te=pwp_te,
+            pwp_tm=pwp_tm,
+        )
+
+
+def test_pwp_to_svwf_regular_rejects_wavevector_k_inconsistency():
+    alpha = np.linspace(0.0, 2.0 * np.pi, 17, endpoint=False)
+    beta = np.linspace(0.0, np.pi, 21)
+    agrid = alpha[:, None]
+    bgrid = beta[None, :]
+    k = 2.0 * np.pi / 550.0
+    pwp_te = {
+        "alpha": alpha,
+        "beta": beta,
+        "kx": k * np.sin(bgrid) * np.cos(agrid),
+        "ky": k * np.sin(bgrid) * np.sin(agrid),
+        "kz": np.broadcast_to(k * np.cos(bgrid), (alpha.size, beta.size)),
+        "coeff": np.ones((alpha.size, beta.size), dtype=np.complex128),
+    }
+    pwp_tm = dict(pwp_te)
+
+    bad_te = dict(pwp_te)
+    bad_tm = dict(pwp_tm)
+    bad_te["kz"] = np.asarray(pwp_te["kz"], dtype=float) + 0.05 * k
+    bad_tm["kz"] = np.asarray(pwp_tm["kz"], dtype=float) + 0.05 * k
+    with np.testing.assert_raises_regex(ValueError, "inconsistent with `k`"):
+        pwp_to_svwf_regular(
+            np.array([[0.0, 0.0, 0.0]], dtype=float),
+            1,
+            k=k,
+            pwp_te=bad_te,
+            pwp_tm=bad_tm,
+        )
 
 
 def test_gaussian_angular_spectrum_tilted_runs():

@@ -17,7 +17,6 @@ from pyceles.core.sources import (
     PlaneWave,
     SLMSource,
     Source,
-    source_has_finite_incident_power,
 )
 from pyceles.postprocessing.farfield import finite_beam_power_fractions
 
@@ -198,7 +197,7 @@ def test_finite_power_policy_honors_explicit_source_capability_contract():
     pwp = _make_dummy_pwp(alpha, beta)
     source = _ExplicitInfinitePowerSource()
 
-    assert source_has_finite_incident_power(cast(Source, source)) is False
+    assert source.has_finite_incident_power() is False
     with pytest.raises(ValueError, match="infinite-power sources"):
         finite_beam_power_fractions(
             cast(Source, source),
