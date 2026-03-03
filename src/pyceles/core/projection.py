@@ -14,7 +14,7 @@ from .polarization import pure_polarization_label
 from .spherical import spherical_functions_trigon
 
 if TYPE_CHECKING:
-    from .sources import GaussianBeam, PlaneWave, Source
+    from .sources import GaussianBeam, JonesPolarizedSource, PlaneWave, Source
 
 
 Polarization = Literal["TE", "TM"]
@@ -77,7 +77,7 @@ def _project_source_single_to_svwf(
 def project_source_basis_to_svwf(
     positions: np.ndarray,
     lmax: int,
-    source: Source,
+    source: JonesPolarizedSource,
     *,
     polar_angles: np.ndarray | None = None,
     azimuthal_angles: np.ndarray | None = None,
@@ -99,6 +99,10 @@ def project_source_basis_to_svwf(
     - `polar_angles`/`azimuthal_angles` are source-projection quadrature nodes;
       they are conceptually independent from any far-field display grid.
     """
+    if not callable(getattr(source, "with_polarization", None)):
+        raise TypeError(
+            f"{type(source).__name__} does not expose `with_polarization(...)` required for TE/TM basis projection."
+        )
     src_te = source.with_polarization("TE")
     src_tm = source.with_polarization("TM")
     b_te = _project_source_single_to_svwf(

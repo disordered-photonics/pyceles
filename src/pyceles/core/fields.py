@@ -27,6 +27,7 @@ from .sources import (
     DipoleCollection,
     DipoleSource,
     GaussianBeam,
+    JonesPolarizedSource,
     PlaneWave,
     Polarization,
     PolarizationInput,
@@ -35,6 +36,7 @@ from .sources import (
     is_normal_incidence,
     polarization_to_jones,
     source_jones,
+    source_supports_jones,
 )
 
 __all__ = [
@@ -43,6 +45,7 @@ __all__ = [
     "DipoleSource",
     "DipoleCollection",
     "GaussianBeam",
+    "JonesPolarizedSource",
     "PlaneWave",
     "SLMSource",
     "Polarization",
@@ -59,5 +62,6 @@ __all__ = [
     "project_source_basis_to_svwf",
     "project_source_to_svwf",
     "source_jones",
+    "source_supports_jones",
     "transformation_coefficients",
 ]

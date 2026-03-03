@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import numpy as np
 
-from pyceles.core.sources import AngularSpectrumSource, Source, source_capabilities
+from pyceles.core.sources import (
+    AngularSpectrumSource,
+    Source,
+    source_capabilities,
+    source_supports_jones,
+)
 
 
 def assert_source_compliance(
@@ -19,8 +24,6 @@ def assert_source_compliance(
     )
     src = source
     assert callable(getattr(source, "incident_coeffs", None))
-    assert callable(getattr(source, "with_polarization", None))
-    assert callable(getattr(source, "jones_coefficients", None))
     assert callable(getattr(source, "has_finite_incident_power", None))
 
     wl = float(src.wavelength)
@@ -34,25 +37,19 @@ def assert_source_compliance(
     assert caps.supports_angular_spectrum is expect_angular_spectrum
     assert caps.finite_incident_power is expect_finite_incident_power
     assert caps.supports_jones_polarization is expect_jones_polarization
+    assert source_supports_jones(source) is expect_jones_polarization
     assert isinstance(source, AngularSpectrumSource) is expect_angular_spectrum
 
     if expect_jones_polarization:
+        if not source_supports_jones(source):
+            raise AssertionError("Expected source to satisfy JonesPolarizedSource protocol.")
+        assert callable(getattr(source, "jones_coefficients", None))
+        assert callable(getattr(source, "with_polarization", None))
         a_te, a_tm = source.jones_coefficients()
         assert np.isfinite(a_te.real) and np.isfinite(a_te.imag)
         assert np.isfinite(a_tm.real) and np.isfinite(a_tm.imag)
         polarized = source.with_polarization("TE")
         assert isinstance(polarized, Source)
     else:
-        try:
-            source.jones_coefficients()
-        except TypeError:
-            pass
-        else:
-            raise AssertionError("Expected `jones_coefficients()` to be unsupported.")
-
-        try:
-            source.with_polarization("TE")
-        except TypeError:
-            pass
-        else:
-            raise AssertionError("Expected `with_polarization()` to be unsupported.")
+        assert not callable(getattr(source, "jones_coefficients", None))
+        assert not callable(getattr(source, "with_polarization", None))

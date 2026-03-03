@@ -3,7 +3,7 @@ from __future__ import annotations
 """Incident-source models and source-side field helpers."""
 
 from dataclasses import dataclass, field, replace
-from typing import Any, Callable, Literal, Protocol, Tuple, runtime_checkable
+from typing import Callable, Literal, Protocol, Tuple, TypeGuard, runtime_checkable
 
 import numpy as np
 import numpy.typing as npt
@@ -188,22 +188,6 @@ def polarization_to_jones(polarization: PolarizationInput) -> tuple[complex, com
     return a_te, a_tm
 
 
-def source_jones(source: Any) -> tuple[complex, complex]:
-    """Return source polarization as Jones-like TE/TM weights.
-
-    Local dipole sources do not define TE/TM Jones metadata; this helper raises
-    for `DipoleSource`/`DipoleCollection`.
-    """
-    if isinstance(source, (DipoleSource, DipoleCollection)):
-        raise TypeError(
-            "Dipole sources do not define TE/TM Jones polarization metadata. "
-            "Use dipole-moment vectors/orientations instead."
-        )
-    if hasattr(source, "jones_coefficients"):
-        return source.jones_coefficients()
-    return polarization_to_jones(getattr(source, "polarization", "TE"))
-
-
 def is_normal_incidence(polar_angle: float, *, atol: float = 1e-12) -> bool:
     """Return True when `polar_angle` corresponds to +/- z propagation."""
     return bool(np.isclose(np.sin(float(polar_angle)), 0.0, atol=float(atol)))
@@ -238,7 +222,7 @@ class AngularSpectrumSource(Protocol):
 
 @runtime_checkable
 class Source(Protocol):
-    """Unified incident-source protocol (channel-aware TE/TM excitation).
+    """Unified incident-source protocol.
 
     Capability contract
     -------------------
@@ -255,17 +239,6 @@ class Source(Protocol):
 
     @property
     def amplitude(self) -> float: ...
-
-    @property
-    def polarization(self) -> PolarizationInput: ...
-
-    def jones_coefficients(self) -> tuple[complex, complex]:
-        """Return source polarization weights in the TE/TM basis."""
-        ...
-
-    def with_polarization(self, polarization: PolarizationInput) -> "Source":
-        """Return a source copy with updated polarization state."""
-        ...
 
     def has_finite_incident_power(self) -> bool:
         """Return True when incident-power-normalized beam diagnostics are valid."""
@@ -284,6 +257,36 @@ class Source(Protocol):
         ...
 
 
+@runtime_checkable
+class JonesPolarizedSource(Source, Protocol):
+    """Source interface exposing TE/TM Jones metadata and channel cloning."""
+
+    @property
+    def polarization(self) -> PolarizationInput: ...
+
+    def jones_coefficients(self) -> tuple[complex, complex]:
+        """Return source polarization weights in the TE/TM basis."""
+        ...
+
+    def with_polarization(self, polarization: PolarizationInput) -> "JonesPolarizedSource":
+        """Return a source copy with updated polarization state."""
+        ...
+
+
+def source_supports_jones(source: object) -> TypeGuard[JonesPolarizedSource]:
+    """Return True when a source supports Jones metadata and TE/TM cloning."""
+    return isinstance(source, JonesPolarizedSource)
+
+
+def source_jones(source: Source) -> tuple[complex, complex]:
+    """Return source polarization as Jones-like TE/TM weights."""
+    if not source_supports_jones(source):
+        raise TypeError(
+            f"{type(source).__name__} does not define TE/TM Jones polarization metadata."
+        )
+    return source.jones_coefficients()
+
+
 @dataclass(frozen=True)
 class SourceCapabilities:
     """Internal source capability summary used across solver/postprocessing paths."""
@@ -295,11 +298,7 @@ class SourceCapabilities:
 
 def source_capabilities(source: Source) -> SourceCapabilities:
     """Return canonical source capabilities used by pyceles internals."""
-    supports_jones = True
-    try:
-        source_jones(source)
-    except TypeError:
-        supports_jones = False
+    supports_jones = source_supports_jones(source)
     return SourceCapabilities(
         supports_jones_polarization=supports_jones,
         supports_angular_spectrum=isinstance(source, AngularSpectrumSource),
@@ -995,14 +994,18 @@ class SLMSource:
         angular sample.
     """
 
-    base_source: Source
+    base_source: JonesPolarizedSource
     modulation: _SLMModulation = 1.0 + 0.0j
 
     def __post_init__(self) -> None:
         if not isinstance(self.base_source, Source):
             raise TypeError(
                 "`base_source` must satisfy the pyceles Source protocol "
-                "(wavelength/medium_n + incident_coeffs/with_polarization APIs)."
+                "(wavelength/medium_n + incident_coeffs + has_finite_incident_power APIs)."
+            )
+        if not source_supports_jones(self.base_source):
+            raise TypeError(
+                "`base_source` must expose Jones metadata and `with_polarization(...)` for SLM wrapping."
             )
         if not isinstance(self.base_source, AngularSpectrumSource):
             raise TypeError("`base_source` must expose `angular_spectrum(...)` for SLM modulation.")
@@ -1192,7 +1195,6 @@ class DipoleSource:
     position: tuple[float, float, float] = (0.0, 0.0, 0.0)
     amplitude: float = 1.0
     radial_lut_dr: float = 1.0
-    polarization: PolarizationInput = "TE"
 
     def __post_init__(self) -> None:
         n = complex(self.medium_n)
@@ -1209,20 +1211,6 @@ class DipoleSource:
             raise ValueError(f"`amplitude` must be finite. Got {self.amplitude!r}.")
         if float(self.radial_lut_dr) <= 0.0:
             raise ValueError(f"`radial_lut_dr` must be > 0. Got {self.radial_lut_dr!r}.")
-
-    def jones_coefficients(self) -> tuple[complex, complex]:
-        """Dipoles do not define TE/TM Jones polarization states."""
-        raise TypeError(
-            "DipoleSource does not define TE/TM Jones polarization metadata. "
-            "Use `dipole_moment` orientation/components instead."
-        )
-
-    def with_polarization(self, polarization: PolarizationInput) -> "DipoleSource":
-        """Dipoles are not TE/TM sources; this method is unsupported by design."""
-        raise TypeError(
-            "DipoleSource does not define TE/TM polarization states. "
-            "Use `dipole_moment` orientation/components instead."
-        )
 
     def has_finite_incident_power(self) -> bool:
         """Beam-power diagnostics do not apply to local dipole emitters."""
@@ -1338,7 +1326,6 @@ class DipoleCollection:
     )
     amplitude: float = 1.0
     radial_lut_dr: float = 1.0
-    polarization: PolarizationInput = "TE"
 
     def __post_init__(self) -> None:
         n = complex(self.medium_n)
@@ -1354,20 +1341,6 @@ class DipoleCollection:
             raise ValueError(f"`amplitude` must be finite. Got {self.amplitude!r}.")
         if float(self.radial_lut_dr) <= 0.0:
             raise ValueError(f"`radial_lut_dr` must be > 0. Got {self.radial_lut_dr!r}.")
-
-    def jones_coefficients(self) -> tuple[complex, complex]:
-        """Dipoles do not define TE/TM Jones polarization states."""
-        raise TypeError(
-            "DipoleCollection does not define TE/TM Jones polarization metadata. "
-            "Use vector dipole moments/orientations instead."
-        )
-
-    def with_polarization(self, polarization: PolarizationInput) -> "DipoleCollection":
-        """Dipoles are not TE/TM sources; this method is unsupported by design."""
-        raise TypeError(
-            "DipoleCollection does not define TE/TM polarization states. "
-            "Use vector dipole moments/orientations instead."
-        )
 
     def has_finite_incident_power(self) -> bool:
         """Beam-power diagnostics do not apply to local dipole emitters."""

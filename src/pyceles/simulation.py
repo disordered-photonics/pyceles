@@ -21,6 +21,7 @@ from pyceles.core.sources import (
     PlaneWave,
     Source,
     source_jones,
+    source_supports_jones,
 )
 from pyceles.linear.preconditioner import make_grid_block_preconditioner
 from pyceles.linear.solvers import (
@@ -558,7 +559,7 @@ class SimulationConfig:
             if not isinstance(self.source, Source):
                 raise TypeError(
                     "`source` must satisfy the pyceles Source protocol "
-                    "(wavelength/medium_n + incident_coeffs/with_polarization APIs). "
+                    "(wavelength/medium_n + incident_coeffs + has_finite_incident_power APIs). "
                     f"Got {type(self.source).__name__}."
                 )
             source_wavelength = float(self.source.wavelength)
@@ -860,7 +861,7 @@ class Simulation:
         if not isinstance(source, Source):
             raise TypeError(
                 f"Source '{label}' must satisfy the pyceles Source protocol "
-                "(wavelength/medium_n + incident_coeffs/with_polarization APIs). "
+                "(wavelength/medium_n + incident_coeffs + has_finite_incident_power APIs). "
                 f"Got {type(source).__name__}."
             )
         wl = float(source.wavelength)
@@ -1015,11 +1016,7 @@ class Simulation:
         else:
             ff = _empty_farfield_patterns(compute_dtype)
 
-        pol_jones: tuple[complex, complex] | None = None
-        try:
-            pol_jones = source_jones(source)
-        except TypeError:
-            pol_jones = None
+        pol_jones = source_jones(source) if source_supports_jones(source) else None
         config_out = cfg if cfg.source is source else replace(cfg, source=source)
         return SimulationResult(
             config=config_out,
@@ -1452,15 +1449,15 @@ class Simulation:
             solved = self.solve_sources({"mixed": source})
             multi = self.postprocess_sources(solved, include_farfield=include_farfield)
             return multi["mixed"]
-        try:
-            a_te, a_tm = source_jones(source)
-            src_te = source.with_polarization("TE")
-            src_tm = source.with_polarization("TM")
-        except TypeError as exc:
+        if not source_supports_jones(source):
             raise ValueError(
                 "`solve_polarization_basis=True` is only defined for TE/TM polarization sources "
                 "that expose Jones metadata and `with_polarization('TE'/'TM')`."
-            ) from exc
+            )
+        source_jones_capable = source
+        a_te, a_tm = source_jones(source_jones_capable)
+        src_te = source_jones_capable.with_polarization("TE")
+        src_tm = source_jones_capable.with_polarization("TM")
 
         basis_sources = {
             "te": src_te,
