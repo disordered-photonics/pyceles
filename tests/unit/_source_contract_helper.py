@@ -4,9 +4,8 @@ import numpy as np
 
 from pyceles.core.sources import (
     AngularSpectrumSource,
+    JonesPolarizedSource,
     Source,
-    source_capabilities,
-    source_supports_jones,
 )
 
 
@@ -33,15 +32,12 @@ def assert_source_compliance(
     assert np.isfinite(amp)
     assert np.isfinite(n_medium.real) and np.isfinite(n_medium.imag)
 
-    caps = source_capabilities(source)
-    assert caps.supports_angular_spectrum is expect_angular_spectrum
-    assert caps.finite_incident_power is expect_finite_incident_power
-    assert caps.supports_jones_polarization is expect_jones_polarization
-    assert source_supports_jones(source) is expect_jones_polarization
     assert isinstance(source, AngularSpectrumSource) is expect_angular_spectrum
+    assert bool(source.has_finite_incident_power()) is expect_finite_incident_power
+    assert isinstance(source, JonesPolarizedSource) is expect_jones_polarization
 
     if expect_jones_polarization:
-        if not source_supports_jones(source):
+        if not isinstance(source, JonesPolarizedSource):
             raise AssertionError("Expected source to satisfy JonesPolarizedSource protocol.")
         assert callable(getattr(source, "jones_coefficients", None))
         assert callable(getattr(source, "with_polarization", None))

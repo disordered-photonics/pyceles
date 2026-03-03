@@ -2,7 +2,6 @@ import numpy as np
 
 from pyceles.core.fields import PlaneWave, incident_coeffs_planewave, transformation_coefficients
 from pyceles.core.indexing import n_modes, n_scalar, scalar_index
-from pyceles.core.sources import source_jones
 from pyceles.core.spherical import spherical_functions_trigon
 from pyceles.postprocessing.nearfield import compute_initial_field
 
@@ -20,7 +19,7 @@ def _incident_coeffs_planewave_reference(
     sb = np.sin(beta)
     cb = np.cos(beta)
     PI, TAU = spherical_functions_trigon(np.asarray(cb), np.asarray(sb), lmax, xp=np)
-    a_te, a_tm = source_jones(source)
+    a_te, a_tm = source.jones_coefficients()
     pol = 1 if abs(a_tm) < 1e-15 and abs(a_te) > 0.0 else 2
     fp = np.asarray(source.focal_point, dtype=float).reshape(3)
     rel = pos - fp

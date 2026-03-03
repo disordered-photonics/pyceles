@@ -16,8 +16,6 @@ from .fields import (
     project_source_basis_to_svwf,
     project_source_to_svwf,
     pwp_to_svwf_regular,
-    source_jones,
-    source_supports_jones,
     svwf_outgoing_to_pwp,
     svwf_regular_to_pwp,
 )
@@ -71,6 +69,4 @@ __all__ = [
     "project_source_to_svwf",
     "project_source_basis_to_svwf",
     "rhs_Tb_numpy",
-    "source_jones",
-    "source_supports_jones",
 ]

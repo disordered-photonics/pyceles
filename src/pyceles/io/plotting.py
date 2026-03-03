@@ -3,7 +3,7 @@ from __future__ import annotations
 import matplotlib.pyplot as plt
 import numpy as np
 
-from pyceles.core.sources import source_supports_jones
+from pyceles.core.sources import JonesPolarizedSource
 
 
 def _is_pure_channel_result(run, channel: str, *, atol: float = 1e-12) -> bool:
@@ -11,7 +11,7 @@ def _is_pure_channel_result(run, channel: str, *, atol: float = 1e-12) -> bool:
     src = getattr(getattr(run, "config", None), "source", None)
     if src is None:
         return False
-    if not source_supports_jones(src):
+    if not isinstance(src, JonesPolarizedSource):
         return False
     if not hasattr(run, "polarization_jones"):
         return False

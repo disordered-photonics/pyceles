@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Literal
 import numpy as np
 
 from pyceles._dtypes import resolve_compute_accum_dtypes
-from pyceles.core.sources import source_supports_jones
+from pyceles.core.sources import JonesPolarizedSource
 
 from .nearfield_workflows import NearFieldComponents, compute_near_field_components
 
@@ -19,7 +19,7 @@ def _is_pure_channel_result(run: SimulationResult, channel: str, *, atol: float 
     src = run.config.source
     if src is None:
         return False
-    if not source_supports_jones(src):
+    if not isinstance(src, JonesPolarizedSource):
         return False
     if run.polarization_jones is None:
         return False
@@ -214,7 +214,7 @@ def compute_near_field(
             )
         if used_basis_payload:
             pol_label: Literal["TE", "TM"] = "TE" if channel_key == "te" else "TM"
-            if not source_supports_jones(source):
+            if not isinstance(source, JonesPolarizedSource):
                 raise ValueError(
                     "Basis near-field channel requires a source with Jones metadata "
                     "and `with_polarization('TE'/'TM')`."

@@ -23,7 +23,6 @@ from pyceles.core.sources import (
     PlaneWave,
     Source,
     ensure_finite_power_diagnostics_supported,
-    source_jones,
 )
 
 
@@ -479,7 +478,7 @@ def _plane_wave_incident_intensity_scale(source: Source) -> float:
     if not isinstance(source, PlaneWave):
         raise ValueError("Cross section only defined for PlaneWave excitation.")
 
-    a_te, a_tm = source_jones(source)
+    a_te, a_tm = source.jones_coefficients()
     pol_norm2 = float(abs(a_te) ** 2 + abs(a_tm) ** 2)
     amp2 = float(abs(complex(source.amplitude)) ** 2)
     scale = amp2 * pol_norm2

@@ -18,10 +18,9 @@ from pyceles.core.projection import project_source_to_svwf
 from pyceles.core.sources import (
     DipoleCollection,
     DipoleSource,
+    JonesPolarizedSource,
     PlaneWave,
     Source,
-    source_jones,
-    source_supports_jones,
 )
 from pyceles.linear.preconditioner import make_grid_block_preconditioner
 from pyceles.linear.solvers import (
@@ -1016,7 +1015,9 @@ class Simulation:
         else:
             ff = _empty_farfield_patterns(compute_dtype)
 
-        pol_jones = source_jones(source) if source_supports_jones(source) else None
+        pol_jones = (
+            source.jones_coefficients() if isinstance(source, JonesPolarizedSource) else None
+        )
         config_out = cfg if cfg.source is source else replace(cfg, source=source)
         return SimulationResult(
             config=config_out,
@@ -1449,15 +1450,14 @@ class Simulation:
             solved = self.solve_sources({"mixed": source})
             multi = self.postprocess_sources(solved, include_farfield=include_farfield)
             return multi["mixed"]
-        if not source_supports_jones(source):
+        if not isinstance(source, JonesPolarizedSource):
             raise ValueError(
                 "`solve_polarization_basis=True` is only defined for TE/TM polarization sources "
                 "that expose Jones metadata and `with_polarization('TE'/'TM')`."
             )
-        source_jones_capable = source
-        a_te, a_tm = source_jones(source_jones_capable)
-        src_te = source_jones_capable.with_polarization("TE")
-        src_tm = source_jones_capable.with_polarization("TM")
+        a_te, a_tm = source.jones_coefficients()
+        src_te = source.with_polarization("TE")
+        src_tm = source.with_polarization("TM")
 
         basis_sources = {
             "te": src_te,

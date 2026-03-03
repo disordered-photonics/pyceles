@@ -3,7 +3,7 @@ from __future__ import annotations
 """Incident-source models and source-side field helpers."""
 
 from dataclasses import dataclass, field, replace
-from typing import Callable, Literal, Protocol, Tuple, TypeGuard, runtime_checkable
+from typing import Callable, Literal, Protocol, Tuple, runtime_checkable
 
 import numpy as np
 import numpy.typing as npt
@@ -273,39 +273,6 @@ class JonesPolarizedSource(Source, Protocol):
         ...
 
 
-def source_supports_jones(source: object) -> TypeGuard[JonesPolarizedSource]:
-    """Return True when a source supports Jones metadata and TE/TM cloning."""
-    return isinstance(source, JonesPolarizedSource)
-
-
-def source_jones(source: Source) -> tuple[complex, complex]:
-    """Return source polarization as Jones-like TE/TM weights."""
-    if not source_supports_jones(source):
-        raise TypeError(
-            f"{type(source).__name__} does not define TE/TM Jones polarization metadata."
-        )
-    return source.jones_coefficients()
-
-
-@dataclass(frozen=True)
-class SourceCapabilities:
-    """Internal source capability summary used across solver/postprocessing paths."""
-
-    supports_jones_polarization: bool
-    supports_angular_spectrum: bool
-    finite_incident_power: bool
-
-
-def source_capabilities(source: Source) -> SourceCapabilities:
-    """Return canonical source capabilities used by pyceles internals."""
-    supports_jones = source_supports_jones(source)
-    return SourceCapabilities(
-        supports_jones_polarization=supports_jones,
-        supports_angular_spectrum=isinstance(source, AngularSpectrumSource),
-        finite_incident_power=bool(source.has_finite_incident_power()),
-    )
-
-
 def finite_power_policy_error(source: Source, *, diagnostic: str) -> ValueError:
     """Build a consistent error for diagnostics requiring finite incident power."""
     cls = type(source).__name__
@@ -356,7 +323,7 @@ def _gaussian_angular_spectrum_coeffs(
 ) -> tuple[dict, dict]:
     """Evaluate Gaussian-beam TE/TM angular-spectrum coefficients on a grid."""
     if polarization_override is None:
-        a_te, a_tm = source_jones(beam)
+        a_te, a_tm = beam.jones_coefficients()
         pure = pure_polarization_label(a_te, a_tm)
         if pure is None:
             te_te, te_tm = _gaussian_angular_spectrum_coeffs(
@@ -654,7 +621,7 @@ def _bessel_angular_spectrum_coeffs(
 ) -> tuple[dict, dict]:
     """Evaluate exact non-paraxial Bessel-beam ring spectrum on one alpha-beta grid."""
     if polarization_override is None:
-        a_te, a_tm = source_jones(beam)
+        a_te, a_tm = beam.jones_coefficients()
         pure = pure_polarization_label(a_te, a_tm)
         if pure is None:
             te_te, te_tm = _bessel_angular_spectrum_coeffs(
@@ -1003,7 +970,7 @@ class SLMSource:
                 "`base_source` must satisfy the pyceles Source protocol "
                 "(wavelength/medium_n + incident_coeffs + has_finite_incident_power APIs)."
             )
-        if not source_supports_jones(self.base_source):
+        if not isinstance(self.base_source, JonesPolarizedSource):
             raise TypeError(
                 "`base_source` must expose Jones metadata and `with_polarization(...)` for SLM wrapping."
             )
@@ -1036,7 +1003,7 @@ class SLMSource:
         return float(getattr(self.base_source, "beam_width", np.inf))
 
     def jones_coefficients(self) -> tuple[complex, complex]:
-        return source_jones(self.base_source)
+        return self.base_source.jones_coefficients()
 
     def with_polarization(self, polarization: PolarizationInput) -> "SLMSource":
         return replace(self, base_source=self.base_source.with_polarization(polarization))

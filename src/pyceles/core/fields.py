@@ -35,8 +35,6 @@ from .sources import (
     Source,
     is_normal_incidence,
     polarization_to_jones,
-    source_jones,
-    source_supports_jones,
 )
 
 __all__ = [
@@ -61,7 +59,5 @@ __all__ = [
     "polarization_to_jones",
     "project_source_basis_to_svwf",
     "project_source_to_svwf",
-    "source_jones",
-    "source_supports_jones",
     "transformation_coefficients",
 ]

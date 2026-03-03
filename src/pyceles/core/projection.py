@@ -42,26 +42,6 @@ def project_source_to_svwf(
         wavebundles). Plane-wave projection is analytic and does not use these
         arrays.
     """
-    return _project_source_single_to_svwf(
-        positions,
-        lmax,
-        source,
-        polar_angles=polar_angles,
-        azimuthal_angles=azimuthal_angles,
-        dtype=dtype,
-    )
-
-
-def _project_source_single_to_svwf(
-    positions: np.ndarray,
-    lmax: int,
-    source: Source,
-    *,
-    polar_angles: np.ndarray | None = None,
-    azimuthal_angles: np.ndarray | None = None,
-    dtype: npt.DTypeLike = np.complex128,
-) -> np.ndarray:
-    """Low-level projector for one concrete source state."""
     if not hasattr(source, "incident_coeffs"):
         raise TypeError(f"Unsupported source type: {type(source).__name__}")
     coeffs = source.incident_coeffs(
@@ -99,13 +79,9 @@ def project_source_basis_to_svwf(
     - `polar_angles`/`azimuthal_angles` are source-projection quadrature nodes;
       they are conceptually independent from any far-field display grid.
     """
-    if not callable(getattr(source, "with_polarization", None)):
-        raise TypeError(
-            f"{type(source).__name__} does not expose `with_polarization(...)` required for TE/TM basis projection."
-        )
     src_te = source.with_polarization("TE")
     src_tm = source.with_polarization("TM")
-    b_te = _project_source_single_to_svwf(
+    b_te = project_source_to_svwf(
         positions,
         lmax,
         src_te,
@@ -113,7 +89,7 @@ def project_source_basis_to_svwf(
         azimuthal_angles=azimuthal_angles,
         dtype=dtype,
     )
-    b_tm = _project_source_single_to_svwf(
+    b_tm = project_source_to_svwf(
         positions,
         lmax,
         src_tm,
