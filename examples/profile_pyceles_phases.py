@@ -18,6 +18,7 @@ from pyceles.core.matvec import (
     make_prepared_A_and_rhs,
     prepare_matvec,
 )
+from pyceles.core.sources import source_jones
 from pyceles.linear.preconditioner import make_grid_block_preconditioner
 from pyceles.linear.solvers import solve_linear_system
 from pyceles.postprocessing.farfield import compute_far_field_patterns
@@ -382,7 +383,7 @@ def main() -> None:
         decomposition_backward=None,
         decomposition_forward_basis=None,
         decomposition_backward_basis=None,
-        polarization_jones=(1.0 + 0j, 0.0 + 0j),
+        polarization_jones=source_jones(source),
     )
 
     if not args.quiet:
