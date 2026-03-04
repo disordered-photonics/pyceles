@@ -15,6 +15,7 @@ SourceName = Literal[
     "laguerre_gaussian",
     "focused_laguerre_gaussian",
     "bessel",
+    "bessel_cartesian",
 ]
 
 
@@ -169,6 +170,23 @@ def _build_source(
                 forward_only=True,
             ),
         )
+    if name == "bessel_cartesian":
+        return (
+            f"bessel_cartesian_m{int(bessel_order)}",
+            pcl.CartesianPolarizedBesselBeam(
+                wavelength=float(wavelength),
+                medium_n=complex(n_medium),
+                amplitude=1.0,
+                order_m=int(bessel_order),
+                cone_angle=float(bessel_cone_angle),
+                polar_angle=0.0,
+                azimuthal_angle=0.0,
+                global_polarization=(1.0 + 0.0j, 0.0 + 0.0j, 0.0 + 0.0j),
+                center=(0.0, 0.0, 0.0),
+                azimuthal_phase=0.0,
+                forward_only=True,
+            ),
+        )
     raise ValueError(f"Unsupported source name {name!r}.")
 
 
@@ -232,6 +250,14 @@ def _source_note(source: pcl.core.Source) -> str:
             "Bessel: "
             f"m={int(source.order_m)}, cone_angle={float(source.cone_angle):.4f} rad, center={c}"
         )
+    if isinstance(source, pcl.CartesianPolarizedBesselBeam):
+        c = tuple(float(v) for v in source.center)
+        gp = tuple(complex(v) for v in source.global_polarization)
+        return (
+            "Bessel (global Cartesian polarization): "
+            f"m={int(source.order_m)}, cone_angle={float(source.cone_angle):.4f} rad, "
+            f"global_polarization={gp}, center={c}"
+        )
     if isinstance(source, pcl.LaguerreGaussianBeam):
         f = tuple(float(v) for v in source.focal_point)
         return (
@@ -266,6 +292,9 @@ def _propagation_and_polarization_note(source: pcl.core.Source) -> str:
     if hasattr(source, "polarization"):
         pol = source.polarization
         pol_txt = f"polarization={pol!r}"
+    elif hasattr(source, "global_polarization"):
+        pol = source.global_polarization
+        pol_txt = f"global_polarization={pol!r}"
     else:
         pol_txt = "polarization=n/a"
     return f"{prop} | {pol_txt}"
@@ -287,6 +316,7 @@ def parse_args() -> argparse.Namespace:
             "laguerre_gaussian",
             "focused_laguerre_gaussian",
             "bessel",
+            "bessel_cartesian",
         ],
         default=[
             "plane_wave",
@@ -294,6 +324,7 @@ def parse_args() -> argparse.Namespace:
             "laguerre_gaussian",
             "focused_laguerre_gaussian",
             "bessel",
+            "bessel_cartesian",
         ],
         help="Sources to render.",
     )
@@ -441,11 +472,12 @@ def main() -> None:
             "laguerre_gaussian",
             "focused_laguerre_gaussian",
             "bessel",
+            "bessel_cartesian",
         }:
             raise ValueError(f"Unsupported source {src_name_raw!r}.")
         src_name = cast(SourceName, src_name_raw)
 
-        bessel_orders = (0, 1) if src_name == "bessel" else (0,)
+        bessel_orders = (0, 1) if src_name in {"bessel", "bessel_cartesian"} else (0,)
         for bessel_order in bessel_orders:
             label, source = _build_source(
                 src_name,

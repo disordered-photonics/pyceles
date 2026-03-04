@@ -4,6 +4,7 @@ from .angular import uniform_periodic_azimuth_grid, uniform_polar_grid
 from .fields import (
     AngularSpectrumSource,
     BesselBeam,
+    CartesianPolarizedBesselBeam,
     DipoleCollection,
     DipoleSource,
     FocusedLaguerreGaussianBeam,
@@ -40,6 +41,7 @@ __all__ = [
     "Ellipsoid",
     "AngularSpectrumSource",
     "BesselBeam",
+    "CartesianPolarizedBesselBeam",
     "DipoleSource",
     "DipoleCollection",
     "FocusedLaguerreGaussianBeam",

@@ -11,6 +11,7 @@ from _source_contract_helper import assert_source_compliance
 from pyceles.core.indexing import n_modes
 from pyceles.core.sources import (
     BesselBeam,
+    CartesianPolarizedBesselBeam,
     DipoleCollection,
     DipoleSource,
     FocusedLaguerreGaussianBeam,
@@ -134,6 +135,23 @@ def _infinite_gaussian() -> GaussianBeam:
             True,
             False,
             True,
+        ),
+        (
+            lambda: CartesianPolarizedBesselBeam(
+                wavelength=550.0,
+                medium_n=1.0 + 0j,
+                order_m=1,
+                cone_angle=0.5,
+                polar_angle=0.3,
+                azimuthal_angle=0.4,
+                global_polarization=(1.0 + 0.0j, 0.2 - 0.3j, 0.0 + 0.0j),
+                amplitude=1.0,
+                center=(0.0, 0.0, 0.0),
+                forward_only=True,
+            ),
+            True,
+            False,
+            False,
         ),
         (
             lambda: LaguerreGaussianBeam(

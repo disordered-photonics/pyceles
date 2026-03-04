@@ -24,6 +24,7 @@ from .projection import (
 from .sources import (
     AngularSpectrumSource,
     BesselBeam,
+    CartesianPolarizedBesselBeam,
     DipoleCollection,
     DipoleSource,
     FocusedLaguerreGaussianBeam,
@@ -42,6 +43,7 @@ from .sources import (
 __all__ = [
     "AngularSpectrumSource",
     "BesselBeam",
+    "CartesianPolarizedBesselBeam",
     "DipoleSource",
     "DipoleCollection",
     "FocusedLaguerreGaussianBeam",

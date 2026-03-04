@@ -26,6 +26,7 @@ dist/
 # Ignore benchmark scripts in examples
 /examples/benchmark_*.py
 /examples/run_smuthi_*.py
+/examples/internal_*.py
 
 # Ignore generated outputs (big)
 /outputs/

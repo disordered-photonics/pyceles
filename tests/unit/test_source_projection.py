@@ -5,6 +5,7 @@ import numpy as np
 from pyceles.core.conversions import pwp_to_svwf_regular
 from pyceles.core.fields import (
     BesselBeam,
+    CartesianPolarizedBesselBeam,
     FocusedLaguerreGaussianBeam,
     GaussianBeam,
     LaguerreGaussianBeam,
@@ -418,6 +419,102 @@ def test_bessel_beam_m0_is_cylindrically_symmetric_in_alpha():
     active = np.where(beta_activity > (1e-10 * np.max(beta_activity)))[0]
     profile = np.sum(amp[:, active], axis=1)
     assert float(np.std(profile)) <= 1e-10 * float(np.max(np.abs(profile)))
+
+
+def test_cartesian_bessel_beam_angular_spectrum_support_concentrates_on_cone():
+    source = CartesianPolarizedBesselBeam(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        order_m=2,
+        cone_angle=0.63,
+        global_polarization=(1.0 + 0.0j, 0.4j, 0.0 + 0.0j),
+        amplitude=1.0,
+        azimuthal_phase=0.2,
+        center=(0.0, 0.0, 0.0),
+        forward_only=True,
+    )
+    k = 2.0 * np.pi / source.wavelength * np.real(source.medium_n)
+    polar = np.linspace(0.0, np.pi, 361)
+    azimuthal = np.linspace(0.0, 2.0 * np.pi, 181, endpoint=False)
+    te, tm = source.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
+
+    amp = np.sqrt(np.abs(te["coeff"]) ** 2 + np.abs(tm["coeff"]) ** 2)
+    beta_activity = np.sum(amp, axis=0)
+    active = np.where(beta_activity > (1e-10 * np.max(beta_activity)))[0]
+    assert active.size <= 2
+    beta_mean = float(np.sum(polar[active] * beta_activity[active]) / np.sum(beta_activity[active]))
+    assert abs(beta_mean - source.cone_angle) <= float(np.max(np.diff(polar)))
+
+
+def test_cartesian_bessel_beam_transverse_projection_enforces_maxwell_constraint():
+    source = CartesianPolarizedBesselBeam(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        order_m=1,
+        cone_angle=0.58,
+        polar_angle=0.37,
+        azimuthal_angle=0.61,
+        global_polarization=(1.0 + 0.0j, 0.2 + 0.1j, 0.3j),
+        amplitude=1.0,
+        center=(0.0, 0.0, 0.0),
+        forward_only=True,
+    )
+    k = 2.0 * np.pi / source.wavelength * np.real(source.medium_n)
+    polar = np.linspace(0.0, np.pi, 321)
+    azimuthal = np.linspace(0.0, 2.0 * np.pi, 241, endpoint=False)
+    te, tm = source.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
+
+    agrid, bgrid = np.meshgrid(azimuthal, polar, indexing="ij")
+    sb = np.sin(bgrid)
+    cb = np.cos(bgrid)
+    ca = np.cos(agrid)
+    sa = np.sin(agrid)
+    sx = sb * ca
+    sy = sb * sa
+    sz = cb
+
+    ephi = np.stack([-sa, ca, np.zeros_like(agrid)], axis=2)
+    etheta = np.stack([cb * ca, cb * sa, -sb], axis=2)
+    ex = te["coeff"] * ephi[..., 0] + tm["coeff"] * etheta[..., 0]
+    ey = te["coeff"] * ephi[..., 1] + tm["coeff"] * etheta[..., 1]
+    ez = te["coeff"] * ephi[..., 2] + tm["coeff"] * etheta[..., 2]
+    dot = ex * sx + ey * sy + ez * sz
+    amp = np.sqrt(np.abs(ex) ** 2 + np.abs(ey) ** 2 + np.abs(ez) ** 2)
+    active = amp > (1e-12 * float(np.max(amp)))
+    assert np.any(active)
+    err = float(np.max(np.abs(dot[active])))
+    scale = float(np.max(amp[active]))
+    assert err <= 1e-10 * scale
+
+
+def test_cartesian_bessel_beam_polarization_vector_is_directional_not_amplitude_scaling():
+    src_ref = CartesianPolarizedBesselBeam(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        order_m=0,
+        cone_angle=0.44,
+        global_polarization=(1.0 + 0.0j, 0.5j, 0.0 + 0.0j),
+        amplitude=1.0,
+        center=(0.0, 0.0, 0.0),
+        forward_only=True,
+    )
+    src_scaled = CartesianPolarizedBesselBeam(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        order_m=0,
+        cone_angle=0.44,
+        global_polarization=(3.0 + 0.0j, 1.5j, 0.0 + 0.0j),
+        amplitude=1.0,
+        center=(0.0, 0.0, 0.0),
+        forward_only=True,
+    )
+    k = 2.0 * np.pi / src_ref.wavelength * np.real(src_ref.medium_n)
+    polar = np.linspace(0.0, np.pi, 241)
+    azimuthal = np.linspace(0.0, 2.0 * np.pi, 181, endpoint=False)
+    te_ref, tm_ref = src_ref.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
+    te_s, tm_s = src_scaled.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
+    np.testing.assert_allclose(te_ref["coeff"], te_s["coeff"], rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(tm_ref["coeff"], tm_s["coeff"], rtol=1e-12, atol=1e-12)
 
 
 def test_laguerre_gaussian_l0_p0_matches_gaussian_angular_spectrum():

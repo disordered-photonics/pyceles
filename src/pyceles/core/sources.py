@@ -882,6 +882,105 @@ def _bessel_tilted_ring_kernel(
     return ring
 
 
+def _normalize_global_polarization_vector(
+    vector: tuple[complex, complex, complex] | np.ndarray,
+) -> np.ndarray:
+    """Return a unit-norm complex polarization vector in global Cartesian basis.
+
+    The source API interprets `global_polarization` as a polarization *state*
+    (direction + relative phase), while overall field scaling is controlled by
+    the source `amplitude`. This helper therefore normalizes the input to unit
+    norm after validating shape/finiteness.
+    """
+    p = _as_complex_triplet("global_polarization", vector)
+    norm = float(np.linalg.norm(p))
+    if np.isclose(norm, 0.0):
+        raise ValueError("`global_polarization` must not be the zero vector.")
+    return np.asarray(p / norm, dtype=np.complex128)
+
+
+def _bessel_ring_geometry(
+    *,
+    beam,
+    k: float,
+    polar_angles: np.ndarray,
+    azimuthal_angles: np.ndarray,
+) -> dict[str, np.ndarray]:
+    """Build common ring-spectrum geometry for Bessel-like sources.
+
+    This helper centralizes the cone-support discretization and coordinate
+    transforms shared by:
+    - local-basis Bessel modes (`BesselBeam`)
+    - global-Cartesian projected Bessel modes (`CartesianPolarizedBesselBeam`)
+    """
+    beta = np.asarray(polar_angles, dtype=float).reshape(-1)
+    alpha = np.asarray(azimuthal_angles, dtype=float).reshape(-1)
+    agrid, bgrid = np.meshgrid(alpha, beta, indexing="ij")
+    sb = np.sin(bgrid)
+    cb = np.cos(bgrid)
+    ca = np.cos(agrid)
+    sa = np.sin(agrid)
+    kx = k * sb * ca
+    ky = k * sb * sa
+    kz = k * cb
+
+    n0, u, v = beam_axis_and_frame(float(beam.polar_angle), float(beam.azimuthal_angle))
+    s = np.stack([sb * ca, sb * sa, cb], axis=2)  # (Na, Nb, 3)
+    sx_l = np.einsum("abi,i->ab", s, u)
+    sy_l = np.einsum("abi,i->ab", s, v)
+    sz_l = np.einsum("abi,i->ab", s, n0)
+    alpha_l = np.arctan2(sy_l, sx_l)
+    cos_beta_l = np.clip(sz_l, -1.0, 1.0)
+    sin_beta_l = np.sqrt(np.maximum(0.0, 1.0 - cos_beta_l**2))
+
+    if is_normal_incidence(float(beam.polar_angle)):
+        ring_1d = _bessel_ring_beta_kernel(beta, float(beam.cone_angle))
+        if not bool(beam.forward_only):
+            ring_1d = ring_1d + _bessel_ring_beta_kernel(
+                beta, float(np.pi - float(beam.cone_angle))
+            )
+        ring = np.broadcast_to(ring_1d[None, :], (alpha.size, beta.size))
+    else:
+        ring = _bessel_tilted_ring_kernel(
+            alpha=alpha,
+            beta=beta,
+            polar_angle=float(beam.polar_angle),
+            azimuthal_angle=float(beam.azimuthal_angle),
+            cone_angle=float(beam.cone_angle),
+            forward_only=bool(beam.forward_only),
+        )
+
+    m = int(beam.order_m)
+    az_phase = float(beam.azimuthal_phase)
+    phase_mode = np.exp(1j * (m * alpha_l + az_phase))
+    cx, cy, cz = _as_float_triplet("center", beam.center)
+    phase_center = np.exp(-1j * (kx * cx + ky * cy + kz * cz))
+    envelope = float(beam.amplitude) * phase_mode * phase_center * ring
+
+    ephi_g = np.stack([-sa, ca, np.zeros_like(agrid)], axis=2)
+    etheta_g = np.stack([cb * ca, cb * sa, -sb], axis=2)
+
+    return {
+        "alpha": alpha,
+        "beta": beta,
+        "kx": kx,
+        "ky": ky,
+        "kz": kz,
+        "sx": sb * ca,
+        "sy": sb * sa,
+        "sz": cb,
+        "alpha_l": alpha_l,
+        "cos_beta_l": cos_beta_l,
+        "sin_beta_l": sin_beta_l,
+        "ephi_g": ephi_g,
+        "etheta_g": etheta_g,
+        "u": u,
+        "v": v,
+        "n0": n0,
+        "envelope": envelope,
+    }
+
+
 def _bessel_angular_spectrum_coeffs(
     *,
     beam,
@@ -916,49 +1015,26 @@ def _bessel_angular_spectrum_coeffs(
             return pwp_te, pwp_tm
         polarization_override = pure
 
-    beta = np.asarray(polar_angles, dtype=float).reshape(-1)
-    alpha = np.asarray(azimuthal_angles, dtype=float).reshape(-1)
-    agrid, bgrid = np.meshgrid(alpha, beta, indexing="ij")
-    sb = np.sin(bgrid)
-    cb = np.cos(bgrid)
-    ca = np.cos(agrid)
-    sa = np.sin(agrid)
-    kx = k * sb * ca
-    ky = k * sb * sa
-    kz = k * cb
-
-    n0, u, v = beam_axis_and_frame(float(beam.polar_angle), float(beam.azimuthal_angle))
-    s = np.stack([sb * ca, sb * sa, cb], axis=2)  # (Na,Nb,3)
-    sx_l = np.einsum("abi,i->ab", s, u)
-    sy_l = np.einsum("abi,i->ab", s, v)
-    sz_l = np.einsum("abi,i->ab", s, n0)
-    alpha_l = np.arctan2(sy_l, sx_l)
-    cos_beta_l = np.clip(sz_l, -1.0, 1.0)
-    sin_beta_l = np.sqrt(np.maximum(0.0, 1.0 - cos_beta_l**2))
-
-    if is_normal_incidence(float(beam.polar_angle)):
-        ring_1d = _bessel_ring_beta_kernel(beta, float(beam.cone_angle))
-        if not bool(beam.forward_only):
-            ring_1d = ring_1d + _bessel_ring_beta_kernel(
-                beta, float(np.pi - float(beam.cone_angle))
-            )
-        ring = np.broadcast_to(ring_1d[None, :], (alpha.size, beta.size))
-    else:
-        ring = _bessel_tilted_ring_kernel(
-            alpha=alpha,
-            beta=beta,
-            polar_angle=float(beam.polar_angle),
-            azimuthal_angle=float(beam.azimuthal_angle),
-            cone_angle=float(beam.cone_angle),
-            forward_only=bool(beam.forward_only),
-        )
-
-    m = int(beam.order_m)
-    az_phase = float(beam.azimuthal_phase)
-    phase_mode = np.exp(1j * (m * alpha_l + az_phase))
-    cx, cy, cz = _as_float_triplet("center", beam.center)
-    phase_center = np.exp(-1j * (kx * cx + ky * cy + kz * cz))
-    envelope = float(beam.amplitude) * phase_mode * phase_center * ring
+    geom = _bessel_ring_geometry(
+        beam=beam,
+        k=float(k),
+        polar_angles=np.asarray(polar_angles, dtype=float),
+        azimuthal_angles=np.asarray(azimuthal_angles, dtype=float),
+    )
+    alpha = np.asarray(geom["alpha"], dtype=float)
+    beta = np.asarray(geom["beta"], dtype=float)
+    kx = np.asarray(geom["kx"], dtype=float)
+    ky = np.asarray(geom["ky"], dtype=float)
+    kz = np.asarray(geom["kz"], dtype=float)
+    alpha_l = np.asarray(geom["alpha_l"], dtype=float)
+    cos_beta_l = np.asarray(geom["cos_beta_l"], dtype=float)
+    sin_beta_l = np.asarray(geom["sin_beta_l"], dtype=float)
+    ephi_g = np.asarray(geom["ephi_g"], dtype=float)
+    etheta_g = np.asarray(geom["etheta_g"], dtype=float)
+    u = np.asarray(geom["u"], dtype=float)
+    v = np.asarray(geom["v"], dtype=float)
+    n0 = np.asarray(geom["n0"], dtype=float)
+    envelope = np.asarray(geom["envelope"], dtype=np.complex128)
 
     pol = str(polarization_override or getattr(beam, "polarization", "TE")).lower()
     if pol == "te":
@@ -968,8 +1044,6 @@ def _bessel_angular_spectrum_coeffs(
         g_te_l = np.zeros_like(envelope)
         g_tm_l = envelope
 
-    ephi_g = np.stack([-sa, ca, np.zeros_like(agrid)], axis=2)
-    etheta_g = np.stack([cb * ca, cb * sa, -sb], axis=2)
     sin_alpha_l = np.sin(alpha_l)
     cos_alpha_l = np.cos(alpha_l)
     ephi_l = (-sin_alpha_l)[..., None] * u[None, None, :] + cos_alpha_l[..., None] * v[
@@ -987,6 +1061,54 @@ def _bessel_angular_spectrum_coeffs(
 
     coeff_te = m11 * g_te_l + m12 * g_tm_l
     coeff_tm = m21 * g_te_l + m22 * g_tm_l
+
+    pwp_te = {"beta": beta, "alpha": alpha, "kx": kx, "ky": ky, "kz": kz, "coeff": coeff_te}
+    pwp_tm = {"beta": beta, "alpha": alpha, "kx": kx, "ky": ky, "kz": kz, "coeff": coeff_tm}
+    return pwp_te, pwp_tm
+
+
+def _bessel_cartesian_angular_spectrum_coeffs(
+    *,
+    beam,
+    k: float,
+    polar_angles: np.ndarray,
+    azimuthal_angles: np.ndarray,
+) -> tuple[dict, dict]:
+    """Evaluate Bessel ring spectrum with global-Cartesian polarization transport.
+
+    Polarization is specified once in the laboratory frame (`global_polarization`)
+    and then projected onto each plane-wave's transverse plane to enforce
+    Maxwell transversality (`E.k=0`) at every angular sample.
+    """
+    geom = _bessel_ring_geometry(
+        beam=beam,
+        k=float(k),
+        polar_angles=np.asarray(polar_angles, dtype=float),
+        azimuthal_angles=np.asarray(azimuthal_angles, dtype=float),
+    )
+    alpha = np.asarray(geom["alpha"], dtype=float)
+    beta = np.asarray(geom["beta"], dtype=float)
+    kx = np.asarray(geom["kx"], dtype=float)
+    ky = np.asarray(geom["ky"], dtype=float)
+    kz = np.asarray(geom["kz"], dtype=float)
+    sx = np.asarray(geom["sx"], dtype=float)
+    sy = np.asarray(geom["sy"], dtype=float)
+    sz = np.asarray(geom["sz"], dtype=float)
+    ephi_g = np.asarray(geom["ephi_g"], dtype=float)
+    etheta_g = np.asarray(geom["etheta_g"], dtype=float)
+    envelope = np.asarray(geom["envelope"], dtype=np.complex128)
+
+    p = _normalize_global_polarization_vector(beam.global_polarization)
+    dot_ps = p[0] * sx + p[1] * sy + p[2] * sz
+    ex_t = p[0] - dot_ps * sx
+    ey_t = p[1] - dot_ps * sy
+    ez_t = p[2] - dot_ps * sz
+
+    g_te = ex_t * ephi_g[..., 0] + ey_t * ephi_g[..., 1] + ez_t * ephi_g[..., 2]
+    g_tm = ex_t * etheta_g[..., 0] + ey_t * etheta_g[..., 1] + ez_t * etheta_g[..., 2]
+
+    coeff_te = envelope * g_te
+    coeff_tm = envelope * g_tm
 
     pwp_te = {"beta": beta, "alpha": alpha, "kx": kx, "ky": ky, "kz": kz, "coeff": coeff_te}
     pwp_tm = {"beta": beta, "alpha": alpha, "kx": kx, "ky": ky, "kz": kz, "coeff": coeff_tm}
@@ -1418,6 +1540,119 @@ class BesselBeam:
         if polar_angles is None or azimuthal_angles is None:
             raise ValueError(
                 "BesselBeam projection requires both `polar_angles` and `azimuthal_angles`."
+            )
+        k = 2.0 * np.pi / float(self.wavelength) * float(np.real(complex(self.medium_n)))
+        return angular_spectrum_to_svwf_regular(
+            positions,
+            lmax,
+            self,
+            k=k,
+            polar_angles=np.asarray(polar_angles, dtype=float),
+            azimuthal_angles=np.asarray(azimuthal_angles, dtype=float),
+            dtype=dtype,
+        )
+
+
+@dataclass(frozen=True)
+class CartesianPolarizedBesselBeam:
+    """Ideal Bessel beam with one global polarization state across the cone.
+
+    This source keeps the same ring support and OAM phase factor as `BesselBeam`,
+    but interprets polarization in the laboratory Cartesian frame through
+    `global_polarization=(px, py, pz)`.
+
+    For every sampled plane-wave direction, the implementation enforces Maxwell
+    transversality by projecting the global vector onto the local transverse
+    plane before converting to TE/TM coefficients.
+
+    Notes
+    -----
+    - This is an ideal Bessel beam (infinite incident power).
+    - `global_polarization` is normalized internally; `amplitude` controls
+      overall scaling.
+    """
+
+    wavelength: float
+    medium_n: complex = 1.0 + 0j
+    order_m: int = 0
+    cone_angle: float = 0.2
+    polar_angle: float = 0.0
+    azimuthal_angle: float = 0.0
+    global_polarization: tuple[complex, complex, complex] = (1.0 + 0.0j, 0.0 + 0.0j, 0.0 + 0.0j)
+    amplitude: float = 1.0
+    azimuthal_phase: float = 0.0
+    center: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+    forward_only: bool = True
+
+    def __post_init__(self) -> None:
+        n = complex(self.medium_n)
+        if abs(n.imag) > 0:
+            raise ValueError(
+                "Embedding medium refractive index must be real for an incident field coming from infinity. "
+                f"Got medium_n={n!r}"
+            )
+        if not (n.real > 0):
+            raise ValueError(f"medium_n must be positive. Got {n!r}")
+        _normalize_global_polarization_vector(self.global_polarization)
+        _as_float_triplet("center", self.center)
+        if not np.isfinite(float(self.amplitude)):
+            raise ValueError(f"`amplitude` must be finite. Got {self.amplitude!r}.")
+        if not np.isfinite(float(self.azimuthal_phase)):
+            raise ValueError(f"`azimuthal_phase` must be finite. Got {self.azimuthal_phase!r}.")
+        if not np.isfinite(float(self.polar_angle)):
+            raise ValueError(f"`polar_angle` must be finite. Got {self.polar_angle!r}.")
+        if not np.isfinite(float(self.azimuthal_angle)):
+            raise ValueError(f"`azimuthal_angle` must be finite. Got {self.azimuthal_angle!r}.")
+        if float(self.polar_angle) < 0.0 or float(self.polar_angle) > np.pi:
+            raise ValueError(f"`polar_angle` must lie in [0, pi]. Got {self.polar_angle!r}.")
+        try:
+            m_float = float(self.order_m)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"`order_m` must be an integer. Got {self.order_m!r}.") from exc
+        if not np.isfinite(m_float) or (not np.isclose(m_float, round(m_float), atol=0.0)):
+            raise ValueError(f"`order_m` must be an integer. Got {self.order_m!r}.")
+        cone = float(self.cone_angle)
+        if not (cone > 0.0 and cone < np.pi):
+            raise ValueError(f"`cone_angle` must lie in (0, pi). Got {self.cone_angle!r}.")
+        if bool(self.forward_only) and cone >= (0.5 * np.pi):
+            raise ValueError(
+                "`forward_only=True` requires `cone_angle < pi/2` (positive kz cone). "
+                f"Got cone_angle={self.cone_angle!r}."
+            )
+
+    def has_finite_incident_power(self) -> bool:
+        """Ideal Bessel beams are infinite-power sources."""
+        return False
+
+    def angular_spectrum(
+        self,
+        *,
+        k: float,
+        polar_angles: np.ndarray,
+        azimuthal_angles: np.ndarray,
+    ) -> tuple[dict, dict]:
+        """Return TE/TM spectrum after per-ray global-to-transverse projection."""
+        return _bessel_cartesian_angular_spectrum_coeffs(
+            beam=self,
+            k=float(k),
+            polar_angles=np.asarray(polar_angles, dtype=float),
+            azimuthal_angles=np.asarray(azimuthal_angles, dtype=float),
+        )
+
+    def incident_coeffs(
+        self,
+        positions: np.ndarray,
+        lmax: int,
+        *,
+        polar_angles: np.ndarray | None = None,
+        azimuthal_angles: np.ndarray | None = None,
+        dtype: npt.DTypeLike = np.complex128,
+    ) -> np.ndarray:
+        """Project this source to regular SVWF coefficients via angular spectrum."""
+        if polar_angles is None or azimuthal_angles is None:
+            raise ValueError(
+                "CartesianPolarizedBesselBeam projection requires both "
+                "`polar_angles` and `azimuthal_angles`."
             )
         k = 2.0 * np.pi / float(self.wavelength) * float(np.real(complex(self.medium_n)))
         return angular_spectrum_to_svwf_regular(
