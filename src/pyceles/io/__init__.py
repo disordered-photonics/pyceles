@@ -22,6 +22,7 @@ from .plotting import (
     plot_nearfield_panels_channels,
     plot_nearfield_poynting_overlay,
     plot_poynting,
+    plot_source_showcase_slices,
     plot_spheres,
     unpolarized_near_field_intensity,
 )
@@ -44,6 +45,7 @@ __all__ = [
     "plot_nearfield_panels",
     "plot_nearfield_panels_channels",
     "plot_nearfield_poynting_overlay",
+    "plot_source_showcase_slices",
     "plot_poynting",
     "plot_spheres",
     "save_far_field_h5",

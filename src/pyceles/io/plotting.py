@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -387,23 +389,9 @@ def plot_farfield_hemispheres(
     return fig, axes
 
 
-def plot_nearfield_panels(
-    axis_0: np.ndarray,
-    axis_1: np.ndarray,
-    E: np.ndarray,
-    H: np.ndarray,
-    positions: np.ndarray,
-    radii: np.ndarray,
-    *,
-    plane: str = "y",
-    plane_value: float = 0.0,
-    real_limits: tuple[float, float] = (-2.0, 2.0),
-    abs_limits: tuple[float, float] = (0.0, 2.0),
-):
-    """Plot 8 near-field panels with sphere overlays."""
-    axis_0_label, axis_1_label = _slice_axis_labels(plane)
-    extent = _imshow_extent_from_center_grids(axis_0, axis_1)
-    component_names = [
+def _nearfield_panel_component_names() -> tuple[str, ...]:
+    """Canonical 8-panel near-field component order."""
+    return (
         "real Ex",
         "real Ey",
         "real Ez",
@@ -412,21 +400,44 @@ def plot_nearfield_panels(
         "real Hy",
         "real Hz",
         "abs H",
-    ]
-    components = [(name, near_field_component(E, H, name)) for name in component_names]
+    )
 
-    fig, axes = plt.subplots(2, 4, figsize=(18, 7), constrained_layout=True)
-    for ax, (name, F) in zip(axes.flat, components):
-        im = ax.imshow(
+
+def _plot_nearfield_panel_block(
+    fig,
+    axes_block: np.ndarray,
+    *,
+    axis_0: np.ndarray,
+    axis_1: np.ndarray,
+    E: np.ndarray,
+    H: np.ndarray,
+    positions: np.ndarray,
+    radii: np.ndarray,
+    plane: str,
+    plane_value: float,
+    axis_0_label: str,
+    axis_1_label: str,
+    real_limits: tuple[float, float],
+    abs_limits: tuple[float, float],
+    title_prefix: str = "",
+) -> None:
+    """Render one 2x4 near-field panel block on preallocated axes."""
+    components = [
+        (name, near_field_component(E, H, name)) for name in _nearfield_panel_component_names()
+    ]
+    for ax, (name, F) in zip(np.asarray(axes_block).flat, components):
+        title = _component_panel_title(name)
+        if title_prefix:
+            title = f"{title_prefix}: {title}"
+        im = plot_field_component(
+            ax,
+            axis_0,
+            axis_1,
             F,
-            extent=extent,
-            origin="lower",
-            aspect="equal",
+            title=title,
+            axis_0_label=axis_0_label,
+            axis_1_label=axis_1_label,
         )
-        ax.set_title(_component_panel_title(name))
-        ax.set_xlabel(axis_0_label)
-        ax.set_ylabel(axis_1_label)
-        ax.set_aspect("equal", adjustable="box")
 
         if name.startswith("real"):
             im.set_cmap("RdBu")
@@ -448,6 +459,39 @@ def plot_nearfield_panels(
         )
         fig.colorbar(im, ax=ax, shrink=0.85)
 
+
+def plot_nearfield_panels(
+    axis_0: np.ndarray,
+    axis_1: np.ndarray,
+    E: np.ndarray,
+    H: np.ndarray,
+    positions: np.ndarray,
+    radii: np.ndarray,
+    *,
+    plane: str = "y",
+    plane_value: float = 0.0,
+    real_limits: tuple[float, float] = (-2.0, 2.0),
+    abs_limits: tuple[float, float] = (0.0, 2.0),
+):
+    """Plot 8 near-field panels with sphere overlays."""
+    axis_0_label, axis_1_label = _slice_axis_labels(plane)
+    fig, axes = plt.subplots(2, 4, figsize=(18, 7), constrained_layout=True)
+    _plot_nearfield_panel_block(
+        fig,
+        axes,
+        axis_0=axis_0,
+        axis_1=axis_1,
+        E=E,
+        H=H,
+        positions=positions,
+        radii=radii,
+        plane=plane,
+        plane_value=plane_value,
+        axis_0_label=axis_0_label,
+        axis_1_label=axis_1_label,
+        real_limits=real_limits,
+        abs_limits=abs_limits,
+    )
     return fig, axes
 
 
@@ -477,17 +521,6 @@ def plot_nearfield_panels_channels(
 
     channels = list(channel_fields.items())
     axis_0_label, axis_1_label = _slice_axis_labels(plane)
-    extent = _imshow_extent_from_center_grids(axis_0, axis_1)
-    component_names = [
-        "real Ex",
-        "real Ey",
-        "real Ez",
-        "abs E",
-        "real Hx",
-        "real Hy",
-        "real Hz",
-        "abs H",
-    ]
 
     n_channels = len(channels)
     fig, axes = plt.subplots(
@@ -498,41 +531,203 @@ def plot_nearfield_panels_channels(
         axes_arr = axes_arr.reshape(2, 4)
 
     for i, (ch_name, (E, H)) in enumerate(channels):
-        components = [(name, near_field_component(E, H, name)) for name in component_names]
         block_axes = axes_arr[(2 * i) : (2 * i + 2), :]
-        for ax, (name, F) in zip(block_axes.flat, components):
-            im = ax.imshow(
-                F,
-                extent=extent,
-                origin="lower",
-                aspect="equal",
-            )
-            ax.set_title(f"{ch_name}: {_component_panel_title(name)}")
-            ax.set_xlabel(axis_0_label)
-            ax.set_ylabel(axis_1_label)
-            ax.set_aspect("equal", adjustable="box")
-
-            if name.startswith("real"):
-                im.set_cmap("RdBu")
-                im.set_clim(real_limits[0], real_limits[1])
-                sphere_color = "k"
-            else:
-                im.set_cmap("inferno")
-                im.set_clim(abs_limits[0], abs_limits[1])
-                sphere_color = "w"
-
-            plot_spheres(
-                ax,
-                positions,
-                radii,
-                plane=plane,
-                plane_value=plane_value,
-                alpha=0.7,
-                color=sphere_color,
-            )
-            fig.colorbar(im, ax=ax, shrink=0.85)
+        _plot_nearfield_panel_block(
+            fig,
+            block_axes,
+            axis_0=axis_0,
+            axis_1=axis_1,
+            E=E,
+            H=H,
+            positions=positions,
+            radii=radii,
+            plane=plane,
+            plane_value=plane_value,
+            axis_0_label=axis_0_label,
+            axis_1_label=axis_1_label,
+            real_limits=real_limits,
+            abs_limits=abs_limits,
+            title_prefix=str(ch_name),
+        )
 
     return fig, axes_arr
+
+
+def plot_source_showcase_slices(
+    run,
+    *,
+    field_component: Literal["initial", "scattered", "internal", "total"] = "initial",
+    channel: Literal["mixed", "te", "tm"] = "mixed",
+    plane_values: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    phase_component: Literal["Ex", "Ey", "Ez"] = "Ex",
+    phase_cmap: str = "twilight_shifted",
+    axis_0_min: float = -4000.0,
+    axis_0_max: float = 4000.0,
+    axis_1_min: float = -3000.0,
+    axis_1_max: float = 5000.0,
+    dx: float = 40.0,
+    real_limits: tuple[float, float] | None = None,
+    abs_limits: tuple[float, float] | None = None,
+    rowwise_percentile: float = 99.5,
+    show_progress: bool = True,
+    force_general_initial_field: bool | None = None,
+    center_pixel_policy: Literal["none", "interpolate"] = "interpolate",
+):
+    """Plot source-centric near-field showcase on x=const, y=const, z=const slices.
+
+    Layout is 3 rows x 5 columns:
+    - rows: planes x/y/z (in that order),
+    - columns 1..3: ``Re(Ex)``, ``Re(Ey)``, ``Re(Ez)`` on each slice,
+    - columns 4..5: ``|E|`` and one complex phase map on every slice.
+
+    Normalization policy:
+    - by default (`real_limits=None`, `abs_limits=None`) each row uses robust
+      percentile-based limits to reduce saturation while preserving per-row
+      consistency across columns;
+    - explicit limits override that auto-scaling.
+    """
+    from pyceles.postprocessing.workflows import compute_near_field_slice
+
+    family = str(field_component).lower()
+    if family not in {"initial", "scattered", "internal", "total"}:
+        raise ValueError(
+            "`field_component` must be one of {'initial', 'scattered', 'internal', 'total'}."
+        )
+
+    phase_name = str(phase_component).strip().lower()
+    phase_idx_map = {"ex": 0, "ey": 1, "ez": 2}
+    if phase_name not in phase_idx_map:
+        raise ValueError("`phase_component` must be one of {'Ex', 'Ey', 'Ez'}.")
+    phase_idx = phase_idx_map[phase_name]
+    if not (0.0 < float(rowwise_percentile) <= 100.0):
+        raise ValueError("`rowwise_percentile` must lie in (0, 100].")
+
+    planes = ("x", "y", "z")
+    if len(tuple(plane_values)) != 3:
+        raise ValueError("`plane_values` must contain exactly three entries for x/y/z.")
+
+    slices = []
+    for plane, plane_value in zip(planes, plane_values):
+        slices.append(
+            compute_near_field_slice(
+                run,
+                axis_0_min=float(axis_0_min),
+                axis_0_max=float(axis_0_max),
+                axis_1_min=float(axis_1_min),
+                axis_1_max=float(axis_1_max),
+                dx=float(dx),
+                plane=plane,
+                plane_value=float(plane_value),
+                channel=channel,
+                show_progress=bool(show_progress),
+                force_general_initial_field=force_general_initial_field,
+                center_pixel_policy=center_pixel_policy,
+            )
+        )
+
+    fig, axes = plt.subplots(3, 5, figsize=(24, 13), constrained_layout=True)
+
+    for row, (plane, slc) in enumerate(zip(planes, slices)):
+        E, H = slc.field_maps[family]
+        E_arr = np.asarray(E)
+
+        if real_limits is None:
+            real_vals = np.abs(np.real(E_arr[..., :3])).reshape(-1)
+            real_vals = real_vals[np.isfinite(real_vals)]
+            if real_vals.size > 0:
+                real_peak = float(np.percentile(real_vals, float(rowwise_percentile)))
+            else:
+                real_peak = 1e-12
+            real_peak = max(real_peak, 1e-12)
+            row_real_limits = (-real_peak, real_peak)
+        else:
+            row_real_limits = (float(real_limits[0]), float(real_limits[1]))
+
+        abs_e = near_field_component(E, H, "abs E")
+        if abs_limits is None:
+            abs_vals = np.asarray(abs_e, dtype=float).reshape(-1)
+            abs_vals = abs_vals[np.isfinite(abs_vals)]
+            if abs_vals.size > 0:
+                abs_peak = float(np.percentile(abs_vals, float(rowwise_percentile)))
+            else:
+                abs_peak = 1e-12
+            abs_peak = max(abs_peak, 1e-12)
+            row_abs_limits = (0.0, abs_peak)
+        else:
+            row_abs_limits = (float(abs_limits[0]), float(abs_limits[1]))
+
+        for col, comp in enumerate(("real Ex", "real Ey", "real Ez")):
+            F = near_field_component(E, H, comp)
+            title = f"{plane}= {float(slc.plane_value):.3g}: {_component_panel_title(comp)}"
+            im = plot_field_component(
+                axes[row, col],
+                slc.axis_0,
+                slc.axis_1,
+                F,
+                title=title,
+                axis_0_label=slc.axis_0_label,
+                axis_1_label=slc.axis_1_label,
+            )
+            im.set_cmap("RdBu")
+            im.set_clim(row_real_limits[0], row_real_limits[1])
+            plot_spheres(
+                axes[row, col],
+                run.positions,
+                run.radii,
+                plane=plane,
+                plane_value=float(slc.plane_value),
+                alpha=0.7,
+                color="k",
+            )
+            fig.colorbar(im, ax=axes[row, col], shrink=0.85)
+
+        im_abs = plot_field_component(
+            axes[row, 3],
+            slc.axis_0,
+            slc.axis_1,
+            abs_e,
+            title=f"{plane}= {float(slc.plane_value):.3g}: $|E|$",
+            axis_0_label=slc.axis_0_label,
+            axis_1_label=slc.axis_1_label,
+        )
+        im_abs.set_cmap("inferno")
+        im_abs.set_clim(row_abs_limits[0], row_abs_limits[1])
+        plot_spheres(
+            axes[row, 3],
+            run.positions,
+            run.radii,
+            plane=plane,
+            plane_value=float(slc.plane_value),
+            alpha=0.7,
+            color="w",
+        )
+        fig.colorbar(im_abs, ax=axes[row, 3], shrink=0.85)
+
+        phase = np.angle(E_arr[..., phase_idx])
+        phase_label = ("Ex", "Ey", "Ez")[phase_idx]
+        im_phase = plot_field_component(
+            axes[row, 4],
+            slc.axis_0,
+            slc.axis_1,
+            phase,
+            title=f"{plane}= {float(slc.plane_value):.3g}: $\\arg({phase_label})$",
+            axis_0_label=slc.axis_0_label,
+            axis_1_label=slc.axis_1_label,
+        )
+        im_phase.set_cmap(str(phase_cmap))
+        im_phase.set_clim(-np.pi, np.pi)
+        plot_spheres(
+            axes[row, 4],
+            run.positions,
+            run.radii,
+            plane=plane,
+            plane_value=float(slc.plane_value),
+            alpha=0.7,
+            color="w",
+        )
+        fig.colorbar(im_phase, ax=axes[row, 4], shrink=0.85)
+
+    return fig, axes
 
 
 def plot_nearfield_poynting_overlay(

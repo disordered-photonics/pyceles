@@ -11,8 +11,10 @@ from pyceles.io.plotting import (
     near_field_component,
     plot_field_component,
     plot_nearfield_panels_channels,
+    plot_source_showcase_slices,
     unpolarized_near_field_intensity,
 )
+from pyceles.postprocessing.workflows import NearFieldSlice
 
 
 def test_near_field_component_extracts_expected_channels():
@@ -89,4 +91,53 @@ def test_plot_field_component_uses_center_based_extent_edges():
     fig, ax = plt.subplots()
     im = plot_field_component(ax, axis_0, axis_1, F)
     np.testing.assert_allclose(im.get_extent(), [-0.5, 2.5, 9.5, 11.5], rtol=0.0, atol=1e-12)
+    plt.close(fig)
+
+
+def test_plot_source_showcase_slices_returns_3x5_layout(monkeypatch):
+    axis_0, axis_1 = np.meshgrid(
+        np.linspace(-1.0, 1.0, 4), np.linspace(-2.0, 2.0, 3), indexing="xy"
+    )
+    E = np.zeros(axis_0.shape + (3,), dtype=np.complex128)
+    E[..., 0] = 1.0 + 1.0j
+    H = np.zeros_like(E)
+
+    def _fake_slice(*args, plane: str, plane_value: float, **kwargs):
+        del args, kwargs
+        return NearFieldSlice(
+            axis_0=axis_0,
+            axis_1=axis_1,
+            inside=np.zeros(axis_0.shape, dtype=bool),
+            field_maps={
+                "initial": (E, H),
+                "scattered": (E, H),
+                "internal": (E, H),
+                "total": (E, H),
+            },
+            plane=str(plane),
+            plane_value=float(plane_value),
+            axis_0_label="u",
+            axis_1_label="v",
+        )
+
+    monkeypatch.setattr("pyceles.postprocessing.workflows.compute_near_field_slice", _fake_slice)
+    run = type(
+        "Run",
+        (),
+        {
+            "positions": np.zeros((0, 3), dtype=float),
+            "radii": np.zeros((0,), dtype=float),
+        },
+    )()
+    fig, axes = plot_source_showcase_slices(
+        run,
+        field_component="initial",
+        channel="mixed",
+        plane_values=(0.0, 0.0, 0.0),
+        show_progress=False,
+    )
+    assert axes.shape == (3, 5)
+    assert axes[0, 3].axison is True
+    assert axes[1, 4].axison is True
+    assert axes[2, 3].axison is True
     plt.close(fig)
