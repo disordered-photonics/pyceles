@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added `SLMSource` (angular-spectrum wrapper source) for complex
   phase/amplitude modulation of propagating TE/TM beams on `(alpha, beta)`
   grids.
+- Added Maxwellian Laguerre-Gaussian source families:
+  - `LaguerreGaussianBeam` (collimated exact angular-spectrum LG),
+  - `FocusedLaguerreGaussianBeam` (Debye/aplanatic finite-NA focused LG).
 - Added canonical SVWF/PVWF conversion helpers:
   `pwp_to_svwf_regular`, `angular_spectrum_to_svwf_regular`,
   `svwf_regular_to_pwp`, and `svwf_outgoing_to_pwp`.

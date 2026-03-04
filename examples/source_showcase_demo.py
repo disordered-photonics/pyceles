@@ -9,7 +9,13 @@ import numpy as np
 
 import pyceles as pcl
 
-SourceName = Literal["plane_wave", "gaussian", "bessel"]
+SourceName = Literal[
+    "plane_wave",
+    "gaussian",
+    "laguerre_gaussian",
+    "focused_laguerre_gaussian",
+    "bessel",
+]
 
 
 def _derived_bessel_cone_angle(*, wavelength: float, gaussian_beam_width: float) -> float:
@@ -17,6 +23,21 @@ def _derived_bessel_cone_angle(*, wavelength: float, gaussian_beam_width: float)
     k0 = 2.0 * np.pi / float(wavelength)
     sigma_theta = 2.0 / (k0 * float(gaussian_beam_width))
     return float(np.clip(sigma_theta, 0.03, 0.7))
+
+
+def _derived_focused_na(
+    *,
+    wavelength: float,
+    gaussian_beam_width: float,
+    n_medium: complex,
+) -> float:
+    """Return a focused-LG NA matched to the Gaussian/Bessel reference spread."""
+    alpha_ref = _derived_bessel_cone_angle(
+        wavelength=float(wavelength),
+        gaussian_beam_width=float(gaussian_beam_width),
+    )
+    na = float(np.real(complex(n_medium))) * float(np.sin(alpha_ref))
+    return float(np.clip(na, 0.03, float(np.real(complex(n_medium))) * 0.95))
 
 
 def _make_no_particle_simulation(
@@ -56,6 +77,10 @@ def _build_source(
     wavelength: float,
     n_medium: complex,
     gaussian_beam_width: float,
+    laguerre_radial_order: int,
+    laguerre_azimuthal_order: int,
+    focused_focal_length: float,
+    focused_numerical_aperture: float,
     bessel_cone_angle: float,
     bessel_order: int = 0,
 ) -> tuple[str, pcl.core.Source]:
@@ -85,6 +110,46 @@ def _build_source(
                 azimuthal_angle=0.0,
                 beam_width=float(gaussian_beam_width),
                 focal_point=(0.0, 0.0, 0.0),
+            ),
+        )
+    if name == "laguerre_gaussian":
+        return (
+            f"laguerre_gaussian_p{int(laguerre_radial_order)}_l{int(laguerre_azimuthal_order)}",
+            pcl.LaguerreGaussianBeam(
+                wavelength=float(wavelength),
+                medium_n=complex(n_medium),
+                amplitude=1.0,
+                polarization=(1.0 + 0.0j, 0.35j),
+                radial_order_p=int(laguerre_radial_order),
+                azimuthal_order_l=int(laguerre_azimuthal_order),
+                polar_angle=0.0,
+                azimuthal_angle=0.0,
+                beam_width=float(gaussian_beam_width),
+                focal_point=(0.0, 0.0, 0.0),
+                azimuthal_phase=0.0,
+            ),
+        )
+    if name == "focused_laguerre_gaussian":
+        return (
+            (
+                f"focused_laguerre_gaussian_p{int(laguerre_radial_order)}"
+                f"_l{int(laguerre_azimuthal_order)}"
+            ),
+            pcl.FocusedLaguerreGaussianBeam(
+                wavelength=float(wavelength),
+                medium_n=complex(n_medium),
+                amplitude=1.0,
+                polarization=(1.0 + 0.0j, 0.35j),
+                radial_order_p=int(laguerre_radial_order),
+                azimuthal_order_l=int(laguerre_azimuthal_order),
+                polar_angle=0.0,
+                azimuthal_angle=0.0,
+                beam_width=float(gaussian_beam_width),
+                focal_length=float(focused_focal_length),
+                numerical_aperture=float(focused_numerical_aperture),
+                focal_point=(0.0, 0.0, 0.0),
+                azimuthal_phase=0.0,
+                sine_condition_apodization=True,
             ),
         )
     if name == "bessel":
@@ -167,6 +232,22 @@ def _source_note(source: pcl.core.Source) -> str:
             "Bessel: "
             f"m={int(source.order_m)}, cone_angle={float(source.cone_angle):.4f} rad, center={c}"
         )
+    if isinstance(source, pcl.LaguerreGaussianBeam):
+        f = tuple(float(v) for v in source.focal_point)
+        return (
+            "Laguerre-Gaussian: "
+            f"p={int(source.radial_order_p)}, l={int(source.azimuthal_order_l)}, "
+            f"beam_width={float(source.beam_width):.0f} nm, focal_point={f}"
+        )
+    if isinstance(source, pcl.FocusedLaguerreGaussianBeam):
+        f = tuple(float(v) for v in source.focal_point)
+        return (
+            "Focused Laguerre-Gaussian: "
+            f"p={int(source.radial_order_p)}, l={int(source.azimuthal_order_l)}, "
+            f"beam_width={float(source.beam_width):.0f} nm, "
+            f"focal_length={float(source.focal_length):.0f} nm, "
+            f"NA={float(source.numerical_aperture):.3f}, focal_point={f}"
+        )
     if isinstance(source, pcl.PlaneWave):
         f = tuple(float(v) for v in source.focal_point)
         return f"Plane wave: focal_point={f}"
@@ -200,8 +281,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--sources",
         nargs="+",
-        choices=["plane_wave", "gaussian", "bessel"],
-        default=["plane_wave", "gaussian", "bessel"],
+        choices=[
+            "plane_wave",
+            "gaussian",
+            "laguerre_gaussian",
+            "focused_laguerre_gaussian",
+            "bessel",
+        ],
+        default=[
+            "plane_wave",
+            "gaussian",
+            "laguerre_gaussian",
+            "focused_laguerre_gaussian",
+            "bessel",
+        ],
         help="Sources to render.",
     )
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/source_showcase"))
@@ -235,6 +328,33 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Bessel cone angle in radians. Default derives from Gaussian beam width "
             "to keep comparable convergence behavior."
+        ),
+    )
+    parser.add_argument(
+        "--laguerre-p",
+        type=int,
+        default=0,
+        help="Laguerre-Gaussian radial index p for both collimated/focused LG sources.",
+    )
+    parser.add_argument(
+        "--laguerre-l",
+        type=int,
+        default=1,
+        help="Laguerre-Gaussian azimuthal index l for both collimated/focused LG sources.",
+    )
+    parser.add_argument(
+        "--focused-focal-length",
+        type=float,
+        default=1000.0,
+        help="Focused LG focal length in nm.",
+    )
+    parser.add_argument(
+        "--focused-na",
+        type=float,
+        default=np.nan,
+        help=(
+            "Focused LG numerical aperture (must be < n_medium). "
+            "Default derives from the Gaussian beam width to match divergence."
         ),
     )
     parser.add_argument(
@@ -276,12 +396,34 @@ def main() -> None:
     real_limit = float(args.real_limit) if np.isfinite(float(args.real_limit)) else None
     abs_limit = float(args.abs_limit) if np.isfinite(float(args.abs_limit)) else None
 
+    focused_na = (
+        _derived_focused_na(
+            wavelength=wavelength,
+            gaussian_beam_width=beam_width,
+            n_medium=n_medium,
+        )
+        if not np.isfinite(float(args.focused_na))
+        else float(args.focused_na)
+    )
+
+    if focused_na >= float(np.real(n_medium)):
+        raise ValueError(
+            "`focused-na` must be smaller than n_medium. "
+            f"Got focused_na={focused_na!r}, n_medium={float(np.real(n_medium))!r}."
+        )
+
     if not args.quiet:
         print(f"Output directory: {out_dir}")
         print(f"Wavelength: {wavelength:.1f} nm | medium_n: {n_medium.real:.3f}")
         print(f"Shared showcase window: [-{args.half_span:.1f}, {args.half_span:.1f}] nm")
         print(f"Shared showcase dx: {args.dx:.1f} nm")
         print(f"Gaussian beam width: {beam_width:.1f} nm")
+        print(f"Laguerre mode indices: p={int(args.laguerre_p)}, l={int(args.laguerre_l)}")
+        print(
+            "Focused LG: "
+            f"focal_length={float(args.focused_focal_length):.1f} nm, "
+            f"NA={focused_na:.3f}"
+        )
         print(f"Bessel cone angle: {cone_angle:.4f} rad")
         if real_limit is None:
             print("Re(E*) scaling: row-wise robust auto")
@@ -293,7 +435,13 @@ def main() -> None:
             print(f"|E| scaling: fixed [0, {abs_limit:.3g}]")
 
     for src_name_raw in args.sources:
-        if src_name_raw not in {"plane_wave", "gaussian", "bessel"}:
+        if src_name_raw not in {
+            "plane_wave",
+            "gaussian",
+            "laguerre_gaussian",
+            "focused_laguerre_gaussian",
+            "bessel",
+        }:
             raise ValueError(f"Unsupported source {src_name_raw!r}.")
         src_name = cast(SourceName, src_name_raw)
 
@@ -304,6 +452,10 @@ def main() -> None:
                 wavelength=wavelength,
                 n_medium=n_medium,
                 gaussian_beam_width=beam_width,
+                laguerre_radial_order=int(args.laguerre_p),
+                laguerre_azimuthal_order=int(args.laguerre_l),
+                focused_focal_length=float(args.focused_focal_length),
+                focused_numerical_aperture=focused_na,
                 bessel_cone_angle=cone_angle,
                 bessel_order=int(bessel_order),
             )

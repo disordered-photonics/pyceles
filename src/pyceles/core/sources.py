@@ -7,6 +7,7 @@ from typing import Callable, Literal, Protocol, Tuple, runtime_checkable
 
 import numpy as np
 import numpy.typing as npt
+from scipy.special import eval_genlaguerre
 
 from .angular import beam_axis_and_frame, trapezoidal_weights
 from .conversions import angular_spectrum_to_svwf_regular
@@ -313,6 +314,43 @@ def ensure_finite_power_diagnostics_supported(source: Source, *, diagnostic: str
     raise finite_power_policy_error(source, diagnostic=diagnostic)
 
 
+def _validated_int(name: str, value: int, *, minimum: int | None = None) -> int:
+    """Validate one finite integer parameter (optionally with lower bound)."""
+    try:
+        value_f = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"`{name}` must be an integer. Got {value!r}.") from exc
+    if not np.isfinite(value_f) or (not np.isclose(value_f, round(value_f), atol=0.0)):
+        raise ValueError(f"`{name}` must be an integer. Got {value!r}.")
+    value_i = int(round(value_f))
+    if minimum is not None and value_i < int(minimum):
+        raise ValueError(f"`{name}` must be >= {int(minimum)}. Got {value_i}.")
+    return value_i
+
+
+def _laguerre_profile_factor(
+    *,
+    radial_argument: np.ndarray,
+    radial_order_p: int,
+    azimuthal_order_l: int,
+) -> np.ndarray:
+    """Return Maxwellian Laguerre-Gaussian scalar profile P_pl(x).
+
+    The convention matches the structured-light form used in the pyceles source
+    angular-spectrum models:
+
+        P_pl(x) = (sqrt(2)*x)^|l| L_p^|l|(2 x^2) exp(-x^2)
+
+    with `x>=0`.
+    """
+    x = np.asarray(radial_argument, dtype=float)
+    p = int(radial_order_p)
+    l = int(azimuthal_order_l)
+    l_abs = abs(l)
+    poly = np.asarray(eval_genlaguerre(p, l_abs, 2.0 * (x**2)), dtype=float)
+    return np.asarray(((-1.0) ** p) * ((np.sqrt(2.0) * x) ** l_abs) * poly * np.exp(-(x**2)))
+
+
 def _gaussian_angular_spectrum_coeffs(
     *,
     beam,
@@ -413,6 +451,239 @@ def _gaussian_angular_spectrum_coeffs(
     m21 = np.einsum("abi,abi->ab", etheta_g, ephi_l)
     m22 = np.einsum("abi,abi->ab", etheta_g, etheta_l)
 
+    coeff_te = (m11 * g_te_l + m12 * g_tm_l) * phase
+    coeff_tm = (m21 * g_te_l + m22 * g_tm_l) * phase
+
+    pwp_te = {"beta": beta, "alpha": alpha, "kx": kx, "ky": ky, "kz": kz, "coeff": coeff_te}
+    pwp_tm = {"beta": beta, "alpha": alpha, "kx": kx, "ky": ky, "kz": kz, "coeff": coeff_tm}
+    return pwp_te, pwp_tm
+
+
+def _laguerre_gaussian_angular_spectrum_coeffs(
+    *,
+    beam,
+    k: float,
+    polar_angles: np.ndarray,
+    azimuthal_angles: np.ndarray,
+    polarization_override: Polarization | None = None,
+) -> tuple[dict, dict]:
+    """Evaluate Maxwell-consistent collimated LG TE/TM angular-spectrum coefficients."""
+    if polarization_override is None:
+        a_te, a_tm = beam.jones_coefficients()
+        pure = pure_polarization_label(a_te, a_tm)
+        if pure is None:
+            te_te, te_tm = _laguerre_gaussian_angular_spectrum_coeffs(
+                beam=beam,
+                k=k,
+                polar_angles=polar_angles,
+                azimuthal_angles=azimuthal_angles,
+                polarization_override="TE",
+            )
+            tm_te, tm_tm = _laguerre_gaussian_angular_spectrum_coeffs(
+                beam=beam,
+                k=k,
+                polar_angles=polar_angles,
+                azimuthal_angles=azimuthal_angles,
+                polarization_override="TM",
+            )
+            pwp_te = dict(te_te)
+            pwp_tm = dict(te_tm)
+            pwp_te["coeff"] = a_te * np.asarray(te_te["coeff"]) + a_tm * np.asarray(tm_te["coeff"])
+            pwp_tm["coeff"] = a_te * np.asarray(te_tm["coeff"]) + a_tm * np.asarray(tm_tm["coeff"])
+            return pwp_te, pwp_tm
+        polarization_override = pure
+
+    beta = np.asarray(polar_angles, float).reshape(-1)
+    alpha = np.asarray(azimuthal_angles, float).reshape(-1)
+    agrid, bgrid = np.meshgrid(alpha, beta, indexing="ij")
+    sb = np.sin(bgrid)
+    cb = np.cos(bgrid)
+    ca = np.cos(agrid)
+    sa = np.sin(agrid)
+    kx = k * sb * ca
+    ky = k * sb * sa
+    kz = k * cb
+
+    sx = sb * ca
+    sy = sb * sa
+    sz = cb
+    s = np.stack([sx, sy, sz], axis=2)
+
+    n0, u, v = beam_axis_and_frame(float(beam.polar_angle), float(beam.azimuthal_angle))
+    sx_l = np.einsum("abi,i->ab", s, u)
+    sy_l = np.einsum("abi,i->ab", s, v)
+    sz_l = np.einsum("abi,i->ab", s, n0)
+
+    rho2_l = np.maximum(0.0, 1.0 - sz_l**2)
+    alpha_l = np.arctan2(sy_l, sx_l)
+    sin_beta_l = np.sqrt(rho2_l)
+    cos_beta_l = np.clip(sz_l, -1.0, 1.0)
+
+    RG = np.asarray(getattr(beam, "focal_point", (0.0, 0.0, 0.0)), float)
+    E0 = float(getattr(beam, "amplitude", 1.0))
+    w = float(getattr(beam, "beam_width", np.inf))
+    p = int(getattr(beam, "radial_order_p", 0))
+    l = int(getattr(beam, "azimuthal_order_l", 0))
+    az_phase = float(getattr(beam, "azimuthal_phase", 0.0))
+
+    x_arg = 0.5 * k * w * sin_beta_l
+    ppl = _laguerre_profile_factor(
+        radial_argument=x_arg,
+        radial_order_p=p,
+        azimuthal_order_l=l,
+    )
+    pref = E0 * (k**2) * (w**2) / (4.0 * np.pi)
+    envelope = pref * cos_beta_l * ppl
+    envelope = envelope * (cos_beta_l > 0.0)
+    envelope = envelope * np.exp(1j * (l * alpha_l + az_phase))
+
+    pol = str(polarization_override or getattr(beam, "polarization", "TE")).lower()
+    if pol == "te":
+        alpha_pol = float(getattr(beam, "azimuthal_angle", 0.0))
+    else:
+        alpha_pol = float(getattr(beam, "azimuthal_angle", 0.0)) - np.pi / 2.0
+    g_te_l = np.cos(alpha_l - alpha_pol) * envelope
+    g_tm_l = np.sin(alpha_l - alpha_pol) * envelope
+
+    phase = np.exp(-1j * (kx * RG[0] + ky * RG[1] + kz * RG[2]))
+    ephi_g = np.stack([-sa, ca, np.zeros_like(agrid)], axis=2)
+    etheta_g = np.stack([cb * ca, cb * sa, -sb], axis=2)
+
+    sin_alpha_l = np.sin(alpha_l)
+    cos_alpha_l = np.cos(alpha_l)
+    ephi_l = (-sin_alpha_l)[..., None] * u[None, None, :] + cos_alpha_l[..., None] * v[
+        None, None, :
+    ]
+    etheta_l = (
+        (cos_beta_l * cos_alpha_l)[..., None] * u[None, None, :]
+        + (cos_beta_l * sin_alpha_l)[..., None] * v[None, None, :]
+        - sin_beta_l[..., None] * n0[None, None, :]
+    )
+
+    m11 = np.einsum("abi,abi->ab", ephi_g, ephi_l)
+    m12 = np.einsum("abi,abi->ab", ephi_g, etheta_l)
+    m21 = np.einsum("abi,abi->ab", etheta_g, ephi_l)
+    m22 = np.einsum("abi,abi->ab", etheta_g, etheta_l)
+    coeff_te = (m11 * g_te_l + m12 * g_tm_l) * phase
+    coeff_tm = (m21 * g_te_l + m22 * g_tm_l) * phase
+
+    pwp_te = {"beta": beta, "alpha": alpha, "kx": kx, "ky": ky, "kz": kz, "coeff": coeff_te}
+    pwp_tm = {"beta": beta, "alpha": alpha, "kx": kx, "ky": ky, "kz": kz, "coeff": coeff_tm}
+    return pwp_te, pwp_tm
+
+
+def _focused_laguerre_gaussian_angular_spectrum_coeffs(
+    *,
+    beam,
+    k: float,
+    polar_angles: np.ndarray,
+    azimuthal_angles: np.ndarray,
+    polarization_override: Polarization | None = None,
+) -> tuple[dict, dict]:
+    """Evaluate Debye/aplanatic-focused LG TE/TM angular-spectrum coefficients."""
+    if polarization_override is None:
+        a_te, a_tm = beam.jones_coefficients()
+        pure = pure_polarization_label(a_te, a_tm)
+        if pure is None:
+            te_te, te_tm = _focused_laguerre_gaussian_angular_spectrum_coeffs(
+                beam=beam,
+                k=k,
+                polar_angles=polar_angles,
+                azimuthal_angles=azimuthal_angles,
+                polarization_override="TE",
+            )
+            tm_te, tm_tm = _focused_laguerre_gaussian_angular_spectrum_coeffs(
+                beam=beam,
+                k=k,
+                polar_angles=polar_angles,
+                azimuthal_angles=azimuthal_angles,
+                polarization_override="TM",
+            )
+            pwp_te = dict(te_te)
+            pwp_tm = dict(te_tm)
+            pwp_te["coeff"] = a_te * np.asarray(te_te["coeff"]) + a_tm * np.asarray(tm_te["coeff"])
+            pwp_tm["coeff"] = a_te * np.asarray(te_tm["coeff"]) + a_tm * np.asarray(tm_tm["coeff"])
+            return pwp_te, pwp_tm
+        polarization_override = pure
+
+    beta = np.asarray(polar_angles, float).reshape(-1)
+    alpha = np.asarray(azimuthal_angles, float).reshape(-1)
+    agrid, bgrid = np.meshgrid(alpha, beta, indexing="ij")
+    sb = np.sin(bgrid)
+    cb = np.cos(bgrid)
+    ca = np.cos(agrid)
+    sa = np.sin(agrid)
+    kx = k * sb * ca
+    ky = k * sb * sa
+    kz = k * cb
+
+    sx = sb * ca
+    sy = sb * sa
+    sz = cb
+    s = np.stack([sx, sy, sz], axis=2)
+
+    n0, u, v = beam_axis_and_frame(float(beam.polar_angle), float(beam.azimuthal_angle))
+    sx_l = np.einsum("abi,i->ab", s, u)
+    sy_l = np.einsum("abi,i->ab", s, v)
+    sz_l = np.einsum("abi,i->ab", s, n0)
+
+    rho2_l = np.maximum(0.0, 1.0 - sz_l**2)
+    alpha_l = np.arctan2(sy_l, sx_l)
+    sin_beta_l = np.sqrt(rho2_l)
+    cos_beta_l = np.clip(sz_l, -1.0, 1.0)
+
+    RG = np.asarray(getattr(beam, "focal_point", (0.0, 0.0, 0.0)), float)
+    E0 = float(getattr(beam, "amplitude", 1.0))
+    w = float(getattr(beam, "beam_width", np.inf))
+    f = float(getattr(beam, "focal_length", np.inf))
+    p = int(getattr(beam, "radial_order_p", 0))
+    l = int(getattr(beam, "azimuthal_order_l", 0))
+    az_phase = float(getattr(beam, "azimuthal_phase", 0.0))
+    n_medium_real = float(np.real(complex(getattr(beam, "medium_n", 1.0 + 0j))))
+    sin_alpha_max = float(getattr(beam, "numerical_aperture", 0.0)) / n_medium_real
+    apodize = bool(getattr(beam, "sine_condition_apodization", True))
+
+    x_arg = (f / w) * sin_beta_l
+    ppl = _laguerre_profile_factor(
+        radial_argument=x_arg,
+        radial_order_p=p,
+        azimuthal_order_l=l,
+    )
+    aperture_mask = (cos_beta_l > 0.0) & (sin_beta_l <= (sin_alpha_max + 1e-12))
+    if apodize:
+        apod = np.sqrt(np.clip(cos_beta_l, 0.0, None))
+    else:
+        apod = np.ones_like(cos_beta_l)
+    envelope = E0 * ppl * apod * aperture_mask
+    envelope = envelope * np.exp(1j * (l * alpha_l + az_phase))
+
+    pol = str(polarization_override or getattr(beam, "polarization", "TE")).lower()
+    if pol == "te":
+        alpha_pol = float(getattr(beam, "azimuthal_angle", 0.0))
+    else:
+        alpha_pol = float(getattr(beam, "azimuthal_angle", 0.0)) - np.pi / 2.0
+    g_te_l = np.cos(alpha_l - alpha_pol) * envelope
+    g_tm_l = np.sin(alpha_l - alpha_pol) * envelope
+
+    phase = np.exp(-1j * (kx * RG[0] + ky * RG[1] + kz * RG[2]))
+    ephi_g = np.stack([-sa, ca, np.zeros_like(agrid)], axis=2)
+    etheta_g = np.stack([cb * ca, cb * sa, -sb], axis=2)
+
+    sin_alpha_l = np.sin(alpha_l)
+    cos_alpha_l = np.cos(alpha_l)
+    ephi_l = (-sin_alpha_l)[..., None] * u[None, None, :] + cos_alpha_l[..., None] * v[
+        None, None, :
+    ]
+    etheta_l = (
+        (cos_beta_l * cos_alpha_l)[..., None] * u[None, None, :]
+        + (cos_beta_l * sin_alpha_l)[..., None] * v[None, None, :]
+        - sin_beta_l[..., None] * n0[None, None, :]
+    )
+
+    m11 = np.einsum("abi,abi->ab", ephi_g, ephi_l)
+    m12 = np.einsum("abi,abi->ab", ephi_g, etheta_l)
+    m21 = np.einsum("abi,abi->ab", etheta_g, ephi_l)
+    m22 = np.einsum("abi,abi->ab", etheta_g, etheta_l)
     coeff_te = (m11 * g_te_l + m12 * g_tm_l) * phase
     coeff_tm = (m21 * g_te_l + m22 * g_tm_l) * phase
 
@@ -805,6 +1076,229 @@ class GaussianBeam:
         if azimuthal_angles is None:
             raise ValueError(
                 "Tilted GaussianBeam projection requires both `polar_angles` and `azimuthal_angles`."
+            )
+        k = 2.0 * np.pi / float(self.wavelength) * float(np.real(complex(self.medium_n)))
+        return angular_spectrum_to_svwf_regular(
+            positions,
+            lmax,
+            self,
+            k=k,
+            polar_angles=np.asarray(polar_angles, dtype=float),
+            azimuthal_angles=np.asarray(azimuthal_angles, dtype=float),
+            dtype=dtype,
+        )
+
+
+@dataclass(frozen=True)
+class LaguerreGaussianBeam:
+    """Collimated Maxwell-consistent Laguerre-Gaussian beam via angular spectrum.
+
+    This source extends the Gaussian wavebundle model with radial/azimuthal LG
+    mode indices `(p, l)` while keeping an exact propagating-wave angular
+    spectrum (no paraxial-field shortcut in real space).
+    """
+
+    wavelength: float
+    medium_n: complex = 1.0 + 0j
+    radial_order_p: int = 0
+    azimuthal_order_l: int = 0
+    polarization: PolarizationInput = "TE"
+    polar_angle: float = 0.0
+    azimuthal_angle: float = 0.0
+    beam_width: float = 2000.0
+    focal_point: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+    amplitude: float = 1.0
+    azimuthal_phase: float = 0.0
+
+    def __post_init__(self) -> None:
+        n = complex(self.medium_n)
+        if abs(n.imag) > 0:
+            raise ValueError(
+                "Embedding medium refractive index must be real for an incident field coming "
+                f"from infinity. Got medium_n={n!r}"
+            )
+        if not (n.real > 0):
+            raise ValueError(f"medium_n must be positive. Got {n!r}")
+        polarization_to_jones(self.polarization)
+        _validated_int("radial_order_p", self.radial_order_p, minimum=0)
+        _validated_int("azimuthal_order_l", self.azimuthal_order_l)
+        if not np.isfinite(float(self.polar_angle)):
+            raise ValueError(f"`polar_angle` must be finite. Got {self.polar_angle!r}.")
+        if not np.isfinite(float(self.azimuthal_angle)):
+            raise ValueError(f"`azimuthal_angle` must be finite. Got {self.azimuthal_angle!r}.")
+        if float(self.polar_angle) < 0.0 or float(self.polar_angle) > np.pi:
+            raise ValueError(f"`polar_angle` must lie in [0, pi]. Got {self.polar_angle!r}.")
+        if not np.isfinite(float(self.amplitude)):
+            raise ValueError(f"`amplitude` must be finite. Got {self.amplitude!r}.")
+        if not np.isfinite(float(self.azimuthal_phase)):
+            raise ValueError(f"`azimuthal_phase` must be finite. Got {self.azimuthal_phase!r}.")
+        _as_float_triplet("focal_point", self.focal_point)
+        w = float(self.beam_width)
+        if (not np.isfinite(w)) or (w <= 0.0):
+            raise ValueError(f"`beam_width` must be finite and > 0. Got {self.beam_width!r}.")
+
+    def jones_coefficients(self) -> tuple[complex, complex]:
+        """Return normalized TE/TM Jones weights for this beam state."""
+        return polarization_to_jones(self.polarization)
+
+    def with_polarization(self, polarization: PolarizationInput) -> "LaguerreGaussianBeam":
+        """Clone beam with a new polarization while keeping mode/geometry settings."""
+        return replace(self, polarization=polarization)
+
+    def has_finite_incident_power(self) -> bool:
+        """LG wavebundle with finite `beam_width` has finite incident power."""
+        return True
+
+    def angular_spectrum(
+        self,
+        *,
+        k: float,
+        polar_angles: np.ndarray,
+        azimuthal_angles: np.ndarray,
+    ) -> tuple[dict, dict]:
+        """Return TE/TM angular spectrum sampled on (`alpha`,`beta`) grids."""
+        return _laguerre_gaussian_angular_spectrum_coeffs(
+            beam=self,
+            k=float(k),
+            polar_angles=np.asarray(polar_angles, dtype=float),
+            azimuthal_angles=np.asarray(azimuthal_angles, dtype=float),
+            polarization_override=None,
+        )
+
+    def incident_coeffs(
+        self,
+        positions: np.ndarray,
+        lmax: int,
+        *,
+        polar_angles: np.ndarray | None = None,
+        azimuthal_angles: np.ndarray | None = None,
+        dtype: npt.DTypeLike = np.complex128,
+    ) -> np.ndarray:
+        """Project LG source to incident SVWF coefficients for all spheres."""
+        if polar_angles is None or azimuthal_angles is None:
+            raise ValueError(
+                "LaguerreGaussianBeam projection requires both `polar_angles` and "
+                "`azimuthal_angles`."
+            )
+        k = 2.0 * np.pi / float(self.wavelength) * float(np.real(complex(self.medium_n)))
+        return angular_spectrum_to_svwf_regular(
+            positions,
+            lmax,
+            self,
+            k=k,
+            polar_angles=np.asarray(polar_angles, dtype=float),
+            azimuthal_angles=np.asarray(azimuthal_angles, dtype=float),
+            dtype=dtype,
+        )
+
+
+@dataclass(frozen=True)
+class FocusedLaguerreGaussianBeam:
+    """Debye/aplanatic focused Laguerre-Gaussian beam via angular spectrum.
+
+    The source models a finite-NA focused LG beam directly in angular space with
+    a pupil profile controlled by `beam_width`, `focal_length`, and
+    `numerical_aperture`, distinct from the collimated LG representation.
+    """
+
+    wavelength: float
+    medium_n: complex = 1.0 + 0j
+    radial_order_p: int = 0
+    azimuthal_order_l: int = 0
+    polarization: PolarizationInput = "TE"
+    polar_angle: float = 0.0
+    azimuthal_angle: float = 0.0
+    beam_width: float = 1000.0
+    focal_length: float = 1000.0
+    numerical_aperture: float = 0.8
+    focal_point: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+    amplitude: float = 1.0
+    azimuthal_phase: float = 0.0
+    sine_condition_apodization: bool = True
+
+    def __post_init__(self) -> None:
+        n = complex(self.medium_n)
+        if abs(n.imag) > 0:
+            raise ValueError(
+                "Embedding medium refractive index must be real for an incident field coming "
+                f"from infinity. Got medium_n={n!r}"
+            )
+        if not (n.real > 0):
+            raise ValueError(f"medium_n must be positive. Got {n!r}")
+        polarization_to_jones(self.polarization)
+        _validated_int("radial_order_p", self.radial_order_p, minimum=0)
+        _validated_int("azimuthal_order_l", self.azimuthal_order_l)
+        if not np.isfinite(float(self.polar_angle)):
+            raise ValueError(f"`polar_angle` must be finite. Got {self.polar_angle!r}.")
+        if not np.isfinite(float(self.azimuthal_angle)):
+            raise ValueError(f"`azimuthal_angle` must be finite. Got {self.azimuthal_angle!r}.")
+        if float(self.polar_angle) < 0.0 or float(self.polar_angle) > np.pi:
+            raise ValueError(f"`polar_angle` must lie in [0, pi]. Got {self.polar_angle!r}.")
+        if not np.isfinite(float(self.amplitude)):
+            raise ValueError(f"`amplitude` must be finite. Got {self.amplitude!r}.")
+        if not np.isfinite(float(self.azimuthal_phase)):
+            raise ValueError(f"`azimuthal_phase` must be finite. Got {self.azimuthal_phase!r}.")
+        _as_float_triplet("focal_point", self.focal_point)
+
+        w = float(self.beam_width)
+        if (not np.isfinite(w)) or (w <= 0.0):
+            raise ValueError(f"`beam_width` must be finite and > 0. Got {self.beam_width!r}.")
+        f = float(self.focal_length)
+        if (not np.isfinite(f)) or (f <= 0.0):
+            raise ValueError(f"`focal_length` must be finite and > 0. Got {self.focal_length!r}.")
+        na = float(self.numerical_aperture)
+        if (not np.isfinite(na)) or (na <= 0.0):
+            raise ValueError(
+                f"`numerical_aperture` must be finite and > 0. Got {self.numerical_aperture!r}."
+            )
+        if na >= float(n.real):
+            raise ValueError(
+                "`numerical_aperture` must be smaller than medium refractive index "
+                f"({float(n.real)!r}). Got {self.numerical_aperture!r}."
+            )
+
+    def jones_coefficients(self) -> tuple[complex, complex]:
+        """Return normalized TE/TM Jones weights for this beam state."""
+        return polarization_to_jones(self.polarization)
+
+    def with_polarization(self, polarization: PolarizationInput) -> "FocusedLaguerreGaussianBeam":
+        """Clone focused beam with a new polarization while preserving geometry/mode."""
+        return replace(self, polarization=polarization)
+
+    def has_finite_incident_power(self) -> bool:
+        """Finite pupil profile and finite NA imply finite incident power."""
+        return True
+
+    def angular_spectrum(
+        self,
+        *,
+        k: float,
+        polar_angles: np.ndarray,
+        azimuthal_angles: np.ndarray,
+    ) -> tuple[dict, dict]:
+        """Return Debye/aplanatic TE/TM angular spectrum on (`alpha`,`beta`) grids."""
+        return _focused_laguerre_gaussian_angular_spectrum_coeffs(
+            beam=self,
+            k=float(k),
+            polar_angles=np.asarray(polar_angles, dtype=float),
+            azimuthal_angles=np.asarray(azimuthal_angles, dtype=float),
+            polarization_override=None,
+        )
+
+    def incident_coeffs(
+        self,
+        positions: np.ndarray,
+        lmax: int,
+        *,
+        polar_angles: np.ndarray | None = None,
+        azimuthal_angles: np.ndarray | None = None,
+        dtype: npt.DTypeLike = np.complex128,
+    ) -> np.ndarray:
+        """Project focused LG source to incident SVWF coefficients."""
+        if polar_angles is None or azimuthal_angles is None:
+            raise ValueError(
+                "FocusedLaguerreGaussianBeam projection requires both `polar_angles` and "
+                "`azimuthal_angles`."
             )
         k = 2.0 * np.pi / float(self.wavelength) * float(np.real(complex(self.medium_n)))
         return angular_spectrum_to_svwf_regular(

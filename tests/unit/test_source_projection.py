@@ -5,7 +5,9 @@ import numpy as np
 from pyceles.core.conversions import pwp_to_svwf_regular
 from pyceles.core.fields import (
     BesselBeam,
+    FocusedLaguerreGaussianBeam,
     GaussianBeam,
+    LaguerreGaussianBeam,
     PlaneWave,
     SLMSource,
     incident_coeffs_planewave,
@@ -113,7 +115,7 @@ def test_gaussian_angular_spectrum_projection_parity_normal():
         polar_angles=polar,
         azimuthal_angles=azimuthal,
     )
-    np.testing.assert_allclose(got, ref, rtol=3e-3, atol=3e-6)
+    np.testing.assert_allclose(got, ref, rtol=0.0, atol=0.0)
 
 
 def test_pwp_to_svwf_regular_rejects_te_tm_grid_mismatch():
@@ -416,3 +418,178 @@ def test_bessel_beam_m0_is_cylindrically_symmetric_in_alpha():
     active = np.where(beta_activity > (1e-10 * np.max(beta_activity)))[0]
     profile = np.sum(amp[:, active], axis=1)
     assert float(np.std(profile)) <= 1e-10 * float(np.max(np.abs(profile)))
+
+
+def test_laguerre_gaussian_l0_p0_matches_gaussian_angular_spectrum():
+    lg = LaguerreGaussianBeam(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        radial_order_p=0,
+        azimuthal_order_l=0,
+        polarization=(1.0 + 0.0j, -0.4j),
+        polar_angle=0.3,
+        azimuthal_angle=0.7,
+        beam_width=1800.0,
+        focal_point=(4.0, -3.0, 2.0),
+        amplitude=1.2,
+        azimuthal_phase=0.0,
+    )
+    g = GaussianBeam(
+        wavelength=lg.wavelength,
+        medium_n=lg.medium_n,
+        polarization=lg.polarization,
+        polar_angle=lg.polar_angle,
+        azimuthal_angle=lg.azimuthal_angle,
+        beam_width=lg.beam_width,
+        focal_point=lg.focal_point,
+        amplitude=lg.amplitude,
+    )
+    k = 2.0 * np.pi / lg.wavelength * np.real(lg.medium_n)
+    polar = np.linspace(0.0, np.pi, 301)
+    azimuthal = np.linspace(0.0, 2.0 * np.pi, 161, endpoint=False)
+
+    te_lg, tm_lg = lg.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
+    te_g, tm_g = g.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
+
+    np.testing.assert_allclose(te_lg["coeff"], te_g["coeff"], rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(tm_lg["coeff"], tm_g["coeff"], rtol=1e-12, atol=1e-12)
+
+
+def test_laguerre_gaussian_oam_phase_winding_tracks_azimuthal_order():
+    source = LaguerreGaussianBeam(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        radial_order_p=0,
+        azimuthal_order_l=3,
+        polarization="TE",
+        polar_angle=0.0,
+        azimuthal_angle=0.0,
+        beam_width=1500.0,
+        focal_point=(0.0, 0.0, 0.0),
+        amplitude=1.0,
+        azimuthal_phase=0.2,
+    )
+    k = 2.0 * np.pi / source.wavelength * np.real(source.medium_n)
+    polar = np.linspace(0.0, np.pi, 401)
+    azimuthal = np.linspace(0.0, 2.0 * np.pi, 241, endpoint=False)
+    te, tm = source.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
+
+    amp = np.sqrt(np.abs(te["coeff"]) ** 2 + np.abs(tm["coeff"]) ** 2)
+    beta_activity = np.sum(amp, axis=0)
+    j = int(np.argmax(beta_activity))
+    # For normal incidence and TE basis, (te - i tm) removes polarization-driven +/-1 azimuth term.
+    c = np.asarray(te["coeff"][:, j] - 1j * tm["coeff"][:, j], dtype=np.complex128)
+    demod = c * np.exp(1j * azimuthal)
+    da = float(azimuthal[1] - azimuthal[0])
+    expected = np.exp(1j * source.azimuthal_order_l * da)
+    ratio = demod[1:] / demod[:-1]
+    np.testing.assert_allclose(ratio, expected, rtol=5e-10, atol=5e-10)
+
+
+def test_laguerre_gaussian_m0_is_cylindrically_symmetric_in_alpha():
+    source = LaguerreGaussianBeam(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        radial_order_p=1,
+        azimuthal_order_l=0,
+        polarization=(1.0 + 0.0j, 0.5 - 0.2j),
+        polar_angle=0.0,
+        azimuthal_angle=0.0,
+        beam_width=1400.0,
+        focal_point=(0.0, 0.0, 0.0),
+        amplitude=1.0,
+    )
+    k = 2.0 * np.pi / source.wavelength * np.real(source.medium_n)
+    polar = np.linspace(0.0, np.pi, 321)
+    azimuthal = np.linspace(0.0, 2.0 * np.pi, 181, endpoint=False)
+    te, tm = source.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
+
+    amp = np.sqrt(np.abs(te["coeff"]) ** 2 + np.abs(tm["coeff"]) ** 2)
+    profile = np.sum(amp, axis=1)
+    assert float(np.std(profile)) <= 1e-10 * float(np.max(np.abs(profile)))
+
+
+def test_laguerre_gaussian_projection_matches_high_resolution_reference():
+    positions = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [80.0, -20.0, 30.0],
+            [-65.0, 45.0, 10.0],
+        ],
+        dtype=float,
+    )
+    source = LaguerreGaussianBeam(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        radial_order_p=1,
+        azimuthal_order_l=2,
+        polarization=(1.0 + 0.0j, -0.3 + 0.4j),
+        polar_angle=0.25,
+        azimuthal_angle=0.55,
+        beam_width=1700.0,
+        focal_point=(10.0, -5.0, 2.0),
+        amplitude=1.1,
+        azimuthal_phase=0.15,
+    )
+    lmax = 3
+    coarse_polar = np.linspace(0.0, np.pi, 481)
+    coarse_az = np.linspace(0.0, 2.0 * np.pi, 321, endpoint=False)
+    fine_polar = np.linspace(0.0, np.pi, 1001)
+    fine_az = np.linspace(0.0, 2.0 * np.pi, 721, endpoint=False)
+
+    got = project_source_to_svwf(
+        positions,
+        lmax,
+        source,
+        polar_angles=coarse_polar,
+        azimuthal_angles=coarse_az,
+    )
+    ref = project_source_to_svwf(
+        positions,
+        lmax,
+        source,
+        polar_angles=fine_polar,
+        azimuthal_angles=fine_az,
+    )
+    np.testing.assert_allclose(got, ref, rtol=1e-3, atol=1e-3)
+
+
+def test_focused_laguerre_projection_matches_high_resolution_reference():
+    positions = np.array([[0.0, 0.0, 0.0], [45.0, -30.0, 15.0]], dtype=float)
+    source = FocusedLaguerreGaussianBeam(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        radial_order_p=0,
+        azimuthal_order_l=1,
+        polarization=(1.0 + 0.0j, 0.2j),
+        polar_angle=0.0,
+        azimuthal_angle=0.0,
+        beam_width=1200.0,
+        focal_length=1000.0,
+        numerical_aperture=0.25,
+        focal_point=(0.0, 0.0, 0.0),
+        amplitude=1.0,
+        azimuthal_phase=0.0,
+        sine_condition_apodization=True,
+    )
+    lmax = 3
+    coarse_polar = np.linspace(0.0, np.pi, 501)
+    coarse_az = np.linspace(0.0, 2.0 * np.pi, 301, endpoint=False)
+    fine_polar = np.linspace(0.0, np.pi, 1001)
+    fine_az = np.linspace(0.0, 2.0 * np.pi, 721, endpoint=False)
+
+    got = project_source_to_svwf(
+        positions,
+        lmax,
+        source,
+        polar_angles=coarse_polar,
+        azimuthal_angles=coarse_az,
+    )
+    ref = project_source_to_svwf(
+        positions,
+        lmax,
+        source,
+        polar_angles=fine_polar,
+        azimuthal_angles=fine_az,
+    )
+    np.testing.assert_allclose(got, ref, rtol=1e-3, atol=1e-3)
