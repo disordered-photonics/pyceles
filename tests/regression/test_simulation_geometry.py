@@ -10,6 +10,7 @@ from pyceles.core.angular import (
     uniform_periodic_azimuth_grid,
     uniform_polar_grid,
 )
+from pyceles.core.particles import LayeredSphere, Sphere
 from pyceles.simulation import Simulation, SimulationConfig
 
 
@@ -61,9 +62,28 @@ def test_simulation_accepts_empty_particle_geometry() -> None:
         radii=np.zeros((0,), dtype=float),
         n_particle=np.zeros((0,), dtype=np.complex128),
     )
+    assert sim.n_particles == 0
     assert sim.positions.size == 0
     assert sim.radii.size == 0
     assert sim.n_particle.size == 0
+
+
+def test_simulation_accepts_explicit_particle_descriptors() -> None:
+    cfg = SimulationConfig(check_circumscribing_sphere_overlap=True, verbose=False)
+    particles = [
+        Sphere(position=(0.0, 0.0, 0.0), radius=50.0, refractive_index=1.5 + 0j),
+        LayeredSphere(
+            position=(200.0, 0.0, 0.0),
+            layer_radii=(40.0, 80.0),
+            layer_refractive_indices=(1.8 + 0j, 1.3 + 0.02j),
+        ),
+    ]
+    sim = Simulation.from_particles(cfg, particles=particles)
+    assert sim.n_particles == 2
+    assert sim.positions.shape == (2, 3)
+    np.testing.assert_allclose(sim.radii, np.array([50.0, 80.0], dtype=float), rtol=0.0, atol=0.0)
+    assert sim.particles is not None
+    assert len(sim.particles) == 2
 
 
 def test_simulation_rejects_none_geometry_inputs() -> None:

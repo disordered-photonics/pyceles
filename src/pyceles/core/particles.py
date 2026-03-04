@@ -46,7 +46,7 @@ class Sphere(Particle):
 
 @dataclass(frozen=True)
 class LayeredSphere(Particle):
-    """Placeholder for future multilayer Mie support."""
+    """Concentric multilayer sphere for exact multilayer Mie kernels."""
 
     layer_radii: Tuple[float, ...]
     layer_refractive_indices: Tuple[complex, ...]

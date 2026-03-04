@@ -257,6 +257,58 @@ def prepare_matvec(
     )
 
 
+def prepare_matvec_from_particles(
+    *,
+    lmax: int,
+    k: float,
+    particles: list[Particle],
+    n_medium: complex = 1.0 + 0j,
+    radial_lut_dr: float,
+    cache_translation_blocks: bool = False,
+    operator_dtype: npt.DTypeLike = np.complex128,
+) -> PreparedMatvec:
+    """Prepare reusable matvec data from an explicit particle list.
+
+    This is the extensible geometry path for mixed particle families that still
+    expose diagonal per-(tau,l,m) response entries.
+    """
+    part = list(particles)
+    positions = np.asarray(
+        [np.asarray(p.position, dtype=float) for p in part], dtype=float
+    ).reshape(-1, 3)
+    op_dtype = np.dtype(operator_dtype)
+    k_f = float(k)
+
+    T_M, T_N = precompute_T_diagonal_from_particles(
+        lmax=int(lmax),
+        k=k_f,
+        particles=part,
+        n_medium=n_medium,
+    )
+    T_M = np.asarray(T_M, dtype=op_dtype, copy=False)
+    T_N = np.asarray(T_N, dtype=op_dtype, copy=False)
+    T_diag = _build_T_mode_diagonal(int(lmax), T_M, T_N)
+    ab5 = translation_ab5_table(int(lmax), dtype=op_dtype)
+
+    dr = float(radial_lut_dr)
+    if dr <= 0.0:
+        raise ValueError(f"radial_lut_dr must be > 0, got {dr}.")
+    lut = RadialLUT(lmax=int(lmax), k=k_f, r_max=_infer_rmax(positions), dr=dr, dtype=op_dtype)
+
+    return PreparedMatvec(
+        lmax=int(lmax),
+        k=k_f,
+        positions=positions,
+        T_M=T_M,
+        T_N=T_N,
+        T_diag=T_diag,
+        ab5=ab5,
+        radial_lut=lut,
+        dtype=op_dtype,
+        cache_translation_blocks=bool(cache_translation_blocks),
+    )
+
+
 def estimate_translation_cache_bytes(
     N: int, lmax: int, *, dtype: npt.DTypeLike = np.complex128
 ) -> int:

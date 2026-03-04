@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Sequence
 
 import numpy as np
 import numpy.typing as npt
+
+from pyceles.core.particles import Particle
 
 from .nearfield_kernels import (
     compute_initial_field,
@@ -46,6 +49,7 @@ def compute_total_field(
     azimuthal_angles: np.ndarray,
     radii: np.ndarray | None = None,
     n_particle: np.ndarray | complex | None = None,
+    particles: Sequence[Particle] | None = None,
     n_medium: complex = 1.0 + 0j,
     batch_size: int = 2048,
     show_progress: bool = False,
@@ -88,6 +92,7 @@ def compute_total_field(
         azimuthal_angles=np.asarray(azimuthal_angles, float),
         radii=radii,
         n_particle=n_particle,
+        particles=particles,
         n_medium=n_medium,
         batch_size=batch_size,
         show_progress=show_progress,
@@ -111,6 +116,7 @@ def compute_near_field_components(
     azimuthal_angles: np.ndarray,
     radii: np.ndarray | None = None,
     n_particle: np.ndarray | complex | None = None,
+    particles: Sequence[Particle] | None = None,
     n_medium: complex = 1.0 + 0j,
     batch_size: int = 2048,
     show_progress: bool = False,
@@ -148,7 +154,17 @@ def compute_near_field_components(
     )
 
     inside_hint = np.zeros(pts.shape[0], dtype=bool)
-    if radii is not None and n_particle is not None:
+    if particles is not None:
+        for p in particles:
+            center = np.asarray(p.position, dtype=float).reshape(3)
+            rr = float(p.circumscribing_radius())
+            R = pts - center[None, :]
+            # TODO(ellipsoids): circumscribing-radius masking is exact for
+            # spherical particle families only. Introduce particle-native
+            # point-containment capability before enabling non-spherical
+            # internal-field replacement here.
+            inside_hint |= np.sum(R * R, axis=1) < (rr**2)
+    elif radii is not None and n_particle is not None:
         # We already know total/internal fields will replace values inside spheres.
         # Build this cheap geometry mask up front so scattered-field evaluation can
         # skip interior points entirely.
@@ -179,7 +195,7 @@ def compute_near_field_components(
     Et = Ei + Es
     Ht = Hi + Hs
 
-    if radii is not None and n_particle is not None:
+    if particles is not None or (radii is not None and n_particle is not None):
         Eint, Hint, inside = compute_internal_field(
             field_points,
             positions,
@@ -192,6 +208,7 @@ def compute_near_field_components(
             show_progress=show_progress,
             compute_dtype=compute_dtype,
             accum_dtype=accum_dtype,
+            particles=particles,
         )
         # Exterior scattered-field expansions are not physically valid inside
         # particles and can diverge at exact sphere centers; sanitize these

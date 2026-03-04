@@ -33,10 +33,17 @@ from .matvec import (
     precompute_T_diagonal,
     precompute_T_diagonal_from_particles,
     prepare_matvec,
+    prepare_matvec_from_particles,
     rhs_Tb_numpy,
 )
 from .particles import Ellipsoid, LayeredSphere, Particle, Sphere
-from .tmatrix import particle_internal_ratios, particle_T_diagonal
+from .tmatrix import (
+    layered_internal_ab_ratios,
+    layered_mie_ab,
+    layered_sphere_T_diagonal,
+    particle_internal_ratios,
+    particle_T_diagonal,
+)
 
 __all__ = [
     "Ellipsoid",
@@ -66,9 +73,13 @@ __all__ = [
     "make_prepared_A_and_rhs",
     "particle_T_diagonal",
     "particle_internal_ratios",
+    "layered_mie_ab",
+    "layered_sphere_T_diagonal",
+    "layered_internal_ab_ratios",
     "precompute_T_diagonal",
     "precompute_T_diagonal_from_particles",
     "prepare_matvec",
+    "prepare_matvec_from_particles",
     "pwp_to_svwf_regular",
     "angular_spectrum_to_svwf_regular",
     "svwf_regular_to_pwp",

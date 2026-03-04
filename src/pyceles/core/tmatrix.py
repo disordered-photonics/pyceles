@@ -1,4 +1,4 @@
-"""Single-sphere response: Mie coefficients and CELES diagonal T entries.
+"""Spherical response kernels: homogeneous/layered Mie and CELES T entries.
 
 CPU-first implementation using NumPy + SciPy.
 
@@ -13,14 +13,22 @@ Conventions
 - `mie_ab` returns the standard Mie scattering coefficients (a_l, b_l)
   for l=1..lmax.
 
-- `sphere_T_diagonal` maps Mie coefficients into CELES' diagonal T entries
+- `sphere_T_diagonal` maps homogeneous-sphere Mie coefficients into CELES'
+  diagonal T entries.
+
+- `layered_sphere_T_diagonal` does the same for concentric multilayer spheres
+  through interface transfer matrices.
+
+- `layered_internal_ab_ratios` provides per-layer radial coefficients for
+  piecewise internal near-field evaluation in layered spheres.
+
+- `sphere_internal_ratios` provides the per-l conversion factors used by CELES
+  for homogeneous spheres.
   following `T_entry.m` in the CELES MATLAB code:
 
     tau=1 (M/TE-like) uses -b_l
     tau=2 (N/TM-like) uses -a_l
 
-- `sphere_internal_ratios` provides the per-l conversion factors used by CELES
-  to convert scattered SVWF coefficients into internal (regular) coefficients.
 """
 
 from __future__ import annotations
@@ -29,6 +37,132 @@ import numpy as np
 from scipy.special import spherical_jn, spherical_yn
 
 from .particles import Ellipsoid, LayeredSphere, Particle, Sphere
+
+
+def _riccati_jh(
+    l: int,
+    x: complex,
+) -> tuple[complex, complex, complex, complex]:
+    """Return (psi, dpsi, xi, dxi) for one order/argument.
+
+    Here `psi=x*j_l(x)` and `xi=x*h_l^(1)(x)`, with derivatives w.r.t. `x`.
+    """
+    jl = spherical_jn(l, x)
+    yl = spherical_yn(l, x)
+    hl = jl + 1j * yl
+
+    djl = spherical_jn(l, x, derivative=True)
+    dyl = spherical_yn(l, x, derivative=True)
+    dhl = djl + 1j * dyl
+
+    psi = x * jl
+    xi = x * hl
+    dpsi = jl + x * djl
+    dxi = hl + x * dhl
+    return psi, dpsi, xi, dxi
+
+
+def _layered_transfer_matrices(
+    lmax: int,
+    k_medium: complex,
+    layer_radii: tuple[float, ...],
+    layer_refractive_indices: tuple[complex, ...],
+    n_medium: complex,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Build forward/backward transfer-matrix products for layered spheres.
+
+    Returns
+    -------
+    T_tm, T_te, T_mm, T_me
+        Arrays of shape `(lmax+1, n_layers, 2, 2)`.
+        - `T_tm`, `T_te`: forward products (inner -> outer interfaces).
+        - `T_mm`, `T_me`: backward products (each layer -> host side).
+    """
+    lmax = int(lmax)
+    radii = np.asarray(layer_radii, dtype=float).reshape(-1)
+    n_layers = np.asarray(layer_refractive_indices, dtype=np.complex128).reshape(-1)
+    if radii.size == 0:
+        raise ValueError("layer_radii must be non-empty.")
+    if n_layers.size != radii.size:
+        raise ValueError("layer_radii and layer_refractive_indices must have the same length.")
+    if np.any(~np.isfinite(radii)) or np.any(radii <= 0.0):
+        raise ValueError("layer_radii must be finite and strictly positive.")
+    if np.any(np.diff(radii) <= 0.0):
+        raise ValueError("layer_radii must be strictly increasing.")
+
+    n_medium_c = complex(n_medium)
+    if n_medium_c == 0:
+        raise ValueError("n_medium must be non-zero.")
+
+    L = int(radii.size)
+    n_full = np.empty(L + 1, dtype=np.complex128)
+    n_full[:-1] = n_layers
+    n_full[-1] = n_medium_c
+
+    kM = complex(k_medium)
+
+    T_tm = np.zeros((lmax + 1, L, 2, 2), dtype=np.complex128)
+    T_te = np.zeros((lmax + 1, L, 2, 2), dtype=np.complex128)
+    T_mm = np.zeros((lmax + 1, L, 2, 2), dtype=np.complex128)
+    T_me = np.zeros((lmax + 1, L, 2, 2), dtype=np.complex128)
+
+    for l in range(1, lmax + 1):
+        tmf = np.zeros((L, 2, 2), dtype=np.complex128)
+        tef = np.zeros((L, 2, 2), dtype=np.complex128)
+        tmb = np.zeros((L, 2, 2), dtype=np.complex128)
+        teb = np.zeros((L, 2, 2), dtype=np.complex128)
+
+        for j in range(L):
+            rj = float(radii[j])
+            ns = complex(n_full[j])
+            np1 = complex(n_full[j + 1])
+            eta = ns / np1
+
+            xs = kM * (ns / n_medium_c) * rj
+            xp = kM * (np1 / n_medium_c) * rj
+
+            psi_s, dpsi_s, xi_s, dxi_s = _riccati_jh(l, xs)
+            psi_p, dpsi_p, xi_p, dxi_p = _riccati_jh(l, xp)
+
+            # Magnetic (M / tau=1): mu-ratio assumed 1.
+            tmb[j, 0, 0] = -1j * (dxi_s * psi_p * eta - xi_s * dpsi_p)
+            tmb[j, 0, 1] = -1j * (dxi_s * xi_p * eta - xi_s * dxi_p)
+            tmb[j, 1, 0] = -1j * (-dpsi_s * psi_p * eta + psi_s * dpsi_p)
+            tmb[j, 1, 1] = -1j * (-dpsi_s * xi_p * eta + psi_s * dxi_p)
+
+            tmf[j, 0, 0] = -1j * (dxi_p * psi_s / eta - xi_p * dpsi_s)
+            tmf[j, 0, 1] = -1j * (dxi_p * xi_s / eta - xi_p * dxi_s)
+            tmf[j, 1, 0] = -1j * (-dpsi_p * psi_s / eta + psi_p * dpsi_s)
+            tmf[j, 1, 1] = -1j * (-dpsi_p * xi_s / eta + psi_p * dxi_s)
+
+            # Electric (N / tau=2): eta/mu terms swap, mu-ratio still 1.
+            teb[j, 0, 0] = -1j * (dxi_s * psi_p - xi_s * dpsi_p * eta)
+            teb[j, 0, 1] = -1j * (dxi_s * xi_p - xi_s * dxi_p * eta)
+            teb[j, 1, 0] = -1j * (-dpsi_s * psi_p + psi_s * dpsi_p * eta)
+            teb[j, 1, 1] = -1j * (-dpsi_s * xi_p + psi_s * dxi_p * eta)
+
+            tef[j, 0, 0] = -1j * (dxi_p * psi_s - xi_p * dpsi_s / eta)
+            tef[j, 0, 1] = -1j * (dxi_p * xi_s - xi_p * dxi_s / eta)
+            tef[j, 1, 0] = -1j * (-dpsi_p * psi_s + psi_p * dpsi_s / eta)
+            tef[j, 1, 1] = -1j * (-dpsi_p * xi_s + psi_p * dxi_s / eta)
+
+        for j in range(L):
+            if j == 0:
+                T_tm[l, j] = tmf[j]
+                T_te[l, j] = tef[j]
+            else:
+                T_tm[l, j] = tmf[j] @ T_tm[l, j - 1]
+                T_te[l, j] = tef[j] @ T_te[l, j - 1]
+
+        for j in range(L - 1, -1, -1):
+            if j == L - 1:
+                T_mm[l, j] = tmb[j]
+                T_me[l, j] = teb[j]
+            else:
+                T_mm[l, j] = tmb[j] @ T_mm[l, j + 1]
+                T_me[l, j] = teb[j] @ T_me[l, j + 1]
+
+    return T_tm, T_te, T_mm, T_me
 
 
 def mie_ab(
@@ -109,6 +243,94 @@ def mie_ab(
     return a, b
 
 
+def layered_mie_ab(
+    lmax: int,
+    k_medium: complex,
+    layer_radii: tuple[float, ...],
+    layer_refractive_indices: tuple[complex, ...],
+    n_medium: complex = 1.0 + 0j,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute multilayer-sphere Mie coefficients `a_l`, `b_l`.
+
+    Parameters
+    ----------
+    lmax:
+        Maximum degree (index 0 is unused).
+    k_medium:
+        Embedding-medium wavenumber.
+    layer_radii:
+        Strictly increasing outer radii of concentric layers (inner -> outer).
+    layer_refractive_indices:
+        Layer refractive indices, same ordering/length as `layer_radii`.
+    n_medium:
+        Embedding-medium refractive index.
+    """
+    lmax = int(lmax)
+    T_tm, T_te, _, _ = _layered_transfer_matrices(
+        lmax=lmax,
+        k_medium=complex(k_medium),
+        layer_radii=layer_radii,
+        layer_refractive_indices=layer_refractive_indices,
+        n_medium=complex(n_medium),
+    )
+    a = np.zeros(lmax + 1, dtype=np.complex128)
+    b = np.zeros(lmax + 1, dtype=np.complex128)
+    for l in range(1, lmax + 1):
+        # Stratify/scattnlay convention: a from electric branch, b from magnetic branch.
+        a[l] = -(T_te[l, -1, 1, 0] / T_te[l, -1, 0, 0])
+        b[l] = -(T_tm[l, -1, 1, 0] / T_tm[l, -1, 0, 0])
+    return a, b
+
+
+def layered_internal_ab_ratios(
+    lmax: int,
+    k_medium: complex,
+    layer_radii: tuple[float, ...],
+    layer_refractive_indices: tuple[complex, ...],
+    n_medium: complex = 1.0 + 0j,
+) -> dict[int, dict[str, np.ndarray]]:
+    """Return per-layer radial `(A,B)` multipliers relative to scattered modes.
+
+    For each polarization branch (`tau=1` magnetic/M, `tau=2` electric/N),
+    each layer `j`, and each degree `l`, this returns
+
+    - `A[j,l]`: multiplier for regular radial basis `j_l(k_j r)`
+    - `B[j,l]`: multiplier for outgoing radial basis `h_l^(1)(k_j r)`
+
+    such that layer fields can be evaluated from solved outgoing coefficients
+    (`Q_scat` basis used in CELES). The innermost layer has `B=0` by regularity
+    at `r=0`.
+    """
+    lmax = int(lmax)
+    L = len(layer_radii)
+    T_tm, T_te, T_mm, T_me = _layered_transfer_matrices(
+        lmax=lmax,
+        k_medium=complex(k_medium),
+        layer_radii=layer_radii,
+        layer_refractive_indices=layer_refractive_indices,
+        n_medium=complex(n_medium),
+    )
+
+    A_m = np.zeros((L, lmax + 1), dtype=np.complex128)
+    B_m = np.zeros((L, lmax + 1), dtype=np.complex128)
+    A_n = np.zeros((L, lmax + 1), dtype=np.complex128)
+    B_n = np.zeros((L, lmax + 1), dtype=np.complex128)
+
+    for l in range(1, lmax + 1):
+        q_scat_m = T_tm[l, -1, 1, 0] / T_tm[l, -1, 0, 0]  # = -b_l
+        q_scat_n = T_te[l, -1, 1, 0] / T_te[l, -1, 0, 0]  # = -a_l
+        for j in range(L):
+            tmm = T_mm[l, j]
+            tme = T_me[l, j]
+            A_m[j, l] = (tmm[0, 0] + tmm[0, 1] * q_scat_m) / q_scat_m
+            A_n[j, l] = (tme[0, 0] + tme[0, 1] * q_scat_n) / q_scat_n
+            if j > 0:
+                B_m[j, l] = (tmm[1, 0] + tmm[1, 1] * q_scat_m) / q_scat_m
+                B_n[j, l] = (tme[1, 0] + tme[1, 1] * q_scat_n) / q_scat_n
+
+    return {1: {"A": A_m, "B": B_m}, 2: {"A": A_n, "B": B_n}}
+
+
 def sphere_T_diagonal(
     lmax: int,
     k_medium: complex,
@@ -132,6 +354,31 @@ def sphere_T_diagonal(
     """
 
     a, b = mie_ab(lmax, k_medium, radius, n_particle, n_medium)
+    return {1: sign * b, 2: sign * a}
+
+
+def layered_sphere_T_diagonal(
+    lmax: int,
+    k_medium: complex,
+    layer_radii: tuple[float, ...],
+    layer_refractive_indices: tuple[complex, ...],
+    n_medium: complex = 1.0 + 0j,
+    *,
+    sign: int = -1,
+) -> dict[int, np.ndarray]:
+    """Layered-sphere diagonal T entries in CELES' (M,N) ordering.
+
+    Uses the same CELES mapping as homogeneous spheres:
+      tau=1: `Q = -b_l`
+      tau=2: `Q = -a_l`
+    """
+    a, b = layered_mie_ab(
+        lmax=lmax,
+        k_medium=k_medium,
+        layer_radii=layer_radii,
+        layer_refractive_indices=layer_refractive_indices,
+        n_medium=n_medium,
+    )
     return {1: sign * b, 2: sign * a}
 
 
@@ -212,8 +459,8 @@ def _unsupported_particle_message(particle: Particle) -> str:
     """Human-readable dispatch error for not-yet-supported particle types."""
     return (
         f"T-matrix for particle type '{type(particle).__name__}' is not implemented yet. "
-        "Only Sphere is currently supported. Planned future backends include layered-sphere "
-        "and non-spherical solvers."
+        "Supported particle backends are Sphere and LayeredSphere. "
+        "Non-spherical solvers are planned separately."
     )
 
 
@@ -235,7 +482,16 @@ def particle_T_diagonal(
             n_medium=n_medium,
             sign=sign,
         )
-    if isinstance(particle, (LayeredSphere, Ellipsoid)):
+    if isinstance(particle, LayeredSphere):
+        return layered_sphere_T_diagonal(
+            lmax=lmax,
+            k_medium=k_medium,
+            layer_radii=particle.layer_radii,
+            layer_refractive_indices=particle.layer_refractive_indices,
+            n_medium=n_medium,
+            sign=sign,
+        )
+    if isinstance(particle, Ellipsoid):
         raise NotImplementedError(_unsupported_particle_message(particle))
     raise TypeError(f"Unsupported particle instance: {type(particle)!r}")
 
@@ -246,7 +502,14 @@ def particle_internal_ratios(
     particle: Particle,
     n_medium: complex = 1.0 + 0j,
 ) -> dict[int, np.ndarray]:
-    """Dispatch internal/scattered conversion ratios by particle type."""
+    """Dispatch internal/scattered conversion ratios by particle type.
+
+    Notes
+    -----
+    For `LayeredSphere`, this returns the innermost-core regular-field ratios
+    (`A` for layer index 0, where `B=0` by regularity). Full layer-wise `(A,B)`
+    data are available via :func:`layered_internal_ab_ratios`.
+    """
     if isinstance(particle, Sphere):
         return sphere_internal_ratios(
             lmax=lmax,
@@ -255,7 +518,19 @@ def particle_internal_ratios(
             n_particle=particle.refractive_index,
             n_medium=n_medium,
         )
-    if isinstance(particle, (LayeredSphere, Ellipsoid)):
+    if isinstance(particle, LayeredSphere):
+        ratios = layered_internal_ab_ratios(
+            lmax=lmax,
+            k_medium=k_medium,
+            layer_radii=particle.layer_radii,
+            layer_refractive_indices=particle.layer_refractive_indices,
+            n_medium=n_medium,
+        )
+        return {
+            1: np.asarray(ratios[1]["A"][0, :], dtype=np.complex128),
+            2: np.asarray(ratios[2]["A"][0, :], dtype=np.complex128),
+        }
+    if isinstance(particle, Ellipsoid):
         raise NotImplementedError(_unsupported_particle_message(particle))
     raise TypeError(f"Unsupported particle instance: {type(particle)!r}")
 

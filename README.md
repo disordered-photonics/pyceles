@@ -32,7 +32,8 @@ Users of pyceles are referred to the publications listed in the CELES and SMUTHI
 - Near-field evaluation with CELES formulas:
   - scattered field
   - initial field (plane-wave-pattern integral)
-  - total field with internal-field replacement inside spheres (CELES behavior)
+  - total field with internal-field replacement inside particles
+    (`Sphere` and `LayeredSphere` currently)
   - canonical helper returning `initial/scattered/internal/total` components in one call
   - geometry-agnostic helper (`compute_near_field`) plus planar convenience wrapper (`compute_near_field_slice`)
 - Far-field plane-wave pattern + forward/backward power flux (CELES formulas)
@@ -55,6 +56,11 @@ Users of pyceles are referred to the publications listed in the CELES and SMUTHI
 - Geometry sanity check:
   - by default, `Simulation` enforces disjoint particle circumscribing spheres
     (required by T-matrix superposition), can be disabled via `check_circumscribing_sphere_overlap=False`
+- Explicit particle descriptors:
+  - `Simulation.from_particles(...)` accepts mixed supported particle families
+    (`Sphere`, `LayeredSphere`) in one geometry
+  - `Simulation.n_particles` / `SimulationResult.n_particles` provide canonical
+    particle counts for both array and descriptor-based workflows
 - Explicit no-scatterer (source-only) simulations:
   - pass explicit empty geometry arrays to run a beam-only simulation
     (`positions=np.zeros((0,3))`, `radii=np.zeros((0,))`, `n_particle=np.zeros((0,), complex)`)
@@ -430,6 +436,34 @@ run_te = multi["te"]
 run_tm = multi["tm"]
 print(solved.solver_result.rhs_count)  # 2
 ```
+
+## Mixed Particle Descriptors
+
+For layered or mixed spherical geometries, construct simulations from explicit
+particle descriptors:
+
+```python
+sim = pcl.Simulation.from_particles(
+    cfg,
+    particles=[
+        pcl.Sphere(position=(0.0, 0.0, 0.0), radius=60.0, refractive_index=1.5 + 0j),
+        pcl.LayeredSphere(
+            position=(250.0, 0.0, 0.0),
+            layer_radii=(40.0, 90.0),
+            layer_refractive_indices=(1.8 + 0j, 1.35 + 0.02j),
+        ),
+    ],
+)
+run = sim.run(include_farfield=False)
+print(sim.n_particles, run.n_particles)
+```
+
+Notes:
+- Layered spheres are treated as one particle each (one center, one solved
+  outgoing-coefficient block).
+- `SimulationResult.n_particle` is retained for legacy array-geometry
+  compatibility and carries effective per-particle values in mixed workflows.
+  Use `run.particles` for exact particle descriptors.
 
 ## Dual-Basis Convenience Run
 

@@ -12,6 +12,7 @@ from pyceles.io.plotting import (
     plot_field_component,
     plot_nearfield_panels_channels,
     plot_source_showcase_slices,
+    plot_spheres,
     unpolarized_near_field_intensity,
 )
 from pyceles.postprocessing.workflows import NearFieldSlice
@@ -75,6 +76,20 @@ def test_plot_nearfield_panels_channels_returns_expected_axes_shape():
     )
     assert axes.shape == (4, 4)
     fig.clf()
+
+
+def test_plot_spheres_can_overlay_layered_shells():
+    fig, ax = plt.subplots()
+    plot_spheres(
+        ax,
+        positions=np.array([[0.0, 0.0, 0.0]], dtype=float),
+        radii=np.array([2.0], dtype=float),
+        layered_radii=[np.array([1.0, 2.0], dtype=float)],
+        plane="z",
+        plane_value=0.0,
+    )
+    assert len(ax.patches) == 2
+    plt.close(fig)
 
 
 def test_unpolarized_near_field_intensity_is_incoherent_average():

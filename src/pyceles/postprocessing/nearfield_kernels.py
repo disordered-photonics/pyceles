@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from functools import cache
+from typing import Sequence
 
 import numpy as np
 import numpy.typing as npt
@@ -15,6 +16,7 @@ from pyceles.core.angular import (
 )
 from pyceles.core.geometry_bounds import conservative_cross_set_max_distance
 from pyceles.core.indexing import index_vswf, n_modes
+from pyceles.core.particles import LayeredSphere, Particle, Sphere
 from pyceles.core.sources import (
     DipoleCollection,
     DipoleSource,
@@ -25,7 +27,7 @@ from pyceles.core.sources import (
     polarization_to_jones,
 )
 from pyceles.core.spherical import spherical_functions_trigon
-from pyceles.core.tmatrix import sphere_internal_ratios
+from pyceles.core.tmatrix import layered_internal_ab_ratios, sphere_internal_ratios
 
 
 @cache
@@ -67,6 +69,50 @@ def _contract_modes(mode_coeffs: np.ndarray, mode_tensor: np.ndarray) -> np.ndar
     # on this exact contraction. Performance is similar up to about lmax~3,
     # while matmul is consistently faster for larger lmax, and also easier to read.
     return np.matmul(np.transpose(mode_tensor, (0, 2, 1)), mode_coeffs)
+
+
+def _build_internal_mode_tensors(
+    *,
+    l: int,
+    m_vals: np.ndarray,
+    abs_m: np.ndarray,
+    phi: np.ndarray,
+    e_r: np.ndarray,
+    e_theta: np.ndarray,
+    e_phi: np.ndarray,
+    PI: np.ndarray,
+    TAU: np.ndarray,
+    P: np.ndarray,
+    z_l: np.ndarray,
+    dxxz: np.ndarray,
+    kr: np.ndarray,
+    compute_dtype: np.dtype,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Build `(M_l, N_l)` mode tensors for one degree and radial basis."""
+    pref = 1.0 / np.sqrt(2.0 * l * (l + 1.0))
+
+    z_over_kr = z_l / kr
+    dxxz_over_kr = dxxz / kr
+
+    P_lm = P[l, abs_m, :].T
+    pi_lm = PI[l, abs_m, :].T
+    tau_lm = TAU[l, abs_m, :].T
+
+    eimphi = np.asarray(np.exp(1j * phi[:, None] * m_vals[None, :]), dtype=compute_dtype)
+    impi = np.asarray((1j * m_vals[None, :]) * pi_lm, dtype=compute_dtype)
+
+    theta_phi_m = impi[:, :, None] * e_theta[:, None, :] - tau_lm[:, :, None] * e_phi[:, None, :]
+    Mv_all = pref * z_l[:, None, None] * theta_phi_m * eimphi[:, :, None]
+
+    radial_er = (l * (l + 1.0) * z_over_kr)[:, None] * P_lm
+    mix_theta_phi = tau_lm[:, :, None] * e_theta[:, None, :] + impi[:, :, None] * e_phi[:, None, :]
+    Nv_all = (
+        pref
+        * (radial_er[:, :, None] * e_r[:, None, :] + dxxz_over_kr[:, None, None] * mix_theta_phi)
+        * eimphi[:, :, None]
+    )
+
+    return Mv_all, Nv_all
 
 
 def _compute_initial_field_gaussian_normal_incidence_analytic(
@@ -530,18 +576,19 @@ def compute_scattered_field(
 
 def compute_internal_field(
     field_points: np.ndarray,
-    positions: np.ndarray,
-    radii: np.ndarray,
+    positions: np.ndarray | None,
+    radii: np.ndarray | None,
     coeffs: np.ndarray,
     k: float,
     lmax: int,
-    n_particle: np.ndarray | complex,
+    n_particle: np.ndarray | complex | None,
     n_medium: complex = 1.0 + 0j,
     show_progress: bool = False,
     compute_dtype: npt.DTypeLike = np.complex128,
     accum_dtype: npt.DTypeLike = np.complex128,
+    particles: Sequence[Particle] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Compute the *total* (physical) field inside spheres.
+    """Compute the *total* (physical) field inside particles.
 
     This mirrors CELES `compute_internal_field.m`:
 
@@ -575,16 +622,43 @@ def compute_internal_field(
     -------
     E_internal, H_internal, internal_mask
         Arrays have shape (Np,3). Values are non-zero only where internal_mask is True.
-    """
 
-    Ns = positions.shape[0]
+    Notes
+    -----
+    - Legacy sphere-array API:
+      use `positions`/`radii`/`n_particle` for homogeneous spheres.
+    - Particle API:
+      pass `particles=[Sphere(...), LayeredSphere(...), ...]` to enable mixed
+      particle families. In this mode, geometric arrays are ignored.
+    """
+    if particles is not None:
+        return _compute_internal_field_particles(
+            field_points,
+            particles=particles,
+            coeffs=coeffs,
+            k=k,
+            lmax=lmax,
+            n_medium=n_medium,
+            show_progress=show_progress,
+            compute_dtype=compute_dtype,
+            accum_dtype=accum_dtype,
+        )
+
+    if positions is None or radii is None or n_particle is None:
+        raise ValueError(
+            "`positions`, `radii`, and `n_particle` are required for homogeneous-sphere "
+            "internal-field evaluation when `particles` is not provided."
+        )
+
+    pos = np.asarray(positions, dtype=float).reshape(-1, 3)
+    Ns = pos.shape[0]
     Np = field_points.shape[0]
     compute_dtype = np.dtype(compute_dtype)
     accum_dtype = np.dtype(accum_dtype)
 
-    radii = np.asarray(radii, dtype=float).reshape(-1)
-    if radii.shape[0] != Ns:
-        raise ValueError(f"radii must have length Ns={Ns}, got {radii.shape}")
+    rad = np.asarray(radii, dtype=float).reshape(-1)
+    if rad.shape[0] != Ns:
+        raise ValueError(f"radii must have length Ns={Ns}, got {rad.shape}")
 
     # Allow scalar or per-sphere refractive index
     if np.ndim(n_particle) == 0:
@@ -608,9 +682,9 @@ def compute_internal_field(
     mode_by_l = _mode_indices_by_l(lmax)
 
     for jS in sphere_iter:
-        R = field_points - positions[jS]
+        R = field_points - pos[jS]
         r2 = np.sum(R * R, axis=1)
-        mask = r2 < (radii[jS] ** 2)
+        mask = r2 < (rad[jS] ** 2)
         if not np.any(mask):
             continue
 
@@ -642,7 +716,7 @@ def compute_internal_field(
         kr = kS * r_safe
 
         # ratios converting scattered -> internal coefficients for this sphere
-        ratios = sphere_internal_ratios(lmax, k, radii[jS], nS, n_medium_c)
+        ratios = sphere_internal_ratios(lmax, k, rad[jS], nS, n_medium_c)
         ratio_M = ratios[1]
         ratio_N = ratios[2]
 
@@ -693,6 +767,248 @@ def compute_internal_field(
             # CELES convention: H = -i * (kS/k0) * (a*N + b*M) = -i*nS*(a*N + b*M)
             H[idx] += (-1j * nS) * _contract_modes(a_int, Nv_all)
             H[idx] += (-1j * nS) * _contract_modes(b_int, Mv_all)
+
+    return E, H, inside
+
+
+def _compute_internal_field_particles(
+    field_points: np.ndarray,
+    particles: Sequence[Particle],
+    coeffs: np.ndarray,
+    *,
+    k: float,
+    lmax: int,
+    n_medium: complex = 1.0 + 0j,
+    show_progress: bool = False,
+    compute_dtype: npt.DTypeLike = np.complex128,
+    accum_dtype: npt.DTypeLike = np.complex128,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Compute internal fields for explicit particle descriptors.
+
+    Internal helper backing the particle-dispatch path in
+    :func:`compute_internal_field`.
+
+    It supports mixed particle lists with `Sphere` and `LayeredSphere`
+    entries. For layered spheres, each shell uses the physically correct piecewise radial basis
+    `A*j_l(k_j r) + B*h_l^(1)(k_j r)`, with `B=0` in the core.
+    """
+    pts = np.asarray(field_points, dtype=float).reshape(-1, 3)
+    part = list(particles)
+    Ns = len(part)
+    Np = pts.shape[0]
+    compute_dtype = np.dtype(compute_dtype)
+    accum_dtype = np.dtype(accum_dtype)
+    n_medium_c = complex(n_medium)
+    lmax = int(lmax)
+    Nm = n_modes(lmax)
+
+    E = np.zeros((Np, 3), dtype=accum_dtype)
+    H = np.zeros((Np, 3), dtype=accum_dtype)
+    inside = np.zeros(Np, dtype=bool)
+    if Ns == 0:
+        return E, H, inside
+
+    c = np.asarray(coeffs, dtype=compute_dtype)
+    if c.size != Ns * Nm:
+        raise ValueError(
+            f"`coeffs` must have {Ns * Nm} entries for {Ns} particles and lmax={lmax}. Got {c.size}."
+        )
+    c = c.reshape(Ns, Nm)
+
+    # Reuse the established homogeneous-sphere kernel if possible.
+    spheres = [sp for sp in part if isinstance(sp, Sphere)]
+    if len(spheres) == Ns:
+        positions = np.asarray([sp.position for sp in spheres], dtype=float).reshape(Ns, 3)
+        radii = np.asarray([sp.radius for sp in spheres], dtype=float).reshape(Ns)
+        n_particle = np.asarray(
+            [complex(sp.refractive_index) for sp in spheres], dtype=np.complex128
+        )
+        return compute_internal_field(
+            pts,
+            positions,
+            radii,
+            c,
+            k=float(k),
+            lmax=lmax,
+            n_particle=n_particle,
+            n_medium=n_medium_c,
+            show_progress=show_progress,
+            compute_dtype=compute_dtype,
+            accum_dtype=accum_dtype,
+        )
+
+    supported = (Sphere, LayeredSphere)
+    bad = [type(p).__name__ for p in part if not isinstance(p, supported)]
+    if bad:
+        raise TypeError(
+            "compute_internal_field currently supports Sphere and LayeredSphere in "
+            f"particle-dispatch mode. Got {bad}."
+        )
+
+    sphere_idx = [j for j, p in enumerate(part) if isinstance(p, Sphere)]
+    layered_idx = [j for j, p in enumerate(part) if isinstance(p, LayeredSphere)]
+
+    # Reuse the canonical homogeneous-sphere kernel to avoid sphere-path drift.
+    if sphere_idx:
+        sphere_part = [p for p in part if isinstance(p, Sphere)]
+        positions = np.asarray([sp.position for sp in sphere_part], dtype=float).reshape(-1, 3)
+        radii = np.asarray([sp.radius for sp in sphere_part], dtype=float).reshape(-1)
+        n_particle = np.asarray(
+            [complex(sp.refractive_index) for sp in sphere_part], dtype=np.complex128
+        )
+        c_sphere = c[np.asarray(sphere_idx, dtype=int), :]
+        E_s, H_s, inside_s = compute_internal_field(
+            pts,
+            positions,
+            radii,
+            c_sphere,
+            k=float(k),
+            lmax=lmax,
+            n_particle=n_particle,
+            n_medium=n_medium_c,
+            show_progress=show_progress,
+            compute_dtype=compute_dtype,
+            accum_dtype=accum_dtype,
+        )
+        E += E_s
+        H += H_s
+        inside |= inside_s
+
+    if not layered_idx:
+        return E, H, inside
+
+    eps = 1e-12
+    mode_by_l = _mode_indices_by_l(lmax)
+    l_iter = layered_idx
+    if show_progress:
+        l_iter = tqdm(layered_idx, desc="Internal field (layered particles)", leave=True)
+
+    for jS in l_iter:
+        p = part[jS]
+        if not isinstance(p, LayeredSphere):
+            continue
+        center = np.asarray(p.position, dtype=float).reshape(3)
+        outer_radius = float(p.circumscribing_radius())
+
+        R = pts - center[None, :]
+        r2 = np.sum(R * R, axis=1)
+        # TODO(ellipsoids): this is exact for concentric layered spheres.
+        # Introduce particle-native point-containment capability before adding
+        # non-spherical internal-field kernels.
+        mask = r2 < (outer_radius**2)
+        if not np.any(mask):
+            continue
+
+        inside[mask] = True
+        idx = np.flatnonzero(mask)
+        r = np.sqrt(r2[mask])
+        r_safe = np.where(r < eps, eps, r)
+
+        x = R[mask, 0]
+        y = R[mask, 1]
+        z = R[mask, 2]
+        rho = np.sqrt(x * x + y * y)
+        ct = z / r_safe
+        st = rho / r_safe
+        phi = np.arctan2(y, x)
+
+        e_r = np.stack([st * np.cos(phi), st * np.sin(phi), ct], axis=1)
+        e_theta = np.stack([ct * np.cos(phi), ct * np.sin(phi), -st], axis=1)
+        e_phi = np.stack([-np.sin(phi), np.cos(phi), np.zeros_like(phi)], axis=1)
+
+        PI, TAU, P = spherical_functions_trigon(ct, st, lmax, xp=np, return_plm=True)
+
+        layer_radii = np.asarray(p.layer_radii, dtype=float).reshape(-1)
+        layer_n = np.asarray(p.layer_refractive_indices, dtype=np.complex128).reshape(-1)
+        layer_idx = np.searchsorted(layer_radii, r, side="right")
+        layer_idx = np.clip(layer_idx, 0, layer_radii.size - 1)
+        k_layers = float(k) * (layer_n / n_medium_c)
+        layered_ratios = layered_internal_ab_ratios(
+            lmax=lmax,
+            k_medium=float(k),
+            layer_radii=p.layer_radii,
+            layer_refractive_indices=p.layer_refractive_indices,
+            n_medium=n_medium_c,
+        )
+        A_m = layered_ratios[1]["A"]
+        B_m = layered_ratios[1]["B"]
+        A_n = layered_ratios[2]["A"]
+        B_n = layered_ratios[2]["B"]
+
+        for l in range(1, lmax + 1):
+            m_vals, abs_m, n1_idx, n2_idx = mode_by_l[l - 1]
+            a_out = c[jS, n1_idx].astype(compute_dtype, copy=False)
+            b_out = c[jS, n2_idx].astype(compute_dtype, copy=False)
+
+            for g in range(layer_radii.size):
+                gmask = layer_idx == g
+                if not np.any(gmask):
+                    continue
+                idx_g = idx[gmask]
+                r_g = r_safe[gmask]
+                phi_g = phi[gmask]
+                kr = k_layers[g] * r_g
+
+                jl = spherical_jn(l, kr)
+                djl = spherical_jn(l, kr, derivative=True)
+                use_h = not (
+                    np.isclose(B_m[g, l], 0.0, rtol=0.0, atol=0.0)
+                    and np.isclose(B_n[g, l], 0.0, rtol=0.0, atol=0.0)
+                )
+                if use_h:
+                    yl = spherical_yn(l, kr)
+                    hl = jl + 1j * yl
+                    dyl = spherical_yn(l, kr, derivative=True)
+                    dhl = djl + 1j * dyl
+                else:
+                    hl = np.zeros_like(jl, dtype=np.complex128)
+                    dhl = np.zeros_like(djl, dtype=np.complex128)
+
+                z_m = A_m[g, l] * jl + B_m[g, l] * hl
+                dxxz_m = A_m[g, l] * (jl + kr * djl) + B_m[g, l] * (hl + kr * dhl)
+
+                z_n = A_n[g, l] * jl + B_n[g, l] * hl
+                dxxz_n = A_n[g, l] * (jl + kr * djl) + B_n[g, l] * (hl + kr * dhl)
+
+                M_m, N_m = _build_internal_mode_tensors(
+                    l=l,
+                    m_vals=m_vals,
+                    abs_m=abs_m,
+                    phi=phi_g,
+                    e_r=e_r[gmask],
+                    e_theta=e_theta[gmask],
+                    e_phi=e_phi[gmask],
+                    PI=PI[:, :, gmask],
+                    TAU=TAU[:, :, gmask],
+                    P=P[:, :, gmask],
+                    z_l=np.asarray(z_m, dtype=compute_dtype),
+                    dxxz=np.asarray(dxxz_m, dtype=compute_dtype),
+                    kr=np.asarray(kr, dtype=compute_dtype),
+                    compute_dtype=compute_dtype,
+                )
+                M_n, N_n = _build_internal_mode_tensors(
+                    l=l,
+                    m_vals=m_vals,
+                    abs_m=abs_m,
+                    phi=phi_g,
+                    e_r=e_r[gmask],
+                    e_theta=e_theta[gmask],
+                    e_phi=e_phi[gmask],
+                    PI=PI[:, :, gmask],
+                    TAU=TAU[:, :, gmask],
+                    P=P[:, :, gmask],
+                    z_l=np.asarray(z_n, dtype=compute_dtype),
+                    dxxz=np.asarray(dxxz_n, dtype=compute_dtype),
+                    kr=np.asarray(kr, dtype=compute_dtype),
+                    compute_dtype=compute_dtype,
+                )
+
+                E[idx_g] += _contract_modes(a_out, M_m)
+                E[idx_g] += _contract_modes(b_out, N_n)
+
+                n_loc = complex(layer_n[g])
+                H[idx_g] += (-1j * n_loc) * _contract_modes(a_out, N_m)
+                H[idx_g] += (-1j * n_loc) * _contract_modes(b_out, M_n)
 
     return E, H, inside
 

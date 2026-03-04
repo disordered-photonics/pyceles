@@ -41,6 +41,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `compute_dipole_ldos_enhancement(...)`
   evaluating particle-scattered fields at dipole positions without direct
   self-field sampling at `r=0`.
+- Added layered-sphere support in the spherical-particle backend:
+  - multilayer Mie/T-entry helpers (`layered_mie_ab`,
+    `layered_sphere_T_diagonal`, `layered_internal_ab_ratios`),
+  - mixed particle descriptor constructor `Simulation.from_particles(...)`,
+  - mixed `Sphere` + `LayeredSphere` operator preparation path.
+- Added `n_particles` convenience properties on `Simulation` and
+  `SimulationResult` for explicit particle counts independent of geometry input
+  style.
 
 ### Changed
 - Source capability contract now includes
@@ -74,6 +82,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capabilities (`Source`/`AngularSpectrumSource` + Jones metadata) instead of
   hard-coded concrete-class checks, so wrapper propagating sources (for example
   `SLMSource`) participate in the same TE/TM basis workflows.
+- Near-field internal-field evaluation is now particle-dispatch aware through
+  the canonical `compute_internal_field(...)` entry point, with explicit support
+  for mixed `Sphere` and `LayeredSphere` lists while keeping the homogeneous
+  sphere kernel as the canonical implementation path.
+- `SimulationResult.n_particle` is now documented as legacy/effective metadata
+  in mixed descriptor workflows; exact particle definitions are carried in
+  `SimulationResult.particles`.
 - Direct-solver repeated solves on the same `Simulation` instance now reuse a
   cached LU factorization of the dense operator in addition to reusing the
   dense matrix assembly.

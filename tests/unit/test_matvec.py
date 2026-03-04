@@ -10,9 +10,10 @@ from pyceles.core.matvec import (
     precompute_T_diagonal,
     precompute_T_diagonal_from_particles,
     prepare_matvec,
+    prepare_matvec_from_particles,
     rhs_Tb_numpy,
 )
-from pyceles.core.particles import Particle, Sphere
+from pyceles.core.particles import LayeredSphere, Particle, Sphere
 from pyceles.core.translation import RadialLUT, translation_ab5_table
 
 
@@ -89,6 +90,74 @@ def test_precompute_t_diagonal_from_particles_matches_array_path():
     )
     np.testing.assert_allclose(T_M_obj, T_M_arr, rtol=1e-12, atol=1e-12)
     np.testing.assert_allclose(T_N_obj, T_N_arr, rtol=1e-12, atol=1e-12)
+
+
+def test_prepare_matvec_from_particles_matches_prepare_matvec_for_spheres():
+    lmax, k, positions, radii, n_particle, n_medium, x, b = _sample_problem()
+    particles: list[Particle] = [
+        Sphere(
+            position=tuple(positions[i].tolist()),
+            radius=float(radii[i]),
+            refractive_index=complex(n_particle[i]),
+        )
+        for i in range(positions.shape[0])
+    ]
+    prepared_arr = prepare_matvec(
+        lmax=lmax,
+        k=k,
+        positions=positions,
+        radii=radii,
+        n_particle=n_particle,
+        n_medium=n_medium,
+        radial_lut_dr=0.5,
+        cache_translation_blocks=True,
+    )
+    prepared_part = prepare_matvec_from_particles(
+        lmax=lmax,
+        k=k,
+        particles=particles,
+        n_medium=n_medium,
+        radial_lut_dr=0.5,
+        cache_translation_blocks=True,
+    )
+    np.testing.assert_allclose(
+        prepared_part.apply_A(x), prepared_arr.apply_A(x), rtol=1e-12, atol=1e-12
+    )
+    np.testing.assert_allclose(
+        prepared_part.rhs_Tb(b), prepared_arr.rhs_Tb(b), rtol=1e-12, atol=1e-12
+    )
+
+
+def test_prepare_matvec_from_particles_accepts_mixed_sphere_and_layered():
+    lmax, k, positions, radii, n_particle, n_medium, x, _ = _sample_problem()
+    particles: list[Particle] = [
+        Sphere(
+            position=tuple(positions[0].tolist()),
+            radius=float(radii[0]),
+            refractive_index=complex(n_particle[0]),
+        ),
+        LayeredSphere(
+            position=tuple(positions[1].tolist()),
+            layer_radii=(40.0, float(radii[1])),
+            layer_refractive_indices=(1.7 + 0j, complex(n_particle[1])),
+        ),
+        Sphere(
+            position=tuple(positions[2].tolist()),
+            radius=float(radii[2]),
+            refractive_index=complex(n_particle[2]),
+        ),
+    ]
+    prepared = prepare_matvec_from_particles(
+        lmax=lmax,
+        k=k,
+        particles=particles,
+        n_medium=n_medium,
+        radial_lut_dr=0.5,
+        cache_translation_blocks=False,
+    )
+    y = prepared.apply_A(x)
+    assert y.shape == x.shape
+    assert np.all(np.isfinite(y))
 
 
 def test_apply_A_lookup_vs_direct_coupling_agree():
