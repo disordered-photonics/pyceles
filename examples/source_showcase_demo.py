@@ -14,6 +14,7 @@ SourceName = Literal[
     "gaussian",
     "laguerre_gaussian",
     "focused_laguerre_gaussian",
+    "focused_laguerre_gaussian_cartesian",
     "bessel",
     "bessel_cartesian",
 ]
@@ -153,6 +154,29 @@ def _build_source(
                 sine_condition_apodization=True,
             ),
         )
+    if name == "focused_laguerre_gaussian_cartesian":
+        return (
+            (
+                f"focused_laguerre_gaussian_cartesian_p{int(laguerre_radial_order)}"
+                f"_l{int(laguerre_azimuthal_order)}"
+            ),
+            pcl.CartesianPolarizedFocusedLaguerreGaussianBeam(
+                wavelength=float(wavelength),
+                medium_n=complex(n_medium),
+                amplitude=1.0,
+                radial_order_p=int(laguerre_radial_order),
+                azimuthal_order_l=int(laguerre_azimuthal_order),
+                polar_angle=0.0,
+                azimuthal_angle=0.0,
+                global_polarization=(1.0 + 0.0j, 0.0 + 0.0j, 0.0 + 0.0j),
+                beam_width=float(gaussian_beam_width),
+                focal_length=float(focused_focal_length),
+                numerical_aperture=float(focused_numerical_aperture),
+                focal_point=(0.0, 0.0, 0.0),
+                azimuthal_phase=0.0,
+                sine_condition_apodization=True,
+            ),
+        )
     if name == "bessel":
         return (
             f"bessel_m{int(bessel_order)}",
@@ -274,6 +298,17 @@ def _source_note(source: pcl.core.Source) -> str:
             f"focal_length={float(source.focal_length):.0f} nm, "
             f"NA={float(source.numerical_aperture):.3f}, focal_point={f}"
         )
+    if isinstance(source, pcl.CartesianPolarizedFocusedLaguerreGaussianBeam):
+        f = tuple(float(v) for v in source.focal_point)
+        gp = tuple(complex(v) for v in source.global_polarization)
+        return (
+            "Focused Laguerre-Gaussian (global Cartesian polarization): "
+            f"p={int(source.radial_order_p)}, l={int(source.azimuthal_order_l)}, "
+            f"beam_width={float(source.beam_width):.0f} nm, "
+            f"focal_length={float(source.focal_length):.0f} nm, "
+            f"NA={float(source.numerical_aperture):.3f}, "
+            f"global_polarization={gp}, focal_point={f}"
+        )
     if isinstance(source, pcl.PlaneWave):
         f = tuple(float(v) for v in source.focal_point)
         return f"Plane wave: focal_point={f}"
@@ -315,6 +350,7 @@ def parse_args() -> argparse.Namespace:
             "gaussian",
             "laguerre_gaussian",
             "focused_laguerre_gaussian",
+            "focused_laguerre_gaussian_cartesian",
             "bessel",
             "bessel_cartesian",
         ],
@@ -323,6 +359,7 @@ def parse_args() -> argparse.Namespace:
             "gaussian",
             "laguerre_gaussian",
             "focused_laguerre_gaussian",
+            "focused_laguerre_gaussian_cartesian",
             "bessel",
             "bessel_cartesian",
         ],
@@ -471,6 +508,7 @@ def main() -> None:
             "gaussian",
             "laguerre_gaussian",
             "focused_laguerre_gaussian",
+            "focused_laguerre_gaussian_cartesian",
             "bessel",
             "bessel_cartesian",
         }:

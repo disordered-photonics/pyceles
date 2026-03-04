@@ -6,6 +6,7 @@ from pyceles.core.conversions import pwp_to_svwf_regular
 from pyceles.core.fields import (
     BesselBeam,
     CartesianPolarizedBesselBeam,
+    CartesianPolarizedFocusedLaguerreGaussianBeam,
     FocusedLaguerreGaussianBeam,
     GaussianBeam,
     LaguerreGaussianBeam,
@@ -511,6 +512,122 @@ def test_cartesian_bessel_beam_polarization_vector_is_directional_not_amplitude_
     k = 2.0 * np.pi / src_ref.wavelength * np.real(src_ref.medium_n)
     polar = np.linspace(0.0, np.pi, 241)
     azimuthal = np.linspace(0.0, 2.0 * np.pi, 181, endpoint=False)
+    te_ref, tm_ref = src_ref.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
+    te_s, tm_s = src_scaled.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
+    np.testing.assert_allclose(te_ref["coeff"], te_s["coeff"], rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(tm_ref["coeff"], tm_s["coeff"], rtol=1e-12, atol=1e-12)
+
+
+def test_cartesian_focused_laguerre_transverse_projection_enforces_maxwell_constraint():
+    source = CartesianPolarizedFocusedLaguerreGaussianBeam(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        radial_order_p=0,
+        azimuthal_order_l=1,
+        polar_angle=0.2,
+        azimuthal_angle=0.7,
+        global_polarization=(1.0 + 0.0j, 0.3 + 0.1j, 0.2j),
+        beam_width=1000.0,
+        focal_length=900.0,
+        numerical_aperture=0.72,
+        focal_point=(0.0, 0.0, 0.0),
+        amplitude=1.0,
+        azimuthal_phase=0.0,
+        sine_condition_apodization=True,
+    )
+    k = 2.0 * np.pi / source.wavelength * np.real(source.medium_n)
+    polar = np.linspace(0.0, np.pi, 321)
+    azimuthal = np.linspace(0.0, 2.0 * np.pi, 241, endpoint=False)
+    te, tm = source.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
+
+    agrid, bgrid = np.meshgrid(azimuthal, polar, indexing="ij")
+    sb = np.sin(bgrid)
+    cb = np.cos(bgrid)
+    ca = np.cos(agrid)
+    sa = np.sin(agrid)
+    sx = sb * ca
+    sy = sb * sa
+    sz = cb
+
+    ephi = np.stack([-sa, ca, np.zeros_like(agrid)], axis=2)
+    etheta = np.stack([cb * ca, cb * sa, -sb], axis=2)
+    ex = te["coeff"] * ephi[..., 0] + tm["coeff"] * etheta[..., 0]
+    ey = te["coeff"] * ephi[..., 1] + tm["coeff"] * etheta[..., 1]
+    ez = te["coeff"] * ephi[..., 2] + tm["coeff"] * etheta[..., 2]
+    dot = ex * sx + ey * sy + ez * sz
+    amp = np.sqrt(np.abs(ex) ** 2 + np.abs(ey) ** 2 + np.abs(ez) ** 2)
+    active = amp > (1e-12 * float(np.max(amp)))
+    assert np.any(active)
+    err = float(np.max(np.abs(dot[active])))
+    scale = float(np.max(amp[active]))
+    assert err <= 1e-10 * scale
+
+
+def test_cartesian_focused_laguerre_spectrum_respects_numerical_aperture_cutoff():
+    source = CartesianPolarizedFocusedLaguerreGaussianBeam(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        radial_order_p=0,
+        azimuthal_order_l=0,
+        polar_angle=0.0,
+        azimuthal_angle=0.0,
+        global_polarization=(1.0 + 0.0j, 0.0 + 0.0j, 0.0 + 0.0j),
+        beam_width=1200.0,
+        focal_length=1000.0,
+        numerical_aperture=0.45,
+        focal_point=(0.0, 0.0, 0.0),
+        amplitude=1.0,
+        azimuthal_phase=0.0,
+        sine_condition_apodization=True,
+    )
+    k = 2.0 * np.pi / source.wavelength * np.real(source.medium_n)
+    polar = np.linspace(0.0, np.pi, 501)
+    azimuthal = np.linspace(0.0, 2.0 * np.pi, 241, endpoint=False)
+    te, tm = source.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
+
+    amp_beta = np.sum(np.sqrt(np.abs(te["coeff"]) ** 2 + np.abs(tm["coeff"]) ** 2), axis=0)
+    active = np.where(amp_beta > (1e-12 * np.max(amp_beta)))[0]
+    beta_max = float(np.max(polar[active]))
+    beta_cut = float(np.arcsin(source.numerical_aperture / np.real(source.medium_n)))
+    assert beta_max <= beta_cut + 2.0 * float(np.max(np.diff(polar)))
+
+
+def test_cartesian_focused_laguerre_polarization_vector_is_directional_not_amplitude_scaling():
+    src_ref = CartesianPolarizedFocusedLaguerreGaussianBeam(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        radial_order_p=0,
+        azimuthal_order_l=1,
+        polar_angle=0.0,
+        azimuthal_angle=0.0,
+        global_polarization=(1.0 + 0.0j, 0.2j, 0.0 + 0.0j),
+        beam_width=1200.0,
+        focal_length=1000.0,
+        numerical_aperture=0.7,
+        focal_point=(0.0, 0.0, 0.0),
+        amplitude=1.0,
+        azimuthal_phase=0.0,
+        sine_condition_apodization=True,
+    )
+    src_scaled = CartesianPolarizedFocusedLaguerreGaussianBeam(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        radial_order_p=0,
+        azimuthal_order_l=1,
+        polar_angle=0.0,
+        azimuthal_angle=0.0,
+        global_polarization=(3.0 + 0.0j, 0.6j, 0.0 + 0.0j),
+        beam_width=1200.0,
+        focal_length=1000.0,
+        numerical_aperture=0.7,
+        focal_point=(0.0, 0.0, 0.0),
+        amplitude=1.0,
+        azimuthal_phase=0.0,
+        sine_condition_apodization=True,
+    )
+    k = 2.0 * np.pi / src_ref.wavelength * np.real(src_ref.medium_n)
+    polar = np.linspace(0.0, np.pi, 301)
+    azimuthal = np.linspace(0.0, 2.0 * np.pi, 241, endpoint=False)
     te_ref, tm_ref = src_ref.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
     te_s, tm_s = src_scaled.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
     np.testing.assert_allclose(te_ref["coeff"], te_s["coeff"], rtol=1e-12, atol=1e-12)

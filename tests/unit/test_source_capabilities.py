@@ -12,6 +12,7 @@ from pyceles.core.indexing import n_modes
 from pyceles.core.sources import (
     BesselBeam,
     CartesianPolarizedBesselBeam,
+    CartesianPolarizedFocusedLaguerreGaussianBeam,
     DipoleCollection,
     DipoleSource,
     FocusedLaguerreGaussianBeam,
@@ -191,6 +192,27 @@ def _infinite_gaussian() -> GaussianBeam:
             True,
             True,
             True,
+        ),
+        (
+            lambda: CartesianPolarizedFocusedLaguerreGaussianBeam(
+                wavelength=550.0,
+                medium_n=1.0 + 0j,
+                radial_order_p=0,
+                azimuthal_order_l=1,
+                polar_angle=0.1,
+                azimuthal_angle=0.4,
+                global_polarization=(1.0 + 0.0j, 0.0 + 0.2j, 0.0 + 0.0j),
+                beam_width=1200.0,
+                focal_length=1000.0,
+                numerical_aperture=0.75,
+                focal_point=(0.0, 0.0, 0.0),
+                amplitude=1.0,
+                azimuthal_phase=0.0,
+                sine_condition_apodization=True,
+            ),
+            True,
+            True,
+            False,
         ),
         (
             lambda: PlaneWave(

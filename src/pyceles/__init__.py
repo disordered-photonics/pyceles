@@ -4,6 +4,7 @@ from pyceles._version import __version__
 from pyceles.core.fields import (
     BesselBeam,
     CartesianPolarizedBesselBeam,
+    CartesianPolarizedFocusedLaguerreGaussianBeam,
     DipoleCollection,
     DipoleSource,
     FocusedLaguerreGaussianBeam,
@@ -43,6 +44,7 @@ __all__ = [
     "FocusedLaguerreGaussianBeam",
     "BesselBeam",
     "CartesianPolarizedBesselBeam",
+    "CartesianPolarizedFocusedLaguerreGaussianBeam",
     "PlaneWave",
     "SLMSource",
     "DipoleSource",
