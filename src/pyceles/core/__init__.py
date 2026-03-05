@@ -36,7 +36,15 @@ from .matvec import (
     prepare_matvec_from_particles,
     rhs_Tb_numpy,
 )
-from .particles import Ellipsoid, LayeredSphere, Particle, Sphere
+from .particles import (
+    Ellipsoid,
+    LayeredSphere,
+    Particle,
+    Sphere,
+    ellipsoids_from_arrays,
+    layered_spheres_from_arrays,
+    spheres_from_arrays,
+)
 from .tmatrix import (
     layered_internal_ab_ratios,
     layered_mie_ab,
@@ -66,6 +74,9 @@ __all__ = [
     "Source",
     "PreparedMatvec",
     "Sphere",
+    "spheres_from_arrays",
+    "layered_spheres_from_arrays",
+    "ellipsoids_from_arrays",
     "assemble_dense_A_numpy",
     "apply_A_numpy",
     "apply_W_numpy",

@@ -10,9 +10,10 @@ re-running SMUTHI.
 import numpy as np
 
 import pyceles as pcl
+from pyceles.core.particles import spheres_from_arrays
 
 
-def _build_geometry(shift_z: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _build_geometry(shift_z: float) -> list[pcl.core.Particle]:
     positions = np.array(
         [
             [-360.0, 0.0, -120.0],
@@ -25,7 +26,11 @@ def _build_geometry(shift_z: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]
     positions[:, 2] += float(shift_z)
     radii = np.array([110.0, 90.0, 120.0, 80.0], dtype=float)
     n_particle = np.array([1.5 + 0.0j, 2.5 + 0.0j, 1.5 + 0.1j, 2.5 + 0.2j], dtype=np.complex128)
-    return positions, radii, n_particle
+    return spheres_from_arrays(
+        positions=positions,
+        radii=radii,
+        refractive_indices=n_particle,
+    )
 
 
 def _probe_points(shift_z: float) -> np.ndarray:
@@ -46,9 +51,7 @@ def _intensity(pwp_te: dict[str, np.ndarray], pwp_tm: dict[str, np.ndarray]) -> 
 def _run_case(
     *,
     source: pcl.DipoleSource | pcl.DipoleCollection,
-    positions: np.ndarray,
-    radii: np.ndarray,
-    n_particle: np.ndarray,
+    particles: list[pcl.core.Particle],
     beta: np.ndarray,
     alpha: np.ndarray,
     probes: np.ndarray,
@@ -65,9 +68,7 @@ def _run_case(
             solver_rtol=1e-6,
             verbose=False,
         ),
-        positions=positions,
-        radii=radii,
-        n_particle=n_particle,
+        particles=particles,
     )
     run = sim.run()
     nf = pcl.compute_near_field(run, points=probes, channel="mixed", show_progress=False)
@@ -112,7 +113,7 @@ def _assert_reference_samples(
 
 def test_dipole_single_smuthi_reference() -> None:
     shift_z = 800.0
-    positions, radii, n_particle = _build_geometry(shift_z)
+    particles = _build_geometry(shift_z)
     probes = _probe_points(shift_z)
     beta = np.linspace(0.0, np.pi, 121, endpoint=False)
     alpha = np.linspace(0.0, 2.0 * np.pi, 180, endpoint=False)
@@ -125,9 +126,7 @@ def test_dipole_single_smuthi_reference() -> None:
 
     I_initial, I_scattered, I_total, E_total, P0 = _run_case(
         source=source,
-        positions=positions,
-        radii=radii,
-        n_particle=n_particle,
+        particles=particles,
         beta=beta,
         alpha=alpha,
         probes=probes,
@@ -179,7 +178,7 @@ def test_dipole_single_smuthi_reference() -> None:
 
 def test_dipole_collection_smuthi_reference() -> None:
     shift_z = 800.0
-    positions, radii, n_particle = _build_geometry(shift_z)
+    particles = _build_geometry(shift_z)
     probes = _probe_points(shift_z)
     beta = np.linspace(0.0, np.pi, 121, endpoint=False)
     alpha = np.linspace(0.0, 2.0 * np.pi, 180, endpoint=False)
@@ -197,9 +196,7 @@ def test_dipole_collection_smuthi_reference() -> None:
 
     I_initial, I_scattered, I_total, E_total, P0 = _run_case(
         source=source,
-        positions=positions,
-        radii=radii,
-        n_particle=n_particle,
+        particles=particles,
         beta=beta,
         alpha=alpha,
         probes=probes,

@@ -57,14 +57,12 @@ Users of pyceles are referred to the publications listed in the CELES and SMUTHI
   - by default, `Simulation` enforces disjoint particle circumscribing spheres
     (required by T-matrix superposition), can be disabled via `check_circumscribing_sphere_overlap=False`
 - Explicit particle descriptors:
-  - `Simulation.from_particles(...)` accepts mixed supported particle families
+  - `Simulation(config, particles=[...])` accepts mixed supported particle families
     (`Sphere`, `LayeredSphere`) in one geometry
   - `Simulation.n_particles` / `SimulationResult.n_particles` provide canonical
-    particle counts for both array and descriptor-based workflows
+    particle counts across all supported particle descriptors
 - Explicit no-scatterer (source-only) simulations:
-  - pass explicit empty geometry arrays to run a beam-only simulation
-    (`positions=np.zeros((0,3))`, `radii=np.zeros((0,))`, `n_particle=np.zeros((0,), complex)`)
-  - `None` geometry inputs are rejected to avoid accidental empty runs
+  - pass `particles=[]` to run a beam-only simulation
 - Channel-aware polarization workflow:
   - source polarization accepts CELES-style `"TE"`, `"TM"` or Jones weights `(a_te, a_tm)`
   - `SLMSource(base_source, modulation)` wrapper for angular-spectrum complex modulation
@@ -423,7 +421,7 @@ Then call `postprocess_sources(...)` when you need channel-level far-field or
 power diagnostics:
 
 ```python
-sim = pcl.Simulation(cfg, positions=pos, radii=rad, n_particle=n_part)
+sim = pcl.Simulation(cfg, particles=particles)
 solved = sim.solve_sources(
     {
         "te": source.with_polarization("TE"),
@@ -443,7 +441,7 @@ For layered or mixed spherical geometries, construct simulations from explicit
 particle descriptors:
 
 ```python
-sim = pcl.Simulation.from_particles(
+sim = pcl.Simulation(
     cfg,
     particles=[
         pcl.Sphere(position=(0.0, 0.0, 0.0), radius=60.0, refractive_index=1.5 + 0j),
@@ -461,9 +459,17 @@ print(sim.n_particles, run.n_particles)
 Notes:
 - Layered spheres are treated as one particle each (one center, one solved
   outgoing-coefficient block).
-- `SimulationResult.n_particle` is retained for legacy array-geometry
-  compatibility and carries effective per-particle values in mixed workflows.
-  Use `run.particles` for exact particle descriptors.
+
+Array-to-particle helper for homogeneous spheres:
+
+```python
+particles = pcl.spheres_from_arrays(
+    positions=positions,          # shape (N, 3)
+    radii=radii,                  # shape (N,)
+    refractive_indices=n_particle # scalar or shape (N,)
+)
+sim = pcl.Simulation(cfg, particles=particles)
+```
 
 ## Dual-Basis Convenience Run
 
@@ -476,7 +482,7 @@ cfg = pcl.SimulationConfig(
     solve_polarization_basis=True,
     solver_method="gmres",
 )
-run = pcl.Simulation(cfg, positions=pos, radii=rad, n_particle=n_part).run()
+run = pcl.Simulation(cfg, particles=particles).run()
 
 # Mixed (user-requested Jones state):
 mixed_coeffs = run.coeffs
@@ -513,21 +519,18 @@ I_u = pcl.io.far_field_intensity_from_result(run, channel="unpolarized")
 
 ## Source-Only Run (No Scatterers)
 
-For beam inspection/debugging, run a simulation with no particles by passing
-explicit empty geometry arrays:
+For beam inspection/debugging, run a simulation with no particles via
+`particles=[]`:
 
 ```python
 run = pcl.Simulation(
     cfg,
-    positions=np.zeros((0, 3), dtype=float),
-    radii=np.zeros((0,), dtype=float),
-    n_particle=np.zeros((0,), dtype=np.complex128),
+    particles=[],
 ).run()
 ```
 
 Notes:
 - this yields zero scattered coefficients/fields and preserves incident-field outputs
-- use explicit empty arrays; `None` is intentionally rejected
 
 ## Warm Start and Preconditioner Hook
 

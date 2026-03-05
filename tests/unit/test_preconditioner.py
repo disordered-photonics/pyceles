@@ -6,6 +6,7 @@ import pytest
 from pyceles.core.fields import PlaneWave
 from pyceles.core.indexing import n_modes
 from pyceles.core.matvec import assemble_dense_A_numpy, prepare_matvec
+from pyceles.core.particles import spheres_from_arrays
 from pyceles.linear.preconditioner import make_grid_block_preconditioner, regular_grid_partition
 from pyceles.simulation import Simulation, SimulationConfig
 
@@ -99,16 +100,21 @@ def test_simulation_supports_builtin_grid_block_preconditioner():
     )
     sim = Simulation(
         cfg,
-        positions=np.array(
-            [
-                [0.0, 0.0, 0.0],
-                [240.0, 15.0, -40.0],
-                [-210.0, 45.0, 35.0],
-            ],
-            dtype=float,
+        particles=spheres_from_arrays(
+            positions=np.array(
+                [
+                    [0.0, 0.0, 0.0],
+                    [240.0, 15.0, -40.0],
+                    [-210.0, 45.0, 35.0],
+                ],
+                dtype=float,
+            ),
+            radii=np.array([70.0, 72.0, 68.0], dtype=float),
+            refractive_indices=np.array(
+                [1.59 + 0.0j, 1.61 + 0.0j, 1.58 + 0.0j],
+                dtype=np.complex128,
+            ),
         ),
-        radii=np.array([70.0, 72.0, 68.0], dtype=float),
-        n_particle=np.array([1.59 + 0.0j, 1.61 + 0.0j, 1.58 + 0.0j], dtype=np.complex128),
     )
     run = sim.run()
     assert run.solver_result.info == 0

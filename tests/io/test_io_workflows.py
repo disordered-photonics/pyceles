@@ -3,6 +3,7 @@ from typing import Any, cast
 import numpy as np
 
 from pyceles.core.fields import PlaneWave
+from pyceles.core.particles import spheres_from_arrays
 from pyceles.io.workflows import load_simulation_h5, save_simulation_h5
 from pyceles.linear.solvers import LinearSolveResult
 from pyceles.postprocessing.farfield import FarFieldPatterns
@@ -59,7 +60,13 @@ def test_save_simulation_h5_writes_basis_and_diagnostics(tmp_path):
         config=cfg,
         positions=np.array([[0.0, 0.0, 0.0]], dtype=float),
         radii=np.array([100.0], dtype=float),
-        n_particle=np.array([1.5 + 0.0j], dtype=np.complex128),
+        particles=tuple(
+            spheres_from_arrays(
+                positions=np.array([[0.0, 0.0, 0.0]], dtype=float),
+                radii=np.array([100.0], dtype=float),
+                refractive_indices=np.array([1.5 + 0.0j], dtype=np.complex128),
+            )
+        ),
         k=2.0 * np.pi / 550.0,
         k0=2.0 * np.pi / 550.0,
         coeffs=np.ones((1, 6), dtype=np.complex128),
@@ -154,9 +161,7 @@ def test_no_scatterer_run_roundtrip_io_workflow(tmp_path):
     )
     sim = Simulation(
         cfg,
-        positions=np.zeros((0, 3), dtype=float),
-        radii=np.zeros((0,), dtype=float),
-        n_particle=np.zeros((0,), dtype=np.complex128),
+        particles=[],
     )
     run = sim.run()
 

@@ -16,10 +16,9 @@ from pyceles.core.indexing import n_modes
 from pyceles.core.matvec import (
     PreparedMatvec,
     assemble_dense_A_numpy,
-    prepare_matvec,
     prepare_matvec_from_particles,
 )
-from pyceles.core.particles import LayeredSphere, Particle, Sphere
+from pyceles.core.particles import Ellipsoid, LayeredSphere, Particle, Sphere
 from pyceles.core.projection import project_source_to_svwf
 from pyceles.core.sources import (
     DipoleCollection,
@@ -111,87 +110,15 @@ def _warn_redundant_periodic_azimuth_endpoint(*, azimuth_name: str, azimuth: np.
         )
 
 
-def _normalize_geometry(
-    positions: np.ndarray,
-    radii: np.ndarray,
-    n_particle: np.ndarray | complex,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Normalize particle geometry inputs for a physically valid sphere ensemble.
-
-    This enforces the minimum constraints needed by the multiple-scattering
-    solver: each sphere has one center, one positive radius, and one finite
-    refractive index with positive real part.
-    """
-    if positions is None:
-        raise ValueError(
-            "`positions` cannot be None. "
-            "Use an explicit array with shape (N, 3); for no scatterers use np.zeros((0, 3))."
-        )
-    if radii is None:
-        raise ValueError(
-            "`radii` cannot be None. "
-            "Use an explicit array with shape (N,); for no scatterers use np.zeros((0,))."
-        )
-    if n_particle is None:
-        raise ValueError(
-            "`n_particle` cannot be None. "
-            "Use an explicit scalar or array with shape (N,); for no scatterers use np.zeros((0,), complex)."
-        )
-
-    pos = np.asarray(positions, dtype=float)
-    if pos.ndim != 2 or pos.shape[1] != 3:
-        raise ValueError(f"`positions` must have shape (N, 3). Got {pos.shape}.")
-    if not np.all(np.isfinite(pos)):
-        raise ValueError("`positions` must contain only finite values.")
-
-    rad = np.asarray(radii, dtype=float).reshape(-1)
-    if rad.shape[0] != pos.shape[0]:
-        raise ValueError(
-            f"`radii` length ({rad.shape[0]}) must match number of positions ({pos.shape[0]})."
-        )
-    if np.any(~np.isfinite(rad)) or np.any(rad <= 0.0):
-        raise ValueError("`radii` must be finite and strictly positive.")
-
-    n_part_arr = np.asarray(n_particle, dtype=np.complex128)
-    if n_part_arr.ndim == 0:
-        n_part = np.full((pos.shape[0],), complex(n_part_arr), dtype=np.complex128)
-    else:
-        n_part = n_part_arr.reshape(-1)
-        if n_part.shape[0] != pos.shape[0]:
-            raise ValueError(
-                f"`n_particle` length ({n_part.shape[0]}) must match number of positions ({pos.shape[0]})."
-            )
-    if not np.all(np.isfinite(n_part.real)) or not np.all(np.isfinite(n_part.imag)):
-        raise ValueError("`n_particle` must contain only finite values.")
-    if np.any(n_part.real <= 0.0):
-        raise ValueError("Real part of `n_particle` must be strictly positive.")
-
-    return pos, rad, n_part.astype(np.complex128, copy=False)
-
-
-def _particle_effective_index(particle: Particle) -> complex:
-    """Return a representative particle index for diagnostics/legacy payloads."""
-    if isinstance(particle, Sphere):
-        return complex(particle.refractive_index)
-    if isinstance(particle, LayeredSphere):
-        return complex(particle.layer_refractive_indices[-1])
-    raise TypeError(
-        "Simulation currently supports Sphere and LayeredSphere particles in mixed-particle mode. "
-        f"Got {type(particle).__name__}."
-    )
-
-
 def _normalize_particle_geometry(
     particles: Sequence[Particle],
-) -> tuple[tuple[Particle, ...], np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[tuple[Particle, ...], np.ndarray, np.ndarray]:
     """Normalize explicit particle descriptors into solver-ready geometry arrays."""
     part = tuple(particles)
     if len(part) == 0:
-        raise ValueError(
-            "`particles` must contain at least one entry. For source-only runs use explicit empty "
-            "array geometry (`positions=np.zeros((0,3))`, `radii=np.zeros((0,))`, "
-            "`n_particle=np.zeros((0,), complex)`)."
-        )
+        empty_pos = np.zeros((0, 3), dtype=float)
+        empty_rad = np.zeros((0,), dtype=float)
+        return part, empty_pos, empty_rad
     if not all(isinstance(p, Particle) for p in part):
         bad = [type(p).__name__ for p in part if not isinstance(p, Particle)]
         raise TypeError(f"All entries in `particles` must be Particle instances. Got {bad}.")
@@ -206,14 +133,24 @@ def _normalize_particle_geometry(
     if np.any(~np.isfinite(rad)) or np.any(rad <= 0.0):
         raise ValueError("Particle circumscribing radii must be finite and strictly positive.")
 
-    n_eff = np.asarray([_particle_effective_index(p) for p in part], dtype=np.complex128)
-    if not np.all(np.isfinite(n_eff.real)) or not np.all(np.isfinite(n_eff.imag)):
-        raise ValueError("Effective particle refractive indices must be finite.")
-    if np.any(n_eff.real <= 0.0):
-        raise ValueError(
-            "Real part of effective particle refractive indices must be strictly positive."
-        )
-    return part, pos, rad, n_eff
+    n_eff: list[complex] = []
+    for p in part:
+        if isinstance(p, Sphere):
+            n_eff.append(complex(p.refractive_index))
+        elif isinstance(p, LayeredSphere):
+            n_eff.append(complex(p.layer_refractive_indices[-1]))
+        elif isinstance(p, Ellipsoid):
+            n_eff.append(complex(p.refractive_index))
+        else:
+            raise TypeError(
+                f"Unsupported particle type {type(p).__name__!r} for refractive-index checks."
+            )
+    n_eff_arr = np.asarray(n_eff, dtype=np.complex128)
+    if not np.all(np.isfinite(n_eff_arr.real)) or not np.all(np.isfinite(n_eff_arr.imag)):
+        raise ValueError("Particle refractive indices must be finite.")
+    if np.any(n_eff_arr.real <= 0.0):
+        raise ValueError("Real part of particle refractive indices must be strictly positive.")
+    return part, pos, rad
 
 
 def _make_empty_solver_result(
@@ -690,11 +627,6 @@ class SimulationResult:
     solve is still performed and postprocessing can be skipped; far-field
     payloads are returned as empty arrays and power/cross-section diagnostics
     remain `None`.
-    `n_particle` is a legacy per-particle index array kept for compatibility
-    with sphere-array workflows. In explicit mixed-particle workflows
-    (`Simulation.from_particles(...)`), entries are effective values used for
-    shape-compatible payloads (for example outer-layer index for
-    `LayeredSphere`); use `particles` for the exact particle descriptors.
     `polarization_jones` is populated for propagating TE/TM sources that expose
     Jones metadata. For local dipole sources it is `None`.
 
@@ -707,7 +639,6 @@ class SimulationResult:
     config: SimulationConfig
     positions: np.ndarray
     radii: np.ndarray
-    n_particle: np.ndarray
     k: float
     k0: float
     coeffs: np.ndarray
@@ -728,7 +659,7 @@ class SimulationResult:
     decomposition_backward: dict[str, float] | None
     decomposition_forward_basis: dict[str, dict[str, float]] | None
     decomposition_backward_basis: dict[str, dict[str, float]] | None
-    particles: tuple[Particle, ...] | None = None
+    particles: tuple[Particle, ...]
     polarization_jones: tuple[complex, complex] | None = None
     compute_dtype: str = "complex128"
     accum_dtype: str = "complex128"
@@ -869,28 +800,20 @@ class Simulation:
         self,
         config: SimulationConfig,
         *,
-        positions: np.ndarray,
-        radii: np.ndarray,
-        n_particle: np.ndarray | complex,
+        particles: Sequence[Particle],
     ):
         """Bind configuration plus particle geometry for a single simulation.
 
-        No-scatterer (source-only) runs are supported by passing explicit empty
-        arrays:
-        `positions.shape==(0,3)`, `radii.shape==(0,)`, `n_particle.shape==(0,)`.
+        Canonical geometry input is `particles=[...]` with explicit particle
+        descriptors (`Sphere`, `LayeredSphere`, ...). Source-only runs are
+        represented by an explicit empty particle list (`particles=[]`).
         """
         self.config = config
-        self.positions, self.radii, self.n_particle = _normalize_geometry(
-            positions, radii, n_particle
-        )
-        self.particles = tuple(
-            Sphere(
-                position=(float(p[0]), float(p[1]), float(p[2])),
-                radius=float(r),
-                refractive_index=complex(n),
-            )
-            for p, r, n in zip(self.positions, self.radii, self.n_particle)
-        )
+        part, pos, rad = _normalize_particle_geometry(particles)
+
+        self.positions = pos
+        self.radii = rad
+        self.particles = part
         # Reuse operator-side precomputations across repeated solves on the same
         # geometry/config (e.g. moving-dipole LDOS maps).
         self._prepared_operator_cache: PreparedMatvec | None = None
@@ -915,19 +838,6 @@ class Simulation:
                     "If this is intentional for an experimental workflow, set "
                     "`check_circumscribing_sphere_overlap=False`."
                 )
-
-    @classmethod
-    def from_particles(
-        cls,
-        config: SimulationConfig,
-        *,
-        particles: Sequence[Particle],
-    ) -> "Simulation":
-        """Construct a simulation from explicit particle descriptors."""
-        part, pos, rad, n_eff = _normalize_particle_geometry(particles)
-        sim = cls(config, positions=pos, radii=rad, n_particle=n_eff)
-        sim.particles = part
-        return sim
 
     def _validate_ready_to_run(
         self,
@@ -1039,7 +949,6 @@ class Simulation:
         cfg = self.config
         positions = self.positions
         radii = self.radii
-        n_particle = self.n_particle
         Ns = positions.shape[0]
         Nm = n_modes(cfg.lmax)
 
@@ -1114,7 +1023,6 @@ class Simulation:
             config=config_out,
             positions=positions,
             radii=radii,
-            n_particle=n_particle,
             particles=self.particles,
             k=k,
             k0=k0,
@@ -1150,8 +1058,6 @@ class Simulation:
         """Solve labeled sources with one shared operator build (solve-only)."""
         cfg = self.config
         positions = self.positions
-        radii = self.radii
-        n_particle = self.n_particle
         labels = tuple(labeled_sources.keys())
         n_channels = len(labels)
         compute_final_residual = (
@@ -1225,28 +1131,15 @@ class Simulation:
                 or self._prepared_operator_dtype != compute_dtype
             )
             if need_prepared:
-                if all(isinstance(p, Sphere) for p in self.particles):
-                    prepared = prepare_matvec(
-                        lmax=cfg.lmax,
-                        k=k,
-                        positions=positions,
-                        radii=radii,
-                        n_particle=n_particle,
-                        n_medium=cfg.n_medium,
-                        radial_lut_dr=cfg.radial_lut_dr,
-                        cache_translation_blocks=cfg.cache_translation_blocks,
-                        operator_dtype=compute_dtype,
-                    )
-                else:
-                    prepared = prepare_matvec_from_particles(
-                        lmax=cfg.lmax,
-                        k=k,
-                        particles=list(self.particles),
-                        n_medium=cfg.n_medium,
-                        radial_lut_dr=cfg.radial_lut_dr,
-                        cache_translation_blocks=cfg.cache_translation_blocks,
-                        operator_dtype=compute_dtype,
-                    )
+                prepared = prepare_matvec_from_particles(
+                    lmax=cfg.lmax,
+                    k=k,
+                    particles=list(self.particles),
+                    n_medium=cfg.n_medium,
+                    radial_lut_dr=cfg.radial_lut_dr,
+                    cache_translation_blocks=cfg.cache_translation_blocks,
+                    operator_dtype=compute_dtype,
+                )
                 self._prepared_operator_cache = prepared
                 self._prepared_operator_dtype = np.dtype(compute_dtype)
                 self._dense_operator_cache = None
@@ -1677,7 +1570,6 @@ class Simulation:
             config=cfg,
             positions=self.positions,
             radii=self.radii,
-            n_particle=self.n_particle,
             particles=self.particles,
             k=run_te.k,
             k0=run_te.k0,

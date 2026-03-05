@@ -4,24 +4,11 @@ import numpy as np
 import pytest
 
 import pyceles as pcl
-
-
-def _empty_geometry() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    return (
-        np.zeros((0, 3), dtype=float),
-        np.zeros((0,), dtype=float),
-        np.zeros((0,), dtype=np.complex128),
-    )
+from pyceles.core.particles import spheres_from_arrays
 
 
 def _run_no_scatterers(cfg: pcl.SimulationConfig) -> pcl.SimulationResult:
-    positions, radii, n_particle = _empty_geometry()
-    return pcl.Simulation(
-        cfg,
-        positions=positions,
-        radii=radii,
-        n_particle=n_particle,
-    ).run()
+    return pcl.Simulation(cfg, particles=[]).run()
 
 
 def test_dipole_power_ldos_no_scatterers_single_dipole():
@@ -106,9 +93,11 @@ def test_dipole_power_ldos_inside_particle_requires_explicit_override():
     with pytest.warns(UserWarning, match="Untested configuration: dipole center lies inside"):
         run = pcl.Simulation(
             cfg,
-            positions=np.array([[0.0, 0.0, 0.0]], dtype=float),
-            radii=np.array([100.0], dtype=float),
-            n_particle=np.array([1.5 + 0.01j], dtype=np.complex128),
+            particles=spheres_from_arrays(
+                positions=np.array([[0.0, 0.0, 0.0]], dtype=float),
+                radii=np.array([100.0], dtype=float),
+                refractive_indices=np.array([1.5 + 0.01j], dtype=np.complex128),
+            ),
         ).run()
 
     with pytest.raises(ValueError, match="inside particle index"):
@@ -164,8 +153,7 @@ def test_dipole_ldos_uses_channel_source_from_postprocess_sources():
         solver_method="direct",
         verbose=False,
     )
-    positions, radii, n_particle = _empty_geometry()
-    sim = pcl.Simulation(cfg, positions=positions, radii=radii, n_particle=n_particle)
+    sim = pcl.Simulation(cfg, particles=[])
 
     probe = pcl.DipoleSource(
         wavelength=550.0,

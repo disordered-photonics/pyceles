@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 import pyceles as pcl
+from pyceles.core.particles import spheres_from_arrays
 
 
 def test_lossless_cluster_plane_wave_has_negligible_absorption():
@@ -26,9 +27,11 @@ def test_lossless_cluster_plane_wave_has_negligible_absorption():
     )
     run = pcl.Simulation(
         cfg,
-        positions=np.array([[-180.0, 0.0, -20.0], [170.0, 0.0, 40.0]], dtype=float),
-        radii=np.array([90.0, 75.0], dtype=float),
-        n_particle=np.array([1.46 + 0.0j, 1.61 + 0.0j], dtype=np.complex128),
+        particles=spheres_from_arrays(
+            positions=np.array([[-180.0, 0.0, -20.0], [170.0, 0.0, 40.0]], dtype=float),
+            radii=np.array([90.0, 75.0], dtype=float),
+            refractive_indices=np.array([1.46 + 0.0j, 1.61 + 0.0j], dtype=np.complex128),
+        ),
     ).run()
 
     cs = run.cross_sections

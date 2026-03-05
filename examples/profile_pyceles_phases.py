@@ -361,7 +361,13 @@ def main() -> None:
         config=cfg,
         positions=positions,
         radii=radii,
-        n_particle=n_particle,
+        particles=tuple(
+            pcl.core.spheres_from_arrays(
+                positions=positions,
+                radii=radii,
+                refractive_indices=n_particle,
+            )
+        ),
         k=k,
         k0=k0,
         coeffs=coeffs,

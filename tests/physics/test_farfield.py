@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from pyceles.core.fields import BesselBeam, GaussianBeam, PlaneWave, SLMSource
+from pyceles.core.particles import spheres_from_arrays
 from pyceles.core.tmatrix import mie_cross_sections
 from pyceles.postprocessing.farfield import (
     absorption_cross_section,
@@ -18,6 +19,19 @@ from pyceles.postprocessing.farfield import (
     total_scattering_cross_section,
 )
 from pyceles.simulation import Simulation, SimulationConfig
+
+
+def _single_sphere_particles(
+    radius: float,
+    n_particle: complex,
+    *,
+    position: tuple[float, float, float] = (0.0, 0.0, 0.0),
+) -> list[Any]:
+    return spheres_from_arrays(
+        positions=np.array([position], dtype=float),
+        radii=np.array([radius], dtype=float),
+        refractive_indices=np.array([n_particle], dtype=np.complex128),
+    )
 
 
 def _dummy_pwp(alpha: np.ndarray, beta: np.ndarray, coeff: np.ndarray) -> dict:
@@ -475,9 +489,7 @@ def test_plane_wave_cross_sections_from_coefficients_match_single_sphere_mie():
     )
     sim = Simulation(
         cfg,
-        positions=np.array([[0.0, 0.0, 0.0]], dtype=float),
-        radii=np.array([radius], dtype=float),
-        n_particle=np.array([n_particle], dtype=np.complex128),
+        particles=_single_sphere_particles(radius=radius, n_particle=n_particle),
     )
     run = sim.run()
     assert run.cross_sections is not None
@@ -568,9 +580,7 @@ def test_simulation_dual_basis_jones_mixing_consistency():
     )
     sim = Simulation(
         cfg,
-        positions=np.array([[0.0, 0.0, 0.0]], dtype=float),
-        radii=np.array([60.0], dtype=float),
-        n_particle=np.array([1.5 + 0.01j], dtype=np.complex128),
+        particles=_single_sphere_particles(radius=60.0, n_particle=1.5 + 0.01j),
     )
     run = sim.run()
     assert run.coeffs_basis is not None
@@ -616,9 +626,7 @@ def test_simulation_dual_basis_supports_slm_wrapped_gaussian_source():
     )
     sim = Simulation(
         cfg,
-        positions=np.array([[0.0, 0.0, 0.0]], dtype=float),
-        radii=np.array([60.0], dtype=float),
-        n_particle=np.array([1.5 + 0.01j], dtype=np.complex128),
+        particles=_single_sphere_particles(radius=60.0, n_particle=1.5 + 0.01j),
     )
     run = sim.run()
     assert run.coeffs_basis is not None
@@ -659,9 +667,7 @@ def test_simulation_dual_basis_supports_bessel_beam_source():
     )
     sim = Simulation(
         cfg,
-        positions=np.array([[0.0, 0.0, 0.0]], dtype=float),
-        radii=np.array([60.0], dtype=float),
-        n_particle=np.array([1.5 + 0.01j], dtype=np.complex128),
+        particles=_single_sphere_particles(radius=60.0, n_particle=1.5 + 0.01j),
     )
     run = sim.run()
     assert run.coeffs_basis is not None
@@ -699,9 +705,7 @@ def test_simulation_dual_basis_mixed_precision_runs_without_numpy2_copy_errors()
     )
     sim = Simulation(
         cfg,
-        positions=np.array([[0.0, 0.0, 0.0]], dtype=float),
-        radii=np.array([50.0], dtype=float),
-        n_particle=np.array([1.45 + 0.01j], dtype=np.complex128),
+        particles=_single_sphere_particles(radius=50.0, n_particle=1.45 + 0.01j),
     )
     run = sim.run()
     assert run.coeffs_basis is not None
@@ -734,15 +738,12 @@ def test_simulation_dual_basis_farfield_matches_single_channel_run():
         accum_dtype="complex128",
         verbose=False,
     )
-    sim_args = dict(
-        positions=np.array([[0.0, 0.0, 0.0]], dtype=float),
-        radii=np.array([60.0], dtype=float),
-        n_particle=np.array([1.5 + 0.01j], dtype=np.complex128),
-    )
+    particles = _single_sphere_particles(radius=60.0, n_particle=1.5 + 0.01j)
 
-    run_single = Simulation(SimulationConfig(**common), **sim_args).run()
+    run_single = Simulation(SimulationConfig(**common), particles=particles).run()
     run_basis = Simulation(
-        SimulationConfig(**common, solve_polarization_basis=True), **sim_args
+        SimulationConfig(**common, solve_polarization_basis=True),
+        particles=particles,
     ).run()
 
     np.testing.assert_allclose(
@@ -803,9 +804,7 @@ def test_simulation_dual_basis_avoids_redundant_mixed_solve_and_farfield(monkeyp
     )
     run = Simulation(
         cfg,
-        positions=np.array([[0.0, 0.0, 0.0]], dtype=float),
-        radii=np.array([60.0], dtype=float),
-        n_particle=np.array([1.5 + 0.01j], dtype=np.complex128),
+        particles=_single_sphere_particles(radius=60.0, n_particle=1.5 + 0.01j),
     ).run()
 
     assert len(solve_rhs_shapes) == 1
@@ -846,9 +845,7 @@ def test_solve_sources_reuses_dense_lu_factorization(monkeypatch):
     )
     sim = Simulation(
         cfg,
-        positions=np.array([[0.0, 0.0, 0.0]], dtype=float),
-        radii=np.array([60.0], dtype=float),
-        n_particle=np.array([1.5 + 0.01j], dtype=np.complex128),
+        particles=_single_sphere_particles(radius=60.0, n_particle=1.5 + 0.01j),
     )
 
     solved0 = sim.solve_sources({"te": source.with_polarization("TE")})
@@ -879,9 +876,7 @@ def test_solve_sources_te_tm_matches_single_runs():
     )
     sim = Simulation(
         cfg,
-        positions=np.array([[0.0, 0.0, 0.0]], dtype=float),
-        radii=np.array([60.0], dtype=float),
-        n_particle=np.array([1.5 + 0.01j], dtype=np.complex128),
+        particles=_single_sphere_particles(radius=60.0, n_particle=1.5 + 0.01j),
     )
     solved = sim.solve_sources(
         {
@@ -892,15 +887,11 @@ def test_solve_sources_te_tm_matches_single_runs():
     multi = sim.postprocess_sources(solved)
     run_te_single = Simulation(
         SimulationConfig(**{**cfg.__dict__, "source": source.with_polarization("TE")}),
-        positions=np.array([[0.0, 0.0, 0.0]], dtype=float),
-        radii=np.array([60.0], dtype=float),
-        n_particle=np.array([1.5 + 0.01j], dtype=np.complex128),
+        particles=_single_sphere_particles(radius=60.0, n_particle=1.5 + 0.01j),
     ).run()
     run_tm_single = Simulation(
         SimulationConfig(**{**cfg.__dict__, "source": source.with_polarization("TM")}),
-        positions=np.array([[0.0, 0.0, 0.0]], dtype=float),
-        radii=np.array([60.0], dtype=float),
-        n_particle=np.array([1.5 + 0.01j], dtype=np.complex128),
+        particles=_single_sphere_particles(radius=60.0, n_particle=1.5 + 0.01j),
     ).run()
 
     assert int(multi.solver_result.rhs_count) == 2
@@ -927,9 +918,7 @@ def test_solve_sources_sequence_labels():
             solver_method="direct",
             verbose=False,
         ),
-        positions=np.array([[0.0, 0.0, 0.0]], dtype=float),
-        radii=np.array([40.0], dtype=float),
-        n_particle=np.array([1.45 + 0.01j], dtype=np.complex128),
+        particles=_single_sphere_particles(radius=40.0, n_particle=1.45 + 0.01j),
     )
     solved = sim.solve_sources([src0, src1], labels=["first", "second"])
     multi = sim.postprocess_sources(solved)
@@ -956,9 +945,7 @@ def test_postprocess_sources_include_farfield_false_keeps_solve_outputs():
             solver_method="direct",
             verbose=False,
         ),
-        positions=np.array([[0.0, 0.0, 0.0]], dtype=float),
-        radii=np.array([40.0], dtype=float),
-        n_particle=np.array([1.45 + 0.01j], dtype=np.complex128),
+        particles=_single_sphere_particles(radius=40.0, n_particle=1.45 + 0.01j),
     )
 
     solved = sim.solve_sources([src0, src1], labels=["first", "second"])
@@ -1002,9 +989,7 @@ def test_simulation_supports_no_particle_source_only_run():
     )
     run = Simulation(
         cfg,
-        positions=np.zeros((0, 3), dtype=float),
-        radii=np.zeros((0,), dtype=float),
-        n_particle=np.zeros((0,), dtype=np.complex128),
+        particles=[],
     ).run()
 
     assert run.coeffs.shape[0] == 0

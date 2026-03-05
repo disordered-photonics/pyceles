@@ -55,7 +55,7 @@ from tqdm.auto import tqdm
 
 from .geometry_bounds import conservative_set_diameter
 from .indexing import n_modes
-from .particles import Particle, Sphere
+from .particles import Particle, Sphere, spheres_from_arrays
 from .tmatrix import particle_T_diagonal, sphere_T_diagonal
 from .translation import RadialLUT, translation_ab5_table, translation_block
 
@@ -206,54 +206,25 @@ def prepare_matvec(
 ) -> PreparedMatvec:
     """Prepare reusable data for many `(I - T W)` applications.
 
-    This always builds a `RadialLUT` from geometry and `radial_lut_dr`.
+    Compatibility wrapper around the canonical particle-descriptor path.
 
-    Notes
-    -----
-    The default execution model remains matrix-free: GMRES repeatedly calls
-    `PreparedMatvec.apply_A` without assembling a global dense matrix. Optional
-    `cache_translation_blocks=True` stores exact pair blocks W_ij to trade RAM
-    for speed on systems where memory headroom is available.
+    `Simulation` now routes through `prepare_matvec_from_particles(...)`
+    directly; this helper is kept for low-level array workflows and tests.
     """
 
-    positions = np.asarray(positions, dtype=float)
-    if positions.ndim != 2 or positions.shape[1] != 3:
-        raise ValueError(f"positions must have shape (Ns,3). Got {positions.shape}.")
-
-    op_dtype = np.dtype(operator_dtype)
-
-    # Keep k explicitly real for this unbounded homogeneous-medium path:
-    # a complex host index is intentionally rejected at SimulationConfig level.
-    k_f = float(k)
-
-    T_M, T_N = precompute_T_diagonal(
-        lmax=lmax,
-        k=k_f,
-        radii=radii,
-        n_particle=n_particle,
-        n_medium=n_medium,
-        dtype=op_dtype,
-    )
-    T_diag = _build_T_mode_diagonal(lmax, T_M, T_N)
-
-    ab5 = translation_ab5_table(lmax, dtype=op_dtype)
-
-    dr = float(radial_lut_dr)
-    if dr <= 0.0:
-        raise ValueError(f"radial_lut_dr must be > 0, got {dr}.")
-    lut = RadialLUT(lmax=int(lmax), k=k_f, r_max=_infer_rmax(positions), dr=dr, dtype=op_dtype)
-
-    return PreparedMatvec(
-        lmax=int(lmax),
-        k=k_f,
+    particles = spheres_from_arrays(
         positions=positions,
-        T_M=T_M,
-        T_N=T_N,
-        T_diag=T_diag,
-        ab5=ab5,
-        radial_lut=lut,
-        dtype=op_dtype,
-        cache_translation_blocks=bool(cache_translation_blocks),
+        radii=radii,
+        refractive_indices=n_particle,
+    )
+    return prepare_matvec_from_particles(
+        lmax=lmax,
+        k=k,
+        particles=particles,
+        n_medium=n_medium,
+        radial_lut_dr=radial_lut_dr,
+        cache_translation_blocks=cache_translation_blocks,
+        operator_dtype=operator_dtype,
     )
 
 
@@ -285,8 +256,8 @@ def prepare_matvec_from_particles(
         particles=part,
         n_medium=n_medium,
     )
-    T_M = np.asarray(T_M, dtype=op_dtype, copy=False)
-    T_N = np.asarray(T_N, dtype=op_dtype, copy=False)
+    T_M = np.asarray(T_M, dtype=op_dtype)
+    T_N = np.asarray(T_N, dtype=op_dtype)
     T_diag = _build_T_mode_diagonal(int(lmax), T_M, T_N)
     ab5 = translation_ab5_table(int(lmax), dtype=op_dtype)
 

@@ -139,7 +139,7 @@ def _run_case(case: LayeredMSTMOracle, pol_name: Literal["TE", "TM"]) -> Any:
         compute_dtype="complex128",
         accum_dtype="complex128",
     )
-    run = Simulation.from_particles(
+    run = Simulation(
         cfg,
         particles=[
             LayeredSphere(

@@ -15,6 +15,15 @@ from pyceles.core.fields import (
     project_source_basis_to_svwf,
     project_source_to_svwf,
 )
+from pyceles.core.particles import (
+    Ellipsoid,
+    LayeredSphere,
+    Particle,
+    Sphere,
+    ellipsoids_from_arrays,
+    layered_spheres_from_arrays,
+    spheres_from_arrays,
+)
 from pyceles.io.workflows import load_simulation_h5, save_simulation_h5
 from pyceles.postprocessing.dipole_metrics import (
     DipolePowerLDOSResult,
@@ -49,6 +58,13 @@ __all__ = [
     "SLMSource",
     "DipoleSource",
     "DipoleCollection",
+    "Particle",
+    "Sphere",
+    "LayeredSphere",
+    "Ellipsoid",
+    "spheres_from_arrays",
+    "layered_spheres_from_arrays",
+    "ellipsoids_from_arrays",
     "project_source_basis_to_svwf",
     "project_source_to_svwf",
     "Simulation",

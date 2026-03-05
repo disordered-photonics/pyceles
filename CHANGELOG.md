@@ -44,7 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added layered-sphere support in the spherical-particle backend:
   - multilayer Mie/T-entry helpers (`layered_mie_ab`,
     `layered_sphere_T_diagonal`, `layered_internal_ab_ratios`),
-  - mixed particle descriptor constructor `Simulation.from_particles(...)`,
+  - mixed particle descriptor geometry via `Simulation(config, particles=[...])`,
   - mixed `Sphere` + `LayeredSphere` operator preparation path.
 - Added `n_particles` convenience properties on `Simulation` and
   `SimulationResult` for explicit particle counts independent of geometry input
@@ -86,9 +86,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the canonical `compute_internal_field(...)` entry point, with explicit support
   for mixed `Sphere` and `LayeredSphere` lists while keeping the homogeneous
   sphere kernel as the canonical implementation path.
-- `SimulationResult.n_particle` is now documented as legacy/effective metadata
-  in mixed descriptor workflows; exact particle definitions are carried in
-  `SimulationResult.particles`.
+- Breaking: removed `Simulation.from_particles(...)`; particle-descriptor
+  construction now goes through `Simulation(config, particles=[...])` only.
+- Breaking: removed legacy `Simulation(...)` array-geometry kwargs
+  (`positions`, `radii`, `n_particle`); use explicit particle descriptors
+  (`particles=[...]`) in all workflows.
+- Breaking: removed `SimulationResult.n_particle`; exact particle definitions
+  are exposed via `SimulationResult.particles`.
+- Added canonical particle-construction helpers
+  (`spheres_from_arrays`, `layered_spheres_from_arrays`,
+  `ellipsoids_from_arrays`).
+- README/examples now present source-only runs as `particles=[]` and no longer
+  document array-geometry constructor patterns.
 - Direct-solver repeated solves on the same `Simulation` instance now reuse a
   cached LU factorization of the dense operator in addition to reusing the
   dense matrix assembly.

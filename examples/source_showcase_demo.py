@@ -67,9 +67,7 @@ def _make_no_particle_simulation(
     )
     return pcl.Simulation(
         cfg,
-        positions=np.zeros((0, 3), dtype=float),
-        radii=np.zeros((0,), dtype=float),
-        n_particle=np.zeros((0,), dtype=np.complex128),
+        particles=[],
     )
 
 

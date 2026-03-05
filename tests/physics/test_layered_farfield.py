@@ -8,7 +8,7 @@ consistency identities that should hold independently of MSTM references.
 
 import numpy as np
 
-from pyceles.core.particles import LayeredSphere
+from pyceles.core.particles import LayeredSphere, Sphere
 from pyceles.core.sources import GaussianBeam, PlaneWave
 from pyceles.simulation import Simulation, SimulationConfig
 
@@ -43,11 +43,11 @@ def test_layered_single_layer_farfield_matches_homogeneous_sphere():
 
     sim_sphere = Simulation(
         cfg,
-        positions=np.array([[0.0, 0.0, 0.0]], dtype=float),
-        radii=np.array([radius], dtype=float),
-        n_particle=np.array([n_particle], dtype=np.complex128),
+        particles=[
+            Sphere(position=(0.0, 0.0, 0.0), radius=radius, refractive_index=n_particle),
+        ],
     )
-    sim_layered = Simulation.from_particles(
+    sim_layered = Simulation(
         cfg,
         particles=[
             LayeredSphere(
@@ -116,11 +116,11 @@ def test_layered_single_layer_finite_beam_power_matches_homogeneous_sphere():
 
     run_sphere = Simulation(
         cfg,
-        positions=np.array([[0.0, 0.0, 0.0]], dtype=float),
-        radii=np.array([radius], dtype=float),
-        n_particle=np.array([n_particle], dtype=np.complex128),
+        particles=[
+            Sphere(position=(0.0, 0.0, 0.0), radius=radius, refractive_index=n_particle),
+        ],
     ).run()
-    run_layered = Simulation.from_particles(
+    run_layered = Simulation(
         cfg,
         particles=[
             LayeredSphere(

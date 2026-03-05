@@ -625,8 +625,8 @@ def compute_internal_field(
 
     Notes
     -----
-    - Legacy sphere-array API:
-      use `positions`/`radii`/`n_particle` for homogeneous spheres.
+    - Homogeneous-sphere path:
+      use `positions`/`radii`/`n_particle` for explicit sphere arrays.
     - Particle API:
       pass `particles=[Sphere(...), LayeredSphere(...), ...]` to enable mixed
       particle families. In this mode, geometric arrays are ignored.

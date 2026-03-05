@@ -8,7 +8,7 @@ from pyceles.core.sources import PlaneWave
 from pyceles.simulation import Simulation, SimulationConfig
 
 
-def test_simulation_from_particles_layered_sphere_runs_and_nearfield_dispatches():
+def test_layered_sphere_simulation_runs_and_nearfield_dispatches():
     cfg = SimulationConfig(
         wavelength=550.0,
         n_medium=1.0 + 0j,
@@ -27,7 +27,7 @@ def test_simulation_from_particles_layered_sphere_runs_and_nearfield_dispatches(
         check_circumscribing_sphere_overlap=True,
         verbose=False,
     )
-    sim = Simulation.from_particles(
+    sim = Simulation(
         cfg,
         particles=[
             LayeredSphere(

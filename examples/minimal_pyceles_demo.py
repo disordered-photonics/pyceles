@@ -89,9 +89,7 @@ def _render_quick_ldos_map(
     cfg = sim.config
     sim_map = pcl.Simulation(
         replace(cfg, verbose=False),
-        positions=sim.positions,
-        radii=sim.radii,
-        n_particle=sim.n_particle,
+        particles=list(sim.particles),
     )
     x = np.arange(float(x_min), float(x_max) + 0.5 * float(dx), float(dx), dtype=float)
     z = np.arange(float(z_min), float(z_max) + 0.5 * float(dx), float(dx), dtype=float)
@@ -221,7 +219,12 @@ def main() -> None:
         verbose=True,
     )
 
-    sim = pcl.Simulation(cfg, positions=positions, radii=radii, n_particle=n_particle)
+    particles = pcl.core.spheres_from_arrays(
+        positions=positions,
+        radii=radii,
+        refractive_indices=n_particle,
+    )
+    sim = pcl.Simulation(cfg, particles=particles)
     run = sim.run()
     nf = pcl.compute_near_field_slice(
         run,
@@ -270,7 +273,7 @@ def main() -> None:
         solver_compute_final_residual=False,
         verbose=True,
     )
-    sim_dip = pcl.Simulation(cfg_dip, positions=positions, radii=radii, n_particle=n_particle)
+    sim_dip = pcl.Simulation(cfg_dip, particles=particles)
     run_dip = sim_dip.run()
     nf_dip = pcl.compute_near_field_slice(
         run_dip,

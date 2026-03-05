@@ -582,7 +582,12 @@ def _pyceles_run(
         verbose=False,
     )
 
-    sim = pcl.Simulation(sim_cfg, positions=positions, radii=radii, n_particle=n_particle)
+    particles = pcl.core.spheres_from_arrays(
+        positions=positions,
+        radii=radii,
+        refractive_indices=n_particle,
+    )
+    sim = pcl.Simulation(sim_cfg, particles=particles)
     solved = sim.solve_sources(
         {
             "te": source.with_polarization("TE"),

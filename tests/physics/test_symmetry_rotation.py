@@ -5,6 +5,7 @@ from typing import Any
 import numpy as np
 
 import pyceles as pcl
+from pyceles.core.particles import spheres_from_arrays
 
 
 def _scattered_intensity(run: pcl.SimulationResult) -> np.ndarray:
@@ -41,9 +42,11 @@ def test_scattered_field_far_zone_obeys_inverse_radius_scaling():
     )
     run = pcl.Simulation(
         cfg,
-        positions=np.array([[0.0, 0.0, 0.0]], dtype=float),
-        radii=np.array([90.0], dtype=float),
-        n_particle=np.array([1.55 + 0.01j], dtype=np.complex128),
+        particles=spheres_from_arrays(
+            positions=np.array([[0.0, 0.0, 0.0]], dtype=float),
+            radii=np.array([90.0], dtype=float),
+            refractive_indices=np.array([1.55 + 0.01j], dtype=np.complex128),
+        ),
     ).run()
 
     r1 = 30_000.0
@@ -83,9 +86,11 @@ def test_single_sphere_normal_incidence_unpolarized_scattering_is_azimuthally_sy
     )
     sim = pcl.Simulation(
         cfg,
-        positions=np.array([[0.0, 0.0, 0.0]], dtype=float),
-        radii=np.array([90.0], dtype=float),
-        n_particle=np.array([1.48 + 0.01j], dtype=np.complex128),
+        particles=spheres_from_arrays(
+            positions=np.array([[0.0, 0.0, 0.0]], dtype=float),
+            radii=np.array([90.0], dtype=float),
+            refractive_indices=np.array([1.48 + 0.01j], dtype=np.complex128),
+        ),
     )
     solved = sim.solve_sources(
         {
@@ -151,15 +156,19 @@ def test_global_z_rotation_covariance_for_plane_wave_cluster():
     )
     run_1 = pcl.Simulation(
         pcl.SimulationConfig(source=source_1, **common),
-        positions=positions,
-        radii=radii,
-        n_particle=n_particle,
+        particles=spheres_from_arrays(
+            positions=positions,
+            radii=radii,
+            refractive_indices=n_particle,
+        ),
     ).run()
     run_2 = pcl.Simulation(
         pcl.SimulationConfig(source=source_2, **common),
-        positions=_rotate_z(positions, delta),
-        radii=radii,
-        n_particle=n_particle,
+        particles=spheres_from_arrays(
+            positions=_rotate_z(positions, delta),
+            radii=radii,
+            refractive_indices=n_particle,
+        ),
     ).run()
 
     I1 = _scattered_intensity(run_1)
