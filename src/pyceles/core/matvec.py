@@ -59,7 +59,7 @@ and pair translation blocks.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable, Optional, Protocol, Sequence
+from typing import Callable, Optional, Protocol, Sequence, TypeAlias
 
 import numpy as np
 import numpy.typing as npt
@@ -94,6 +94,27 @@ class SingleBodyGroupPlan:
     particle_indices: Array
 
 
+@dataclass(frozen=True)
+class SingleBodyPreparationContext:
+    """Shared preparation inputs for representation-specific group factories.
+
+    This keeps extension points high-level: future backends can inspect the
+    particle subset, truncation, medium, and dtype policy without reaching back
+    into `Simulation` or global module state.
+    """
+
+    lmax: int
+    k: float
+    particles: tuple[Particle, ...]
+    n_medium: complex
+    dtype: np.dtype
+
+    @property
+    def n_modes(self) -> int:
+        """Number of SVWF modes per particle at the requested truncation."""
+        return n_modes(self.lmax)
+
+
 class PreparedSingleBodyGroup(Protocol):
     """Prepared subset of particles sharing one `T` representation.
 
@@ -115,6 +136,47 @@ class PreparedSingleBodyGroup(Protocol):
     def mode_diagonal(self) -> Array | None: ...
 
     def degree_diagonals(self) -> tuple[Array, Array] | None: ...
+
+
+SingleBodyGroupFactory: TypeAlias = Callable[
+    [SingleBodyGroupPlan, SingleBodyPreparationContext], PreparedSingleBodyGroup
+]
+DenseBlockProvider: TypeAlias = Callable[[Sequence[Particle], SingleBodyPreparationContext], Array]
+AxisymmetricSubsetApply: TypeAlias = Callable[
+    [Array, Sequence[Particle], SingleBodyPreparationContext], Array
+]
+AxisymmetricLocalBlockApply: TypeAlias = Callable[
+    [int, Array, Sequence[Particle], SingleBodyPreparationContext], Array
+]
+AxisymmetricMetadataBuilder: TypeAlias = Callable[
+    [Sequence[Particle], SingleBodyPreparationContext], object | None
+]
+
+
+@dataclass(frozen=True)
+class SingleBodyGroupFactories:
+    """Optional representation-specific group factories for `prepare_matvec`.
+
+    The diagonal path has a built-in default because it is the current core
+    solver path. Axisymmetric and dense paths can be injected here before their
+    physics-specific preparation is part of the main codebase.
+    """
+
+    diagonal: SingleBodyGroupFactory | None = None
+    axisymmetric: SingleBodyGroupFactory | None = None
+    dense: SingleBodyGroupFactory | None = None
+
+    def for_representation(
+        self, representation: SingleBodyRepresentation
+    ) -> SingleBodyGroupFactory | None:
+        """Return the factory configured for one representation label."""
+        if representation == "diagonal":
+            return self.diagonal
+        if representation == "axisymmetric":
+            return self.axisymmetric
+        if representation == "dense":
+            return self.dense
+        raise ValueError(f"Unsupported single-body representation {representation!r}.")
 
 
 @dataclass
@@ -215,22 +277,41 @@ class AxisymmetricTGroup:
     """
 
     particle_indices: Array
+    apply_subset_fn: Callable[[Array], Array] | None = None
+    rhs_subset_fn: Callable[[Array], Array] | None = None
+    apply_local_block_fn: Callable[[int, Array], Array] | None = None
     body_metadata: object | None = None
     dtype: np.dtype = np.dtype(np.complex128)
 
+    def __post_init__(self) -> None:
+        self.particle_indices = np.asarray(self.particle_indices, dtype=np.int64).reshape(-1)
+
     def apply_subset(self, x_subset: Array) -> Array:
-        raise NotImplementedError(
-            "Axisymmetric single-body operators are planned but not implemented yet."
+        if self.apply_subset_fn is None:
+            raise NotImplementedError(
+                "Axisymmetric single-body operators are planned but not implemented yet."
+            )
+        return np.asarray(
+            self.apply_subset_fn(np.asarray(x_subset, dtype=self.dtype)), dtype=self.dtype
         )
 
     def rhs_subset(self, b_subset: Array) -> Array:
-        raise NotImplementedError(
-            "Axisymmetric single-body operators are planned but not implemented yet."
-        )
+        if self.rhs_subset_fn is not None:
+            return np.asarray(
+                self.rhs_subset_fn(np.asarray(b_subset, dtype=self.dtype)), dtype=self.dtype
+            )
+        return self.apply_subset(b_subset)
 
     def apply_local_block(self, local_particle_index: int, block: Array) -> Array:
-        raise NotImplementedError(
-            "Axisymmetric single-body operators are planned but not implemented yet."
+        if self.apply_local_block_fn is None:
+            raise NotImplementedError(
+                "Axisymmetric single-body operators are planned but not implemented yet."
+            )
+        return np.asarray(
+            self.apply_local_block_fn(
+                int(local_particle_index), np.asarray(block, dtype=self.dtype)
+            ),
+            dtype=self.dtype,
         )
 
     def mode_diagonal(self) -> Array | None:
@@ -505,6 +586,86 @@ def plan_single_body_groups(particles: Sequence[Particle]) -> tuple[SingleBodyGr
     )
 
 
+def make_dense_group_factory(block_provider: DenseBlockProvider) -> SingleBodyGroupFactory:
+    """Build a dense-group factory from a particle-subset T-block provider.
+
+    This is the intended high-level hook for future imported/database-backed
+    T-matrix workflows: the caller only needs to provide one `(Ng, Nm, Nm)`
+    block stack for the selected particle subset.
+    """
+
+    def factory(
+        plan: SingleBodyGroupPlan, context: SingleBodyPreparationContext
+    ) -> PreparedSingleBodyGroup:
+        ids = np.asarray(plan.particle_indices, dtype=np.int64)
+        group_particles = tuple(context.particles[int(i)] for i in ids)
+        return DenseTGroup(
+            particle_indices=ids,
+            T_blocks=np.asarray(block_provider(group_particles, context), dtype=context.dtype),
+            dtype=context.dtype,
+        )
+
+    return factory
+
+
+def make_axisymmetric_group_factory(
+    *,
+    apply_subset: AxisymmetricSubsetApply,
+    apply_local_block: AxisymmetricLocalBlockApply,
+    rhs_subset: AxisymmetricSubsetApply | None = None,
+    metadata_builder: AxisymmetricMetadataBuilder | None = None,
+) -> SingleBodyGroupFactory:
+    """Build an axisymmetric-group factory from high-level apply callbacks.
+
+    The eventual spheroid backend can use this by binding body-frame data and
+    SVWF rotations into the returned callbacks, while `prepare_matvec()` remains
+    unchanged.
+    """
+
+    def factory(
+        plan: SingleBodyGroupPlan, context: SingleBodyPreparationContext
+    ) -> PreparedSingleBodyGroup:
+        ids = np.asarray(plan.particle_indices, dtype=np.int64)
+        group_particles = tuple(context.particles[int(i)] for i in ids)
+        metadata = None if metadata_builder is None else metadata_builder(group_particles, context)
+
+        def apply_subset_bound(x_subset: Array) -> Array:
+            return np.asarray(
+                apply_subset(np.asarray(x_subset, dtype=context.dtype), group_particles, context),
+                dtype=context.dtype,
+            )
+
+        def apply_local_block_bound(local_particle_index: int, block: Array) -> Array:
+            return np.asarray(
+                apply_local_block(
+                    int(local_particle_index),
+                    np.asarray(block, dtype=context.dtype),
+                    group_particles,
+                    context,
+                ),
+                dtype=context.dtype,
+            )
+
+        def rhs_subset_bound(b_subset: Array) -> Array:
+            if rhs_subset is None:
+                return apply_subset_bound(b_subset)
+            return np.asarray(
+                rhs_subset(np.asarray(b_subset, dtype=context.dtype), group_particles, context),
+                dtype=context.dtype,
+            )
+
+        return AxisymmetricTGroup(
+            particle_indices=ids,
+            apply_subset_fn=apply_subset_bound,
+            rhs_subset_fn=rhs_subset_bound,
+            apply_local_block_fn=apply_local_block_bound,
+            body_metadata=metadata,
+            dtype=context.dtype,
+        )
+
+    return factory
+
+
 def _prepare_diagonal_group(
     *,
     plan: SingleBodyGroupPlan,
@@ -538,6 +699,34 @@ def _prepare_diagonal_group(
     )
 
 
+def _default_group_factory(
+    *,
+    plan: SingleBodyGroupPlan,
+    context: SingleBodyPreparationContext,
+) -> PreparedSingleBodyGroup:
+    """Prepare one group using built-in support when available."""
+
+    if plan.representation == "diagonal":
+        return _prepare_diagonal_group(
+            plan=plan,
+            lmax=context.lmax,
+            k=context.k,
+            particles=context.particles,
+            n_medium=context.n_medium,
+            dtype=context.dtype,
+        )
+
+    particle_labels = ", ".join(
+        f"{int(i)}:{type(context.particles[int(i)]).__name__}"
+        for i in np.asarray(plan.particle_indices)
+    )
+    raise NotImplementedError(
+        "Single-body operator planning selected the "
+        f"'{plan.representation}' representation for particle(s) {particle_labels}, "
+        "but no preparation factory was provided for that representation."
+    )
+
+
 def _prepare_single_body_operator(
     *,
     lmax: int,
@@ -545,6 +734,7 @@ def _prepare_single_body_operator(
     particles: Sequence[Particle],
     n_medium: complex,
     dtype: np.dtype,
+    group_factories: SingleBodyGroupFactories | None = None,
 ) -> CompositeSingleBodyOperator:
     """Prepare the particle-local operator using planned representation groups.
 
@@ -554,36 +744,28 @@ def _prepare_single_body_operator(
     diagonal-only kernel.
     """
 
-    plans = plan_single_body_groups(particles)
-    groups: list[DiagonalTGroup] = []
+    part = tuple(particles)
+    context = SingleBodyPreparationContext(
+        lmax=int(lmax),
+        k=float(k),
+        particles=part,
+        n_medium=complex(n_medium),
+        dtype=dtype,
+    )
+    plans = plan_single_body_groups(part)
+    factories = SingleBodyGroupFactories() if group_factories is None else group_factories
+    groups: list[PreparedSingleBodyGroup] = []
     for plan in plans:
-        if plan.representation == "diagonal":
-            groups.append(
-                _prepare_diagonal_group(
-                    plan=plan,
-                    lmax=lmax,
-                    k=k,
-                    particles=particles,
-                    n_medium=n_medium,
-                    dtype=dtype,
-                )
-            )
-            continue
-
-        particle_labels = ", ".join(
-            f"{int(i)}:{type(particles[int(i)]).__name__}"
-            for i in np.asarray(plan.particle_indices)
-        )
-        raise NotImplementedError(
-            "Single-body operator planning selected the "
-            f"'{plan.representation}' representation for particle(s) {particle_labels}, "
-            "but only the diagonal prepared operator is implemented so far. "
-            "The operator boundary is ready for future axisymmetric and dense groups."
+        factory = factories.for_representation(plan.representation)
+        groups.append(
+            _default_group_factory(plan=plan, context=context)
+            if factory is None
+            else factory(plan, context)
         )
 
     return CompositeSingleBodyOperator(
         lmax=int(lmax),
-        n_particles=len(particles),
+        n_particles=len(part),
         groups=tuple(groups),
         dtype=dtype,
     )
@@ -635,6 +817,7 @@ def prepare_matvec(
     radial_lut_dr: float,
     cache_translation_blocks: bool = False,
     operator_dtype: npt.DTypeLike = np.complex128,
+    single_body_group_factories: SingleBodyGroupFactories | None = None,
 ) -> PreparedOperator:
     """Prepare reusable `A = I - T W` data from explicit particle descriptors.
 
@@ -642,6 +825,9 @@ def prepare_matvec(
     `Simulation` only sees one prepared operator, while the internal single-body
     representation can stay diagonal for spheres or later switch to
     axisymmetric/dense groups on a subset of particles.
+
+    Advanced callers can inject `single_body_group_factories` to prepare dense
+    or axisymmetric groups before those backends are part of the default path.
     """
     part = list(particles)
     positions = np.asarray(
@@ -662,6 +848,7 @@ def prepare_matvec(
         particles=part,
         n_medium=n_medium,
         dtype=op_dtype,
+        group_factories=single_body_group_factories,
     )
     coupling = PairwiseCouplingOperator(
         lmax=int(lmax),
