@@ -99,7 +99,7 @@ def _render_quick_ldos_map(
     inside = np.zeros((points_flat.shape[0],), dtype=bool)
     if sim_map.positions.shape[0] > 0:
         dr = points_flat[:, None, :] - sim_map.positions[None, :, :]
-        inside = np.any(np.linalg.norm(dr, axis=2) < sim_map.radii[None, :], axis=1)
+        inside = np.any(np.linalg.norm(dr, axis=2) < sim_map.circumscribing_radii[None, :], axis=1)
     inside = inside.reshape(xx.shape)
 
     ldos_px = np.full(xx.shape, np.nan, dtype=float)

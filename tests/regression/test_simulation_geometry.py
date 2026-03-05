@@ -46,7 +46,7 @@ def test_simulation_can_skip_overlap_check_when_requested() -> None:
         ),
     )
     np.testing.assert_allclose(sim.positions, positions, rtol=0.0, atol=0.0)
-    np.testing.assert_allclose(sim.radii, radii, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(sim.circumscribing_radii, radii, rtol=0.0, atol=0.0)
 
 
 def test_overlap_tolerance_allows_small_roundoff_level_penetration() -> None:
@@ -71,7 +71,7 @@ def test_overlap_tolerance_allows_small_roundoff_level_penetration() -> None:
             refractive_indices=1.5 + 0j,
         ),
     )
-    np.testing.assert_allclose(sim.radii, radii, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(sim.circumscribing_radii, radii, rtol=0.0, atol=0.0)
 
 
 def test_simulation_accepts_empty_particle_geometry() -> None:
@@ -79,7 +79,7 @@ def test_simulation_accepts_empty_particle_geometry() -> None:
     sim = Simulation(cfg, particles=[])
     assert sim.n_particles == 0
     assert sim.positions.size == 0
-    assert sim.radii.size == 0
+    assert sim.circumscribing_radii.size == 0
 
 
 def test_simulation_accepts_explicit_particle_descriptors() -> None:
@@ -95,7 +95,12 @@ def test_simulation_accepts_explicit_particle_descriptors() -> None:
     sim = Simulation(cfg, particles=particles)
     assert sim.n_particles == 2
     assert sim.positions.shape == (2, 3)
-    np.testing.assert_allclose(sim.radii, np.array([50.0, 80.0], dtype=float), rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(
+        sim.circumscribing_radii,
+        np.array([50.0, 80.0], dtype=float),
+        rtol=0.0,
+        atol=0.0,
+    )
     assert sim.particles is not None
     assert len(sim.particles) == 2
 

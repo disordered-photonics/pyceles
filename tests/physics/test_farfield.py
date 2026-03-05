@@ -899,7 +899,7 @@ def test_solve_sources_te_tm_matches_single_runs():
     np.testing.assert_allclose(multi["tm"].coeffs, run_tm_single.coeffs, rtol=1e-6, atol=1e-7)
 
 
-def test_solve_sources_sequence_labels():
+def test_solve_sources_requires_mapping():
     src0 = PlaneWave(
         wavelength=550.0,
         medium_n=1.0 + 0j,
@@ -920,7 +920,32 @@ def test_solve_sources_sequence_labels():
         ),
         particles=_single_sphere_particles(radius=40.0, n_particle=1.45 + 0.01j),
     )
-    solved = sim.solve_sources([src0, src1], labels=["first", "second"])
+    with pytest.raises(TypeError, match="mapping"):
+        sim.solve_sources([src0, src1])  # type: ignore[arg-type]
+
+
+def test_solve_sources_mapping_labels():
+    src0 = PlaneWave(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        polarization="TE",
+        polar_angle=0.4,
+        azimuthal_angle=0.3,
+        amplitude=1.0,
+    )
+    src1 = src0.with_polarization("TM")
+    sim = Simulation(
+        SimulationConfig(
+            wavelength=550.0,
+            n_medium=1.0 + 0j,
+            lmax=2,
+            source=src0,
+            solver_method="direct",
+            verbose=False,
+        ),
+        particles=_single_sphere_particles(radius=40.0, n_particle=1.45 + 0.01j),
+    )
+    solved = sim.solve_sources({"first": src0, "second": src1})
     multi = sim.postprocess_sources(solved)
     assert tuple(multi.labels) == ("first", "second")
     assert set(multi.runs) == {"first", "second"}
@@ -948,7 +973,7 @@ def test_postprocess_sources_include_farfield_false_keeps_solve_outputs():
         particles=_single_sphere_particles(radius=40.0, n_particle=1.45 + 0.01j),
     )
 
-    solved = sim.solve_sources([src0, src1], labels=["first", "second"])
+    solved = sim.solve_sources({"first": src0, "second": src1})
     multi_solve_only = sim.postprocess_sources(solved, include_farfield=False)
     multi_full = sim.postprocess_sources(solved)
 

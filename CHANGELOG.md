@@ -75,6 +75,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `Simulation.postprocess_sources(...)` performs optional channel postprocessing
     (far field, power, cross sections),
   - `Simulation.run_multi_sources(...)` was removed.
+- Breaking: `Simulation.solve_sources(...)` now accepts only
+  mapping-style channel input (`{label: source}`); sequence + `labels=...`
+  call patterns were removed to keep one explicit multi-source API surface.
 - `solve_polarization_basis=True` now acts as a convenience `run()` wrapper
   built on top of `solve_sources(...)` + `postprocess_sources(...)` (TE/TM channels + Jones mixed
   recombination + unpolarized diagnostics).
@@ -118,8 +121,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `plot_nearfield_poynting_overlay(...)` consume `particles=[...]` geometry
   instead of parallel `positions`/`radii` inputs.
 - `SimulationResult` now stores only canonical `particles`; convenience
-  `positions`/`radii` views are derived properties rather than duplicated
-  stored payloads.
+  `positions`/`circumscribing_radii` views are derived properties rather than
+  duplicated stored payloads.
+- Breaking: `io.load_geometry_h5(...)` now returns only canonical
+  `particles` + metadata attrs; the derived `positions` convenience payload was
+  removed to keep one geometry representation in loaded snapshots.
+- Breaking: `Simulation` / `SimulationResult` now expose
+  `circumscribing_radii` as the canonical per-particle radius view; ambiguous
+  `radii` shorthand was removed.
 - README/examples now present source-only runs as `particles=[]` and no longer
   document array-geometry constructor patterns.
 - Direct-solver repeated solves on the same `Simulation` instance now reuse a

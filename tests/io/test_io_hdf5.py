@@ -50,7 +50,6 @@ def test_geometry_near_far_write(tmp_path):
         Sphere(position=(0.0, 0.0, 0.0), radius=0.5, refractive_index=1.5 + 0.01j),
         Sphere(position=(1.0, 2.0, 3.0), radius=0.6, refractive_index=1.6 + 0.02j),
     )
-    positions = np.asarray([p.position for p in particles], dtype=float)
 
     X, Z = np.meshgrid(np.linspace(-1, 1, 5), np.linspace(-2, 2, 7), indexing="xy")
     E = np.zeros(X.shape + (3,), dtype=np.complex128)
@@ -92,7 +91,7 @@ def test_geometry_near_far_write(tmp_path):
         assert bool(h5["far_field"].attrs["total_omitted_as_redundant"]) is True
 
     geom_loaded = load_geometry_h5(path)
-    np.testing.assert_allclose(geom_loaded["positions"], positions)
+    assert tuple(geom_loaded["particles"]) == particles
     ff_loaded = load_far_field_h5(path)
     np.testing.assert_allclose(ff_loaded["patterns"]["initial"]["te"]["coeff"], pwp["coeff"])
 

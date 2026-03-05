@@ -215,9 +215,6 @@ def load_geometry_h5(path: str | Path, *, group: str = "geometry") -> dict[str, 
     with h5py.File(_pathlike(path), "r") as h5:
         g = h5[group]
         out["particles"] = _load_particle_descriptors(g)
-        out["positions"] = np.asarray(
-            [np.asarray(p.position, dtype=float) for p in out["particles"]], dtype=float
-        ).reshape(-1, 3)
         out["attrs"] = dict(g.attrs.items())
     return out
 

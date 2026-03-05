@@ -120,7 +120,7 @@ def compute_dipole_power_ldos(
     if run.positions.shape[0] > 0:
         dr = dip_pos[:, None, :] - np.asarray(run.positions, dtype=float)[None, :, :]
         dist = np.linalg.norm(dr, axis=2)
-        inside = dist < np.asarray(run.radii, dtype=float)[None, :]
+        inside = dist < np.asarray(run.circumscribing_radii, dtype=float)[None, :]
         if np.any(inside):
             j, i = np.argwhere(inside)[0]
             msg = (

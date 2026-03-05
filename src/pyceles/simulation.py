@@ -677,8 +677,14 @@ class SimulationResult:
         )
 
     @property
-    def radii(self) -> np.ndarray:
-        """Return particle circumscribing radii derived from `particles`."""
+    def circumscribing_radii(self) -> np.ndarray:
+        """Return one circumscribing radius per particle.
+
+        Semantics are shape-agnostic: this is always the circumscribing-sphere
+        radius for each particle. For `Sphere`/`LayeredSphere` this equals the
+        outer physical radius; for non-spherical particles it remains the
+        circumscribing radius used by geometry validity checks and kernels.
+        """
         if len(self.particles) == 0:
             return np.zeros((0,), dtype=float)
         return np.asarray(
@@ -829,7 +835,8 @@ class Simulation:
         part, pos, rad = _normalize_particle_geometry(particles)
 
         self.positions = pos
-        self.radii = rad
+        # Shape-agnostic geometry checks always use circumscribing radii.
+        self.circumscribing_radii = rad
         self.particles = part
         # Reuse operator-side precomputations across repeated solves on the same
         # geometry/config (e.g. moving-dipole LDOS maps).
@@ -842,7 +849,7 @@ class Simulation:
         if bool(self.config.check_circumscribing_sphere_overlap):
             overlap = _first_overlapping_circumscribing_pair(
                 self.positions,
-                self.radii,
+                self.circumscribing_radii,
                 atol=float(self.config.circumscribing_sphere_overlap_atol),
                 show_progress=bool(self.config.verbose),
             )
@@ -895,7 +902,7 @@ class Simulation:
                 # interior-source formulation for dipoles embedded inside particles.
                 deltas = dip_pos[:, None, :] - self.positions[None, :, :]
                 dist = np.linalg.norm(deltas, axis=2)
-                inside = dist < self.radii[None, :]
+                inside = dist < self.circumscribing_radii[None, :]
                 if np.any(inside):
                     j, i = np.argwhere(inside)[0]
                     warnings.warn(
@@ -909,37 +916,17 @@ class Simulation:
 
     def _normalize_sources_argument(
         self,
-        sources: Mapping[str, Source] | Sequence[Source],
-        *,
-        labels: Sequence[str] | None = None,
+        sources: Mapping[str, Source],
     ) -> dict[str, Source]:
-        """Normalize multi-source inputs to a deterministic labeled dictionary."""
-        if isinstance(sources, Mapping):
-            if labels is not None:
-                raise ValueError("`labels` must be omitted when `sources` is a mapping.")
-            out: dict[str, Source] = {}
-            for key, src in sources.items():
-                lbl = str(key)
-                if lbl in out:
-                    raise ValueError(f"Duplicate source label '{lbl}'.")
-                out[lbl] = src
-        else:
-            src_list = list(sources)
-            if len(src_list) == 0:
-                raise ValueError("`sources` must contain at least one source.")
-            if labels is None:
-                labels_eff = [f"source_{j}" for j in range(len(src_list))]
-            else:
-                labels_eff = [str(v) for v in labels]
-                if len(labels_eff) != len(src_list):
-                    raise ValueError(
-                        "`labels` length must match number of sources. "
-                        f"Got {len(labels_eff)} labels for {len(src_list)} sources."
-                    )
-            if len(set(labels_eff)) != len(labels_eff):
-                raise ValueError("`labels` must be unique.")
-            out = {labels_eff[j]: src_list[j] for j in range(len(src_list))}
-
+        """Normalize multi-source mapping inputs to a deterministic labeled dictionary."""
+        if not isinstance(sources, Mapping):
+            raise TypeError("`sources` must be a mapping `{label: source}`.")
+        out: dict[str, Source] = {}
+        for key, src in sources.items():
+            lbl = str(key)
+            if lbl in out:
+                raise ValueError(f"Duplicate source label '{lbl}'.")
+            out[lbl] = src
         if len(out) == 0:
             raise ValueError("`sources` must contain at least one source.")
         for label, src in out.items():
@@ -1312,9 +1299,8 @@ class Simulation:
 
     def solve_sources(
         self,
-        sources: Mapping[str, Source] | Sequence[Source],
+        sources: Mapping[str, Source],
         *,
-        labels: Sequence[str] | None = None,
         solver_compute_final_residual: bool | None = None,
     ) -> SolvedSourcesResult:
         """Canonical solve-only API for one labeled source set.
@@ -1322,11 +1308,7 @@ class Simulation:
         Parameters
         ----------
         sources:
-            Either a mapping `{label: source}` (recommended) or a sequence of
-            sources. Sequence inputs can be labeled via `labels`; otherwise
-            `source_0`, `source_1`, ... are used.
-        labels:
-            Optional labels for sequence inputs.
+            Mapping `{label: source}` defining one or more source channels.
         solver_compute_final_residual:
             Optional override for final residual diagnostics at this call.
             `None` uses `SimulationConfig.solver_compute_final_residual`.
@@ -1337,7 +1319,7 @@ class Simulation:
             Solve-only multipole payload: coefficients, RHS, initial
             coefficients, and multi-RHS solver diagnostics.
         """
-        labeled = self._normalize_sources_argument(sources, labels=labels)
+        labeled = self._normalize_sources_argument(sources)
         return self._solve_sources_core(
             labeled,
             solver_compute_final_residual=solver_compute_final_residual,
