@@ -161,7 +161,7 @@ def test_dipole_ldos_uses_channel_source_from_postprocess_sources():
         position=(30.0, 0.0, -40.0),
         dipole_moment=(1.0 + 0j, 0.0 + 0j, 0.0 + 0j),
     )
-    solved = sim.solve_sources(probe.cartesian_basis_sources(labels=("px", "py", "pz")))
+    solved = sim.solve_sources(probe.cartesian_basis_sources())
     multi = sim.postprocess_sources(solved, include_farfield=False)
 
     assert isinstance(multi["px"].config.source, pcl.DipoleSource)

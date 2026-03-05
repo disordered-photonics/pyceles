@@ -129,6 +129,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Breaking: `Simulation` / `SimulationResult` now expose
   `circumscribing_radii` as the canonical per-particle radius view; ambiguous
   `radii` shorthand was removed.
+- Breaking: `DipoleSource.cartesian_basis_sources(...)` now returns fixed
+  labels (`px`, `py`, `pz`); custom label overrides were removed so basis
+  naming is consistent with other fixed-channel interfaces.
 - README/examples now present source-only runs as `particles=[]` and no longer
   document array-geometry constructor patterns.
 - Direct-solver repeated solves on the same `Simulation` instance now reuse a

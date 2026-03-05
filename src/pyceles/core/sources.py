@@ -2136,19 +2136,16 @@ class DipoleSource:
     def cartesian_basis_sources(
         self,
         *,
-        labels: tuple[str, str, str] = ("px", "py", "pz"),
         moment_magnitude: complex = 1.0 + 0j,
     ) -> dict[str, "DipoleSource"]:
-        """Return three orthogonal dipole-orientation sources at same position."""
-        if len(labels) != 3:
-            raise ValueError(f"`labels` must have length 3. Got {labels!r}.")
+        """Return fixed Cartesian dipole-basis channels (`px`,`py`,`pz`)."""
         m = complex(moment_magnitude)
         if not np.isfinite(m.real) or not np.isfinite(m.imag):
             raise ValueError(f"`moment_magnitude` must be finite. Got {moment_magnitude!r}.")
         return {
-            str(labels[0]): replace(self, dipole_moment=(m, 0.0 + 0j, 0.0 + 0j)),
-            str(labels[1]): replace(self, dipole_moment=(0.0 + 0j, m, 0.0 + 0j)),
-            str(labels[2]): replace(self, dipole_moment=(0.0 + 0j, 0.0 + 0j, m)),
+            "px": replace(self, dipole_moment=(m, 0.0 + 0j, 0.0 + 0j)),
+            "py": replace(self, dipole_moment=(0.0 + 0j, m, 0.0 + 0j)),
+            "pz": replace(self, dipole_moment=(0.0 + 0j, 0.0 + 0j, m)),
         }
 
     def outgoing_coeffs(

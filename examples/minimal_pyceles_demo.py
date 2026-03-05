@@ -115,10 +115,7 @@ def _render_quick_ldos_map(
             dipole_moment=(moment_magnitude, 0.0 + 0j, 0.0 + 0j),
         )
         solved = sim_map.solve_sources(
-            probe.cartesian_basis_sources(
-                labels=("px", "py", "pz"),
-                moment_magnitude=moment_magnitude,
-            ),
+            probe.cartesian_basis_sources(moment_magnitude=moment_magnitude),
             solver_compute_final_residual=False,
         )
         multi = sim_map.postprocess_sources(solved, include_farfield=False)
