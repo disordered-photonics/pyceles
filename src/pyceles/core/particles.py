@@ -6,7 +6,7 @@ from typing import Literal, Tuple
 
 import numpy as np
 
-SingleBodyRepresentation = Literal["diagonal", "axisymmetric", "dense"]
+ParticleTRepresentation = Literal["diagonal", "axisymmetric", "dense"]
 
 
 @dataclass(frozen=True)
@@ -35,7 +35,7 @@ class Particle:
         raise NotImplementedError(f"{type(self).__name__} must implement circumscribing_radius().")
 
     @property
-    def single_body_representation(self) -> SingleBodyRepresentation:
+    def t_operator_representation(self) -> ParticleTRepresentation:
         """Preferred prepared-operator representation for this particle family.
 
         The representation only describes how the particle-local `T` operator
@@ -59,7 +59,7 @@ class Sphere(Particle):
         return float(self.radius)
 
     @property
-    def single_body_representation(self) -> SingleBodyRepresentation:
+    def t_operator_representation(self) -> ParticleTRepresentation:
         """Spheres use the diagonal Mie fast path."""
         return "diagonal"
 
@@ -88,7 +88,7 @@ class LayeredSphere(Particle):
         return float(self.layer_radii[-1])
 
     @property
-    def single_body_representation(self) -> SingleBodyRepresentation:
+    def t_operator_representation(self) -> ParticleTRepresentation:
         """Layered spheres remain diagonal in the SVWF basis."""
         return "diagonal"
 
@@ -113,7 +113,7 @@ class Spheroid(Particle):
         return float(max(float(self.equatorial_radius), float(self.polar_radius)))
 
     @property
-    def single_body_representation(self) -> SingleBodyRepresentation:
+    def t_operator_representation(self) -> ParticleTRepresentation:
         """Axisymmetric particles admit a narrower-than-dense T representation."""
         return "axisymmetric"
 

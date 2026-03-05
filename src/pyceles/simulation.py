@@ -841,7 +841,7 @@ class Simulation:
         # Reuse operator-side precomputations across repeated solves on the same
         # geometry/config (e.g. moving-dipole LDOS maps). The cached object
         # hides whether particles currently use diagonal, axisymmetric, or dense
-        # single-body operators, so solver code stays representation-agnostic.
+        # particle-local T operators, so solver code stays representation-agnostic.
         self._prepared_operator_cache: PreparedOperator | None = None
         self._prepared_operator_dtype: np.dtype | None = None
         self._dense_operator_cache: np.ndarray | None = None

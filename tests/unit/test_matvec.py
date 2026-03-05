@@ -8,16 +8,16 @@ import pytest
 from pyceles.core.indexing import n_modes
 from pyceles.core.matvec import (
     AxisymmetricTGroup,
-    CompositeSingleBodyOperator,
+    CompositeParticleTOperator,
     DenseTGroup,
     DiagonalTGroup,
-    SingleBodyGroupFactories,
+    ParticleTGroupFactories,
     apply_A_numpy,
     assemble_dense_A_numpy,
     estimate_translation_cache_bytes,
     make_axisymmetric_group_factory,
     make_dense_group_factory,
-    plan_single_body_groups,
+    plan_particle_t_groups,
     precompute_T_diagonal,
     prepare_matvec,
     rhs_Tb_numpy,
@@ -25,12 +25,12 @@ from pyceles.core.matvec import (
 from pyceles.core.particles import (
     LayeredSphere,
     Particle,
-    SingleBodyRepresentation,
+    ParticleTRepresentation,
     Sphere,
     Spheroid,
     spheres_from_arrays,
 )
-from pyceles.core.tmatrix import sphere_T_diagonal
+from pyceles.core.tmatrix import particle_T_diagonal, sphere_T_diagonal
 from pyceles.core.translation import RadialLUT, translation_ab5_table
 
 
@@ -43,8 +43,42 @@ class _DenseTestParticle(Particle):
         return float(self.circumscribing)
 
     @property
-    def single_body_representation(self) -> SingleBodyRepresentation:
+    def t_operator_representation(self) -> ParticleTRepresentation:
         return "dense"
+
+
+@dataclass(frozen=True)
+class _ForcedRepresentationParticle(Particle):
+    base_particle: Particle
+    representation: ParticleTRepresentation
+
+    def circumscribing_radius(self) -> float:
+        return float(self.base_particle.circumscribing_radius())
+
+    @property
+    def t_operator_representation(self) -> ParticleTRepresentation:
+        return self.representation
+
+
+def _wrapped_particle_t_diag(group_particles, context):
+    diag_rows = []
+    for wrapped in group_particles:
+        base = wrapped.base_particle  # type: ignore[attr-defined]
+        Td = particle_T_diagonal(
+            lmax=context.lmax,
+            k_medium=context.k,
+            particle=base,
+            n_medium=context.n_medium,
+        )
+        diag_rows.append(
+            np.concatenate(
+                [
+                    np.repeat(Td[1][1:], 2 * np.arange(1, context.lmax + 1) + 1),
+                    np.repeat(Td[2][1:], 2 * np.arange(1, context.lmax + 1) + 1),
+                ]
+            )
+        )
+    return np.asarray(diag_rows, dtype=context.dtype)
 
 
 def _sample_problem():
@@ -100,7 +134,7 @@ def test_prepare_matvec_matches_explicit_operator_kernels():
     np.testing.assert_allclose(rhs_prepared, rhs_ref, rtol=1e-12, atol=1e-12)
 
 
-def test_prepare_matvec_exposes_composite_single_body_operator():
+def test_prepare_matvec_exposes_composite_particle_t_operator():
     lmax, k, _, _, _, particles, n_medium, x, _ = _sample_problem()
     prepared = prepare_matvec(
         lmax=lmax,
@@ -111,23 +145,23 @@ def test_prepare_matvec_exposes_composite_single_body_operator():
         cache_translation_blocks=False,
     )
 
-    assert isinstance(prepared.single_body, CompositeSingleBodyOperator)
-    assert len(prepared.single_body.groups) == 1
-    group = prepared.single_body.groups[0]
+    assert isinstance(prepared.particle_t, CompositeParticleTOperator)
+    assert len(prepared.particle_t.groups) == 1
+    group = prepared.particle_t.groups[0]
     assert isinstance(group, DiagonalTGroup)
     np.testing.assert_array_equal(group.particle_indices, np.arange(len(particles), dtype=np.int64))
 
     Nm = n_modes(lmax)
     x2 = np.asarray(x).reshape(len(particles), Nm)
     np.testing.assert_allclose(
-        prepared.single_body.apply(x),
+        prepared.particle_t.apply(x),
         (group.T_diag * x2).reshape(-1),
         rtol=1e-12,
         atol=1e-12,
     )
 
 
-def test_plan_single_body_groups_marks_axisymmetric_particles_separately():
+def test_plan_particle_t_groups_marks_axisymmetric_particles_separately():
     _, _, positions, radii, n_particle, _, _, _, _ = _sample_problem()
     particles: list[Particle] = [
         Sphere(
@@ -147,7 +181,7 @@ def test_plan_single_body_groups_marks_axisymmetric_particles_separately():
             refractive_index=complex(n_particle[2]),
         ),
     ]
-    plans = plan_single_body_groups(particles)
+    plans = plan_particle_t_groups(particles)
 
     assert len(plans) == 2
     assert plans[0].representation == "diagonal"
@@ -206,7 +240,7 @@ def test_prepare_matvec_accepts_custom_dense_group_factory():
         base[0, 1] = 0.25 - 0.1j
         return base[None, :, :]
 
-    factories = SingleBodyGroupFactories(dense=make_dense_group_factory(provide_dense_blocks))
+    factories = ParticleTGroupFactories(dense=make_dense_group_factory(provide_dense_blocks))
     prepared = prepare_matvec(
         lmax=lmax,
         k=k,
@@ -214,11 +248,11 @@ def test_prepare_matvec_accepts_custom_dense_group_factory():
         n_medium=n_medium,
         radial_lut_dr=0.5,
         cache_translation_blocks=False,
-        single_body_group_factories=factories,
+        particle_t_group_factories=factories,
     )
 
-    assert isinstance(prepared.single_body, CompositeSingleBodyOperator)
-    assert isinstance(prepared.single_body.groups[1], DenseTGroup)
+    assert isinstance(prepared.particle_t, CompositeParticleTOperator)
+    assert isinstance(prepared.particle_t.groups[1], DenseTGroup)
     rhs = prepared.rhs_Tb(b[: 2 * n_modes(lmax)])
     y_dense = (
         assemble_dense_A_numpy(prepared, show_progress=False, use_cache=False, store_blocks=False)
@@ -249,7 +283,7 @@ def test_prepare_matvec_accepts_custom_axisymmetric_group_factory():
     axis_matrix = np.eye(nm, dtype=np.complex128) * (0.8 + 0.1j)
     axis_matrix[0, 2] = 0.15 - 0.05j
 
-    factories = SingleBodyGroupFactories(
+    factories = ParticleTGroupFactories(
         axisymmetric=make_axisymmetric_group_factory(
             apply_subset=lambda x_subset, _particles, _context: x_subset @ axis_matrix.T,
             apply_local_block=lambda local_i, block, _particles, _context: axis_matrix @ block,
@@ -265,12 +299,12 @@ def test_prepare_matvec_accepts_custom_axisymmetric_group_factory():
         n_medium=n_medium,
         radial_lut_dr=0.5,
         cache_translation_blocks=False,
-        single_body_group_factories=factories,
+        particle_t_group_factories=factories,
     )
 
-    assert isinstance(prepared.single_body, CompositeSingleBodyOperator)
-    assert isinstance(prepared.single_body.groups[1], AxisymmetricTGroup)
-    assert prepared.single_body.groups[1].body_metadata is not None
+    assert isinstance(prepared.particle_t, CompositeParticleTOperator)
+    assert isinstance(prepared.particle_t.groups[1], AxisymmetricTGroup)
+    assert prepared.particle_t.groups[1].body_metadata is not None
     y_dense = (
         assemble_dense_A_numpy(prepared, show_progress=False, use_cache=False, store_blocks=False)
         @ x[: 2 * nm]
@@ -279,6 +313,131 @@ def test_prepare_matvec_accepts_custom_axisymmetric_group_factory():
     rhs = prepared.rhs_Tb(b[: 2 * nm])
     np.testing.assert_allclose(y_mv, y_dense, rtol=1e-12, atol=1e-12)
     assert rhs.shape == (2 * nm,)
+
+
+def test_sphere_and_layered_match_when_forced_through_dense_factory():
+    lmax, k, positions, radii, n_particle, _, n_medium, x, b = _sample_problem()
+    base_particles: list[Particle] = [
+        Sphere(
+            position=tuple(positions[0].tolist()),
+            radius=float(radii[0]),
+            refractive_index=complex(n_particle[0]),
+        ),
+        LayeredSphere(
+            position=tuple(positions[1].tolist()),
+            layer_radii=(40.0, float(radii[1])),
+            layer_refractive_indices=(1.7 + 0j, complex(n_particle[1])),
+        ),
+    ]
+    reference = prepare_matvec(
+        lmax=lmax,
+        k=k,
+        particles=base_particles,
+        n_medium=n_medium,
+        radial_lut_dr=0.5,
+        cache_translation_blocks=False,
+    )
+    forced_particles = [
+        _ForcedRepresentationParticle(
+            position=particle.position,
+            base_particle=particle,
+            representation="dense",
+        )
+        for particle in base_particles
+    ]
+
+    factories = ParticleTGroupFactories(
+        dense=make_dense_group_factory(
+            lambda group_particles, context: np.stack(
+                [np.diag(row) for row in _wrapped_particle_t_diag(group_particles, context)],
+                axis=0,
+            )
+        )
+    )
+    forced = prepare_matvec(
+        lmax=lmax,
+        k=k,
+        particles=forced_particles,
+        n_medium=n_medium,
+        radial_lut_dr=0.5,
+        cache_translation_blocks=False,
+        particle_t_group_factories=factories,
+    )
+
+    n = len(base_particles) * n_modes(lmax)
+    np.testing.assert_allclose(
+        forced.apply_A(x[:n]), reference.apply_A(x[:n]), rtol=1e-12, atol=1e-12
+    )
+    np.testing.assert_allclose(
+        forced.rhs_Tb(b[:n]), reference.rhs_Tb(b[:n]), rtol=1e-12, atol=1e-12
+    )
+
+
+def test_sphere_and_layered_match_when_forced_through_axisymmetric_factory():
+    lmax, k, positions, radii, n_particle, _, n_medium, x, b = _sample_problem()
+    base_particles: list[Particle] = [
+        Sphere(
+            position=tuple(positions[0].tolist()),
+            radius=float(radii[0]),
+            refractive_index=complex(n_particle[0]),
+        ),
+        LayeredSphere(
+            position=tuple(positions[1].tolist()),
+            layer_radii=(40.0, float(radii[1])),
+            layer_refractive_indices=(1.7 + 0j, complex(n_particle[1])),
+        ),
+    ]
+    reference = prepare_matvec(
+        lmax=lmax,
+        k=k,
+        particles=base_particles,
+        n_medium=n_medium,
+        radial_lut_dr=0.5,
+        cache_translation_blocks=False,
+    )
+    forced_particles = [
+        _ForcedRepresentationParticle(
+            position=particle.position,
+            base_particle=particle,
+            representation="axisymmetric",
+        )
+        for particle in base_particles
+    ]
+
+    factories = ParticleTGroupFactories(
+        axisymmetric=make_axisymmetric_group_factory(
+            apply_subset=lambda x_subset, group_particles, context: (
+                _wrapped_particle_t_diag(group_particles, context) * x_subset
+            ),
+            apply_local_block=lambda local_i, block, group_particles, context: (
+                _wrapped_particle_t_diag(group_particles, context)[local_i][:, None] * block
+            ),
+            metadata_builder=lambda group_particles, context: {
+                "forced_from_diagonal": True,
+                "n_particles": len(group_particles),
+                "n_modes": context.n_modes,
+            },
+        )
+    )
+    forced = prepare_matvec(
+        lmax=lmax,
+        k=k,
+        particles=forced_particles,
+        n_medium=n_medium,
+        radial_lut_dr=0.5,
+        cache_translation_blocks=False,
+        particle_t_group_factories=factories,
+    )
+
+    n = len(base_particles) * n_modes(lmax)
+    assert isinstance(forced.particle_t, CompositeParticleTOperator)
+    assert isinstance(forced.particle_t.groups[0], AxisymmetricTGroup)
+    np.testing.assert_allclose(
+        forced.apply_A(x[:n]), reference.apply_A(x[:n]), rtol=1e-12, atol=1e-12
+    )
+    np.testing.assert_allclose(
+        forced.rhs_Tb(b[:n]), reference.rhs_Tb(b[:n]), rtol=1e-12, atol=1e-12
+    )
 
 
 def test_precompute_t_diagonal_matches_per_sphere_reference():

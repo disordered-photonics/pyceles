@@ -6,7 +6,7 @@ import pytest
 from pyceles.core.fields import PlaneWave
 from pyceles.core.indexing import n_modes
 from pyceles.core.matvec import (
-    CompositeSingleBodyOperator,
+    CompositeParticleTOperator,
     DenseTGroup,
     DiagonalTGroup,
     PreparedOperator,
@@ -164,7 +164,7 @@ def test_grid_block_preconditioner_handles_mixed_diagonal_and_dense_groups():
         ),
         dtype=np.dtype(prepared.dtype),
     )
-    mixed_single_body = CompositeSingleBodyOperator(
+    mixed_particle_t = CompositeParticleTOperator(
         lmax=prepared.lmax,
         n_particles=prepared.positions.shape[0],
         groups=(diagonal_group, dense_group),
@@ -174,7 +174,7 @@ def test_grid_block_preconditioner_handles_mixed_diagonal_and_dense_groups():
         lmax=prepared.lmax,
         k=prepared.k,
         positions=prepared.positions,
-        single_body=mixed_single_body,
+        particle_t=mixed_particle_t,
         coupling=prepared.coupling,
         dtype=np.dtype(prepared.dtype),
     )

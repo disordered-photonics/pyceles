@@ -221,7 +221,7 @@ def make_grid_block_preconditioner(
     Because local assembly goes through the prepared-operator boundary, this
     routine is representation-agnostic: the same code can precondition diagonal
     spheres, layered spheres, or future mixed clusters as long as the
-    single-body operator can left-apply each particle-local `T_i`.
+    particle-local T operator can left-apply each particle-local `T_i`.
     """
     import scipy.linalg
 
