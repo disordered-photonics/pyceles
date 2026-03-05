@@ -18,7 +18,7 @@ from pyceles.core.matvec import (
     assemble_dense_A_numpy,
     prepare_matvec,
 )
-from pyceles.core.particles import Ellipsoid, LayeredSphere, Particle, Sphere
+from pyceles.core.particles import LayeredSphere, Particle, Sphere, Spheroid
 from pyceles.core.projection import project_source_to_svwf
 from pyceles.core.sources import (
     DipoleCollection,
@@ -139,7 +139,7 @@ def _normalize_particle_geometry(
             n_eff.append(complex(p.refractive_index))
         elif isinstance(p, LayeredSphere):
             n_eff.append(complex(p.layer_refractive_indices[-1]))
-        elif isinstance(p, Ellipsoid):
+        elif isinstance(p, Spheroid):
             n_eff.append(complex(p.refractive_index))
         else:
             raise TypeError(

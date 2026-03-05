@@ -99,7 +99,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   removed.
 - Added canonical particle-construction helpers
   (`spheres_from_arrays`, `layered_spheres_from_arrays`,
-  `ellipsoids_from_arrays`).
+  `spheroids_from_arrays`).
+- Breaking: renamed previous `Ellipsoid` placeholder references to
+  `Spheroid` across code/docs/tests (no compatibility aliases kept).
 - Breaking: HDF5 geometry snapshots no longer persist compatibility
   `geometry/n_particle`; geometry payloads are now strictly particle-native
   (`geometry/particles`) with no persisted generic `positions`/`radii` tables.

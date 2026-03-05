@@ -35,13 +35,13 @@ from .matvec import (
     rhs_Tb_numpy,
 )
 from .particles import (
-    Ellipsoid,
     LayeredSphere,
     Particle,
     Sphere,
-    ellipsoids_from_arrays,
+    Spheroid,
     layered_spheres_from_arrays,
     spheres_from_arrays,
+    spheroids_from_arrays,
 )
 from .tmatrix import (
     layered_internal_ab_ratios,
@@ -52,7 +52,7 @@ from .tmatrix import (
 )
 
 __all__ = [
-    "Ellipsoid",
+    "Spheroid",
     "AngularSpectrumSource",
     "BesselBeam",
     "CartesianPolarizedBesselBeam",
@@ -74,7 +74,7 @@ __all__ = [
     "Sphere",
     "spheres_from_arrays",
     "layered_spheres_from_arrays",
-    "ellipsoids_from_arrays",
+    "spheroids_from_arrays",
     "assemble_dense_A_numpy",
     "apply_A_numpy",
     "apply_W_numpy",

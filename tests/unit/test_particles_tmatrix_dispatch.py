@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from pyceles.core.particles import Ellipsoid, LayeredSphere, Sphere
+from pyceles.core.particles import LayeredSphere, Sphere, Spheroid
 from pyceles.core.tmatrix import (
     layered_internal_ab_ratios,
     layered_sphere_T_diagonal,
@@ -74,13 +74,14 @@ def test_particle_internal_ratios_layered_returns_core_regular_ratios():
     np.testing.assert_allclose(out[2], ref[2]["A"][0, :], rtol=1e-12, atol=1e-12)
 
 
-def test_particle_t_diagonal_ellipsoid_placeholder_raises():
-    p_ellip = Ellipsoid(
+def test_particle_t_diagonal_spheroid_placeholder_raises():
+    p_spheroid = Spheroid(
         position=(0.0, 0.0, 0.0),
-        semi_axes=(80.0, 90.0, 110.0),
+        equatorial_radius=90.0,
+        polar_radius=110.0,
         refractive_index=1.5 + 0.0j,
     )
     with pytest.raises(NotImplementedError):
         particle_internal_ratios(
-            lmax=3, k_medium=2.0 * np.pi / 550.0, particle=p_ellip, n_medium=1.0 + 0j
+            lmax=3, k_medium=2.0 * np.pi / 550.0, particle=p_spheroid, n_medium=1.0 + 0j
         )

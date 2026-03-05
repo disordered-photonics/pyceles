@@ -36,7 +36,7 @@ from __future__ import annotations
 import numpy as np
 from scipy.special import spherical_jn, spherical_yn
 
-from .particles import Ellipsoid, LayeredSphere, Particle, Sphere
+from .particles import LayeredSphere, Particle, Sphere, Spheroid
 
 
 def _riccati_jh(
@@ -491,7 +491,7 @@ def particle_T_diagonal(
             n_medium=n_medium,
             sign=sign,
         )
-    if isinstance(particle, Ellipsoid):
+    if isinstance(particle, Spheroid):
         raise NotImplementedError(_unsupported_particle_message(particle))
     raise TypeError(f"Unsupported particle instance: {type(particle)!r}")
 
@@ -530,7 +530,7 @@ def particle_internal_ratios(
             1: np.asarray(ratios[1]["A"][0, :], dtype=np.complex128),
             2: np.asarray(ratios[2]["A"][0, :], dtype=np.complex128),
         }
-    if isinstance(particle, Ellipsoid):
+    if isinstance(particle, Spheroid):
         raise NotImplementedError(_unsupported_particle_message(particle))
     raise TypeError(f"Unsupported particle instance: {type(particle)!r}")
 

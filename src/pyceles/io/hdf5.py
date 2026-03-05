@@ -7,7 +7,7 @@ from typing import Any, Mapping
 import h5py
 import numpy as np
 
-from pyceles.core.particles import Ellipsoid, LayeredSphere, Particle, Sphere
+from pyceles.core.particles import LayeredSphere, Particle, Sphere, Spheroid
 
 
 def _pathlike(path: str | Path) -> str:
@@ -81,10 +81,19 @@ def _write_particle_descriptors(
                 np.asarray(particle.layer_refractive_indices, dtype=np.complex128),
                 compression=compression,
             )
-        elif isinstance(particle, Ellipsoid):
-            pgroup.attrs["type"] = "Ellipsoid"
+        elif isinstance(particle, Spheroid):
+            pgroup.attrs["type"] = "Spheroid"
             _write_dataset(
-                pgroup, "semi_axes", np.asarray(particle.semi_axes, dtype=float), compression=None
+                pgroup,
+                "equatorial_radius",
+                np.asarray(float(particle.equatorial_radius), dtype=float),
+                compression=None,
+            )
+            _write_dataset(
+                pgroup,
+                "polar_radius",
+                np.asarray(float(particle.polar_radius), dtype=float),
+                compression=None,
             )
             _write_dataset(
                 pgroup,
@@ -145,13 +154,17 @@ def _load_particle_descriptors(group: h5py.Group) -> tuple[Particle, ...]:
                 )
             )
             continue
-        if kind == "Ellipsoid":
-            axes_arr = np.asarray(pgroup["semi_axes"][...], dtype=float).reshape(3)
+        if kind == "Spheroid":
             euler_arr = np.asarray(pgroup["euler_angles"][...], dtype=float).reshape(3)
             particles.append(
-                Ellipsoid(
+                Spheroid(
                     position=pos,
-                    semi_axes=(float(axes_arr[0]), float(axes_arr[1]), float(axes_arr[2])),
+                    equatorial_radius=float(
+                        np.asarray(pgroup["equatorial_radius"][...], dtype=float).reshape(())
+                    ),
+                    polar_radius=float(
+                        np.asarray(pgroup["polar_radius"][...], dtype=float).reshape(())
+                    ),
                     refractive_index=complex(
                         np.asarray(pgroup["refractive_index"][...]).reshape(())
                     ),

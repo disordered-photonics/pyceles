@@ -1,6 +1,6 @@
 import numpy as np
 
-from pyceles.core.particles import Ellipsoid, LayeredSphere, Sphere
+from pyceles.core.particles import LayeredSphere, Sphere, Spheroid
 from pyceles.io.hdf5 import (
     load_far_field_h5,
     load_geometry_h5,
@@ -106,9 +106,10 @@ def test_geometry_particle_descriptor_roundtrip(tmp_path):
             layer_radii=(60.0, 110.0),
             layer_refractive_indices=(2.1 + 0.0j, 1.7 + 0.03j),
         ),
-        Ellipsoid(
+        Spheroid(
             position=(-150.0, 10.0, 25.0),
-            semi_axes=(80.0, 60.0, 40.0),
+            equatorial_radius=80.0,
+            polar_radius=40.0,
             refractive_index=1.8 + 0.0j,
             euler_angles=(0.2, 0.4, 0.6),
         ),

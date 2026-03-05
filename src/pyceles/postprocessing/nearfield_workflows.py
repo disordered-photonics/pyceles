@@ -153,7 +153,7 @@ def compute_near_field_components(
             center = np.asarray(p.position, dtype=float).reshape(3)
             rr = float(p.circumscribing_radius())
             R = pts - center[None, :]
-            # TODO(ellipsoids): circumscribing-radius masking is exact for
+            # TODO(spheroids): circumscribing-radius masking is exact for
             # spherical particle families only. Introduce particle-native
             # point-containment capability before enabling non-spherical
             # internal-field replacement here.

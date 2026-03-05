@@ -893,7 +893,7 @@ def _compute_internal_field_particles(
 
         R = pts - center[None, :]
         r2 = np.sum(R * R, axis=1)
-        # TODO(ellipsoids): this is exact for concentric layered spheres.
+        # TODO(spheroids): this is exact for concentric layered spheres.
         # Introduce particle-native point-containment capability before adding
         # non-spherical internal-field kernels.
         mask = r2 < (outer_radius**2)

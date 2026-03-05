@@ -13,7 +13,7 @@ class Particle:
 
     Notes
     -----
-    Only `Sphere` is currently supported in the active numerical kernels.
+    `Sphere` and `LayeredSphere` are currently supported in active kernels.
     Other shapes are included as explicit placeholders to expose planned API.
     """
 
@@ -70,22 +70,23 @@ class LayeredSphere(Particle):
 
 
 @dataclass(frozen=True)
-class Ellipsoid(Particle):
-    """Placeholder for future ellipsoidal T-matrix support."""
+class Spheroid(Particle):
+    """Placeholder for future spheroidal T-matrix support."""
 
-    semi_axes: Tuple[float, float, float]
+    equatorial_radius: float
+    polar_radius: float
     refractive_index: complex = 1.5 + 0j
     euler_angles: Tuple[float, float, float] = (0.0, 0.0, 0.0)
 
     def __post_init__(self) -> None:
-        if len(self.semi_axes) != 3:
-            raise ValueError("semi_axes must be a 3-tuple (a, b, c).")
-        if any(float(a) <= 0.0 for a in self.semi_axes):
-            raise ValueError("All semi-axes must be positive.")
+        if float(self.equatorial_radius) <= 0.0:
+            raise ValueError("equatorial_radius must be positive.")
+        if float(self.polar_radius) <= 0.0:
+            raise ValueError("polar_radius must be positive.")
 
     def circumscribing_radius(self) -> float:
-        """Largest semi-axis, i.e. radius of the minimal enclosing sphere."""
-        return float(max(self.semi_axes))
+        """Largest semi-axis of the spheroid."""
+        return float(max(float(self.equatorial_radius), float(self.polar_radius)))
 
 
 def _as_positions_array(positions: Sequence[Sequence[float]] | np.ndarray) -> np.ndarray:
@@ -223,32 +224,45 @@ def layered_spheres_from_arrays(
     return out
 
 
-def ellipsoids_from_arrays(
+def _as_positive_float_vector(
+    values: Sequence[float] | np.ndarray | float,
+    *,
+    n: int,
+    name: str,
+) -> np.ndarray:
+    """Normalize scalar-or-vector positive float inputs to length `n`."""
+    arr = np.asarray(values, dtype=float)
+    if arr.ndim == 0:
+        out = np.full((n,), float(arr), dtype=float)
+    else:
+        out = arr.reshape(-1).astype(float, copy=False)
+        if out.shape[0] != n:
+            raise ValueError(
+                f"`{name}` length ({out.shape[0]}) must match number of particles ({n})."
+            )
+    if np.any(~np.isfinite(out)) or np.any(out <= 0.0):
+        raise ValueError(f"`{name}` must contain finite strictly positive values.")
+    return out
+
+
+def spheroids_from_arrays(
     *,
     positions: Sequence[Sequence[float]] | np.ndarray,
-    semi_axes: Sequence[Sequence[float]] | Sequence[float] | np.ndarray,
+    equatorial_radii: Sequence[float] | np.ndarray | float,
+    polar_radii: Sequence[float] | np.ndarray | float,
     refractive_indices: Sequence[complex] | np.ndarray | complex,
     euler_angles: Sequence[Sequence[float]] | Sequence[float] | np.ndarray = (0.0, 0.0, 0.0),
     into: list[Particle] | None = None,
 ) -> list[Particle]:
-    """Create/extend particle lists with homogeneous ellipsoid descriptors.
+    """Create/extend particle lists with homogeneous spheroid descriptors.
 
-    This is currently a geometry helper only; full ellipsoidal scattering
+    This is currently a geometry helper only; full spheroidal scattering
     kernels are planned for future integration.
     """
     pos = _as_positions_array(positions)
     n = int(pos.shape[0])
-    axes = np.asarray(semi_axes, dtype=float)
-    if axes.ndim == 1:
-        if axes.shape[0] != 3:
-            raise ValueError(f"`semi_axes` must have shape (3,) or (N,3). Got {axes.shape}.")
-        axes = np.broadcast_to(axes.reshape(1, 3), (n, 3)).copy()
-    elif axes.ndim == 2 and axes.shape == (n, 3):
-        axes = axes.copy()
-    else:
-        raise ValueError(f"`semi_axes` must have shape (3,) or (N,3). Got {axes.shape}.")
-    if np.any(~np.isfinite(axes)) or np.any(axes <= 0.0):
-        raise ValueError("`semi_axes` entries must be finite and strictly positive.")
+    eq = _as_positive_float_vector(equatorial_radii, n=n, name="equatorial_radii")
+    po = _as_positive_float_vector(polar_radii, n=n, name="polar_radii")
 
     eul = np.asarray(euler_angles, dtype=float)
     if eul.ndim == 1:
@@ -265,12 +279,13 @@ def ellipsoids_from_arrays(
     n_part = _as_complex_vector(refractive_indices, n=n, name="refractive_indices")
     out = [] if into is None else into
     out.extend(
-        Ellipsoid(
+        Spheroid(
             position=(float(p[0]), float(p[1]), float(p[2])),
-            semi_axes=(float(a[0]), float(a[1]), float(a[2])),
+            equatorial_radius=float(a_eq),
+            polar_radius=float(a_po),
             refractive_index=complex(nr),
             euler_angles=(float(ang[0]), float(ang[1]), float(ang[2])),
         )
-        for p, a, nr, ang in zip(pos, axes, n_part, eul)
+        for p, a_eq, a_po, nr, ang in zip(pos, eq, po, n_part, eul)
     )
     return out
