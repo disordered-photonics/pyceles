@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from pyceles.core.indexing import n_modes
 from pyceles.core.matvec import (
+    CompositeSingleBodyOperator,
+    DiagonalTGroup,
     apply_A_numpy,
     assemble_dense_A_numpy,
     estimate_translation_cache_bytes,
+    plan_single_body_groups,
     precompute_T_diagonal,
     prepare_matvec,
     rhs_Tb_numpy,
 )
-from pyceles.core.particles import LayeredSphere, Particle, Sphere, spheres_from_arrays
+from pyceles.core.particles import LayeredSphere, Particle, Sphere, Spheroid, spheres_from_arrays
 from pyceles.core.tmatrix import sphere_T_diagonal
 from pyceles.core.translation import RadialLUT, translation_ab5_table
 
@@ -67,6 +71,89 @@ def test_prepare_matvec_matches_explicit_operator_kernels():
 
     np.testing.assert_allclose(A_prepared, A_ref, rtol=1e-12, atol=1e-12)
     np.testing.assert_allclose(rhs_prepared, rhs_ref, rtol=1e-12, atol=1e-12)
+
+
+def test_prepare_matvec_exposes_composite_single_body_operator():
+    lmax, k, _, _, _, particles, n_medium, x, _ = _sample_problem()
+    prepared = prepare_matvec(
+        lmax=lmax,
+        k=k,
+        particles=particles,
+        n_medium=n_medium,
+        radial_lut_dr=0.5,
+        cache_translation_blocks=False,
+    )
+
+    assert isinstance(prepared.single_body, CompositeSingleBodyOperator)
+    assert len(prepared.single_body.groups) == 1
+    group = prepared.single_body.groups[0]
+    assert isinstance(group, DiagonalTGroup)
+    np.testing.assert_array_equal(group.particle_indices, np.arange(len(particles), dtype=np.int64))
+
+    Nm = n_modes(lmax)
+    x2 = np.asarray(x).reshape(len(particles), Nm)
+    np.testing.assert_allclose(
+        prepared.single_body.apply(x),
+        (group.T_diag * x2).reshape(-1),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+
+
+def test_plan_single_body_groups_marks_axisymmetric_particles_separately():
+    _, _, positions, radii, n_particle, _, _, _, _ = _sample_problem()
+    particles: list[Particle] = [
+        Sphere(
+            position=tuple(positions[0].tolist()),
+            radius=float(radii[0]),
+            refractive_index=complex(n_particle[0]),
+        ),
+        LayeredSphere(
+            position=tuple(positions[1].tolist()),
+            layer_radii=(40.0, float(radii[1])),
+            layer_refractive_indices=(1.7 + 0j, complex(n_particle[1])),
+        ),
+        Spheroid(
+            position=tuple(positions[2].tolist()),
+            equatorial_radius=float(radii[2]),
+            polar_radius=float(radii[2]) * 1.5,
+            refractive_index=complex(n_particle[2]),
+        ),
+    ]
+    plans = plan_single_body_groups(particles)
+
+    assert len(plans) == 2
+    assert plans[0].representation == "diagonal"
+    assert plans[1].representation == "axisymmetric"
+    np.testing.assert_array_equal(plans[0].particle_indices, np.array([0, 1], dtype=np.int64))
+    np.testing.assert_array_equal(plans[1].particle_indices, np.array([2], dtype=np.int64))
+
+
+def test_prepare_matvec_rejects_axisymmetric_particles_with_clear_boundary_error():
+    lmax, k, positions, radii, n_particle, _, n_medium, _, _ = _sample_problem()
+    particles: list[Particle] = [
+        Sphere(
+            position=tuple(positions[0].tolist()),
+            radius=float(radii[0]),
+            refractive_index=complex(n_particle[0]),
+        ),
+        Spheroid(
+            position=tuple(positions[1].tolist()),
+            equatorial_radius=float(radii[1]),
+            polar_radius=float(radii[1]) * 1.25,
+            refractive_index=complex(n_particle[1]),
+        ),
+    ]
+
+    with pytest.raises(NotImplementedError, match="axisymmetric"):
+        prepare_matvec(
+            lmax=lmax,
+            k=k,
+            particles=particles,
+            n_medium=n_medium,
+            radial_lut_dr=0.5,
+            cache_translation_blocks=False,
+        )
 
 
 def test_precompute_t_diagonal_matches_per_sphere_reference():

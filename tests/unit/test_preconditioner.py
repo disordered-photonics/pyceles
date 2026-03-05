@@ -5,8 +5,15 @@ import pytest
 
 from pyceles.core.fields import PlaneWave
 from pyceles.core.indexing import n_modes
-from pyceles.core.matvec import assemble_dense_A_numpy, prepare_matvec
-from pyceles.core.particles import spheres_from_arrays
+from pyceles.core.matvec import (
+    CompositeSingleBodyOperator,
+    DenseTGroup,
+    DiagonalTGroup,
+    PreparedOperator,
+    assemble_dense_A_numpy,
+    prepare_matvec,
+)
+from pyceles.core.particles import layered_spheres_from_arrays, spheres_from_arrays
 from pyceles.linear.preconditioner import make_grid_block_preconditioner, regular_grid_partition
 from pyceles.simulation import Simulation, SimulationConfig
 
@@ -31,6 +38,47 @@ def _sample_prepared():
             positions=positions,
             radii=radii,
             refractive_indices=n_particle,
+        ),
+        n_medium=1.0 + 0j,
+        radial_lut_dr=1.0,
+        cache_translation_blocks=False,
+        operator_dtype=np.complex128,
+    )
+    return prepared
+
+
+def _sample_layered_prepared():
+    lmax = 2
+    k = 2.0 * np.pi / 550.0
+    positions = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [150.0, -10.0, 35.0],
+            [-125.0, 55.0, -25.0],
+        ],
+        dtype=float,
+    )
+    prepared = prepare_matvec(
+        lmax=lmax,
+        k=k,
+        particles=layered_spheres_from_arrays(
+            positions=positions,
+            layer_radii=np.array(
+                [
+                    [40.0, 80.0],
+                    [35.0, 82.0],
+                    [38.0, 79.0],
+                ],
+                dtype=float,
+            ),
+            layer_refractive_indices=np.array(
+                [
+                    [1.70 + 0.0j, 1.59 + 0.0j],
+                    [1.68 + 0.0j, 1.61 + 0.0j],
+                    [1.72 + 0.0j, 1.58 + 0.0j],
+                ],
+                dtype=np.complex128,
+            ),
         ),
         n_medium=1.0 + 0j,
         radial_lut_dr=1.0,
@@ -71,6 +119,78 @@ def test_grid_block_preconditioner_exact_if_single_block_contains_all_particles(
     n = prepared.positions.shape[0] * n_modes(prepared.lmax)
     rng = np.random.default_rng(12)
     x = rng.standard_normal(n) + 1j * rng.standard_normal(n)
+    y = A @ x
+    x_rec = precond(y)
+    np.testing.assert_allclose(x_rec, x, rtol=1e-10, atol=1e-10)
+
+
+def test_grid_block_preconditioner_exact_for_layered_spheres_too():
+    prepared = _sample_layered_prepared()
+    A = assemble_dense_A_numpy(prepared, show_progress=False, use_cache=False, store_blocks=False)
+    precond = make_grid_block_preconditioner(
+        prepared,
+        subdivisions=1,
+        cubic_bbox=True,
+        show_progress=False,
+    )
+
+    n = prepared.positions.shape[0] * n_modes(prepared.lmax)
+    rng = np.random.default_rng(21)
+    x = rng.standard_normal(n) + 1j * rng.standard_normal(n)
+    y = A @ x
+    x_rec = precond(y)
+    np.testing.assert_allclose(x_rec, x, rtol=1e-10, atol=1e-10)
+
+
+def test_grid_block_preconditioner_handles_mixed_diagonal_and_dense_groups():
+    prepared = _sample_prepared()
+    Nm = n_modes(prepared.lmax)
+
+    diagonal_group = DiagonalTGroup(
+        particle_indices=np.array([0], dtype=np.int64),
+        T_M=prepared.T_M[[0]],
+        T_N=prepared.T_N[[0]],
+        T_diag=prepared.T_diag[[0]],
+        dtype=np.dtype(prepared.dtype),
+    )
+    dense_group = DenseTGroup(
+        particle_indices=np.array([1, 2], dtype=np.int64),
+        T_blocks=np.stack(
+            [
+                np.diag(prepared.T_diag[1]),
+                np.diag(prepared.T_diag[2]),
+            ],
+            axis=0,
+        ),
+        dtype=np.dtype(prepared.dtype),
+    )
+    mixed_single_body = CompositeSingleBodyOperator(
+        lmax=prepared.lmax,
+        n_particles=prepared.positions.shape[0],
+        groups=(diagonal_group, dense_group),
+        dtype=np.dtype(prepared.dtype),
+    )
+    mixed_prepared = PreparedOperator(
+        lmax=prepared.lmax,
+        k=prepared.k,
+        positions=prepared.positions,
+        single_body=mixed_single_body,
+        coupling=prepared.coupling,
+        dtype=np.dtype(prepared.dtype),
+    )
+
+    A = assemble_dense_A_numpy(
+        mixed_prepared, show_progress=False, use_cache=False, store_blocks=False
+    )
+    precond = make_grid_block_preconditioner(
+        mixed_prepared,
+        subdivisions=1,
+        cubic_bbox=True,
+        show_progress=False,
+    )
+
+    rng = np.random.default_rng(31)
+    x = rng.standard_normal(3 * Nm) + 1j * rng.standard_normal(3 * Nm)
     y = A @ x
     x_rec = precond(y)
     np.testing.assert_allclose(x_rec, x, rtol=1e-10, atol=1e-10)

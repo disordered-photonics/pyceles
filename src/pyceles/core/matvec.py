@@ -19,6 +19,18 @@ This file provides a correctness-first O(N^2) implementation:
 - rhs_Tb_numpy:  r = T b
 - assemble_dense_A_numpy: explicit dense A = I - T W (small systems only)
 
+Architecture note
+-----------------
+The operator is intentionally split into:
+- particle-local single-body scattering `T`
+- inter-particle coupling `W`
+
+That boundary is the key refactor for future work. Spheres and layered spheres
+still use a diagonal fast path today, but the solver no longer assumes that all
+particles do. Future axisymmetric and fully general particles can slot in by
+implementing new single-body groups without rewriting `Simulation`, the direct
+solver cache, or the block preconditioner.
+
 Performance notes
 -----------------
 Even for the O(N^2) reference, it is crucial to precompute reusable quantities:
@@ -47,7 +59,7 @@ and pair translation blocks.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable, Optional, Sequence
+from typing import Callable, Optional, Protocol, Sequence
 
 import numpy as np
 import numpy.typing as npt
@@ -55,7 +67,7 @@ from tqdm.auto import tqdm
 
 from .geometry_bounds import conservative_set_diameter
 from .indexing import n_modes
-from .particles import Particle, Sphere
+from .particles import Particle, SingleBodyRepresentation, Sphere
 from .tmatrix import particle_T_diagonal, sphere_T_diagonal
 from .translation import RadialLUT, translation_ab5_table, translation_block
 
@@ -69,22 +81,280 @@ class Geometry:
     positions: Array  # (Ns,3)
 
 
-@dataclass
-class PreparedMatvec:
-    """Prepared data for repeated many-sphere matvec calls.
+@dataclass(frozen=True)
+class SingleBodyGroupPlan:
+    """Planned subset of particles sharing one prepared `T` representation.
 
-    This keeps expensive geometry/material precomputations out of GMRES inner
-    iterations. Users can keep this object and call `apply_A` / `rhs_Tb`.
+    Planning happens before expensive preparation. This keeps representation
+    policy in one place so future axisymmetric and dense groups can be added
+    without scattering `isinstance(...)` branches through the solver stack.
     """
 
-    lmax: int
-    # This solver path assumes a homogeneous non-absorbing host medium.
-    # Therefore the medium wavenumber k is real-valued in all translation kernels.
-    k: float
-    positions: Array
+    representation: SingleBodyRepresentation
+    particle_indices: Array
+
+
+class PreparedSingleBodyGroup(Protocol):
+    """Prepared subset of particles sharing one `T` representation.
+
+    Every group exposes the same small surface:
+    - apply `T` to stacked coefficients on its own particle subset,
+    - left-apply one local `T_i` block during dense assembly/preconditioning,
+    - optionally expose cheap diagonal views when the representation has them.
+    """
+
+    particle_indices: Array
+    dtype: np.dtype
+
+    def apply_subset(self, x_subset: Array) -> Array: ...
+
+    def rhs_subset(self, b_subset: Array) -> Array: ...
+
+    def apply_local_block(self, local_particle_index: int, block: Array) -> Array: ...
+
+    def mode_diagonal(self) -> Array | None: ...
+
+    def degree_diagonals(self) -> tuple[Array, Array] | None: ...
+
+
+@dataclass
+class DiagonalTGroup:
+    """Diagonal single-body operator for particles with per-mode T factors.
+
+    This is the main performance path for spheres and layered spheres. The
+    prepared data stay compact and `T` application remains elementwise, which is
+    why the general operator refactor does not need to penalize spherical runs.
+    """
+
+    particle_indices: Array
     T_M: Array
     T_N: Array
     T_diag: Array
+    dtype: np.dtype = np.dtype(np.complex128)
+
+    def apply_subset(self, x_subset: Array) -> Array:
+        """Apply `T` to coefficients already sliced to this group."""
+        arr = np.asarray(x_subset, dtype=self.dtype)
+        return self.T_diag * arr
+
+    def rhs_subset(self, b_subset: Array) -> Array:
+        """Apply `T` to incident coefficients on this group subset."""
+        return self.apply_subset(b_subset)
+
+    def apply_local_block(self, local_particle_index: int, block: Array) -> Array:
+        """Left-multiply one pair block by the local particle T operator."""
+        return self.T_diag[int(local_particle_index)][:, None] * np.asarray(block, dtype=self.dtype)
+
+    def mode_diagonal(self) -> Array | None:
+        """Return the stored per-particle mode diagonals."""
+        return np.asarray(self.T_diag, dtype=self.dtype)
+
+    def degree_diagonals(self) -> tuple[Array, Array] | None:
+        """Return the stored per-particle `(T_M, T_N)` diagonals."""
+        return np.asarray(self.T_M, dtype=self.dtype), np.asarray(self.T_N, dtype=self.dtype)
+
+
+@dataclass
+class DenseTGroup:
+    """Dense single-body operator for fully general particle-local T blocks.
+
+    This is the generic fallback for imported or non-axisymmetric particles.
+    It is intentionally separate from the diagonal path so mixed clusters can
+    keep spherical particles on the cheap representation while only the truly
+    general subset pays dense-block storage and matvec costs.
+    """
+
+    particle_indices: Array
+    T_blocks: Array
+    dtype: np.dtype = np.dtype(np.complex128)
+
+    def __post_init__(self) -> None:
+        blocks = np.asarray(self.T_blocks, dtype=self.dtype)
+        if blocks.ndim != 3 or blocks.shape[1] != blocks.shape[2]:
+            raise ValueError(f"`T_blocks` must have shape (Ng, Nm, Nm). Got {blocks.shape}.")
+        ids = np.asarray(self.particle_indices, dtype=np.int64).reshape(-1)
+        if blocks.shape[0] != ids.size:
+            raise ValueError(
+                "Dense single-body group must have one T block per particle. "
+                f"Got {blocks.shape[0]} blocks for {ids.size} particles."
+            )
+        self.particle_indices = ids
+        self.T_blocks = blocks
+
+    def apply_subset(self, x_subset: Array) -> Array:
+        """Apply dense per-particle T blocks to one subset of coefficients."""
+        arr = np.asarray(x_subset, dtype=self.dtype)
+        return np.einsum("gij,gj->gi", self.T_blocks, arr, optimize=True)
+
+    def rhs_subset(self, b_subset: Array) -> Array:
+        """Apply dense per-particle T blocks to incident coefficients."""
+        return self.apply_subset(b_subset)
+
+    def apply_local_block(self, local_particle_index: int, block: Array) -> Array:
+        """Left-multiply one pair block by the local dense particle T block."""
+        return self.T_blocks[int(local_particle_index)] @ np.asarray(block, dtype=self.dtype)
+
+    def mode_diagonal(self) -> Array | None:
+        """Dense groups do not expose cheap diagonal-mode views."""
+        return None
+
+    def degree_diagonals(self) -> tuple[Array, Array] | None:
+        """Dense groups do not expose degree-diagonal TE/TM factors."""
+        return None
+
+
+@dataclass
+class AxisymmetricTGroup:
+    """Placeholder for future axisymmetric particle-local T operators.
+
+    Axisymmetric particles are expected to use a narrower representation than
+    generic dense blocks, for example body-frame `m` blocks combined with SVWF
+    rotations. This class exists now to stabilize the operator boundary before
+    the first spheroid backend lands, so later work can focus on physics and
+    numerics rather than reopening solver architecture yet again.
+    """
+
+    particle_indices: Array
+    body_metadata: object | None = None
+    dtype: np.dtype = np.dtype(np.complex128)
+
+    def apply_subset(self, x_subset: Array) -> Array:
+        raise NotImplementedError(
+            "Axisymmetric single-body operators are planned but not implemented yet."
+        )
+
+    def rhs_subset(self, b_subset: Array) -> Array:
+        raise NotImplementedError(
+            "Axisymmetric single-body operators are planned but not implemented yet."
+        )
+
+    def apply_local_block(self, local_particle_index: int, block: Array) -> Array:
+        raise NotImplementedError(
+            "Axisymmetric single-body operators are planned but not implemented yet."
+        )
+
+    def mode_diagonal(self) -> Array | None:
+        return None
+
+    def degree_diagonals(self) -> tuple[Array, Array] | None:
+        return None
+
+
+class SingleBodyOperator(Protocol):
+    """Prepared particle-local scattering operator `T`."""
+
+    lmax: int
+    n_particles: int
+    dtype: np.dtype
+
+    def apply(self, x: Array) -> Array: ...
+
+    def rhs(self, b: Array) -> Array: ...
+
+    def apply_particle_block(self, particle_index: int, block: Array) -> Array: ...
+
+    def mode_diagonal(self) -> Array | None: ...
+
+    def degree_diagonals(self) -> tuple[Array, Array] | None: ...
+
+
+@dataclass
+class CompositeSingleBodyOperator:
+    """Composite particle-local operator supporting mixed T representations.
+
+    A single simulation can therefore combine, for example, diagonal spheres
+    with future axisymmetric spheroids or dense imported T-matrices while
+    preserving one solver and one preconditioner interface.
+    """
+
+    lmax: int
+    n_particles: int
+    groups: Sequence[PreparedSingleBodyGroup]
+    dtype: np.dtype = np.dtype(np.complex128)
+    _particle_to_group: np.ndarray = field(init=False, repr=False)
+    _particle_to_local: np.ndarray = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        Ns = int(self.n_particles)
+        group_of = np.full(Ns, -1, dtype=np.int64)
+        local_of = np.full(Ns, -1, dtype=np.int64)
+        for gidx, group in enumerate(self.groups):
+            ids = np.asarray(group.particle_indices, dtype=np.int64).reshape(-1)
+            if ids.size == 0:
+                raise ValueError("Single-body operator groups must be non-empty.")
+            if np.any(ids < 0) or np.any(ids >= Ns):
+                raise ValueError("Single-body operator group indices out of bounds.")
+            if np.any(group_of[ids] != -1):
+                raise ValueError("Single-body operator groups must not overlap.")
+            group_of[ids] = gidx
+            local_of[ids] = np.arange(ids.size, dtype=np.int64)
+        if np.any(group_of < 0):
+            raise ValueError("Single-body operator groups must cover all particles.")
+        self._particle_to_group = group_of
+        self._particle_to_local = local_of
+
+    @property
+    def n_modes(self) -> int:
+        """Number of SVWF modes per particle."""
+        return n_modes(self.lmax)
+
+    def apply(self, x: Array) -> Array:
+        """Apply `T` to stacked coefficients."""
+        arr = np.asarray(x, dtype=self.dtype).reshape(self.n_particles, self.n_modes)
+        out = np.zeros_like(arr, dtype=self.dtype)
+        for group in self.groups:
+            ids = np.asarray(group.particle_indices, dtype=np.int64)
+            out[ids] = group.apply_subset(arr[ids])
+        return out.reshape(self.n_particles * self.n_modes)
+
+    def rhs(self, b: Array) -> Array:
+        """Apply `T` to stacked incident coefficients."""
+        arr = np.asarray(b, dtype=self.dtype).reshape(self.n_particles, self.n_modes)
+        out = np.zeros_like(arr, dtype=self.dtype)
+        for group in self.groups:
+            ids = np.asarray(group.particle_indices, dtype=np.int64)
+            out[ids] = group.rhs_subset(arr[ids])
+        return out.reshape(self.n_particles * self.n_modes)
+
+    def apply_particle_block(self, particle_index: int, block: Array) -> Array:
+        """Return `T_i @ block` for one destination particle."""
+        i = int(particle_index)
+        gidx = int(self._particle_to_group[i])
+        local = int(self._particle_to_local[i])
+        return self.groups[gidx].apply_local_block(local, block)
+
+    def mode_diagonal(self) -> Array | None:
+        """Return per-particle mode diagonals if every group is diagonal."""
+        out = np.empty((self.n_particles, self.n_modes), dtype=self.dtype)
+        for group in self.groups:
+            ids = np.asarray(group.particle_indices, dtype=np.int64)
+            diag = group.mode_diagonal()
+            if diag is None:
+                return None
+            out[ids] = np.asarray(diag, dtype=self.dtype)
+        return out
+
+    def degree_diagonals(self) -> tuple[Array, Array] | None:
+        """Return per-particle `(T_M, T_N)` diagonals if every group is diagonal."""
+        out_M = np.empty((self.n_particles, self.lmax + 1), dtype=self.dtype)
+        out_N = np.empty((self.n_particles, self.lmax + 1), dtype=self.dtype)
+        for group in self.groups:
+            ids = np.asarray(group.particle_indices, dtype=np.int64)
+            diags = group.degree_diagonals()
+            if diags is None:
+                return None
+            out_M[ids] = np.asarray(diags[0], dtype=self.dtype)
+            out_N[ids] = np.asarray(diags[1], dtype=self.dtype)
+        return out_M, out_N
+
+
+@dataclass
+class PairwiseCouplingOperator:
+    """Prepared pairwise free-space coupling operator `W`."""
+
+    lmax: int
+    k: float
+    positions: Array
     ab5: Array
     radial_lut: RadialLUT
     dtype: np.dtype = np.dtype(np.complex128)
@@ -104,35 +374,12 @@ class PreparedMatvec:
             block_cache=self._W_cache if self.cache_translation_blocks else None,
         )
 
-    def apply_A(self, x: Array) -> Array:
-        """Apply full linear operator `A = I - T W` used by iterative solvers."""
-        return apply_A_numpy(
-            self.lmax,
-            self.k,
-            self.positions,
-            x,
-            T_M=self.T_M,
-            T_N=self.T_N,
-            T_diag=self.T_diag,
-            ab5=self.ab5,
-            dtype=self.dtype,
-            radial_lut=self.radial_lut,
-            block_cache=self._W_cache if self.cache_translation_blocks else None,
-        )
-
-    def rhs_Tb(self, b: Array) -> Array:
-        """Apply right-hand side mapping `b -> T b` in CELES formulation."""
-        return rhs_Tb_numpy(
-            self.lmax, b, T_M=self.T_M, T_N=self.T_N, T_diag=self.T_diag, dtype=self.dtype
-        )
+    def apply(self, x: Array) -> Array:
+        """Protocol-friendly alias for `apply_W`."""
+        return self.apply_W(x)
 
     def populate_translation_cache(self, *, show_progress: bool = False) -> None:
-        """Precompute and cache all pair translation blocks W_ij (i!=j).
-
-        Warning: memory scales as O(N^2 * Nm^2), so this is for small/debug
-        cases only.
-        """
-
+        """Precompute and cache all pair translation blocks W_ij (i!=j)."""
         if not self.cache_translation_blocks:
             return
 
@@ -153,6 +400,193 @@ class PreparedMatvec:
                 ab5=self.ab5,
                 radial_lut=self.radial_lut,
             )
+
+
+@dataclass
+class PreparedOperator:
+    """Prepared linear operator `A = I - T W` with explicit `T`/`W` boundaries."""
+
+    lmax: int
+    k: float
+    positions: Array
+    single_body: SingleBodyOperator
+    coupling: PairwiseCouplingOperator
+    dtype: np.dtype = np.dtype(np.complex128)
+
+    def apply_W(self, x: Array) -> Array:
+        """Apply inter-particle translation operator `W`."""
+        return self.coupling.apply(x)
+
+    def apply_A(self, x: Array) -> Array:
+        """Apply the full linear operator `A = I - T W`."""
+        return np.asarray(x, dtype=self.dtype) - self.single_body.apply(self.apply_W(x))
+
+    def rhs(self, b: Array) -> Array:
+        """Apply right-hand side mapping `b -> T b`."""
+        return self.single_body.rhs(b)
+
+    def rhs_Tb(self, b: Array) -> Array:
+        """Compatibility wrapper for the CELES-form RHS map."""
+        return self.rhs(b)
+
+    def apply_particle_block(self, particle_index: int, block: Array) -> Array:
+        """Return `T_i @ block` for one destination-particle block row."""
+        return self.single_body.apply_particle_block(particle_index, block)
+
+    def populate_translation_cache(self, *, show_progress: bool = False) -> None:
+        """Precompute and cache all pair translation blocks W_ij."""
+        self.coupling.populate_translation_cache(show_progress=show_progress)
+
+    @property
+    def ab5(self) -> Array:
+        return self.coupling.ab5
+
+    @property
+    def radial_lut(self) -> RadialLUT:
+        return self.coupling.radial_lut
+
+    @property
+    def cache_translation_blocks(self) -> bool:
+        return self.coupling.cache_translation_blocks
+
+    @property
+    def _W_cache(self) -> dict[tuple[int, int], Array]:
+        return self.coupling._W_cache
+
+    @property
+    def T_diag(self) -> Array:
+        diag = self.single_body.mode_diagonal()
+        if diag is None:
+            raise NotImplementedError("Prepared operator does not expose diagonal per-mode T data.")
+        return diag
+
+    @property
+    def T_M(self) -> Array:
+        diags = self.single_body.degree_diagonals()
+        if diags is None:
+            raise NotImplementedError("Prepared operator does not expose diagonal T_M/T_N data.")
+        return diags[0]
+
+    @property
+    def T_N(self) -> Array:
+        diags = self.single_body.degree_diagonals()
+        if diags is None:
+            raise NotImplementedError("Prepared operator does not expose diagonal T_M/T_N data.")
+        return diags[1]
+
+
+def plan_single_body_groups(particles: Sequence[Particle]) -> tuple[SingleBodyGroupPlan, ...]:
+    """Plan particle-local `T` groups before preparing concrete operators.
+
+    Grouping by representation keeps the current diagonal sphere path intact and
+    provides a stable insertion point for future axisymmetric and dense
+    implementations. The order is deterministic and follows first appearance in
+    the particle list so diagnostics remain easy to read.
+    """
+
+    if len(particles) == 0:
+        return ()
+
+    grouped: dict[SingleBodyRepresentation, list[int]] = {}
+    order: list[SingleBodyRepresentation] = []
+    for idx, particle in enumerate(particles):
+        rep = particle.single_body_representation
+        if rep not in grouped:
+            grouped[rep] = []
+            order.append(rep)
+        grouped[rep].append(int(idx))
+
+    return tuple(
+        SingleBodyGroupPlan(
+            representation=rep,
+            particle_indices=np.asarray(grouped[rep], dtype=np.int64),
+        )
+        for rep in order
+    )
+
+
+def _prepare_diagonal_group(
+    *,
+    plan: SingleBodyGroupPlan,
+    lmax: int,
+    k: float,
+    particles: Sequence[Particle],
+    n_medium: complex,
+    dtype: np.dtype,
+) -> DiagonalTGroup:
+    """Prepare one diagonal single-body group for diagonal-capable particles.
+
+    This helper isolates the current sphere/layered-sphere preparation logic so
+    later group types can be added alongside it instead of replacing it.
+    """
+
+    ids = np.asarray(plan.particle_indices, dtype=np.int64)
+    group_particles = [particles[int(i)] for i in ids]
+    T_M, T_N = precompute_T_diagonal(
+        lmax=int(lmax),
+        k=float(k),
+        particles=group_particles,
+        n_medium=n_medium,
+        dtype=dtype,
+    )
+    return DiagonalTGroup(
+        particle_indices=ids,
+        T_M=T_M,
+        T_N=T_N,
+        T_diag=_build_T_mode_diagonal(int(lmax), T_M, T_N),
+        dtype=dtype,
+    )
+
+
+def _prepare_single_body_operator(
+    *,
+    lmax: int,
+    k: float,
+    particles: Sequence[Particle],
+    n_medium: complex,
+    dtype: np.dtype,
+) -> CompositeSingleBodyOperator:
+    """Prepare the particle-local operator using planned representation groups.
+
+    Only the diagonal path is active today. Axisymmetric and dense groups are
+    deliberately rejected here, at the representation boundary, so unsupported
+    particles fail early with an architectural message instead of deep inside a
+    diagonal-only kernel.
+    """
+
+    plans = plan_single_body_groups(particles)
+    groups: list[DiagonalTGroup] = []
+    for plan in plans:
+        if plan.representation == "diagonal":
+            groups.append(
+                _prepare_diagonal_group(
+                    plan=plan,
+                    lmax=lmax,
+                    k=k,
+                    particles=particles,
+                    n_medium=n_medium,
+                    dtype=dtype,
+                )
+            )
+            continue
+
+        particle_labels = ", ".join(
+            f"{int(i)}:{type(particles[int(i)]).__name__}"
+            for i in np.asarray(plan.particle_indices)
+        )
+        raise NotImplementedError(
+            "Single-body operator planning selected the "
+            f"'{plan.representation}' representation for particle(s) {particle_labels}, "
+            "but only the diagonal prepared operator is implemented so far. "
+            "The operator boundary is ready for future axisymmetric and dense groups."
+        )
+
+    return CompositeSingleBodyOperator(
+        lmax=int(lmax),
+        n_particles=len(particles),
+        groups=tuple(groups),
+        dtype=dtype,
+    )
 
 
 def _build_T_mode_diagonal(lmax: int, T_M: Array, T_N: Array) -> Array:
@@ -201,23 +635,20 @@ def prepare_matvec(
     radial_lut_dr: float,
     cache_translation_blocks: bool = False,
     operator_dtype: npt.DTypeLike = np.complex128,
-) -> PreparedMatvec:
-    """Prepare reusable matvec data from explicit particle descriptors."""
+) -> PreparedOperator:
+    """Prepare reusable `A = I - T W` data from explicit particle descriptors.
+
+    The returned object is intentionally backend-neutral at the top level:
+    `Simulation` only sees one prepared operator, while the internal single-body
+    representation can stay diagonal for spheres or later switch to
+    axisymmetric/dense groups on a subset of particles.
+    """
     part = list(particles)
     positions = np.asarray(
         [np.asarray(p.position, dtype=float) for p in part], dtype=float
     ).reshape(-1, 3)
     op_dtype = np.dtype(operator_dtype)
     k_f = float(k)
-
-    T_M, T_N = precompute_T_diagonal(
-        lmax=int(lmax),
-        k=k_f,
-        particles=part,
-        n_medium=n_medium,
-        dtype=op_dtype,
-    )
-    T_diag = _build_T_mode_diagonal(int(lmax), T_M, T_N)
     ab5 = translation_ab5_table(int(lmax), dtype=op_dtype)
 
     dr = float(radial_lut_dr)
@@ -225,17 +656,30 @@ def prepare_matvec(
         raise ValueError(f"radial_lut_dr must be > 0, got {dr}.")
     lut = RadialLUT(lmax=int(lmax), k=k_f, r_max=_infer_rmax(positions), dr=dr, dtype=op_dtype)
 
-    return PreparedMatvec(
+    single_body = _prepare_single_body_operator(
+        lmax=int(lmax),
+        k=k_f,
+        particles=part,
+        n_medium=n_medium,
+        dtype=op_dtype,
+    )
+    coupling = PairwiseCouplingOperator(
         lmax=int(lmax),
         k=k_f,
         positions=positions,
-        T_M=T_M,
-        T_N=T_N,
-        T_diag=T_diag,
         ab5=ab5,
         radial_lut=lut,
         dtype=op_dtype,
         cache_translation_blocks=bool(cache_translation_blocks),
+    )
+
+    return PreparedOperator(
+        lmax=int(lmax),
+        k=k_f,
+        positions=positions,
+        single_body=single_body,
+        coupling=coupling,
+        dtype=op_dtype,
     )
 
 
@@ -258,7 +702,7 @@ def estimate_translation_cache_bytes(
 
 
 def make_prepared_A_and_rhs(
-    prepared: PreparedMatvec, b: Array
+    prepared: PreparedOperator, b: Array
 ) -> tuple[Callable[[Array], Array], Array]:
     """Return `(A_mv, rhs)` from a prepared system and incident coefficients."""
 
@@ -272,7 +716,7 @@ def make_prepared_A_and_rhs(
 
 
 def assemble_dense_A_numpy(
-    prepared: PreparedMatvec,
+    prepared: PreparedOperator,
     *,
     show_progress: bool = False,
     use_cache: bool = False,
@@ -312,7 +756,7 @@ def assemble_dense_A_numpy(
             if store_blocks:
                 prepared._W_cache[key] = Wij
 
-        blk = -(prepared.T_diag[i][:, None] * Wij)
+        blk = -prepared.apply_particle_block(i, Wij)
         rs = slice(i * Nm, (i + 1) * Nm)
         cs = slice(j * Nm, (j + 1) * Nm)
         A[rs, cs] = blk

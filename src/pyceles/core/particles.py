@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Literal, Tuple
 
 import numpy as np
+
+SingleBodyRepresentation = Literal["diagonal", "axisymmetric", "dense"]
 
 
 @dataclass(frozen=True)
@@ -32,6 +34,18 @@ class Particle:
         """Radius of a sphere enclosing the particle (for broad-phase geometry)."""
         raise NotImplementedError(f"{type(self).__name__} must implement circumscribing_radius().")
 
+    @property
+    def single_body_representation(self) -> SingleBodyRepresentation:
+        """Preferred prepared-operator representation for this particle family.
+
+        The representation only describes how the particle-local `T` operator
+        should be stored/applied. It does not decide the coupling backend.
+        Keeping this declaration on the particle descriptor lets operator
+        preparation choose specialized groups in one place instead of growing
+        solver-wide type checks.
+        """
+        return "dense"
+
 
 @dataclass(frozen=True)
 class Sphere(Particle):
@@ -43,6 +57,11 @@ class Sphere(Particle):
     def circumscribing_radius(self) -> float:
         """For spheres the circumscribing radius is the physical radius."""
         return float(self.radius)
+
+    @property
+    def single_body_representation(self) -> SingleBodyRepresentation:
+        """Spheres use the diagonal Mie fast path."""
+        return "diagonal"
 
 
 @dataclass(frozen=True)
@@ -68,6 +87,11 @@ class LayeredSphere(Particle):
         """Outermost shell radius, useful for overlap checks and bounding boxes."""
         return float(self.layer_radii[-1])
 
+    @property
+    def single_body_representation(self) -> SingleBodyRepresentation:
+        """Layered spheres remain diagonal in the SVWF basis."""
+        return "diagonal"
+
 
 @dataclass(frozen=True)
 class Spheroid(Particle):
@@ -87,6 +111,11 @@ class Spheroid(Particle):
     def circumscribing_radius(self) -> float:
         """Largest semi-axis of the spheroid."""
         return float(max(float(self.equatorial_radius), float(self.polar_radius)))
+
+    @property
+    def single_body_representation(self) -> SingleBodyRepresentation:
+        """Axisymmetric particles admit a narrower-than-dense T representation."""
+        return "axisymmetric"
 
 
 def _as_positions_array(positions: Sequence[Sequence[float]] | np.ndarray) -> np.ndarray:

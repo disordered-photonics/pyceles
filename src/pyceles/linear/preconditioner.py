@@ -7,7 +7,7 @@ import numpy as np
 from tqdm.auto import tqdm
 
 from pyceles.core.indexing import n_modes
-from pyceles.core.matvec import PreparedMatvec
+from pyceles.core.matvec import PreparedOperator
 from pyceles.core.translation import translation_block
 
 
@@ -93,7 +93,7 @@ def regular_grid_partition(
 
 
 def _pair_block(
-    prepared: PreparedMatvec,
+    prepared: PreparedOperator,
     i: int,
     j: int,
     *,
@@ -118,39 +118,44 @@ def _pair_block(
 
 
 def _assemble_local_A_block(
-    prepared: PreparedMatvec,
-    sphere_ids: np.ndarray,
+    prepared: PreparedOperator,
+    particle_ids: np.ndarray,
     *,
     store_translations: bool,
 ) -> np.ndarray:
-    """Assemble dense local block of `A = I - T W` for one sphere partition."""
-    ids = np.asarray(sphere_ids, dtype=np.int64).reshape(-1)
+    """Assemble dense local block of `A = I - T W` for one particle partition."""
+    ids = np.asarray(particle_ids, dtype=np.int64).reshape(-1)
     Nm = n_modes(prepared.lmax)
     nblk = ids.size * Nm
     A = np.eye(nblk, dtype=prepared.dtype)
     for li, gi in enumerate(ids):
         rs = slice(li * Nm, (li + 1) * Nm)
-        Ti = prepared.T_diag[gi]
         for lj, gj in enumerate(ids):
             if gi == gj:
                 continue
             cs = slice(lj * Nm, (lj + 1) * Nm)
             Wij = _pair_block(prepared, int(gi), int(gj), store_translations=store_translations)
-            A[rs, cs] = -(Ti[:, None] * Wij)
+            A[rs, cs] = -prepared.apply_particle_block(int(gi), Wij)
     return A
 
 
 @dataclass
 class GridBlockPreconditioner:
-    """Block-diagonal preconditioner built from regular-grid sphere groups.
+    """Block-diagonal preconditioner built from regular-grid particle groups.
 
     Each spatial block contributes one local dense system that is LU-factorized.
     Applying the preconditioner solves each block independently.
+
+    The important architectural point is that this object no longer assumes
+    spherical particles. It works with any prepared operator that can assemble
+    local `T_i @ W_ij` block rows through `PreparedOperator.apply_particle_block`.
+    That keeps the preconditioner compatible with layered spheres today and with
+    future mixed diagonal/axisymmetric/dense particle sets.
     """
 
-    sphere_blocks: list[np.ndarray]
+    particle_blocks: list[np.ndarray]
     lu_factors: list[tuple[np.ndarray, np.ndarray]]
-    n_spheres: int
+    n_particles: int
     n_modes: int
     dtype: np.dtype
 
@@ -163,44 +168,44 @@ class GridBlockPreconditioner:
 
         arr = np.asarray(x, dtype=self.dtype)
         if arr.ndim == 1:
-            if arr.size != self.n_spheres * self.n_modes:
+            if arr.size != self.n_particles * self.n_modes:
                 raise ValueError(
-                    f"Input length must be {self.n_spheres * self.n_modes}, got {arr.size}."
+                    f"Input length must be {self.n_particles * self.n_modes}, got {arr.size}."
                 )
-            arr3 = arr.reshape(self.n_spheres, self.n_modes, 1)
+            arr3 = arr.reshape(self.n_particles, self.n_modes, 1)
             squeeze = True
         elif arr.ndim == 2:
-            if arr.shape[0] != self.n_spheres * self.n_modes:
+            if arr.shape[0] != self.n_particles * self.n_modes:
                 raise ValueError(
-                    f"Input first dimension must be {self.n_spheres * self.n_modes}, got {arr.shape[0]}."
+                    f"Input first dimension must be {self.n_particles * self.n_modes}, got {arr.shape[0]}."
                 )
-            arr3 = arr.reshape(self.n_spheres, self.n_modes, arr.shape[1])
+            arr3 = arr.reshape(self.n_particles, self.n_modes, arr.shape[1])
             squeeze = False
         else:
             raise ValueError(f"Input must be 1D or 2D. Got shape {arr.shape}.")
 
         out = np.zeros_like(arr3, dtype=self.dtype)
-        for ids, (lu, piv) in zip(self.sphere_blocks, self.lu_factors):
+        for ids, (lu, piv) in zip(self.particle_blocks, self.lu_factors):
             rhs_loc = arr3[ids, :, :].reshape(ids.size * self.n_modes, -1)
             sol_loc = scipy.linalg.lu_solve((lu, piv), rhs_loc, check_finite=False)
             out[ids, :, :] = sol_loc.reshape(ids.size, self.n_modes, -1)
 
-        out2 = out.reshape(self.n_spheres * self.n_modes, -1)
+        out2 = out.reshape(self.n_particles * self.n_modes, -1)
         return out2[:, 0] if squeeze else out2
 
     @property
     def n_blocks(self) -> int:
         """Number of populated spatial blocks in the preconditioner."""
-        return len(self.sphere_blocks)
+        return len(self.particle_blocks)
 
     @property
     def block_sizes(self) -> tuple[int, ...]:
         """Particle counts per spatial block (for diagnostics/monitoring)."""
-        return tuple(int(b.size) for b in self.sphere_blocks)
+        return tuple(int(b.size) for b in self.particle_blocks)
 
 
 def make_grid_block_preconditioner(
-    prepared: PreparedMatvec,
+    prepared: PreparedOperator,
     *,
     subdivisions: int | tuple[int, int, int] = 2,
     cubic_bbox: bool = True,
@@ -212,6 +217,11 @@ def make_grid_block_preconditioner(
 
     The particle cloud is partitioned on a regular 3D grid. For each populated
     block, we assemble the local dense block of `A = I - T W` and LU-factorize it.
+
+    Because local assembly goes through the prepared-operator boundary, this
+    routine is representation-agnostic: the same code can precondition diagonal
+    spheres, layered spheres, or future mixed clusters as long as the
+    single-body operator can left-apply each particle-local `T_i`.
     """
     import scipy.linalg
 
@@ -253,9 +263,9 @@ def make_grid_block_preconditioner(
         kept_blocks.append(np.asarray(ids, dtype=np.int64))
 
     return GridBlockPreconditioner(
-        sphere_blocks=kept_blocks,
+        particle_blocks=kept_blocks,
         lu_factors=lu_factors,
-        n_spheres=Ns,
+        n_particles=Ns,
         n_modes=Nm,
         dtype=np.dtype(prepared.dtype),
     )

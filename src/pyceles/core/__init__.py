@@ -24,7 +24,7 @@ from .fields import (
     svwf_regular_to_pwp,
 )
 from .matvec import (
-    PreparedMatvec,
+    PreparedOperator,
     apply_A_numpy,
     apply_W_numpy,
     assemble_dense_A_numpy,
@@ -70,7 +70,7 @@ __all__ = [
     "Particle",
     "PlaneWave",
     "Source",
-    "PreparedMatvec",
+    "PreparedOperator",
     "Sphere",
     "spheres_from_arrays",
     "layered_spheres_from_arrays",

@@ -14,7 +14,7 @@ from pyceles._version import __version__
 from pyceles.core.angular import uniform_periodic_azimuth_grid, uniform_polar_grid
 from pyceles.core.indexing import n_modes
 from pyceles.core.matvec import (
-    PreparedMatvec,
+    PreparedOperator,
     assemble_dense_A_numpy,
     prepare_matvec,
 )
@@ -839,8 +839,10 @@ class Simulation:
         self.circumscribing_radii = rad
         self.particles = part
         # Reuse operator-side precomputations across repeated solves on the same
-        # geometry/config (e.g. moving-dipole LDOS maps).
-        self._prepared_operator_cache: PreparedMatvec | None = None
+        # geometry/config (e.g. moving-dipole LDOS maps). The cached object
+        # hides whether particles currently use diagonal, axisymmetric, or dense
+        # single-body operators, so solver code stays representation-agnostic.
+        self._prepared_operator_cache: PreparedOperator | None = None
         self._prepared_operator_dtype: np.dtype | None = None
         self._dense_operator_cache: np.ndarray | None = None
         self._dense_operator_dtype: np.dtype | None = None

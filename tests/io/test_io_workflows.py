@@ -181,8 +181,8 @@ def test_no_scatterer_run_roundtrip_io_workflow(tmp_path):
     geometry = cast(dict[str, Any], loaded["geometry"])
     solution = cast(dict[str, Any], loaded["solution"])
 
-    assert np.asarray(geometry["positions"]).shape == (0, 3)
     assert geometry["particles"] == tuple()
+    assert "positions" not in geometry
     assert np.asarray(solution["coeffs"]).shape[0] == 0
     assert "far_field" in loaded
     assert "diagnostics" in loaded
