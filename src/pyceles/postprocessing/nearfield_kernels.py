@@ -576,17 +576,15 @@ def compute_scattered_field(
 
 def compute_internal_field(
     field_points: np.ndarray,
-    positions: np.ndarray | None,
-    radii: np.ndarray | None,
     coeffs: np.ndarray,
     k: float,
     lmax: int,
-    n_particle: np.ndarray | complex | None,
+    *,
+    particles: Sequence[Particle],
     n_medium: complex = 1.0 + 0j,
     show_progress: bool = False,
     compute_dtype: npt.DTypeLike = np.complex128,
     accum_dtype: npt.DTypeLike = np.complex128,
-    particles: Sequence[Particle] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Compute the *total* (physical) field inside particles.
 
@@ -602,19 +600,15 @@ def compute_internal_field(
     Parameters
     ----------
     field_points:
-        (Np,3) points at which to evaluate fields (same coordinate system as `positions`).
-    positions:
-        (Ns,3) sphere centers.
-    radii:
-        (Ns,) sphere radii.
+        (Np,3) points at which to evaluate fields.
     coeffs:
         (Ns, Nm) scattered-field expansion coefficients (CELES ordering).
     k:
         Medium wavenumber k_medium = k0 * n_medium.
     lmax:
         Multipole truncation.
-    n_particle:
-        Sphere refractive index (scalar) or (Ns,) array.
+    particles:
+        Explicit particle descriptors (`Sphere` and/or `LayeredSphere`).
     n_medium:
         Medium refractive index.
 
@@ -625,30 +619,37 @@ def compute_internal_field(
 
     Notes
     -----
-    - Homogeneous-sphere path:
-      use `positions`/`radii`/`n_particle` for explicit sphere arrays.
-    - Particle API:
-      pass `particles=[Sphere(...), LayeredSphere(...), ...]` to enable mixed
-      particle families. In this mode, geometric arrays are ignored.
+    The particle API is canonical. Mixed `Sphere` + `LayeredSphere` lists are
+    supported.
     """
-    if particles is not None:
-        return _compute_internal_field_particles(
-            field_points,
-            particles=particles,
-            coeffs=coeffs,
-            k=k,
-            lmax=lmax,
-            n_medium=n_medium,
-            show_progress=show_progress,
-            compute_dtype=compute_dtype,
-            accum_dtype=accum_dtype,
-        )
+    return _compute_internal_field_particles(
+        field_points,
+        particles=particles,
+        coeffs=coeffs,
+        k=k,
+        lmax=lmax,
+        n_medium=n_medium,
+        show_progress=show_progress,
+        compute_dtype=compute_dtype,
+        accum_dtype=accum_dtype,
+    )
 
-    if positions is None or radii is None or n_particle is None:
-        raise ValueError(
-            "`positions`, `radii`, and `n_particle` are required for homogeneous-sphere "
-            "internal-field evaluation when `particles` is not provided."
-        )
+
+def _compute_internal_field_homogeneous_spheres(
+    field_points: np.ndarray,
+    positions: np.ndarray,
+    radii: np.ndarray,
+    coeffs: np.ndarray,
+    *,
+    k: float,
+    lmax: int,
+    n_particle: np.ndarray,
+    n_medium: complex = 1.0 + 0j,
+    show_progress: bool = False,
+    compute_dtype: npt.DTypeLike = np.complex128,
+    accum_dtype: npt.DTypeLike = np.complex128,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Canonical homogeneous-sphere internal-field kernel used by dispatchers."""
 
     pos = np.asarray(positions, dtype=float).reshape(-1, 3)
     Ns = pos.shape[0]
@@ -823,7 +824,7 @@ def _compute_internal_field_particles(
         n_particle = np.asarray(
             [complex(sp.refractive_index) for sp in spheres], dtype=np.complex128
         )
-        return compute_internal_field(
+        return _compute_internal_field_homogeneous_spheres(
             pts,
             positions,
             radii,
@@ -857,7 +858,7 @@ def _compute_internal_field_particles(
             [complex(sp.refractive_index) for sp in sphere_part], dtype=np.complex128
         )
         c_sphere = c[np.asarray(sphere_idx, dtype=int), :]
-        E_s, H_s, inside_s = compute_internal_field(
+        E_s, H_s, inside_s = _compute_internal_field_homogeneous_spheres(
             pts,
             positions,
             radii,

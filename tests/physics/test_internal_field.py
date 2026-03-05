@@ -2,7 +2,7 @@ import numpy as np
 
 from pyceles.core.fields import PlaneWave, incident_coeffs_planewave
 from pyceles.core.matvec import make_prepared_A_and_rhs, prepare_matvec
-from pyceles.core.particles import spheres_from_arrays
+from pyceles.core.particles import Sphere, spheres_from_arrays
 from pyceles.postprocessing.nearfield import compute_internal_field
 
 
@@ -47,12 +47,16 @@ def _single_sphere_internal_field(
 
     E, _, inside = compute_internal_field(
         points,
-        positions,
-        radii,
         coeffs,
         k=k_medium,
         lmax=lmax,
-        n_particle=np.array([n_particle], dtype=np.complex128),
+        particles=(
+            Sphere(
+                position=(0.0, 0.0, 0.0),
+                radius=float(sphere_radius),
+                refractive_index=complex(n_particle),
+            ),
+        ),
         n_medium=n_medium,
         show_progress=False,
     )

@@ -47,8 +47,6 @@ def compute_total_field(
     *,
     polar_angles: np.ndarray,
     azimuthal_angles: np.ndarray,
-    radii: np.ndarray | None = None,
-    n_particle: np.ndarray | complex | None = None,
     particles: Sequence[Particle] | None = None,
     n_medium: complex = 1.0 + 0j,
     batch_size: int = 2048,
@@ -90,8 +88,6 @@ def compute_total_field(
         beam=beam,
         polar_angles=np.asarray(polar_angles, float),
         azimuthal_angles=np.asarray(azimuthal_angles, float),
-        radii=radii,
-        n_particle=n_particle,
         particles=particles,
         n_medium=n_medium,
         batch_size=batch_size,
@@ -114,8 +110,6 @@ def compute_near_field_components(
     beam,
     polar_angles: np.ndarray,
     azimuthal_angles: np.ndarray,
-    radii: np.ndarray | None = None,
-    n_particle: np.ndarray | complex | None = None,
     particles: Sequence[Particle] | None = None,
     n_medium: complex = 1.0 + 0j,
     batch_size: int = 2048,
@@ -164,16 +158,6 @@ def compute_near_field_components(
             # point-containment capability before enabling non-spherical
             # internal-field replacement here.
             inside_hint |= np.sum(R * R, axis=1) < (rr**2)
-    elif radii is not None and n_particle is not None:
-        # We already know total/internal fields will replace values inside spheres.
-        # Build this cheap geometry mask up front so scattered-field evaluation can
-        # skip interior points entirely.
-        pos = np.asarray(positions, dtype=float)
-        rad = np.asarray(radii, dtype=float).reshape(-1)
-        for jS in range(pos.shape[0]):
-            R = pts - pos[jS]
-            inside_hint |= np.sum(R * R, axis=1) < (rad[jS] ** 2)
-
     Es, Hs = compute_scattered_field(
         field_points,
         positions,
@@ -195,20 +179,17 @@ def compute_near_field_components(
     Et = Ei + Es
     Ht = Hi + Hs
 
-    if particles is not None or (radii is not None and n_particle is not None):
+    if particles is not None and len(particles) > 0:
         Eint, Hint, inside = compute_internal_field(
             field_points,
-            positions,
-            radii,
             coeffs,
-            k,
-            lmax,
-            n_particle=n_particle,
+            k=k,
+            lmax=lmax,
+            particles=particles,
             n_medium=n_medium,
             show_progress=show_progress,
             compute_dtype=compute_dtype,
             accum_dtype=accum_dtype,
-            particles=particles,
         )
         # Exterior scattered-field expansions are not physically valid inside
         # particles and can diverge at exact sphere centers; sanitize these

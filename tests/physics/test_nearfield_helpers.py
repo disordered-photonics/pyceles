@@ -1,7 +1,7 @@
 import numpy as np
 
 from pyceles.core.fields import PlaneWave
-from pyceles.core.particles import LayeredSphere
+from pyceles.core.particles import LayeredSphere, Sphere
 from pyceles.postprocessing.nearfield import compute_near_field_components
 
 
@@ -40,9 +40,8 @@ def test_compute_near_field_components_zeroes_scattered_inside_particles():
     """Inside points must not carry exterior scattered-field values."""
     pts = np.array([[0.0, 0.0, 0.0], [220.0, 0.0, 0.0]], dtype=float)
     positions = np.array([[0.0, 0.0, 0.0]], dtype=float)
-    radii = np.array([120.0], dtype=float)
-    n_particle = np.array([1.5 + 0.1j], dtype=np.complex128)
     lmax = 1
+    particles = [Sphere(position=(0.0, 0.0, 0.0), radius=120.0, refractive_index=1.5 + 0.1j)]
     # Coefficients are synthetic but non-zero to exercise scattered-field path.
     coeffs = (1.0 + 0.3j) * np.ones((1, 6), dtype=np.complex128)
     beam = PlaneWave(
@@ -63,8 +62,7 @@ def test_compute_near_field_components_zeroes_scattered_inside_particles():
         beam=beam,
         polar_angles=np.linspace(0.0, np.pi, 21),
         azimuthal_angles=np.linspace(0.0, 2.0 * np.pi, 13, endpoint=False),
-        radii=radii,
-        n_particle=n_particle,
+        particles=particles,
         n_medium=1.0 + 0j,
         show_progress=False,
     )

@@ -103,6 +103,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Breaking: HDF5 geometry snapshots no longer persist compatibility
   `geometry/n_particle`; geometry payloads are now strictly particle-native
   (`geometry/particles`) with no persisted generic `positions`/`radii` tables.
+- Breaking: near-field internal-field APIs are now particle-native:
+  `compute_internal_field(...)` and `compute_near_field_components(...)` no
+  longer expose legacy homogeneous-sphere array inputs
+  (`positions`/`radii`/`n_particle`) for internal-field evaluation.
 - README/examples now present source-only runs as `particles=[]` and no longer
   document array-geometry constructor patterns.
 - Direct-solver repeated solves on the same `Simulation` instance now reuse a

@@ -239,8 +239,6 @@ def compute_near_field(
         beam=source_eff,
         polar_angles=source_polar_angles,
         azimuthal_angles=source_azimuthal_angles,
-        radii=run.radii,
-        n_particle=None,
         particles=getattr(run, "particles", None),
         n_medium=run.config.n_medium,
         show_progress=show_progress,

@@ -1,7 +1,7 @@
 import numpy as np
 
 from pyceles.core.indexing import n_modes
-from pyceles.core.particles import LayeredSphere
+from pyceles.core.particles import LayeredSphere, Sphere
 from pyceles.postprocessing.nearfield import compute_internal_field
 
 
@@ -30,12 +30,16 @@ def test_internal_field_particles_single_layer_matches_homogeneous_kernel():
 
     E_ref, H_ref, inside_ref = compute_internal_field(
         points,
-        positions=np.array([[0.0, 0.0, 0.0]], dtype=float),
-        radii=np.array([radius], dtype=float),
         coeffs=coeffs,
         k=k_medium,
         lmax=lmax,
-        n_particle=np.array([n_particle], dtype=np.complex128),
+        particles=[
+            Sphere(
+                position=(0.0, 0.0, 0.0),
+                radius=float(radius),
+                refractive_index=complex(n_particle),
+            )
+        ],
         n_medium=n_medium,
         show_progress=False,
     )
@@ -46,12 +50,9 @@ def test_internal_field_particles_single_layer_matches_homogeneous_kernel():
     )
     E_new, H_new, inside_new = compute_internal_field(
         points,
-        positions=None,
-        radii=None,
         coeffs=coeffs,
         k=k_medium,
         lmax=lmax,
-        n_particle=None,
         n_medium=n_medium,
         show_progress=False,
         particles=[layered],
@@ -83,12 +84,9 @@ def test_internal_field_particles_layered_masks_and_finiteness():
     )
     E, H, inside = compute_internal_field(
         points,
-        positions=None,
-        radii=None,
         coeffs=coeffs,
         k=2.0 * np.pi / 550.0,
         lmax=lmax,
-        n_particle=None,
         n_medium=1.0 + 0j,
         show_progress=False,
         particles=[layered],

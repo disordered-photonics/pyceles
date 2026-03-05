@@ -578,6 +578,8 @@ Notes:
 
 `pcl.io.save_simulation_h5(...)` now stores:
 - mixed solution/far-field groups (as before)
+- particle-native geometry under `geometry/particles` (no persisted generic
+  `positions`/`radii` tables)
 - optional basis groups when available:
   - `solution_basis/te`, `solution_basis/tm`
   - `far_field_basis/te`, `far_field_basis/tm`
