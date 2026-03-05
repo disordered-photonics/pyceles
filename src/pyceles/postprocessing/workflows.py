@@ -232,14 +232,13 @@ def compute_near_field(
 
     nf = compute_near_field_components(
         pts_flat,
-        positions=run.positions,
         coeffs=coeffs,
         k=run.k,
         lmax=run.config.lmax,
         beam=source_eff,
         polar_angles=source_polar_angles,
         azimuthal_angles=source_azimuthal_angles,
-        particles=getattr(run, "particles", None),
+        particles=run.particles,
         n_medium=run.config.n_medium,
         show_progress=show_progress,
         force_general_initial_field=(

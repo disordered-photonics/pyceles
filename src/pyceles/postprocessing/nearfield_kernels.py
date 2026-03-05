@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from functools import cache
 from typing import Sequence
 
@@ -28,6 +29,54 @@ from pyceles.core.sources import (
 )
 from pyceles.core.spherical import spherical_functions_trigon
 from pyceles.core.tmatrix import layered_internal_ab_ratios, sphere_internal_ratios
+
+
+@dataclass(frozen=True)
+class InternalPointClassification:
+    """Broad-phase particle ownership of near-field sample points.
+
+    `inside_any` marks points inside at least one circumscribing sphere.
+    `point_indices_by_particle[j]` stores the global point indices associated
+    with particle `j` under the same broad-phase rule.
+    """
+
+    inside_any: np.ndarray
+    point_indices_by_particle: tuple[np.ndarray, ...]
+
+
+def classify_internal_points(
+    field_points: np.ndarray,
+    particles: Sequence[Particle],
+) -> InternalPointClassification:
+    """Classify near-field points against particle circumscribing spheres.
+
+    This broad-phase classification is exact for `Sphere` and `LayeredSphere`.
+    """
+    pts = np.asarray(field_points, dtype=float).reshape(-1, 3)
+    part = list(particles)
+    Np = pts.shape[0]
+    inside_any = np.zeros((Np,), dtype=bool)
+    by_particle: list[np.ndarray] = []
+
+    supported = (Sphere, LayeredSphere)
+    bad = [type(p).__name__ for p in part if not isinstance(p, supported)]
+    if bad:
+        raise TypeError(
+            f"Internal point classification currently supports Sphere and LayeredSphere. Got {bad}."
+        )
+
+    for p in part:
+        center = np.asarray(p.position, dtype=float).reshape(3)
+        rr = float(p.circumscribing_radius())
+        R = pts - center[None, :]
+        idx = np.flatnonzero(np.sum(R * R, axis=1) < (rr**2)).astype(np.intp, copy=False)
+        by_particle.append(idx)
+        inside_any[idx] = True
+
+    return InternalPointClassification(
+        inside_any=inside_any,
+        point_indices_by_particle=tuple(by_particle),
+    )
 
 
 @cache
@@ -581,6 +630,7 @@ def compute_internal_field(
     lmax: int,
     *,
     particles: Sequence[Particle],
+    _point_classification: InternalPointClassification | None = None,
     n_medium: complex = 1.0 + 0j,
     show_progress: bool = False,
     compute_dtype: npt.DTypeLike = np.complex128,
@@ -629,6 +679,7 @@ def compute_internal_field(
         k=k,
         lmax=lmax,
         n_medium=n_medium,
+        classification=_point_classification,
         show_progress=show_progress,
         compute_dtype=compute_dtype,
         accum_dtype=accum_dtype,
@@ -644,6 +695,7 @@ def _compute_internal_field_homogeneous_spheres(
     k: float,
     lmax: int,
     n_particle: np.ndarray,
+    inside_indices_by_sphere: Sequence[np.ndarray] | None = None,
     n_medium: complex = 1.0 + 0j,
     show_progress: bool = False,
     compute_dtype: npt.DTypeLike = np.complex128,
@@ -651,15 +703,21 @@ def _compute_internal_field_homogeneous_spheres(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Canonical homogeneous-sphere internal-field kernel used by dispatchers."""
 
+    pts = np.asarray(field_points, dtype=float).reshape(-1, 3)
     pos = np.asarray(positions, dtype=float).reshape(-1, 3)
     Ns = pos.shape[0]
-    Np = field_points.shape[0]
+    Np = pts.shape[0]
     compute_dtype = np.dtype(compute_dtype)
     accum_dtype = np.dtype(accum_dtype)
 
     rad = np.asarray(radii, dtype=float).reshape(-1)
     if rad.shape[0] != Ns:
         raise ValueError(f"radii must have length Ns={Ns}, got {rad.shape}")
+    if inside_indices_by_sphere is not None and len(inside_indices_by_sphere) != Ns:
+        raise ValueError(
+            "`inside_indices_by_sphere` length must match number of spheres "
+            f"({Ns}). Got {len(inside_indices_by_sphere)}."
+        )
 
     # Allow scalar or per-sphere refractive index
     if np.ndim(n_particle) == 0:
@@ -683,21 +741,24 @@ def _compute_internal_field_homogeneous_spheres(
     mode_by_l = _mode_indices_by_l(lmax)
 
     for jS in sphere_iter:
-        R = field_points - pos[jS]
-        r2 = np.sum(R * R, axis=1)
-        mask = r2 < (rad[jS] ** 2)
-        if not np.any(mask):
+        if inside_indices_by_sphere is None:
+            R_full = pts - pos[jS]
+            r2_full = np.sum(R_full * R_full, axis=1)
+            idx = np.flatnonzero(r2_full < (rad[jS] ** 2))
+        else:
+            idx = np.asarray(inside_indices_by_sphere[jS], dtype=np.intp).reshape(-1)
+        if idx.size == 0:
             continue
 
-        inside[mask] = True
-        idx = np.nonzero(mask)[0]
-
-        r = np.sqrt(r2[mask])
+        inside[idx] = True
+        R = pts[idx] - pos[jS]
+        r2 = np.sum(R * R, axis=1)
+        r = np.sqrt(r2)
         r_safe = np.where(r < eps, eps, r)
 
-        x = R[mask, 0]
-        y = R[mask, 1]
-        z = R[mask, 2]
+        x = R[:, 0]
+        y = R[:, 1]
+        z = R[:, 2]
 
         rho = np.sqrt(x * x + y * y)
         ct = z / r_safe
@@ -779,6 +840,7 @@ def _compute_internal_field_particles(
     *,
     k: float,
     lmax: int,
+    classification: InternalPointClassification | None = None,
     n_medium: complex = 1.0 + 0j,
     show_progress: bool = False,
     compute_dtype: npt.DTypeLike = np.complex128,
@@ -808,6 +870,17 @@ def _compute_internal_field_particles(
     inside = np.zeros(Np, dtype=bool)
     if Ns == 0:
         return E, H, inside
+    if classification is not None:
+        if classification.inside_any.shape != (Np,):
+            raise ValueError(
+                "`classification.inside_any` must have shape "
+                f"({Np},). Got {classification.inside_any.shape}."
+            )
+        if len(classification.point_indices_by_particle) != Ns:
+            raise ValueError(
+                "`classification.point_indices_by_particle` length must match "
+                f"particle count ({Ns}). Got {len(classification.point_indices_by_particle)}."
+            )
 
     c = np.asarray(coeffs, dtype=compute_dtype)
     if c.size != Ns * Nm:
@@ -824,6 +897,11 @@ def _compute_internal_field_particles(
         n_particle = np.asarray(
             [complex(sp.refractive_index) for sp in spheres], dtype=np.complex128
         )
+        inside_idx = (
+            [np.asarray(v, dtype=np.intp) for v in classification.point_indices_by_particle]
+            if classification is not None
+            else None
+        )
         return _compute_internal_field_homogeneous_spheres(
             pts,
             positions,
@@ -832,6 +910,7 @@ def _compute_internal_field_particles(
             k=float(k),
             lmax=lmax,
             n_particle=n_particle,
+            inside_indices_by_sphere=inside_idx,
             n_medium=n_medium_c,
             show_progress=show_progress,
             compute_dtype=compute_dtype,
@@ -858,6 +937,14 @@ def _compute_internal_field_particles(
             [complex(sp.refractive_index) for sp in sphere_part], dtype=np.complex128
         )
         c_sphere = c[np.asarray(sphere_idx, dtype=int), :]
+        inside_idx = (
+            [
+                np.asarray(classification.point_indices_by_particle[j], dtype=np.intp)
+                for j in sphere_idx
+            ]
+            if classification is not None
+            else None
+        )
         E_s, H_s, inside_s = _compute_internal_field_homogeneous_spheres(
             pts,
             positions,
@@ -866,6 +953,7 @@ def _compute_internal_field_particles(
             k=float(k),
             lmax=lmax,
             n_particle=n_particle,
+            inside_indices_by_sphere=inside_idx,
             n_medium=n_medium_c,
             show_progress=show_progress,
             compute_dtype=compute_dtype,
@@ -891,23 +979,29 @@ def _compute_internal_field_particles(
         center = np.asarray(p.position, dtype=float).reshape(3)
         outer_radius = float(p.circumscribing_radius())
 
-        R = pts - center[None, :]
-        r2 = np.sum(R * R, axis=1)
-        # TODO(spheroids): this is exact for concentric layered spheres.
-        # Introduce particle-native point-containment capability before adding
-        # non-spherical internal-field kernels.
-        mask = r2 < (outer_radius**2)
-        if not np.any(mask):
+        if classification is None:
+            R_full = pts - center[None, :]
+            r2_full = np.sum(R_full * R_full, axis=1)
+            # TODO(spheroids): this is exact for concentric layered spheres.
+            # Introduce particle-native point-containment capability before adding
+            # non-spherical internal-field kernels.
+            idx = np.flatnonzero(r2_full < (outer_radius**2))
+        else:
+            idx = np.asarray(classification.point_indices_by_particle[jS], dtype=np.intp).reshape(
+                -1
+            )
+        if idx.size == 0:
             continue
 
-        inside[mask] = True
-        idx = np.flatnonzero(mask)
-        r = np.sqrt(r2[mask])
+        inside[idx] = True
+        R = pts[idx] - center[None, :]
+        r2 = np.sum(R * R, axis=1)
+        r = np.sqrt(r2)
         r_safe = np.where(r < eps, eps, r)
 
-        x = R[mask, 0]
-        y = R[mask, 1]
-        z = R[mask, 2]
+        x = R[:, 0]
+        y = R[:, 1]
+        z = R[:, 2]
         rho = np.sqrt(x * x + y * y)
         ct = z / r_safe
         st = rho / r_safe

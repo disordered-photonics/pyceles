@@ -9,6 +9,7 @@ import numpy.typing as npt
 from pyceles.core.particles import Particle
 
 from .nearfield_kernels import (
+    classify_internal_points,
     compute_initial_field,
     compute_internal_field,
     compute_scattered_field,
@@ -39,7 +40,6 @@ class NearFieldComponents:
 
 def compute_total_field(
     field_points: np.ndarray,
-    positions: np.ndarray,
     coeffs: np.ndarray,
     k: float,
     lmax: int,
@@ -47,7 +47,7 @@ def compute_total_field(
     *,
     polar_angles: np.ndarray,
     azimuthal_angles: np.ndarray,
-    particles: Sequence[Particle] | None = None,
+    particles: Sequence[Particle],
     n_medium: complex = 1.0 + 0j,
     batch_size: int = 2048,
     show_progress: bool = False,
@@ -81,7 +81,6 @@ def compute_total_field(
 
     out = compute_near_field_components(
         field_points,
-        positions=positions,
         coeffs=coeffs,
         k=k,
         lmax=lmax,
@@ -100,17 +99,26 @@ def compute_total_field(
     return out.E_total, out.H_total, out.inside_mask
 
 
+def _positions_from_particles(particles: Sequence[Particle]) -> np.ndarray:
+    """Return `(Ns,3)` centers derived from canonical particle descriptors."""
+    part = tuple(particles)
+    if len(part) == 0:
+        return np.zeros((0, 3), dtype=float)
+    return np.asarray([np.asarray(p.position, dtype=float) for p in part], dtype=float).reshape(
+        -1, 3
+    )
+
+
 def compute_near_field_components(
     field_points: np.ndarray,
     *,
-    positions: np.ndarray,
     coeffs: np.ndarray,
     k: float,
     lmax: int,
     beam,
     polar_angles: np.ndarray,
     azimuthal_angles: np.ndarray,
-    particles: Sequence[Particle] | None = None,
+    particles: Sequence[Particle],
     n_medium: complex = 1.0 + 0j,
     batch_size: int = 2048,
     show_progress: bool = False,
@@ -124,6 +132,8 @@ def compute_near_field_components(
     This is the canonical near-field evaluator used by higher-level workflows.
     It returns physically separated components so users can inspect incident,
     scattering, and internal contributions before/after the inside replacement.
+    Geometry input is canonical and particle-native: scatterer centers are
+    derived from `particles` only.
     The angular grids are the source-projection quadrature nodes for the
     incident field, not generic far-field display bins.
     Compared to the baseline CELES workflow, scattered-field evaluation here
@@ -132,6 +142,7 @@ def compute_near_field_components(
     """
 
     pts = np.asarray(field_points, dtype=float)
+    pos = _positions_from_particles(particles)
 
     Ei, Hi = compute_initial_field(
         field_points,
@@ -147,20 +158,14 @@ def compute_near_field_components(
         accum_dtype=accum_dtype,
     )
 
+    classification = None
     inside_hint = np.zeros(pts.shape[0], dtype=bool)
-    if particles is not None:
-        for p in particles:
-            center = np.asarray(p.position, dtype=float).reshape(3)
-            rr = float(p.circumscribing_radius())
-            R = pts - center[None, :]
-            # TODO(spheroids): circumscribing-radius masking is exact for
-            # spherical particle families only. Introduce particle-native
-            # point-containment capability before enabling non-spherical
-            # internal-field replacement here.
-            inside_hint |= np.sum(R * R, axis=1) < (rr**2)
+    if len(particles) > 0:
+        classification = classify_internal_points(pts, particles)
+        inside_hint = np.asarray(classification.inside_any, dtype=bool)
     Es, Hs = compute_scattered_field(
         field_points,
-        positions,
+        pos,
         coeffs,
         k=k,
         lmax=lmax,
@@ -179,13 +184,14 @@ def compute_near_field_components(
     Et = Ei + Es
     Ht = Hi + Hs
 
-    if particles is not None and len(particles) > 0:
+    if len(particles) > 0:
         Eint, Hint, inside = compute_internal_field(
             field_points,
             coeffs,
             k=k,
             lmax=lmax,
             particles=particles,
+            _point_classification=classification,
             n_medium=n_medium,
             show_progress=show_progress,
             compute_dtype=compute_dtype,
