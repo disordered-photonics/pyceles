@@ -637,8 +637,6 @@ class SimulationResult:
     """
 
     config: SimulationConfig
-    positions: np.ndarray
-    radii: np.ndarray
     k: float
     k0: float
     coeffs: np.ndarray
@@ -667,7 +665,26 @@ class SimulationResult:
     @property
     def n_particles(self) -> int:
         """Return the number of scattering particles represented by this result."""
-        return int(self.positions.shape[0])
+        return int(len(self.particles))
+
+    @property
+    def positions(self) -> np.ndarray:
+        """Return particle centers derived from canonical `particles` descriptors."""
+        if len(self.particles) == 0:
+            return np.zeros((0, 3), dtype=float)
+        return np.asarray(
+            [np.asarray(p.position, dtype=float) for p in self.particles], dtype=float
+        )
+
+    @property
+    def radii(self) -> np.ndarray:
+        """Return particle circumscribing radii derived from `particles`."""
+        if len(self.particles) == 0:
+            return np.zeros((0,), dtype=float)
+        return np.asarray(
+            [float(p.circumscribing_radius()) for p in self.particles],
+            dtype=float,
+        ).reshape(-1)
 
 
 @dataclass(frozen=True)
@@ -948,7 +965,6 @@ class Simulation:
         """Assemble one channel `SimulationResult` from solved coefficients."""
         cfg = self.config
         positions = self.positions
-        radii = self.radii
         Ns = positions.shape[0]
         Nm = n_modes(cfg.lmax)
 
@@ -1021,8 +1037,6 @@ class Simulation:
         config_out = cfg if cfg.source is source else replace(cfg, source=source)
         return SimulationResult(
             config=config_out,
-            positions=positions,
-            radii=radii,
             particles=self.particles,
             k=k,
             k0=k0,
@@ -1568,8 +1582,6 @@ class Simulation:
 
         return SimulationResult(
             config=cfg,
-            positions=self.positions,
-            radii=self.radii,
             particles=self.particles,
             k=run_te.k,
             k0=run_te.k0,

@@ -978,6 +978,13 @@ def _plot_nearfield_component_pairs(
     channel_label: str,
     field_label: str,
 ) -> None:
+    particles = list(
+        pcl.core.spheres_from_arrays(
+            positions=positions,
+            radii=radii,
+            refractive_indices=np.ones_like(radii, dtype=np.complex128),
+        )
+    )
     x_vals, y_vals, z_vals, py_grid = _fields_to_grid(coords_phys, py_fields)
     _, _, _, ms_grid = _fields_to_grid(coords_phys, mstm_fields)
 
@@ -1035,8 +1042,7 @@ def _plot_nearfield_component_pairs(
         for col in (0, 1):
             plot_spheres(
                 axes[row, col],
-                positions,
-                radii,
+                particles,
                 plane=meta_py.plane,
                 plane_value=meta_py.plane_value,
                 alpha=0.35,

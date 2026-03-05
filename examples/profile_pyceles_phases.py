@@ -361,8 +361,6 @@ def main() -> None:
 
     run = pcl.SimulationResult(
         config=cfg,
-        positions=positions,
-        radii=radii,
         particles=tuple(
             pcl.core.spheres_from_arrays(
                 positions=positions,
@@ -401,10 +399,10 @@ def main() -> None:
         top_n=args.top_n,
         fn=pcl.compute_near_field_slice,
         run=run,
-        x_min=-4000.0,
-        x_max=4000.0,
-        z_min=-3000.0,
-        z_max=5000.0,
+        axis_0_min=-4000.0,
+        axis_0_max=4000.0,
+        axis_1_min=-3000.0,
+        axis_1_max=5000.0,
         dx=float(args.dx),
         plane="y",
         plane_value=0.0,

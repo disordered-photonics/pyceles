@@ -5,6 +5,7 @@ matplotlib.use("Agg", force=True)
 
 from matplotlib import pyplot as plt
 
+from pyceles.core.particles import LayeredSphere, Sphere
 from pyceles.io.plotting import (
     far_field_intensity,
     far_field_intensity_from_result,
@@ -69,8 +70,7 @@ def test_plot_nearfield_panels_channels_returns_expected_axes_shape():
         axis_0,
         axis_1,
         {"TE": (E, H), "TM": (E, H)},
-        positions=np.array([[0.0, 0.0, 0.0]], dtype=float),
-        radii=np.array([0.2], dtype=float),
+        particles=[Sphere(position=(0.0, 0.0, 0.0), radius=0.2, refractive_index=1.5 + 0j)],
         plane="y",
         plane_value=0.0,
     )
@@ -82,9 +82,13 @@ def test_plot_spheres_can_overlay_layered_shells():
     fig, ax = plt.subplots()
     plot_spheres(
         ax,
-        positions=np.array([[0.0, 0.0, 0.0]], dtype=float),
-        radii=np.array([2.0], dtype=float),
-        layered_radii=[np.array([1.0, 2.0], dtype=float)],
+        particles=[
+            LayeredSphere(
+                position=(0.0, 0.0, 0.0),
+                layer_radii=(1.0, 2.0),
+                layer_refractive_indices=(1.5 + 0j, 1.2 + 0j),
+            )
+        ],
         plane="z",
         plane_value=0.0,
     )
@@ -140,8 +144,7 @@ def test_plot_source_showcase_slices_returns_3x5_layout(monkeypatch):
         "Run",
         (),
         {
-            "positions": np.zeros((0, 3), dtype=float),
-            "radii": np.zeros((0,), dtype=float),
+            "particles": tuple(),
         },
     )()
     fig, axes = plot_source_showcase_slices(

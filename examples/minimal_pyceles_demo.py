@@ -49,8 +49,7 @@ def _render_outputs(
         nf.axis_1,
         E,
         H,
-        run.positions,
-        run.radii,
+        particles=run.particles,
         plane=nf.plane,
         plane_value=nf.plane_value,
         real_limits=real_limits,
@@ -173,8 +172,7 @@ def _render_quick_ldos_map(
         plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
         pcl.io.plot_spheres(
             ax,
-            sim_map.positions,
-            sim_map.radii,
+            sim_map.particles,
             plane="y",
             plane_value=float(plane_value),
             alpha=0.7,
@@ -228,10 +226,10 @@ def main() -> None:
     run = sim.run()
     nf = pcl.compute_near_field_slice(
         run,
-        x_min=-700.0,
-        x_max=700.0,
-        z_min=-500.0,
-        z_max=500.0,
+        axis_0_min=-700.0,
+        axis_0_max=700.0,
+        axis_1_min=-500.0,
+        axis_1_max=500.0,
         dx=10.0,
         plane="y",
         plane_value=0.0,
@@ -277,10 +275,10 @@ def main() -> None:
     run_dip = sim_dip.run()
     nf_dip = pcl.compute_near_field_slice(
         run_dip,
-        x_min=-700.0,
-        x_max=700.0,
-        z_min=-500.0,
-        z_max=500.0,
+        axis_0_min=-700.0,
+        axis_0_max=700.0,
+        axis_1_min=-500.0,
+        axis_1_max=500.0,
         dx=10.0,
         plane="y",
         plane_value=0.0,

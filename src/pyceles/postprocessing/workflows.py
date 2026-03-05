@@ -331,14 +331,10 @@ def _interpolate_center_pixels(
 def compute_near_field_slice(
     run: SimulationResult,
     *,
-    x_min: float = -4000.0,
-    x_max: float = 4000.0,
-    z_min: float = -3000.0,
-    z_max: float = 5000.0,
-    axis_0_min: float | None = None,
-    axis_0_max: float | None = None,
-    axis_1_min: float | None = None,
-    axis_1_max: float | None = None,
+    axis_0_min: float = -4000.0,
+    axis_0_max: float = 4000.0,
+    axis_1_min: float = -3000.0,
+    axis_1_max: float = 5000.0,
     dx: float = 40.0,
     plane: str = "y",
     plane_value: float = 0.0,
@@ -360,15 +356,6 @@ def compute_near_field_slice(
     """
     if float(dx) <= 0.0:
         raise ValueError(f"`dx` must be > 0. Got {dx!r}.")
-
-    if axis_0_min is None:
-        axis_0_min = x_min
-    if axis_0_max is None:
-        axis_0_max = x_max
-    if axis_1_min is None:
-        axis_1_min = z_min
-    if axis_1_max is None:
-        axis_1_max = z_max
 
     if float(axis_0_max) < float(axis_0_min):
         raise ValueError(

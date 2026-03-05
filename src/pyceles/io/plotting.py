@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Literal
 
 import matplotlib.pyplot as plt
 import numpy as np
 
+from pyceles.core.particles import LayeredSphere, Particle, Sphere, Spheroid
 from pyceles.core.sources import JonesPolarizedSource
 
 
@@ -186,9 +188,7 @@ def far_field_intensity_from_result(run, *, channel: str = "mixed") -> np.ndarra
 
 def plot_spheres(
     ax,
-    positions,
-    radii,
-    layered_radii: list[np.ndarray] | None = None,
+    particles: Sequence[Particle],
     *,
     plane="y",
     plane_value=0.0,
@@ -198,15 +198,8 @@ def plot_spheres(
 ):
     """Plot sphere/shell intersections with a Cartesian slice plane.
 
-    Parameters
-    ----------
-    layered_radii:
-        Optional per-sphere shell radii (inner -> outer). When provided, each
-        shell is drawn as a concentric outline on the selected slice.
-    plane:
-        Slice plane normal axis: "x", "y", or "z".
-    plane_value:
-        Slice location along `plane`.
+    Geometry input is particle-native. `LayeredSphere` entries are drawn as
+    concentric shell outlines; `Sphere` entries as single outlines.
     """
     plane = str(plane).lower()
     if plane not in {"x", "y", "z"}:
@@ -223,32 +216,19 @@ def plot_spheres(
         slice_idx = 2
         plot_i, plot_j = 0, 1
 
-    pos = np.asarray(positions, float)
-    r = np.asarray(radii, float)
-    if layered_radii is None:
-        shells = [np.asarray([ri], dtype=float) for ri in r]
-    else:
-        if len(layered_radii) != int(r.size):
-            raise ValueError(
-                f"`layered_radii` length must match number of spheres ({r.size}). "
-                f"Got {len(layered_radii)}."
-            )
-        shells = []
-        for i, shell_r in enumerate(layered_radii):
-            shell = np.asarray(shell_r, dtype=float).reshape(-1)
-            if shell.size == 0:
-                raise ValueError("Each `layered_radii[i]` entry must be non-empty.")
-            if np.any(shell <= 0.0) or np.any(~np.isfinite(shell)):
-                raise ValueError("All shell radii must be finite and strictly positive.")
-            if np.any(np.diff(shell) <= 0.0):
-                raise ValueError("Each layered-radii entry must be strictly increasing.")
-            if not np.isclose(shell[-1], r[i], rtol=1e-12, atol=1e-12):
-                raise ValueError(
-                    "The last shell radius must match the corresponding outer particle radius."
-                )
-            shells.append(shell)
-
-    for p, rr, shell in zip(pos, r, shells):
+    for particle in particles:
+        p = np.asarray(particle.position, dtype=float).reshape(3)
+        if isinstance(particle, Sphere):
+            shell = np.asarray([float(particle.radius)], dtype=float)
+        elif isinstance(particle, LayeredSphere):
+            shell = np.asarray(particle.layer_radii, dtype=float).reshape(-1)
+        elif isinstance(particle, Spheroid):
+            # Exact spheroid-slice overlays can be added once spheroidal
+            # kernels are implemented; for now use the circumscribing sphere.
+            shell = np.asarray([float(particle.circumscribing_radius())], dtype=float)
+        else:
+            raise TypeError(f"Unsupported particle type {type(particle).__name__!r} for plotting.")
+        rr = float(shell[-1])
         dd = float(p[slice_idx] - float(plane_value))
         if abs(dd) > rr:
             continue
@@ -441,8 +421,7 @@ def _plot_nearfield_panel_block(
     axis_1: np.ndarray,
     E: np.ndarray,
     H: np.ndarray,
-    positions: np.ndarray,
-    radii: np.ndarray,
+    particles: Sequence[Particle],
     plane: str,
     plane_value: float,
     axis_0_label: str,
@@ -480,8 +459,7 @@ def _plot_nearfield_panel_block(
 
         plot_spheres(
             ax,
-            positions,
-            radii,
+            particles,
             plane=plane,
             plane_value=plane_value,
             alpha=0.7,
@@ -495,15 +473,14 @@ def plot_nearfield_panels(
     axis_1: np.ndarray,
     E: np.ndarray,
     H: np.ndarray,
-    positions: np.ndarray,
-    radii: np.ndarray,
+    particles: Sequence[Particle],
     *,
     plane: str = "y",
     plane_value: float = 0.0,
     real_limits: tuple[float, float] = (-2.0, 2.0),
     abs_limits: tuple[float, float] = (0.0, 2.0),
 ):
-    """Plot 8 near-field panels with sphere overlays."""
+    """Plot 8 near-field panels with particle overlays."""
     axis_0_label, axis_1_label = _slice_axis_labels(plane)
     fig, axes = plt.subplots(2, 4, figsize=(18, 7), constrained_layout=True)
     _plot_nearfield_panel_block(
@@ -513,8 +490,7 @@ def plot_nearfield_panels(
         axis_1=axis_1,
         E=E,
         H=H,
-        positions=positions,
-        radii=radii,
+        particles=particles,
         plane=plane,
         plane_value=plane_value,
         axis_0_label=axis_0_label,
@@ -529,8 +505,7 @@ def plot_nearfield_panels_channels(
     axis_0: np.ndarray,
     axis_1: np.ndarray,
     channel_fields: dict[str, tuple[np.ndarray, np.ndarray]],
-    positions: np.ndarray,
-    radii: np.ndarray,
+    particles: Sequence[Particle],
     *,
     plane: str = "y",
     plane_value: float = 0.0,
@@ -545,6 +520,8 @@ def plot_nearfield_panels_channels(
         Mapping ``channel_name -> (E, H)``. Each channel contributes one 8-panel
         set (2 rows x 4 columns). For two channels (e.g. TE/TM) this produces
         16 panels.
+    particles:
+        Particle descriptors overlaid on all panels.
     """
     if not channel_fields:
         raise ValueError("`channel_fields` must not be empty.")
@@ -569,8 +546,7 @@ def plot_nearfield_panels_channels(
             axis_1=axis_1,
             E=E,
             H=H,
-            positions=positions,
-            radii=radii,
+            particles=particles,
             plane=plane,
             plane_value=plane_value,
             axis_0_label=axis_0_label,
@@ -702,8 +678,7 @@ def plot_source_showcase_slices(
             im.set_clim(row_real_limits[0], row_real_limits[1])
             plot_spheres(
                 axes[row, col],
-                run.positions,
-                run.radii,
+                run.particles,
                 plane=plane,
                 plane_value=float(slc.plane_value),
                 alpha=0.7,
@@ -724,8 +699,7 @@ def plot_source_showcase_slices(
         im_abs.set_clim(row_abs_limits[0], row_abs_limits[1])
         plot_spheres(
             axes[row, 3],
-            run.positions,
-            run.radii,
+            run.particles,
             plane=plane,
             plane_value=float(slc.plane_value),
             alpha=0.7,
@@ -748,8 +722,7 @@ def plot_source_showcase_slices(
         im_phase.set_clim(-np.pi, np.pi)
         plot_spheres(
             axes[row, 4],
-            run.positions,
-            run.radii,
+            run.particles,
             plane=plane,
             plane_value=float(slc.plane_value),
             alpha=0.7,
@@ -765,8 +738,7 @@ def plot_nearfield_poynting_overlay(
     axis_1: np.ndarray,
     E: np.ndarray,
     H: np.ndarray,
-    positions: np.ndarray,
-    radii: np.ndarray,
+    particles: Sequence[Particle],
     *,
     plane: str = "y",
     plane_value: float = 0.0,
@@ -793,7 +765,7 @@ def plot_nearfield_poynting_overlay(
         axis_0_label=axis_0_label,
         axis_1_label=axis_1_label,
     )
-    plot_spheres(ax, positions, radii, plane=plane, plane_value=plane_value, alpha=0.7, color="w")
+    plot_spheres(ax, particles, plane=plane, plane_value=plane_value, alpha=0.7, color="w")
     ax.set_xlabel(axis_0_label)
     ax.set_ylabel(axis_1_label)
     return fig, ax

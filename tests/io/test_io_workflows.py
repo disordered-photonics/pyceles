@@ -58,8 +58,6 @@ def test_save_simulation_h5_writes_basis_and_diagnostics(tmp_path):
 
     run = SimulationResult(
         config=cfg,
-        positions=np.array([[0.0, 0.0, 0.0]], dtype=float),
-        radii=np.array([100.0], dtype=float),
         particles=tuple(
             spheres_from_arrays(
                 positions=np.array([[0.0, 0.0, 0.0]], dtype=float),

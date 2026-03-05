@@ -109,6 +109,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `compute_internal_field(...)`, `compute_near_field_components(...)`, and
   `compute_total_field(...)` now take geometry from `particles=[...]` only.
   Legacy array-style geometry inputs are removed from these paths.
+- Breaking: `compute_near_field_slice(...)` now uses only
+  `axis_0_min/axis_0_max/axis_1_min/axis_1_max` bounds; legacy
+  `x_min/x_max/z_min/z_max` aliases were removed.
+- Breaking: near-field plotting overlays are now particle-native:
+  `plot_spheres(...)`, `plot_nearfield_panels(...)`,
+  `plot_nearfield_panels_channels(...)`, and
+  `plot_nearfield_poynting_overlay(...)` consume `particles=[...]` geometry
+  instead of parallel `positions`/`radii` inputs.
+- `SimulationResult` now stores only canonical `particles`; convenience
+  `positions`/`radii` views are derived properties rather than duplicated
+  stored payloads.
 - README/examples now present source-only runs as `particles=[]` and no longer
   document array-geometry constructor patterns.
 - Direct-solver repeated solves on the same `Simulation` instance now reuse a
