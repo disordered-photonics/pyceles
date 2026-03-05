@@ -261,9 +261,11 @@ def main() -> None:
         prepared = prepare_matvec(
             lmax=cfg.lmax,
             k=k,
-            positions=positions,
-            radii=radii,
-            n_particle=n_particle,
+            particles=pcl.core.spheres_from_arrays(
+                positions=positions,
+                radii=radii,
+                refractive_indices=n_particle,
+            ),
             n_medium=cfg.n_medium,
             radial_lut_dr=cfg.radial_lut_dr,
             cache_translation_blocks=cache_on,

@@ -31,9 +31,7 @@ from .matvec import (
     estimate_translation_cache_bytes,
     make_prepared_A_and_rhs,
     precompute_T_diagonal,
-    precompute_T_diagonal_from_particles,
     prepare_matvec,
-    prepare_matvec_from_particles,
     rhs_Tb_numpy,
 )
 from .particles import (
@@ -88,9 +86,7 @@ __all__ = [
     "layered_sphere_T_diagonal",
     "layered_internal_ab_ratios",
     "precompute_T_diagonal",
-    "precompute_T_diagonal_from_particles",
     "prepare_matvec",
-    "prepare_matvec_from_particles",
     "pwp_to_svwf_regular",
     "angular_spectrum_to_svwf_regular",
     "svwf_regular_to_pwp",

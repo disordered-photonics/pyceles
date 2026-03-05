@@ -1,7 +1,9 @@
 import numpy as np
 
+from pyceles.core.particles import Ellipsoid, LayeredSphere, Sphere
 from pyceles.io.hdf5 import (
     load_far_field_h5,
+    load_geometry_h5,
     load_mapping_h5,
     load_near_field_components_h5,
     load_solution_h5,
@@ -44,9 +46,11 @@ def test_solution_roundtrip(tmp_path):
 
 def test_geometry_near_far_write(tmp_path):
     path = tmp_path / "run.h5"
-    positions = np.array([[0.0, 0.0, 0.0], [1.0, 2.0, 3.0]])
-    radii = np.array([0.5, 0.6])
-    n_particle = np.array([1.5 + 0.01j, 1.6 + 0.02j])
+    particles = (
+        Sphere(position=(0.0, 0.0, 0.0), radius=0.5, refractive_index=1.5 + 0.01j),
+        Sphere(position=(1.0, 2.0, 3.0), radius=0.6, refractive_index=1.6 + 0.02j),
+    )
+    positions = np.asarray([p.position for p in particles], dtype=float)
 
     X, Z = np.meshgrid(np.linspace(-1, 1, 5), np.linspace(-2, 2, 7), indexing="xy")
     E = np.zeros(X.shape + (3,), dtype=np.complex128)
@@ -59,9 +63,7 @@ def test_geometry_near_far_write(tmp_path):
 
     save_geometry_h5(
         path,
-        positions=positions,
-        radii=radii,
-        n_particle=n_particle,
+        particles=particles,
         n_medium=1.0 + 0j,
         wavelength=550.0,
         lmax=3,
@@ -83,14 +85,48 @@ def test_geometry_near_far_write(tmp_path):
         assert "geometry" in h5
         assert "near_field" in h5
         assert "far_field" in h5
-        np.testing.assert_allclose(h5["geometry/positions"][...], positions)
+        assert "positions" not in h5["geometry"]
         np.testing.assert_allclose(h5["near_field/X"][...], X)
         np.testing.assert_allclose(h5["far_field/initial/te/coeff"][...], pwp["coeff"])
         np.testing.assert_allclose(h5["far_field/scattered/te/coeff"][...], pwp["coeff"])
         assert bool(h5["far_field"].attrs["total_omitted_as_redundant"]) is True
 
+    geom_loaded = load_geometry_h5(path)
+    np.testing.assert_allclose(geom_loaded["positions"], positions)
     ff_loaded = load_far_field_h5(path)
     np.testing.assert_allclose(ff_loaded["patterns"]["initial"]["te"]["coeff"], pwp["coeff"])
+
+
+def test_geometry_particle_descriptor_roundtrip(tmp_path):
+    path = tmp_path / "particles.h5"
+    particles = (
+        Sphere(position=(0.0, 0.0, 0.0), radius=120.0, refractive_index=1.5 + 0.01j),
+        LayeredSphere(
+            position=(200.0, 0.0, 0.0),
+            layer_radii=(60.0, 110.0),
+            layer_refractive_indices=(2.1 + 0.0j, 1.7 + 0.03j),
+        ),
+        Ellipsoid(
+            position=(-150.0, 10.0, 25.0),
+            semi_axes=(80.0, 60.0, 40.0),
+            refractive_index=1.8 + 0.0j,
+            euler_angles=(0.2, 0.4, 0.6),
+        ),
+    )
+    save_geometry_h5(
+        path,
+        particles=particles,
+        n_medium=1.0 + 0j,
+        wavelength=550.0,
+        lmax=3,
+        mode="w",
+    )
+
+    loaded = load_geometry_h5(path)
+    loaded_particles = loaded["particles"]
+    assert isinstance(loaded_particles, tuple)
+    assert len(loaded_particles) == 3
+    assert loaded_particles == particles
 
 
 def test_near_field_components_write(tmp_path):

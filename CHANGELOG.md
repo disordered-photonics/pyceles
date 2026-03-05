@@ -93,9 +93,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`particles=[...]`) in all workflows.
 - Breaking: removed `SimulationResult.n_particle`; exact particle definitions
   are exposed via `SimulationResult.particles`.
+- Breaking: `core.matvec.prepare_matvec(...)` and
+  `core.matvec.precompute_T_diagonal(...)` now use particle descriptors as the
+  canonical API (`particles=[...]`), and thin `*_from_particles` aliases were
+  removed.
 - Added canonical particle-construction helpers
   (`spheres_from_arrays`, `layered_spheres_from_arrays`,
   `ellipsoids_from_arrays`).
+- Breaking: HDF5 geometry snapshots no longer persist compatibility
+  `geometry/n_particle`; geometry payloads are now strictly particle-native
+  (`geometry/particles`) with no persisted generic `positions`/`radii` tables.
 - README/examples now present source-only runs as `particles=[]` and no longer
   document array-geometry constructor patterns.
 - Direct-solver repeated solves on the same `Simulation` instance now reuse a

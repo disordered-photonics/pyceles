@@ -16,7 +16,7 @@ from pyceles.core.indexing import n_modes
 from pyceles.core.matvec import (
     PreparedMatvec,
     assemble_dense_A_numpy,
-    prepare_matvec_from_particles,
+    prepare_matvec,
 )
 from pyceles.core.particles import Ellipsoid, LayeredSphere, Particle, Sphere
 from pyceles.core.projection import project_source_to_svwf
@@ -1131,7 +1131,7 @@ class Simulation:
                 or self._prepared_operator_dtype != compute_dtype
             )
             if need_prepared:
-                prepared = prepare_matvec_from_particles(
+                prepared = prepare_matvec(
                     lmax=cfg.lmax,
                     k=k,
                     particles=list(self.particles),

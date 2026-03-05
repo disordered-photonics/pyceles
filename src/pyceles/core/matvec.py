@@ -47,7 +47,7 @@ and pair translation blocks.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from typing import Callable, Optional, Sequence
 
 import numpy as np
 import numpy.typing as npt
@@ -55,7 +55,7 @@ from tqdm.auto import tqdm
 
 from .geometry_bounds import conservative_set_diameter
 from .indexing import n_modes
-from .particles import Particle, Sphere, spheres_from_arrays
+from .particles import Particle, Sphere
 from .tmatrix import particle_T_diagonal, sphere_T_diagonal
 from .translation import RadialLUT, translation_ab5_table, translation_block
 
@@ -196,53 +196,13 @@ def prepare_matvec(
     *,
     lmax: int,
     k: float,
-    positions: Array,
-    radii: Array,
-    n_particle: Array,
+    particles: Sequence[Particle],
     n_medium: complex = 1.0 + 0j,
     radial_lut_dr: float,
     cache_translation_blocks: bool = False,
     operator_dtype: npt.DTypeLike = np.complex128,
 ) -> PreparedMatvec:
-    """Prepare reusable data for many `(I - T W)` applications.
-
-    Compatibility wrapper around the canonical particle-descriptor path.
-
-    `Simulation` now routes through `prepare_matvec_from_particles(...)`
-    directly; this helper is kept for low-level array workflows and tests.
-    """
-
-    particles = spheres_from_arrays(
-        positions=positions,
-        radii=radii,
-        refractive_indices=n_particle,
-    )
-    return prepare_matvec_from_particles(
-        lmax=lmax,
-        k=k,
-        particles=particles,
-        n_medium=n_medium,
-        radial_lut_dr=radial_lut_dr,
-        cache_translation_blocks=cache_translation_blocks,
-        operator_dtype=operator_dtype,
-    )
-
-
-def prepare_matvec_from_particles(
-    *,
-    lmax: int,
-    k: float,
-    particles: list[Particle],
-    n_medium: complex = 1.0 + 0j,
-    radial_lut_dr: float,
-    cache_translation_blocks: bool = False,
-    operator_dtype: npt.DTypeLike = np.complex128,
-) -> PreparedMatvec:
-    """Prepare reusable matvec data from an explicit particle list.
-
-    This is the extensible geometry path for mixed particle families that still
-    expose diagonal per-(tau,l,m) response entries.
-    """
+    """Prepare reusable matvec data from explicit particle descriptors."""
     part = list(particles)
     positions = np.asarray(
         [np.asarray(p.position, dtype=float) for p in part], dtype=float
@@ -250,14 +210,13 @@ def prepare_matvec_from_particles(
     op_dtype = np.dtype(operator_dtype)
     k_f = float(k)
 
-    T_M, T_N = precompute_T_diagonal_from_particles(
+    T_M, T_N = precompute_T_diagonal(
         lmax=int(lmax),
         k=k_f,
         particles=part,
         n_medium=n_medium,
+        dtype=op_dtype,
     )
-    T_M = np.asarray(T_M, dtype=op_dtype)
-    T_N = np.asarray(T_N, dtype=op_dtype)
     T_diag = _build_T_mode_diagonal(int(lmax), T_M, T_N)
     ab5 = translation_ab5_table(int(lmax), dtype=op_dtype)
 
@@ -365,70 +324,19 @@ def precompute_T_diagonal(
     *,
     lmax: int,
     k: float,
-    radii: Array,
-    n_particle: Array,
+    particles: Sequence[Particle],
     n_medium: complex = 1.0 + 0j,
     dtype: npt.DTypeLike = np.complex128,
 ) -> tuple[Array, Array]:
-    """Precompute per-sphere diagonal T entries.
-
-    Returns
-    -------
-    T_M, T_N:
-        Arrays of shape (Ns, lmax+1) where index l=0 is unused.
-    """
-
-    out_dtype = np.dtype(dtype)
+    """Precompute per-particle diagonal T entries for the current geometry."""
     lmax = int(lmax)
-    radii = np.asarray(radii, dtype=float).reshape(-1)
-    n_particle = np.asarray(n_particle, dtype=out_dtype).reshape(-1)
-    Ns = radii.size
-
+    out_dtype = np.dtype(dtype)
+    Ns = len(particles)
     T_M = np.zeros((Ns, lmax + 1), dtype=out_dtype)
     T_N = np.zeros((Ns, lmax + 1), dtype=out_dtype)
 
-    # Reuse identical single-sphere evaluations (common in monodisperse clusters).
-    # Keep the memo bounded so highly heterogeneous systems do not grow a huge dict.
-    MAX_TMEMO_ENTRIES = 100_000
-    tmemo: dict[tuple[float, complex, complex, complex, int], tuple[Array, Array]] = {}
-    for i in range(Ns):
-        ri = float(radii[i])
-        npi = complex(n_particle[i])
-        nmed = complex(n_medium)
-        key = (ri, npi, complex(k), nmed, int(lmax))
-        cached = tmemo.get(key)
-        if cached is None:
-            Td = sphere_T_diagonal(lmax, k, ri, npi, nmed)
-            cached = (
-                np.asarray(Td[1], dtype=out_dtype).copy(),
-                np.asarray(Td[2], dtype=out_dtype).copy(),
-            )
-            if len(tmemo) < MAX_TMEMO_ENTRIES:
-                tmemo[key] = cached
-        T_M[i, :] = cached[0]
-        T_N[i, :] = cached[1]
-
-    return T_M, T_N
-
-
-def precompute_T_diagonal_from_particles(
-    *,
-    lmax: int,
-    k: float,
-    particles: list[Particle],
-    n_medium: complex = 1.0 + 0j,
-) -> tuple[Array, Array]:
-    """Precompute per-particle diagonal T entries from particle objects.
-
-    This is the extensible counterpart of `precompute_T_diagonal` and is intended
-    for future non-spherical particle support.
-    """
-    lmax = int(lmax)
-    Ns = len(particles)
-    T_M = np.zeros((Ns, lmax + 1), dtype=np.complex128)
-    T_N = np.zeros((Ns, lmax + 1), dtype=np.complex128)
-
     # Fast reuse for identical spheres.
+    MAX_TMEMO_ENTRIES = 100_000
     sphere_memo: dict[tuple[float, complex, complex, complex, int], tuple[Array, Array]] = {}
     for i, p in enumerate(particles):
         if isinstance(p, Sphere):
@@ -442,15 +350,19 @@ def precompute_T_diagonal_from_particles(
             cached = sphere_memo.get(key)
             if cached is None:
                 Td = sphere_T_diagonal(lmax, k, p.radius, p.refractive_index, n_medium)
-                cached = (Td[1].copy(), Td[2].copy())
-                sphere_memo[key] = cached
+                cached = (
+                    np.asarray(Td[1], dtype=out_dtype).copy(),
+                    np.asarray(Td[2], dtype=out_dtype).copy(),
+                )
+                if len(sphere_memo) < MAX_TMEMO_ENTRIES:
+                    sphere_memo[key] = cached
             T_M[i, :] = cached[0]
             T_N[i, :] = cached[1]
             continue
 
         Td = particle_T_diagonal(lmax=lmax, k_medium=k, particle=p, n_medium=n_medium)
-        T_M[i, :] = np.asarray(Td[1], dtype=np.complex128)
-        T_N[i, :] = np.asarray(Td[2], dtype=np.complex128)
+        T_M[i, :] = np.asarray(Td[1], dtype=out_dtype)
+        T_N[i, :] = np.asarray(Td[2], dtype=out_dtype)
 
     return T_M, T_N
 

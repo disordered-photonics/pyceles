@@ -27,9 +27,11 @@ def _sample_prepared():
     prepared = prepare_matvec(
         lmax=lmax,
         k=k,
-        positions=positions,
-        radii=radii,
-        n_particle=n_particle,
+        particles=spheres_from_arrays(
+            positions=positions,
+            radii=radii,
+            refractive_indices=n_particle,
+        ),
         n_medium=1.0 + 0j,
         radial_lut_dr=1.0,
         cache_translation_blocks=False,

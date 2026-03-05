@@ -6,8 +6,6 @@ from typing import TYPE_CHECKING
 import h5py
 import numpy as np
 
-from pyceles.core.particles import Ellipsoid, LayeredSphere, Particle, Sphere
-
 from .hdf5 import (
     load_far_field_h5,
     load_geometry_h5,
@@ -24,26 +22,6 @@ from .hdf5 import (
 if TYPE_CHECKING:
     from pyceles.postprocessing.workflows import NearFieldSlice
     from pyceles.simulation import SimulationResult
-
-
-def _geometry_refractive_indices_for_hdf5(particles: tuple[Particle, ...]) -> np.ndarray:
-    """Return one representative refractive index per particle for legacy HDF5 geometry payloads.
-
-    The HDF5 `geometry/n_particle` dataset remains an array-form compatibility
-    payload. For layered spheres this stores the outermost layer refractive
-    index; no homogenization is performed.
-    """
-    out: list[complex] = []
-    for p in particles:
-        if isinstance(p, Sphere):
-            out.append(complex(p.refractive_index))
-        elif isinstance(p, LayeredSphere):
-            out.append(complex(p.layer_refractive_indices[-1]))
-        elif isinstance(p, Ellipsoid):
-            out.append(complex(p.refractive_index))
-        else:
-            raise TypeError(f"Unsupported particle type {type(p).__name__!r} for geometry export.")
-    return np.asarray(out, dtype=np.complex128)
 
 
 def save_simulation_h5(
@@ -67,9 +45,7 @@ def save_simulation_h5(
     out_h5.parent.mkdir(parents=True, exist_ok=True)
     save_geometry_h5(
         out_h5,
-        positions=run.positions,
-        radii=run.radii,
-        n_particle=_geometry_refractive_indices_for_hdf5(run.particles),
+        particles=run.particles,
         n_medium=run.config.n_medium,
         wavelength=run.config.wavelength,
         lmax=run.config.lmax,

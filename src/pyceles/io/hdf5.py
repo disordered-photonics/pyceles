@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Mapping
 
 import h5py
 import numpy as np
+
+from pyceles.core.particles import Ellipsoid, LayeredSphere, Particle, Sphere
 
 
 def _pathlike(path: str | Path) -> str:
@@ -40,12 +43,134 @@ def _write_dataset(group: h5py.Group, name: str, value: Any, *, compression: str
         group.create_dataset(name, data=arr, **kwargs)
 
 
+def _write_particle_descriptors(
+    group: h5py.Group,
+    particles: Sequence[Particle],
+    *,
+    compression: str | None,
+) -> None:
+    """Persist explicit particle descriptors in canonical typed form."""
+    pg = group.create_group("particles")
+    pg.attrs["schema"] = "pyceles.particles.v1"
+    pg.attrs["count"] = int(len(particles))
+    for idx, particle in enumerate(particles):
+        pgroup = pg.create_group(str(idx))
+        _write_dataset(
+            pgroup, "position", np.asarray(particle.position, dtype=float), compression=None
+        )
+        if isinstance(particle, Sphere):
+            pgroup.attrs["type"] = "Sphere"
+            _write_dataset(pgroup, "radius", float(particle.radius), compression=None)
+            _write_dataset(
+                pgroup,
+                "refractive_index",
+                np.asarray(complex(particle.refractive_index), dtype=np.complex128),
+                compression=None,
+            )
+        elif isinstance(particle, LayeredSphere):
+            pgroup.attrs["type"] = "LayeredSphere"
+            _write_dataset(
+                pgroup,
+                "layer_radii",
+                np.asarray(particle.layer_radii, dtype=float),
+                compression=compression,
+            )
+            _write_dataset(
+                pgroup,
+                "layer_refractive_indices",
+                np.asarray(particle.layer_refractive_indices, dtype=np.complex128),
+                compression=compression,
+            )
+        elif isinstance(particle, Ellipsoid):
+            pgroup.attrs["type"] = "Ellipsoid"
+            _write_dataset(
+                pgroup, "semi_axes", np.asarray(particle.semi_axes, dtype=float), compression=None
+            )
+            _write_dataset(
+                pgroup,
+                "refractive_index",
+                np.asarray(complex(particle.refractive_index), dtype=np.complex128),
+                compression=None,
+            )
+            _write_dataset(
+                pgroup,
+                "euler_angles",
+                np.asarray(particle.euler_angles, dtype=float),
+                compression=None,
+            )
+        else:
+            raise TypeError(f"Unsupported particle type {type(particle).__name__!r}.")
+
+
+def _load_particle_descriptors(group: h5py.Group) -> tuple[Particle, ...]:
+    """Load typed particle descriptors written by `_write_particle_descriptors`."""
+    if "particles" not in group:
+        raise ValueError(
+            "Missing required geometry payload `particles`. "
+            "This file does not follow the canonical particle-native geometry schema."
+        )
+    pg = group["particles"]
+    particles: list[Particle] = []
+    keys = sorted(pg.keys(), key=lambda key: int(key))
+    for key in keys:
+        pgroup = pg[key]
+        kind = str(pgroup.attrs.get("type", ""))
+        pos_arr = np.asarray(pgroup["position"][...], dtype=float).reshape(3)
+        pos = (float(pos_arr[0]), float(pos_arr[1]), float(pos_arr[2]))
+        if kind == "Sphere":
+            particles.append(
+                Sphere(
+                    position=pos,
+                    radius=float(np.asarray(pgroup["radius"][...]).reshape(())),
+                    refractive_index=complex(
+                        np.asarray(pgroup["refractive_index"][...]).reshape(())
+                    ),
+                )
+            )
+            continue
+        if kind == "LayeredSphere":
+            particles.append(
+                LayeredSphere(
+                    position=pos,
+                    layer_radii=tuple(
+                        float(v)
+                        for v in np.asarray(pgroup["layer_radii"][...], dtype=float).reshape(-1)
+                    ),
+                    layer_refractive_indices=tuple(
+                        complex(v)
+                        for v in np.asarray(
+                            pgroup["layer_refractive_indices"][...], dtype=np.complex128
+                        ).reshape(-1)
+                    ),
+                )
+            )
+            continue
+        if kind == "Ellipsoid":
+            axes_arr = np.asarray(pgroup["semi_axes"][...], dtype=float).reshape(3)
+            euler_arr = np.asarray(pgroup["euler_angles"][...], dtype=float).reshape(3)
+            particles.append(
+                Ellipsoid(
+                    position=pos,
+                    semi_axes=(float(axes_arr[0]), float(axes_arr[1]), float(axes_arr[2])),
+                    refractive_index=complex(
+                        np.asarray(pgroup["refractive_index"][...]).reshape(())
+                    ),
+                    euler_angles=(
+                        float(euler_arr[0]),
+                        float(euler_arr[1]),
+                        float(euler_arr[2]),
+                    ),
+                )
+            )
+            continue
+        raise ValueError(f"Unsupported or missing particle type attribute: {kind!r}.")
+    return tuple(particles)
+
+
 def save_geometry_h5(
     path: str | Path,
     *,
-    positions: np.ndarray,
-    radii: np.ndarray,
-    n_particle: np.ndarray | complex,
+    particles: Sequence[Particle],
     n_medium: complex,
     wavelength: float,
     lmax: int,
@@ -54,12 +179,17 @@ def save_geometry_h5(
     attrs: Mapping[str, Any] | None = None,
     compression: str | None = "gzip",
 ) -> None:
-    """Persist particle geometry and optical constants for reproducible reruns."""
+    """Persist canonical particle descriptors and optical metadata.
+
+    Parameters
+    ----------
+    particles:
+        Explicit particle descriptors serialized under ``<group>/particles``.
+    """
+    part = tuple(particles)
     with h5py.File(_pathlike(path), mode) as h5:
         g = _reset_group(h5, group)
-        _write_dataset(g, "positions", positions, compression=compression)
-        _write_dataset(g, "radii", radii, compression=compression)
-        _write_dataset(g, "n_particle", n_particle, compression=compression)
+        _write_particle_descriptors(g, part, compression=compression)
         g.attrs["n_medium"] = complex(n_medium)
         g.attrs["wavelength"] = float(wavelength)
         g.attrs["lmax"] = int(lmax)
@@ -67,13 +197,14 @@ def save_geometry_h5(
 
 
 def load_geometry_h5(path: str | Path, *, group: str = "geometry") -> dict[str, Any]:
-    """Load geometry payload (positions/radii/indexes) plus stored metadata."""
+    """Load geometry payload from canonical particle descriptors plus metadata attrs."""
     out: dict[str, Any] = {}
     with h5py.File(_pathlike(path), "r") as h5:
         g = h5[group]
-        out["positions"] = g["positions"][...]
-        out["radii"] = g["radii"][...]
-        out["n_particle"] = g["n_particle"][...]
+        out["particles"] = _load_particle_descriptors(g)
+        out["positions"] = np.asarray(
+            [np.asarray(p.position, dtype=float) for p in out["particles"]], dtype=float
+        ).reshape(-1, 3)
         out["attrs"] = dict(g.attrs.items())
     return out
 

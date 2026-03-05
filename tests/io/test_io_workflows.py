@@ -3,7 +3,7 @@ from typing import Any, cast
 import numpy as np
 
 from pyceles.core.fields import PlaneWave
-from pyceles.core.particles import spheres_from_arrays
+from pyceles.core.particles import Sphere, spheres_from_arrays
 from pyceles.io.workflows import load_simulation_h5, save_simulation_h5
 from pyceles.linear.solvers import LinearSolveResult
 from pyceles.postprocessing.farfield import FarFieldPatterns
@@ -184,6 +184,54 @@ def test_no_scatterer_run_roundtrip_io_workflow(tmp_path):
     solution = cast(dict[str, Any], loaded["solution"])
 
     assert np.asarray(geometry["positions"]).shape == (0, 3)
+    assert geometry["particles"] == tuple()
     assert np.asarray(solution["coeffs"]).shape[0] == 0
     assert "far_field" in loaded
     assert "diagnostics" in loaded
+
+
+def test_save_simulation_h5_geometry_loads_particles(tmp_path):
+    source = PlaneWave(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        polarization="TE",
+        polar_angle=0.0,
+        azimuthal_angle=0.0,
+    )
+    cfg = SimulationConfig(
+        wavelength=550.0,
+        n_medium=1.0 + 0j,
+        lmax=2,
+        source=source,
+        solver_method="direct",
+        verbose=False,
+    )
+    particles = tuple(
+        spheres_from_arrays(
+            positions=np.array([[0.0, 0.0, 0.0]], dtype=float),
+            radii=np.array([120.0], dtype=float),
+            refractive_indices=np.array([1.5 + 0.01j], dtype=np.complex128),
+        )
+    )
+    sim = Simulation(cfg, particles=particles)
+    run = sim.run(include_farfield=False)
+
+    X, Z = np.meshgrid(np.linspace(-1.0, 1.0, 3), np.linspace(-1.0, 1.0, 3), indexing="xy")
+    zero = np.zeros(X.shape + (3,), dtype=np.complex128)
+    near = NearFieldSlice(
+        axis_0=X,
+        axis_1=Z,
+        inside=np.zeros_like(X, dtype=bool),
+        field_maps={"initial": (zero, zero)},
+        plane="y",
+        plane_value=0.0,
+        axis_0_label="x",
+        axis_1_label="z",
+    )
+    out = save_simulation_h5(run, near, tmp_path / "particle_roundtrip.h5")
+    loaded = cast(dict[str, Any], load_simulation_h5(out))
+    geometry = cast(dict[str, Any], loaded["geometry"])
+    geometry_particles = cast(tuple[Sphere, ...], geometry["particles"])
+
+    assert len(geometry_particles) == 1
+    assert geometry_particles[0] == particles[0]
