@@ -36,6 +36,7 @@ from __future__ import annotations
 import numpy as np
 from scipy.special import spherical_jn, spherical_yn
 
+from .indexing import n_modes
 from .particles import LayeredSphere, Particle, Sphere, Spheroid
 
 
@@ -494,6 +495,101 @@ def particle_T_diagonal(
     if isinstance(particle, Spheroid):
         raise NotImplementedError(_unsupported_particle_message(particle))
     raise TypeError(f"Unsupported particle instance: {type(particle)!r}")
+
+
+def _mode_diagonal_from_degree_diagonal(
+    lmax: int,
+    T_M: np.ndarray,
+    T_N: np.ndarray,
+) -> np.ndarray:
+    """Expand per-degree TE/TM diagonals into CELES-order mode diagonals.
+
+    This is the canonical spherical-basis bridge from compact diagonal particle
+    kernels to a full `(Nm,)` operator row. It is used when diagonal particles
+    are forced through block-based solver paths, and will also serve as the
+    reference representation for future non-diagonal particles implemented
+    directly in the spherical basis.
+    """
+
+    lmax = int(lmax)
+    T_M = np.asarray(T_M)
+    T_N = np.asarray(T_N)
+    if T_M.shape != T_N.shape:
+        raise ValueError(f"T_M and T_N must have the same shape, got {T_M.shape} and {T_N.shape}.")
+
+    Nm = n_modes(lmax)
+    Nscl = lmax * (lmax + 2)
+    out = np.zeros((Nm,), dtype=np.result_type(T_M.dtype, T_N.dtype, np.complex64))
+    for l in range(1, lmax + 1):
+        start = (l - 1) * (l + 1)
+        end = start + (2 * l + 1)
+        out[start:end] = T_M[l]
+        out[Nscl + start : Nscl + end] = T_N[l]
+    return out
+
+
+def particle_T_matrix_block(
+    lmax: int,
+    k_medium: complex,
+    particle: Particle,
+    n_medium: complex = 1.0 + 0j,
+    *,
+    sign: int = -1,
+) -> np.ndarray:
+    """Return one particle-local spherical-basis T block in CELES mode ordering.
+
+    Notes
+    -----
+    This is the canonical full-block representation consumed by dense and
+    baseline axisymmetric solver paths. Diagonal particles are expanded exactly
+    into a dense diagonal matrix, so non-diagonal backends can be regression
+    tested against the fast path without re-implementing particle physics.
+    """
+
+    Td = particle_T_diagonal(
+        lmax=lmax,
+        k_medium=k_medium,
+        particle=particle,
+        n_medium=n_medium,
+        sign=sign,
+    )
+    diag = _mode_diagonal_from_degree_diagonal(
+        int(lmax),
+        np.asarray(Td[1], dtype=np.complex128),
+        np.asarray(Td[2], dtype=np.complex128),
+    )
+    return np.diag(diag)
+
+
+def particle_T_matrix_blocks(
+    lmax: int,
+    k_medium: complex,
+    particles: list[Particle] | tuple[Particle, ...],
+    n_medium: complex = 1.0 + 0j,
+    *,
+    sign: int = -1,
+) -> np.ndarray:
+    """Return stacked spherical-basis T blocks for a particle subset.
+
+    This helper intentionally mirrors `particle_T_diagonal(...)` but returns the
+    denser `(Ng, Nm, Nm)` form expected by general prepared-operator paths.
+    Future spheroid implementations can plug into the solver by teaching this
+    dispatch how to build their spherical-basis T blocks.
+    """
+
+    return np.stack(
+        [
+            particle_T_matrix_block(
+                lmax=lmax,
+                k_medium=k_medium,
+                particle=particle,
+                n_medium=n_medium,
+                sign=sign,
+            )
+            for particle in particles
+        ],
+        axis=0,
+    )
 
 
 def particle_internal_ratios(

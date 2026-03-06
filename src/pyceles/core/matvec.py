@@ -68,7 +68,7 @@ from tqdm.auto import tqdm
 from .geometry_bounds import conservative_set_diameter
 from .indexing import n_modes
 from .particles import Particle, ParticleTRepresentation, Sphere
-from .tmatrix import particle_T_diagonal, sphere_T_diagonal
+from .tmatrix import particle_T_diagonal, particle_T_matrix_blocks, sphere_T_diagonal
 from .translation import RadialLUT, translation_ab5_table, translation_block
 
 Array = np.ndarray
@@ -270,16 +270,18 @@ class DenseTGroup:
 
 @dataclass
 class AxisymmetricTGroup:
-    """Placeholder for future axisymmetric single-particle T operators.
+    """Prepared axisymmetric particle-local T operator.
 
-    Axisymmetric particles are expected to use a narrower representation than
-    generic dense blocks, for example body-frame `m` blocks combined with SVWF
-    rotations. This class exists now to stabilize the operator boundary before
-    the first spheroid backend lands, so later work can focus on physics and
-    numerics rather than reopening solver architecture yet again.
+    The long-term optimized form is expected to use body-frame `m` blocks and
+    optional SVWF rotations. For the first spherical-basis spheroid backend,
+    however, it is useful to also support a dense-block fallback here directly.
+    That lets non-diagonal axisymmetric particles enter the default solver path
+    as soon as they can produce spherical-basis T blocks, without waiting for
+    the narrower `m`-block implementation.
     """
 
     particle_indices: Array
+    T_blocks: Array | None = None
     apply_subset_fn: Callable[[Array], Array] | None = None
     rhs_subset_fn: Callable[[Array], Array] | None = None
     apply_local_block_fn: Callable[[int, Array], Array] | None = None
@@ -288,8 +290,24 @@ class AxisymmetricTGroup:
 
     def __post_init__(self) -> None:
         self.particle_indices = np.asarray(self.particle_indices, dtype=np.int64).reshape(-1)
+        if self.T_blocks is not None:
+            blocks = np.asarray(self.T_blocks, dtype=self.dtype)
+            ids = np.asarray(self.particle_indices, dtype=np.int64).reshape(-1)
+            if blocks.ndim != 3 or blocks.shape[1] != blocks.shape[2]:
+                raise ValueError(
+                    "Axisymmetric dense fallback must provide blocks of shape (Ng, Nm, Nm)."
+                )
+            if blocks.shape[0] != ids.size:
+                raise ValueError(
+                    "Axisymmetric dense fallback must provide one T block per particle. "
+                    f"Got {blocks.shape[0]} blocks for {ids.size} particles."
+                )
+            self.T_blocks = blocks
 
     def apply_subset(self, x_subset: Array) -> Array:
+        if self.T_blocks is not None:
+            arr = np.asarray(x_subset, dtype=self.dtype)
+            return np.einsum("gij,gj->gi", self.T_blocks, arr, optimize=True)
         if self.apply_subset_fn is None:
             raise NotImplementedError(
                 "Axisymmetric particle-T operators are planned but not implemented yet."
@@ -299,6 +317,8 @@ class AxisymmetricTGroup:
         )
 
     def rhs_subset(self, b_subset: Array) -> Array:
+        if self.T_blocks is not None:
+            return self.apply_subset(b_subset)
         if self.rhs_subset_fn is not None:
             return np.asarray(
                 self.rhs_subset_fn(np.asarray(b_subset, dtype=self.dtype)), dtype=self.dtype
@@ -306,6 +326,8 @@ class AxisymmetricTGroup:
         return self.apply_subset(b_subset)
 
     def apply_local_block(self, local_particle_index: int, block: Array) -> Array:
+        if self.T_blocks is not None:
+            return self.T_blocks[int(local_particle_index)] @ np.asarray(block, dtype=self.dtype)
         if self.apply_local_block_fn is None:
             raise NotImplementedError(
                 "Axisymmetric particle-T operators are planned but not implemented yet."
@@ -669,6 +691,35 @@ def make_axisymmetric_group_factory(
     return factory
 
 
+def make_axisymmetric_block_group_factory(
+    block_provider: DenseBlockProvider,
+    *,
+    metadata_builder: AxisymmetricMetadataBuilder | None = None,
+) -> ParticleTGroupFactory:
+    """Build an axisymmetric group from full spherical-basis T blocks.
+
+    This is the intended bridge for the first spheroid backend in `pyceles`:
+    generate canonical spherical-basis T blocks from physics code, keep the
+    solver path unchanged, and optimize storage/application later by replacing
+    the dense fallback inside `AxisymmetricTGroup`.
+    """
+
+    def factory(
+        plan: ParticleTGroupPlan, context: ParticleTPreparationContext
+    ) -> PreparedParticleTGroup:
+        ids = np.asarray(plan.particle_indices, dtype=np.int64)
+        group_particles = tuple(context.particles[int(i)] for i in ids)
+        metadata = None if metadata_builder is None else metadata_builder(group_particles, context)
+        return AxisymmetricTGroup(
+            particle_indices=ids,
+            T_blocks=np.asarray(block_provider(group_particles, context), dtype=context.dtype),
+            body_metadata=metadata,
+            dtype=context.dtype,
+        )
+
+    return factory
+
+
 def _prepare_diagonal_group(
     *,
     plan: ParticleTGroupPlan,
@@ -716,6 +767,49 @@ def _default_group_factory(
             k=context.k,
             particles=context.particles,
             n_medium=context.n_medium,
+            dtype=context.dtype,
+        )
+
+    if plan.representation == "dense":
+        ids = np.asarray(plan.particle_indices, dtype=np.int64)
+        group_particles = [context.particles[int(i)] for i in ids]
+        try:
+            blocks = particle_T_matrix_blocks(
+                lmax=context.lmax,
+                k_medium=context.k,
+                particles=group_particles,
+                n_medium=context.n_medium,
+            )
+        except (NotImplementedError, TypeError) as exc:
+            raise NotImplementedError(
+                "dense particle-T preparation requires canonical spherical-basis "
+                "T blocks for every particle in the selected group."
+            ) from exc
+        return DenseTGroup(
+            particle_indices=ids,
+            T_blocks=blocks.astype(context.dtype, copy=False),
+            dtype=context.dtype,
+        )
+
+    if plan.representation == "axisymmetric":
+        ids = np.asarray(plan.particle_indices, dtype=np.int64)
+        axis_particles = tuple(context.particles[int(i)] for i in ids)
+        try:
+            blocks = particle_T_matrix_blocks(
+                lmax=context.lmax,
+                k_medium=context.k,
+                particles=list(axis_particles),
+                n_medium=context.n_medium,
+            )
+        except (NotImplementedError, TypeError) as exc:
+            raise NotImplementedError(
+                "axisymmetric particle-T preparation requires canonical spherical-basis "
+                "T blocks for every particle in the selected group."
+            ) from exc
+        return AxisymmetricTGroup(
+            particle_indices=ids,
+            T_blocks=blocks.astype(context.dtype, copy=False),
+            body_metadata={"storage": "spherical_basis_dense_blocks"},
             dtype=context.dtype,
         )
 

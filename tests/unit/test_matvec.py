@@ -15,6 +15,7 @@ from pyceles.core.matvec import (
     apply_A_numpy,
     assemble_dense_A_numpy,
     estimate_translation_cache_bytes,
+    make_axisymmetric_block_group_factory,
     make_axisymmetric_group_factory,
     make_dense_group_factory,
     plan_particle_t_groups,
@@ -315,6 +316,57 @@ def test_prepare_matvec_accepts_custom_axisymmetric_group_factory():
     assert rhs.shape == (2 * nm,)
 
 
+def test_prepare_matvec_accepts_axisymmetric_block_group_factory():
+    lmax, k, positions, radii, n_particle, _, n_medium, x, b = _sample_problem()
+    particles: list[Particle] = [
+        Sphere(
+            position=tuple(positions[0].tolist()),
+            radius=float(radii[0]),
+            refractive_index=complex(n_particle[0]),
+        ),
+        Spheroid(
+            position=tuple(positions[1].tolist()),
+            equatorial_radius=float(radii[1]),
+            polar_radius=float(radii[1]) * 1.25,
+            refractive_index=complex(n_particle[1]),
+            euler_angles=(0.2, 0.4, 0.1),
+        ),
+    ]
+    nm = n_modes(lmax)
+    axis_matrix = np.eye(nm, dtype=np.complex128) * (0.9 - 0.05j)
+    axis_matrix[1, 4] = -0.1 + 0.03j
+
+    factories = ParticleTGroupFactories(
+        axisymmetric=make_axisymmetric_block_group_factory(
+            lambda _group_particles, _context: axis_matrix[None, :, :],
+            metadata_builder=lambda group_particles, _context: {
+                "euler_angles": tuple(group_particles[0].euler_angles)  # type: ignore[attr-defined]
+            },
+        )
+    )
+    prepared = prepare_matvec(
+        lmax=lmax,
+        k=k,
+        particles=particles,
+        n_medium=n_medium,
+        radial_lut_dr=0.5,
+        cache_translation_blocks=False,
+        particle_t_group_factories=factories,
+    )
+
+    assert isinstance(prepared.particle_t, CompositeParticleTOperator)
+    assert isinstance(prepared.particle_t.groups[1], AxisymmetricTGroup)
+    assert prepared.particle_t.groups[1].T_blocks is not None
+    y_dense = (
+        assemble_dense_A_numpy(prepared, show_progress=False, use_cache=False, store_blocks=False)
+        @ x[: 2 * nm]
+    )
+    y_mv = prepared.apply_A(x[: 2 * nm])
+    rhs = prepared.rhs_Tb(b[: 2 * nm])
+    np.testing.assert_allclose(y_mv, y_dense, rtol=1e-12, atol=1e-12)
+    assert rhs.shape == (2 * nm,)
+
+
 def test_sphere_and_layered_match_when_forced_through_dense_factory():
     lmax, k, positions, radii, n_particle, _, n_medium, x, b = _sample_problem()
     base_particles: list[Particle] = [
@@ -438,6 +490,40 @@ def test_sphere_and_layered_match_when_forced_through_axisymmetric_factory():
     np.testing.assert_allclose(
         forced.rhs_Tb(b[:n]), reference.rhs_Tb(b[:n]), rtol=1e-12, atol=1e-12
     )
+
+
+def test_prepare_matvec_rejects_dense_representation_without_canonical_block_dispatch():
+    lmax, k, positions, radii, n_particle, _, n_medium, x, b = _sample_problem()
+    base_particles: list[Particle] = [
+        Sphere(
+            position=tuple(positions[0].tolist()),
+            radius=float(radii[0]),
+            refractive_index=complex(n_particle[0]),
+        ),
+        LayeredSphere(
+            position=tuple(positions[1].tolist()),
+            layer_radii=(40.0, float(radii[1])),
+            layer_refractive_indices=(1.7 + 0j, complex(n_particle[1])),
+        ),
+    ]
+    forced_particles = [
+        _ForcedRepresentationParticle(
+            position=particle.position,
+            base_particle=particle,
+            representation="dense",
+        )
+        for particle in base_particles
+    ]
+
+    with pytest.raises(NotImplementedError):
+        prepare_matvec(
+            lmax=lmax,
+            k=k,
+            particles=forced_particles,
+            n_medium=n_medium,
+            radial_lut_dr=0.5,
+            cache_translation_blocks=False,
+        )
 
 
 def test_precompute_t_diagonal_matches_per_sphere_reference():

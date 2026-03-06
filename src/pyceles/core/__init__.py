@@ -36,6 +36,7 @@ from .matvec import (
     apply_W_numpy,
     assemble_dense_A_numpy,
     estimate_translation_cache_bytes,
+    make_axisymmetric_block_group_factory,
     make_axisymmetric_group_factory,
     make_dense_group_factory,
     make_prepared_A_and_rhs,
@@ -59,6 +60,8 @@ from .tmatrix import (
     layered_sphere_T_diagonal,
     particle_internal_ratios,
     particle_T_diagonal,
+    particle_T_matrix_block,
+    particle_T_matrix_blocks,
 )
 
 __all__ = [
@@ -96,11 +99,14 @@ __all__ = [
     "apply_A_numpy",
     "apply_W_numpy",
     "estimate_translation_cache_bytes",
+    "make_axisymmetric_block_group_factory",
     "make_axisymmetric_group_factory",
     "make_dense_group_factory",
     "make_prepared_A_and_rhs",
     "plan_particle_t_groups",
     "particle_T_diagonal",
+    "particle_T_matrix_block",
+    "particle_T_matrix_blocks",
     "particle_internal_ratios",
     "layered_mie_ab",
     "layered_sphere_T_diagonal",
