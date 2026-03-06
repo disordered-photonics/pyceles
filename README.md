@@ -2,13 +2,15 @@
 
 pyceles is a Python reimplementation of the MATLAB CELES package for electromagnetic
 simulation of large particle ensembles with the T-matrix method.
-The code starts as a pure NumPy + SciPy reference implementation, with accelerator backends planned.
+The code keeps a NumPy + SciPy reference implementation and now also ships an
+optional CuPy backend for the direct many-body solve path.
 
 This repository focuses on:
 - Correctness first (CELES conventions, reproducible examples/notebooks)
 - A clean NumPy + SciPy reference implementation
 - Performance via vectorization + CELES-style caching/LUTs (no MEX build)
-- A future optional GPU backend (CuPy, or possibly Numba and/or PETSc) without duplicating code paths
+- An optional CuPy backend for direct GPU pairwise solves, without duplicating
+  the physical operator structure
 - A CELES-style precision policy (`compute_dtype`, `accum_dtype`) for CPU/GPU portability
 
 ## Acknowledgment
@@ -28,12 +30,33 @@ Users of pyceles are referred to the publications listed in the CELES and SMUTHI
     (with general alpha-beta fallback via `force_general_initial_field=True`)
 - CELES plane-wave incident coefficients
 - O(N^2) reference matvec for (I - T W) x = T b
+- NumPy matrix-free MLFMM coupling backend for large sphere clusters:
+  - `coupling_backend="mlfmm"` on the NumPy operator path
+  - exact near interactions on the resolved leaf partition
+  - automatic stage selection between direct pairwise fallback, single-level HF,
+    and multilevel HF
+  - one uniform-depth occupied-box hierarchy (non-adaptive octree)
+  - high-frequency-only formulation: no low-frequency/static regime handling is
+    included in the current backend
+  - relative-offset batching, interior radial-LUT reuse, and shared directional
+    interpolation/transforms across occupied boxes
+  - structured resolved-plan metadata through the prepared operator
+  - current guardrail: NumPy MLFMM requires `compute_dtype=complex128`
+- CuPy direct backend for the same `A = I - T W` operator:
+  - fused RawKernel pairwise coupling `W·x` for `complex64` and `complex128`
+  - GPU single-body `T` support for diagonal groups and explicit dense spherical-basis blocks
+  - CuPy GMRES solve path
+  - inherited CuPy far-field scattered-PWP postprocessing path
+  - inherited CuPy near-field postprocessing path for:
+    - scattered field
+    - dominant Gaussian/general initial-field paths
+    - homogeneous-sphere internal fields
 - SciPy GMRES wrapper with tqdm progress
 - Near-field evaluation with CELES formulas:
   - scattered field
   - initial field (plane-wave-pattern integral)
   - total field with internal-field replacement inside particles
-    (`Sphere` and `LayeredSphere` currently)
+    (`Sphere`, `LayeredSphere`, and `Spheroid`)
   - canonical helper returning `initial/scattered/internal/total` components in one call
   - geometry-agnostic helper (`compute_near_field`) plus planar convenience wrapper (`compute_near_field_slice`)
 - Far-field plane-wave pattern + forward/backward power flux (CELES formulas)
@@ -58,9 +81,20 @@ Users of pyceles are referred to the publications listed in the CELES and SMUTHI
     (required by T-matrix superposition), can be disabled via `check_circumscribing_sphere_overlap=False`
 - Explicit particle descriptors:
   - `Simulation(config, particles=[...])` accepts mixed supported particle families
-    (`Sphere`, `LayeredSphere`) in one geometry
+    (`Sphere`, `LayeredSphere`, `Spheroid`) in one geometry
   - `Simulation.n_particles` / `SimulationResult.n_particles` provide canonical
     particle counts across all supported particle descriptors
+- Axisymmetric spheroid support:
+  - homogeneous `Spheroid` particle-local scattering blocks in the spherical SVWF basis
+  - aligned and rotated spheroid `T`-matrix support in CELES ordering
+  - internal-field evaluation inside spheroids
+  - regression coverage against isolated-particle SMUTHI and ScatterPy references
+  - current limitation: near-field evaluation remains unreliable for points
+    outside a spheroid but inside its circumscribing sphere, because the main
+    branch still uses the outgoing spherical SVWF expansion there
+  - exploratory surface-integral, arbitrary-precision, and first spheroidal-shell
+    postprocessing variants were investigated, but none is ready to replace the
+    default path yet
 - Explicit no-scatterer (source-only) simulations:
   - pass `particles=[]` to run a beam-only simulation
 - Channel-aware polarization workflow:
@@ -92,7 +126,9 @@ Users of pyceles are referred to the publications listed in the CELES and SMUTHI
   - warm start vectors/matrices (`solver_warm_start`)
   - preconditioner hook (`solver_preconditioner`)
   - built-in CELES-style regular-grid block-diagonal preconditioner
-    (`solver_preconditioner_kind='grid_block'`)
+    (`solver_preconditioner_kind='grid_block'`) on both NumPy and CuPy backends
+  - inherited postprocessing backend policy via
+    `SimulationConfig(postprocessing_backend="inherit" | "numpy" | "cupy")`
 - Angular-grid API:
   - one shared CELES-style default grid (`polar_angles`, `azimuthal_angles`)
   - optional split grids for source projection and far-field outputs
@@ -162,6 +198,22 @@ python -m pip install -U pip
 python -m pip install -e .
 ```
 
+For contributors, install the development toolchain:
+
+```bash
+python -m pip install -e .[dev]
+```
+
+If you have a recent NVIDIA GPU and want the optional CuPy backend:
+
+```bash
+python -m pip install -e .[cupy]
+```
+
+The extra is named `cupy` rather than `gpu` so future accelerator extras can
+remain explicit (`cupy`, `pyopencl`, `numba`, ...), instead of collapsing
+different backends into one generic label.
+
 ## Run the notebook replicating the original CELES_MAIN.m script
 
 Open:
@@ -228,10 +280,78 @@ CELES is fast because it:
 - reuses cached translation tables + radial Hankel LUTs
 - uses a block-diagonal preconditioner
 
-pyceles currently matches the equations/conventions, but the matvec is still a
-straight O(N^2) NumPy implementation. Next performance milestones will focus on
-- optional CuPy (or Numba, PETSc) backend for the hot paths
-- O(N log N) matvec via fast multipole method or FFT-based matvec for grid-snapped particles
+pyceles now ships two direct backends for the same many-body operator:
+- a NumPy/SciPy reference path,
+- a CuPy path using a fused RawKernel for the direct pairwise coupling matvec.
+
+For larger dilute clusters on the NumPy path, pyceles also ships a matrix-free
+high-frequency MLFMM coupling backend selected through
+`SimulationConfig(coupling_backend="mlfmm")`. This keeps near interactions
+exact while accelerating the far coupling through single-level or multilevel
+directional box operators, depending on the resolved hierarchy depth.
+
+Current implementation choices:
+- the hierarchy is uniform-depth, not adaptive: pyceles first builds one root
+  cube for the full particle set, then subdivides it to one shared depth and
+  keeps only the occupied boxes on each level
+- stage policy is depth-based:
+  - depth `0-1`: direct pairwise fallback
+  - depth `2`: single-level HF MLFMM on the occupied leaf level
+  - depth `>=3`: multilevel HF MLFMM with upward/downward transfer between
+    occupied levels
+- the current backend is intentionally high-frequency only: here "HF" means
+  the far coupling is represented through directional sampled translators on
+  boxes that are large enough for that asymptotic formulation to be effective
+- low-frequency stabilization/switching is intentionally out of scope for the
+  current implementation, so pyceles does not try to blend this backend into a
+  separate LF regime today
+
+For moderate dense systems that fit in memory, both backends also support a
+direct dense solve with cached LU reuse for repeated RHS workflows (for example
+multi-source sweeps or local LDOS probes). On the CuPy path this uses
+CuPy/cuSOLVER rather than a custom fused solve kernel.
+
+Current MLFMM scope/limits:
+- NumPy operator backend only (`operator_backend="numpy"`)
+- matrix-free iterative solves for true MLFMM stages
+- dense/direct NumPy solves remain pairwise-only
+- the current implementation targets the high-frequency regime only
+- the octree policy is uniform-depth rather than adaptive
+
+CuPy also supports the built-in grid-block preconditioner now, but current
+tests on dilute benchmark clusters show that this should be treated as a
+case-dependent option rather than a default speed win. On the tested low-volume-
+fraction sphere clouds, restarted CuPy GMRES often benefited more from choosing
+an adequate restart dimension than from enabling the grid-block preconditioner.
+
+Postprocessing follows the solve backend by default through
+`postprocessing_backend="inherit"`. The current CuPy postprocessing slices are:
+- scattered far-field SVWF-to-PWP assembly,
+- scattered near-field,
+- the dominant Gaussian/general initial-field paths,
+- homogeneous-sphere internal fields.
+
+Mixed non-spherical internal-field cases still fall back to the NumPy
+reference kernels today.
+
+Current CuPy feature-parity gaps relative to the NumPy reference path include:
+- layered-sphere internal near-field kernels,
+- spheroid internal near-field kernels,
+- mixed non-spherical internal-field subsets,
+- callback-only axisymmetric single-body GPU wrappers.
+
+Current performance milestones after that direct GPU backend are:
+- improve the CuPy raw kernel and surrounding solve path for larger low-`lmax` clusters,
+- extend GPU acceleration further into postprocessing-heavy workflows,
+- add an accelerated `O(N log N)` coupling backend for regimes where brute-force `O(N^2)` is no longer viable.
+
+A previous CELES experiment with rotation-translation-rotation (RTR) coupling idea
+was explored as a possible alternative translation backend. After matching the RTR
+block formulas to the shipped CELES-compatible translation conventions, the prototype
+reproduced translation blocks accurately but remained much slower than the current
+reference block builder on the public `500`-particle benchmark (`~26x` slower at `lmax=3`,
+`~38x` slower at `lmax=4`). RTR therefore remains an interesting mathematical
+direction, but not competitive against pyceles' low-`lmax` brute-force path.
 
 ## Recent CPU benchmark snapshot
 
@@ -246,30 +366,60 @@ Common benchmark parameters:
 - source: Gaussian beam (`wavelength=550`, `n_medium=1.0`, `beam_width=2000`, `TE`, normal incidence)
 - angular grids: `n_beta=3601`, `n_alpha=180`
 - near-field slice: plane `y=0`, `x=[-4000, 4000]`, `z=[-3000, 5000]`, `dx=40` (201 x 201 points)
-- solver: `gmres`, `rtol=1e-4`, `restart=100`, `maxiter=1000`
+- solver: `gmres`, `rtol=1e-4`, `restart=25`, `maxiter=100`
+- grid-block preconditioner default for these runs: subdivisions=`3`
 
 Reproduce:
 ```bash
-python examples/profile_pyceles_phases.py --n-particles 500 --lmax 3 --dx 40 --compute-dtype complex128 --accum-dtype complex128 --out-dir outputs/profiling_py312_c128a128 --quiet
-python examples/profile_pyceles_phases.py --n-particles 500 --lmax 3 --dx 40 --compute-dtype complex64 --accum-dtype complex128 --out-dir outputs/profiling_py312_c64a128 --quiet
-# optional: compare no-preconditioner vs grid_block in the same run
-python examples/profile_pyceles_phases.py --n-particles 500 --lmax 3 --dx 40 --preconditioner-mode both --preconditioner-subdivisions 2 --cache-mode off --out-dir outputs/profiling_py312_precond_compare --quiet
+python examples/profile_pyceles_phases.py --n-particles 500 --lmax 3 --dx 40 --operator-backend numpy --compute-dtype complex128 --accum-dtype complex128 --cache-mode off --preconditioner-mode none --out-dir outputs/profile_matrix_cpu_c128_none --quiet
+python examples/profile_pyceles_phases.py --n-particles 500 --lmax 3 --dx 40 --operator-backend numpy --compute-dtype complex128 --accum-dtype complex128 --cache-mode off --preconditioner-mode grid_block --preconditioner-subdivisions 3 --out-dir outputs/profile_matrix_cpu_c128_grid3 --quiet
+python examples/profile_pyceles_phases.py --n-particles 500 --lmax 3 --dx 40 --operator-backend numpy --compute-dtype complex64 --accum-dtype complex128 --cache-mode off --preconditioner-mode none --out-dir outputs/profile_matrix_cpu_c64_none --quiet
+python examples/profile_pyceles_phases.py --n-particles 500 --lmax 3 --dx 40 --operator-backend numpy --compute-dtype complex64 --accum-dtype complex128 --cache-mode off --preconditioner-mode grid_block --preconditioner-subdivisions 3 --out-dir outputs/profile_matrix_cpu_c64_grid3 --quiet
+python examples/profile_pyceles_phases.py --n-particles 500 --lmax 3 --dx 40 --operator-backend cupy --postprocessing-backend inherit --compute-dtype complex128 --accum-dtype complex128 --cache-mode off --preconditioner-mode none --out-dir outputs/profile_matrix_cupy_c128_none --quiet
+python examples/profile_pyceles_phases.py --n-particles 500 --lmax 3 --dx 40 --operator-backend cupy --postprocessing-backend inherit --compute-dtype complex128 --accum-dtype complex128 --cache-mode off --preconditioner-mode grid_block --preconditioner-subdivisions 3 --out-dir outputs/profile_matrix_cupy_c128_grid3 --quiet
+python examples/profile_pyceles_phases.py --n-particles 500 --lmax 3 --dx 40 --operator-backend cupy --postprocessing-backend inherit --compute-dtype complex64 --accum-dtype complex128 --cache-mode off --preconditioner-mode none --out-dir outputs/profile_matrix_cupy_c64_none --quiet
+python examples/profile_pyceles_phases.py --n-particles 500 --lmax 3 --dx 40 --operator-backend cupy --postprocessing-backend inherit --compute-dtype complex64 --accum-dtype complex128 --cache-mode off --preconditioner-mode grid_block --preconditioner-subdivisions 3 --out-dir outputs/profile_matrix_cupy_c64_grid3 --quiet
 ```
 
 Phase wall times:
-- `complex128/complex128`:
-  - Solver (translation block cache OFF): `366.5 s`
-  - Solver (translation block cache ON): `30.3 s`
-  - Far-field postprocessing: `22.2 s`
-  - Near-field postprocessing: `171.3 s`
-- `complex64/complex128`:
-  - Solver (translation block cache OFF): `313.7 s` (about `-14.4%`)
-  - Solver (translation block cache ON): `25.6 s` (about `-15.6%`)
-  - Far-field postprocessing: `19.7 s` (about `-11.6%`)
-  - Near-field postprocessing: `136.3 s` (about `-20.4%`)
-- `grid_block` preconditioner (cache OFF, `complex128/complex128`, subdivisions=2):
-  - Solver without preconditioner: `362.3 s`
-  - Solver with `grid_block`: `241.8 s` (about `-33.3%`, `~1.50x` faster)
+- NumPy, `complex128/complex128`, no preconditioner:
+  - Solver: `389.8 s`
+  - Far-field: `21.9 s`
+  - Near-field: `181.2 s`
+- NumPy, `complex128/complex128`, `grid_block`, subdivisions=`3`:
+  - Solver: `310.5 s`
+  - Far-field: `21.6 s`
+  - Near-field: `181.5 s`
+- NumPy, `complex64/complex128`, no preconditioner:
+  - Solver: `324.9 s`
+  - Far-field: `19.6 s`
+  - Near-field: `146.7 s`
+- NumPy, `complex64/complex128`, `grid_block`, subdivisions=`3`:
+  - Solver: `254.0 s`
+  - Far-field: `19.3 s`
+  - Near-field: `146.0 s`
+- CuPy, `complex128/complex128`, no preconditioner:
+  - Solver: `13.6 s`
+  - Far-field: `2.6 s`
+  - Near-field: `18.2 s`
+- CuPy, `complex128/complex128`, `grid_block`, subdivisions=`3`:
+  - Solver: `14.0 s`
+  - Far-field: `1.9 s`
+  - Near-field: `14.3 s`
+- CuPy, `complex64/complex128`, no preconditioner:
+  - Solver: `0.63 s`
+  - Far-field: `0.68 s`
+  - Near-field: `3.31 s`
+- CuPy, `complex64/complex128`, `grid_block`, subdivisions=`3`:
+  - Solver: `0.89 s`
+  - Far-field: `0.70 s`
+  - Near-field: `3.30 s`
+
+On this public `500`-particle benchmark, the updated `3x3x3` grid-block
+preconditioner remains useful on the NumPy reference path, but it is not a
+speed win on the CuPy path: restarted CuPy GMRES with the raw-kernel backend is
+already strong enough here that the preconditioner build/apply overhead makes
+the solve slower.
   
 ## Cumulative Optimization Notes
 
@@ -278,8 +428,6 @@ Key improvements include:
 
 - Scalar-Legendre translation path (`legendre_normalized_trigon_scalar`) in `translation_block`
   to reduce overhead in the matrix-free pair-block assembly hot path.
-- `matmul`-based mode contraction in near-field kernels after benchmarking against
-  `einsum` and `tensordot` (similar at very low `lmax`, better scaling for larger `lmax`).
 - Translation table/LUT reuse (ab5 cache + radial Hankel LUT + optional exact `W_ij` block cache).
 - End-to-end precision policy (`compute_dtype`, `accum_dtype`) enabling CELES-style
   mixed precision on CPU today and portable behavior for a future GPU backend.
@@ -288,15 +436,33 @@ Key improvements include:
     evaluates the beam initial field with analytic azimuth integration, then rotates
     E/H vectors back to the user frame.
   - the general alpha-beta quadrature path is still kept as fallback for flexible/periodic workflows.
+- CuPy near-field scattered-field rewrite that contracts over the mode index
+  before assembling Cartesian components, reducing temporary tensor payloads
+  while preserving the reference formulas.
 
 Benchmarked but intentionally *not* kept as defaults:
 - full `z*kz` phase precompute for near-field initial evaluation: modest speedup with large memory payload.
 - giant all-alpha batch strategies: no consistent end-to-end gains.
 - multiprocessing near-field initial evaluation: good speedups but high RAM/process overhead and extra complexity.
+- hardware-aware scattered-field chunk heuristics: no robust win and regressions on dense near-field canvases.
+- shared `matmul` rewrite for CuPy scattered-field contractions: cleaner algebra, but slightly slower than the current `einsum` path on the profiled `lmax=3/4` cases.
 
 Important for CELES users: these gains preserve the matrix-free iterative workflow by default.
 The solver does not require assembling/storing a global dense matrix; optional block caching
 is an explicit tradeoff for systems where RAM is plentiful.
+
+For long interactive sessions or large exploratory sweeps, process-global
+precompute caches can be cleared explicitly to release memory:
+
+```python
+import pyceles as pcl
+
+pcl.core.clear_caches()
+pcl.postprocessing.nearfield.clear_caches()
+```
+
+pyceles does not call these automatically between runs because warm caches are
+often beneficial when repeating solves in the same process.
 
 ## Beyond CELES (current pyceles extras)
 
@@ -594,6 +760,35 @@ Loading helpers are available via `pcl.io`:
 - `load_geometry_h5`, `load_solution_h5`, `load_far_field_h5`
 - `load_near_field_components_h5`, `load_mapping_h5`
 - `load_simulation_h5` (workflow-level convenience loader)
+
+## Related Works
+
+pyceles is an independent Python implementation, but it draws heavily on the
+multiple-scattering literature and on ideas demonstrated in earlier implementations.
+Some relevant references are grouped by how directly they shape the current code or
+the near-term roadmap.
+
+Direct predecessors:
+
+- Egel et al., *CELES: CUDA-accelerated simulation of electromagnetic scattering by large ensembles of spheres*, JQSRT 199 (2017) 103-110. https://doi.org/10.1016/j.jqsrt.2017.05.010
+- Egel et al., *SMUTHI: A Python package for the simulation of light scattering by multiple particles near or between planar interfaces*, JQSRT 273 (2021) 107846. https://doi.org/10.1016/j.jqsrt.2021.107846
+
+Related references for validation of present and future features:
+
+- Auguie et al., *SMARTIES: User-friendly codes for fast and accurate calculations of light scattering by spheroids*, JQSRT 174 (2016) 39-55. https://doi.org/10.1016/j.jqsrt.2016.01.005
+- Pena-Rodriguez et al., *Near- and far-field Mie scattering calculations for a multilayered sphere*, CPC 180 (2009) 2348-2354. https://doi.org/10.1016/j.cpc.2009.07.010
+- Rasskazov et al., *STRATIFY: a comprehensive and versatile MATLAB code for a multilayered sphere*, OSAC 3 (2020) 2290-2306. https://doi.org/10.1364/OSAC.399979
+- Dufva et al., *Unified derivation of the translational addition theorems for the spherical scalar and vector wave functions* Progress In Electromagnetics Research B 4 (2008) 79-99 http://dx.doi.org/10.2528/PIERB07121203
+- Martin, *Another look at addition theorems for vector spherical wavefunctions* Mathematical Methods in the Applied Sciences 47.16 (2024) 12443-12459. https://doi.org/10.1002/mma.9987
+- Mun et al., *Multipole decomposition for interactions between structured optical fields and meta-atoms*, OE 28 (2020) 36756-36770. https://doi.org/10.1364/OE.409775
+- Gumerov and Duraiswami, *Computation of scattering from clusters of spheres using the fast multipole method* JASA 117 (2005) 1744-1761. https://doi.org/10.1121/1.1853017
+- Theobald et al., *Simulation of light scattering in large, disordered nanostructures using a periodic T-matrix method*, JQSRT 272 (2021) 107802. https://doi.org/10.1016/j.jqsrt.2021.107802
+- Nečada and Törmä, *Multiple-Scattering $T$-Matrix Simulations for Nanophotonics: Symmetries and Periodic Lattices*. 30.2 (2021) 357-395. https://doi.org/10.4208/cicp.OA-2020-0136
+- Mackowski and Kolokolova, *Application of the multiple sphere superposition solution to large-scale systems of spheres via an accelerated algorithm*, JQSRT 287 (2022) 108221. https://doi.org/10.1016/j.jqsrt.2022.108221
+- Mackowski, *Extension of the Multiple Sphere T-Matrix code to include multiple plane boundaries and 2-D periodic systems*, JQSRT 290 (2022) 108292. https://doi.org/10.1016/j.jqsrt.2022.108292
+- Markkanen and Yuffa, *Fast superposition T-matrix solution for clusters with arbitrarily shaped constituent particles*, JQSRT 189 (2017) 181-188. https://doi.org/10.1016/j.jqsrt.2016.11.004
+- Stilgoe et al., *Computational toolbox for scattering of focused light from flattened or elongated particles using spheroidal wavefunctions*, JQSRT 331 (2025) 109267. https://doi.org/10.1016/j.jqsrt.2024.109267
+- Gumerov and Duraiswami, *Fast Multipole Methods on Graphics Processors* Journal of Computational Physics 227.18 (2008) 8290-8313. https://doi.org/10.1016/j.jcp.2008.05.023
 
 ## License
 

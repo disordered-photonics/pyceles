@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import Literal, Tuple
 
 import numpy as np
@@ -95,7 +95,7 @@ class LayeredSphere(Particle):
 
 @dataclass(frozen=True)
 class Spheroid(Particle):
-    """Placeholder for future spheroidal T-matrix support."""
+    """Homogeneous axisymmetric particle with spherical-basis T-block support."""
 
     equatorial_radius: float
     polar_radius: float
@@ -116,6 +116,51 @@ class Spheroid(Particle):
     def t_operator_representation(self) -> ParticleTRepresentation:
         """Axisymmetric particles admit a narrower-than-dense T representation."""
         return "axisymmetric"
+
+
+def particle_t_signature(particle: Particle) -> tuple[object, ...]:
+    """Return a position-independent cache key for solver-facing particle-T data.
+
+    The particle-local `T` operator depends on shape, material, and orientation,
+    but not on the particle center. This helper lets preparation paths reuse one
+    computed particle kernel across many identical particles placed at different
+    positions in the cluster.
+
+    Notes
+    -----
+    This signature intentionally includes every particle field except
+    `position`, so a rotated spheroid is treated as distinct from the same
+    spheroid at another orientation. That is the correct cache key when the
+    reused object is the final lab-frame operator consumed by the solver.
+    """
+
+    payload = []
+    for field in fields(type(particle)):
+        if field.name == "position":
+            continue
+        payload.append(getattr(particle, field.name))
+    return (type(particle), *payload)
+
+
+def particle_intrinsic_t_signature(particle: Particle) -> tuple[object, ...]:
+    """Return a position/orientation-independent key for intrinsic particle data.
+
+    This narrower signature is useful when particle preparation naturally splits
+    into:
+    - an intrinsic body-frame object that depends only on shape/material, and
+    - a solver-facing lab-frame object that additionally depends on orientation.
+
+    Spheres and layered spheres do not currently need that distinction, but
+    axisymmetric particles do: one aligned spheroid model can be reused across
+    many differently oriented copies before the final SVWF rotation step.
+    """
+
+    payload = []
+    for field in fields(type(particle)):
+        if field.name in {"position", "euler_angles"}:
+            continue
+        payload.append(getattr(particle, field.name))
+    return (type(particle), *payload)
 
 
 def _as_positions_array(positions: Sequence[Sequence[float]] | np.ndarray) -> np.ndarray:
@@ -283,11 +328,7 @@ def spheroids_from_arrays(
     euler_angles: Sequence[Sequence[float]] | Sequence[float] | np.ndarray = (0.0, 0.0, 0.0),
     into: list[Particle] | None = None,
 ) -> list[Particle]:
-    """Create/extend particle lists with homogeneous spheroid descriptors.
-
-    This is currently a geometry helper only; full spheroidal scattering
-    kernels are planned for future integration.
-    """
+    """Create/extend particle lists with homogeneous spheroid descriptors."""
     pos = _as_positions_array(positions)
     n = int(pos.shape[0])
     eq = _as_positive_float_vector(equatorial_radii, n=n, name="equatorial_radii")

@@ -1,4 +1,4 @@
-"""Wigner 3j symbols (integer arguments), cached.
+"""Wigner angular-momentum coefficients used by translation and rotation kernels.
 
 This is a CPU-first, deterministic implementation intended for **precompute** use.
 For CELES-style translation tables, we only need small (lmax ~ O(10)) values but
@@ -7,7 +7,10 @@ we need them to be numerically stable.
 Implementation notes
 --------------------
 - Uses a Racah-style summation with log-factorials via SciPy `gammaln`.
-- Cached with `functools.cache` because many calls repeat.
+- `wigner_3j` is cached with `functools.cache` because translation-table calls
+  revisit a constrained integer domain.
+- `wigner_d` / `wigner_D` are left uncached here; rotation matrices cache at the
+  block level because their keys include Euler angles from a continuous domain.
 """
 
 from __future__ import annotations
@@ -26,6 +29,14 @@ def _triangle(l1: int, l2: int, l3: int) -> bool:
 def _gammaln(x: float) -> float:
     """Scalar wrapper around `scipy.special.gammaln`."""
     return float(gammaln(x))
+
+
+def _log_factorial(n: int) -> float:
+    """Return `log(n!)` for non-negative integer `n`."""
+
+    if n < 0:
+        raise ValueError("factorial arguments must be non-negative")
+    return _gammaln(n + 1.0)
 
 
 # NOTE:
@@ -54,12 +65,6 @@ def wigner_3j(l1: int, l2: int, l3: int, m1: int, m2: int, m3: int) -> float:
     if not _triangle(l1, l2, l3):
         return 0.0
 
-    def log_fact(n: int) -> float:
-        """Log-factorial helper used by Racah summation terms."""
-        if n < 0:
-            return float("nan")
-        return _gammaln(n + 1.0)
-
     # phase (-1)^(l1-l2-m3)
     phase = -1.0 if ((l1 - l2 - m3) % 2) else 1.0
 
@@ -70,14 +75,16 @@ def wigner_3j(l1: int, l2: int, l3: int, m1: int, m2: int, m3: int) -> float:
     if min(a, b, c) < 0:
         return 0.0
 
-    log_delta = 0.5 * (log_fact(a) + log_fact(b) + log_fact(c) - log_fact(d))
+    log_delta = 0.5 * (
+        _log_factorial(a) + _log_factorial(b) + _log_factorial(c) - _log_factorial(d)
+    )
     log_m = 0.5 * (
-        log_fact(l1 + m1)
-        + log_fact(l1 - m1)
-        + log_fact(l2 + m2)
-        + log_fact(l2 - m2)
-        + log_fact(l3 + m3)
-        + log_fact(l3 - m3)
+        _log_factorial(l1 + m1)
+        + _log_factorial(l1 - m1)
+        + _log_factorial(l2 + m2)
+        + _log_factorial(l2 - m2)
+        + _log_factorial(l3 + m3)
+        + _log_factorial(l3 - m3)
     )
 
     kmin = max(0, l2 - l3 - m1, l1 - l3 + m2)
@@ -97,7 +104,7 @@ def wigner_3j(l1: int, l2: int, l3: int, m1: int, m2: int, m3: int) -> float:
         ]
         if min(denom_args) < 0:
             continue
-        log_denom = sum(log_fact(arg) for arg in denom_args)
+        log_denom = sum(_log_factorial(arg) for arg in denom_args)
         sign = -1.0 if (k % 2) else 1.0
         s += sign * np.exp(-log_denom)
 
@@ -105,6 +112,81 @@ def wigner_3j(l1: int, l2: int, l3: int, m1: int, m2: int, m3: int) -> float:
         return 0.0
 
     return float(phase * np.exp(log_delta + log_m) * s)
+
+
+def wigner_d(l: int, m: int, m_prime: int, beta: float) -> float:
+    """Return the real Wigner small-`d` coefficient `d^l_{m,m'}(beta)`.
+
+    This closed-form sum is used by particle-local SVWF rotations. The target
+    regime in `pyceles` is moderate `lmax`, so a direct stable reference
+    implementation is preferable to more specialized recurrence machinery.
+    """
+
+    l = int(l)
+    m = int(m)
+    m_prime = int(m_prime)
+    beta = float(beta)
+    if l < 0:
+        raise ValueError("l must be non-negative.")
+    if abs(m) > l or abs(m_prime) > l:
+        return 0.0
+
+    k_min = max(0, m - m_prime)
+    k_max = min(l + m, l - m_prime)
+    if k_min > k_max:
+        return 0.0
+
+    log_pref = 0.5 * (
+        _log_factorial(l + m)
+        + _log_factorial(l - m)
+        + _log_factorial(l + m_prime)
+        + _log_factorial(l - m_prime)
+    )
+    c_half = np.cos(0.5 * beta)
+    s_half = np.sin(0.5 * beta)
+
+    total = 0.0
+    for k in range(k_min, k_max + 1):
+        denom = (
+            _log_factorial(l + m - k)
+            + _log_factorial(k)
+            + _log_factorial(m_prime - m + k)
+            + _log_factorial(l - m_prime - k)
+        )
+        phase = -1.0 if ((k - m + m_prime) % 2) else 1.0
+        pow_c = 2 * l + m - m_prime - 2 * k
+        pow_s = m_prime - m + 2 * k
+        total += phase * np.exp(log_pref - denom) * (c_half**pow_c) * (s_half**pow_s)
+
+    return float(total)
+
+
+def wigner_D(l: int, m: int, m_prime: int, alpha: float, beta: float, gamma: float) -> complex:
+    """Return the Wigner-`D` coefficient in the CELES / Doicu rotation convention."""
+
+    l = int(l)
+    m = int(m)
+    m_prime = int(m_prime)
+    alpha = float(alpha)
+    beta = float(beta)
+    gamma = float(gamma)
+
+    if m >= 0 and m_prime >= 0:
+        delta = 1
+    elif m >= 0 and m_prime < 0:
+        delta = (-1) ** m_prime
+    elif m < 0 and m_prime >= 0:
+        delta = (-1) ** m
+    else:
+        delta = (-1) ** (m + m_prime)
+
+    return (
+        ((-1) ** (m + m_prime))
+        * np.exp(1j * m * alpha)
+        * delta
+        * wigner_d(l, m, m_prime, beta)
+        * np.exp(1j * m_prime * gamma)
+    )
 
 
 def clear_cache() -> None:

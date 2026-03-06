@@ -135,6 +135,44 @@ def test_prepare_matvec_matches_explicit_operator_kernels():
     np.testing.assert_allclose(rhs_prepared, rhs_ref, rtol=1e-12, atol=1e-12)
 
 
+def test_precompute_t_diagonal_reuses_identical_particle_kernels(monkeypatch):
+    particles = [
+        LayeredSphere(
+            position=(0.0, 0.0, 0.0),
+            layer_radii=(40.0, 90.0),
+            layer_refractive_indices=(1.6 + 0.0j, 1.4 + 0.0j),
+        ),
+        LayeredSphere(
+            position=(140.0, 0.0, 0.0),
+            layer_radii=(40.0, 90.0),
+            layer_refractive_indices=(1.6 + 0.0j, 1.4 + 0.0j),
+        ),
+    ]
+
+    calls = {"count": 0}
+    original = particle_T_diagonal
+
+    def counted_particle_t_diagonal(*args, **kwargs):
+        calls["count"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "pyceles.core.matvec.particle_T_diagonal",
+        counted_particle_t_diagonal,
+    )
+
+    T_M, T_N = precompute_T_diagonal(
+        lmax=3,
+        k=2 * np.pi / 550.0,
+        particles=particles,
+        n_medium=1.0 + 0j,
+    )
+
+    assert calls["count"] == 1
+    np.testing.assert_allclose(T_M[0], T_M[1], rtol=1e-13, atol=1e-13)
+    np.testing.assert_allclose(T_N[0], T_N[1], rtol=1e-13, atol=1e-13)
+
+
 def test_prepare_matvec_exposes_composite_particle_t_operator():
     lmax, k, _, _, _, particles, n_medium, x, _ = _sample_problem()
     prepared = prepare_matvec(
@@ -191,7 +229,7 @@ def test_plan_particle_t_groups_marks_axisymmetric_particles_separately():
     np.testing.assert_array_equal(plans[1].particle_indices, np.array([2], dtype=np.int64))
 
 
-def test_prepare_matvec_rejects_axisymmetric_particles_with_clear_boundary_error():
+def test_prepare_matvec_accepts_rotated_spheroids_with_default_axisymmetric_path():
     lmax, k, positions, radii, n_particle, _, n_medium, _, _ = _sample_problem()
     particles: list[Particle] = [
         Sphere(
@@ -204,18 +242,58 @@ def test_prepare_matvec_rejects_axisymmetric_particles_with_clear_boundary_error
             equatorial_radius=float(radii[1]),
             polar_radius=float(radii[1]) * 1.25,
             refractive_index=complex(n_particle[1]),
+            euler_angles=(0.1, 0.0, 0.0),
         ),
     ]
 
-    with pytest.raises(NotImplementedError, match="axisymmetric"):
-        prepare_matvec(
-            lmax=lmax,
-            k=k,
-            particles=particles,
-            n_medium=n_medium,
-            radial_lut_dr=0.5,
-            cache_translation_blocks=False,
-        )
+    prepared = prepare_matvec(
+        lmax=lmax,
+        k=k,
+        particles=particles,
+        n_medium=n_medium,
+        radial_lut_dr=0.5,
+        cache_translation_blocks=False,
+    )
+
+    assert isinstance(prepared.particle_t, CompositeParticleTOperator)
+    assert len(prepared.particle_t.groups) == 2
+    assert isinstance(prepared.particle_t.groups[0], DiagonalTGroup)
+    assert isinstance(prepared.particle_t.groups[1], AxisymmetricTGroup)
+    assert prepared.particle_t.groups[1].T_blocks is not None
+
+
+def test_prepare_matvec_accepts_default_aligned_spheroid_axisymmetric_path():
+    lmax = 3
+    k = 2 * np.pi / 550.0
+    n_medium = 1.0 + 0j
+    particles: list[Particle] = [
+        Sphere(
+            position=(0.0, 0.0, 0.0),
+            radius=80.0,
+            refractive_index=1.5 + 0.0j,
+        ),
+        Spheroid(
+            position=(220.0, 0.0, 0.0),
+            equatorial_radius=70.0,
+            polar_radius=100.0,
+            refractive_index=1.4 + 0.0j,
+        ),
+    ]
+
+    prepared = prepare_matvec(
+        lmax=lmax,
+        k=k,
+        particles=particles,
+        n_medium=n_medium,
+        radial_lut_dr=0.5,
+        cache_translation_blocks=False,
+    )
+
+    assert isinstance(prepared.particle_t, CompositeParticleTOperator)
+    assert len(prepared.particle_t.groups) == 2
+    assert isinstance(prepared.particle_t.groups[0], DiagonalTGroup)
+    assert isinstance(prepared.particle_t.groups[1], AxisymmetricTGroup)
+    assert prepared.particle_t.groups[1].T_blocks is not None
 
 
 def test_prepare_matvec_accepts_custom_dense_group_factory():

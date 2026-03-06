@@ -15,12 +15,19 @@ Implemented so far:
 - `mu = cos(theta)`-centric meridian quadrature,
 - direct reference radial products in CELES/SMUTHI outgoing-wave conventions,
 - one-`m` angular-function preparation,
-- one-`m` raw `P/Q` block assembly.
+- one-`m` raw `P/Q` block assembly,
+- parity-reduced `T/R` reference solves.
 
 Not implemented yet:
-- `P/Q -> T/R` solves,
 - conversion to final particle spherical-basis `T` blocks,
 - rotated axisymmetric particle handling in the solver path.
+
+Precision policy
+----------------
+This preparation layer currently runs in `float64` / `complex128`
+unconditionally. These are particle-local setup kernels and small dense solves,
+not the repeated cluster-level matvec hot path, so the default here favors
+robustness over `compute_dtype` plumbing for now.
 """
 
 from __future__ import annotations
@@ -31,6 +38,8 @@ from typing import Protocol
 import numpy as np
 from numpy.polynomial.legendre import leggauss
 from scipy.special import spherical_jn, spherical_yn
+
+from .indexing import index_vswf, n_modes
 
 Array = np.ndarray
 
@@ -200,6 +209,56 @@ class AxisymmetricPQBlock:
     P12: Array
     P21: Array
     P22: Array
+
+
+@dataclass(frozen=True)
+class AxisymmetricParityBlock:
+    """Even/odd parity block form for one axisymmetric `m` sector."""
+
+    m: int
+    even_indices: Array
+    odd_indices: Array
+    Q11: Array
+    Q12: Array
+    Q21: Array
+    Q22: Array
+    P11: Array
+    P12: Array
+    P21: Array
+    P22: Array
+
+
+@dataclass(frozen=True)
+class AxisymmetricTRBlock:
+    """Solved `T` and optional `R` blocks for one parity-reduced `m` sector."""
+
+    m: int
+    even_indices: Array
+    odd_indices: Array
+    T11: Array
+    T12: Array
+    T21: Array
+    T22: Array
+    R11: Array | None
+    R12: Array | None
+    R21: Array | None
+    R22: Array | None
+
+
+@dataclass(frozen=True)
+class AxisymmetricResolvedMBlock:
+    """Full fixed-`m` `T/R` block after recombining the parity subsectors."""
+
+    m: int
+    n_values: Array
+    T11: Array
+    T12: Array
+    T21: Array
+    T22: Array
+    R11: Array | None
+    R12: Array | None
+    R21: Array | None
+    R22: Array | None
 
 
 def axisymmetric_shape_quadrature(
@@ -740,3 +799,388 @@ def assemble_axisymmetric_pq_block(
         P21=P21,
         P22=P22,
     )
+
+
+def split_axisymmetric_pq_block_by_parity(
+    block: AxisymmetricPQBlock,
+) -> tuple[AxisymmetricParityBlock, AxisymmetricParityBlock]:
+    """Split one raw `P/Q` block into the two reflection-parity subsectors.
+
+    The raw `P/Q` matrices are indexed by consecutive `n` values for one `m`.
+    For axisymmetric particles with reflection symmetries, these matrices admit
+    a narrower block structure. We return the two complementary subsectors:
+
+    - `even_odd`: the `11` family keeps even-degree rows/columns, while the
+      `22` family keeps odd-degree rows/columns.
+    - `odd_even`: the complementary sector, with odd degrees in the `11`
+      family and even degrees in the `22` family.
+    """
+
+    n_values = np.asarray(block.n_values, dtype=np.int64)
+    even_mask = (n_values % 2) == 0
+    odd_mask = ~even_mask
+
+    even_indices = np.flatnonzero(even_mask).astype(np.int64)
+    odd_indices = np.flatnonzero(odd_mask).astype(np.int64)
+
+    even_odd = AxisymmetricParityBlock(
+        m=int(block.m),
+        even_indices=even_indices,
+        odd_indices=odd_indices,
+        Q11=np.asarray(block.Q11[np.ix_(even_indices, even_indices)], dtype=np.complex128),
+        Q12=np.asarray(block.Q12[np.ix_(even_indices, odd_indices)], dtype=np.complex128),
+        Q21=np.asarray(block.Q21[np.ix_(odd_indices, even_indices)], dtype=np.complex128),
+        Q22=np.asarray(block.Q22[np.ix_(odd_indices, odd_indices)], dtype=np.complex128),
+        P11=np.asarray(block.P11[np.ix_(even_indices, even_indices)], dtype=np.complex128),
+        P12=np.asarray(block.P12[np.ix_(even_indices, odd_indices)], dtype=np.complex128),
+        P21=np.asarray(block.P21[np.ix_(odd_indices, even_indices)], dtype=np.complex128),
+        P22=np.asarray(block.P22[np.ix_(odd_indices, odd_indices)], dtype=np.complex128),
+    )
+    odd_even = AxisymmetricParityBlock(
+        m=int(block.m),
+        even_indices=odd_indices,
+        odd_indices=even_indices,
+        Q11=np.asarray(block.Q11[np.ix_(odd_indices, odd_indices)], dtype=np.complex128),
+        Q12=np.asarray(block.Q12[np.ix_(odd_indices, even_indices)], dtype=np.complex128),
+        Q21=np.asarray(block.Q21[np.ix_(even_indices, odd_indices)], dtype=np.complex128),
+        Q22=np.asarray(block.Q22[np.ix_(even_indices, even_indices)], dtype=np.complex128),
+        P11=np.asarray(block.P11[np.ix_(odd_indices, odd_indices)], dtype=np.complex128),
+        P12=np.asarray(block.P12[np.ix_(odd_indices, even_indices)], dtype=np.complex128),
+        P21=np.asarray(block.P21[np.ix_(even_indices, odd_indices)], dtype=np.complex128),
+        P22=np.asarray(block.P22[np.ix_(even_indices, even_indices)], dtype=np.complex128),
+    )
+    return even_odd, odd_even
+
+
+def _solve_right_inverse(matrix: Array) -> Array:
+    """Return the right inverse of a small dense block via `solve(A, I)`.
+
+    The particle-local EBCM algebra needs `Q^{-1}` only as an operator acting
+    on the right. Solving against the identity keeps that intent explicit and
+    avoids forming an inverse through a separate matrix-inversion routine.
+    """
+
+    matrix_arr = np.asarray(matrix, dtype=np.complex128)
+    ident = np.eye(matrix_arr.shape[0], dtype=np.complex128)
+    return np.linalg.solve(matrix_arr, ident)
+
+
+def solve_axisymmetric_tr_block(
+    parity_block: AxisymmetricParityBlock,
+    *,
+    include_internal: bool = True,
+) -> AxisymmetricTRBlock:
+    """Solve one parity-reduced particle-local EBCM system for `T` and `R`.
+
+    In the axisymmetric EBCM formulation, boundary matching first produces the
+    particle-local matrices `P` and `Q`. The scattering and internal-response
+    blocks are then defined by the dense linear systems
+
+    `T Q = -P`
+    `R Q = I`
+
+    on each fixed-`m`, fixed-parity sector. These solves are completely local
+    to one particle shape and one azimuthal order: their matrix dimension is
+    the number of retained degrees in that sector, so it grows with `lmax`.
+    """
+
+    m = int(parity_block.m)
+    Q11 = np.asarray(parity_block.Q11, dtype=np.complex128)
+    Q12 = np.asarray(parity_block.Q12, dtype=np.complex128)
+    Q21 = np.asarray(parity_block.Q21, dtype=np.complex128)
+    Q22 = np.asarray(parity_block.Q22, dtype=np.complex128)
+    P11 = np.asarray(parity_block.P11, dtype=np.complex128)
+    P12 = np.asarray(parity_block.P12, dtype=np.complex128)
+    P21 = np.asarray(parity_block.P21, dtype=np.complex128)
+    P22 = np.asarray(parity_block.P22, dtype=np.complex128)
+
+    n_even = int(Q11.shape[0])
+    n_odd = int(Q22.shape[0])
+
+    if m == 0:
+        R11 = _solve_right_inverse(Q11) if include_internal else None
+        R22 = _solve_right_inverse(Q22) if include_internal else None
+        T11 = -P11 @ (R11 if R11 is not None else _solve_right_inverse(Q11))
+        T22 = -P22 @ (R22 if R22 is not None else _solve_right_inverse(Q22))
+        T12 = np.zeros((n_even, n_odd), dtype=np.complex128)
+        T21 = np.zeros((n_odd, n_even), dtype=np.complex128)
+        R12 = np.zeros((n_even, n_odd), dtype=np.complex128) if include_internal else None
+        R21 = np.zeros((n_odd, n_even), dtype=np.complex128) if include_internal else None
+    else:
+        Q11_inv = _solve_right_inverse(Q11)
+        G1 = P11 @ Q11_inv
+        G3 = P21 @ Q11_inv
+        G5 = Q21 @ Q11_inv
+        F2 = _solve_right_inverse(Q22 - G5 @ Q12)
+        G2 = P22 @ F2
+        G4 = P12 @ F2
+        G6 = Q12 @ F2
+
+        T12 = G1 @ G6 - G4
+        T22 = G3 @ G6 - G2
+        T11 = -G1 - T12 @ G5
+        T21 = -G3 - T22 @ G5
+
+        if include_internal:
+            R12 = -Q11_inv @ G6
+            R22 = F2
+            R11 = Q11_inv - R12 @ G5
+            R21 = -R22 @ G5
+        else:
+            R11 = None
+            R12 = None
+            R21 = None
+            R22 = None
+
+    return AxisymmetricTRBlock(
+        m=m,
+        even_indices=np.asarray(parity_block.even_indices, dtype=np.int64),
+        odd_indices=np.asarray(parity_block.odd_indices, dtype=np.int64),
+        T11=T11,
+        T12=T12,
+        T21=T21,
+        T22=T22,
+        R11=R11,
+        R12=R12,
+        R21=R21,
+        R22=R22,
+    )
+
+
+def combine_axisymmetric_parity_blocks(
+    even_odd: AxisymmetricTRBlock,
+    odd_even: AxisymmetricTRBlock,
+) -> AxisymmetricResolvedMBlock:
+    """Recombine the complementary parity solves into one full fixed-`m` block.
+
+    The parity-reduced solves split the axisymmetric algebra into two decoupled
+    sectors. This helper stitches them back together in the natural degree
+    ordering `n = max(m, 1)..lmax`, which is the form needed to populate the
+    final spherical-basis particle `T` matrix.
+    """
+
+    if int(even_odd.m) != int(odd_even.m):
+        raise ValueError("Parity blocks must belong to the same azimuthal order m.")
+
+    m = int(even_odd.m)
+    even_idx = np.asarray(even_odd.even_indices, dtype=np.int64)
+    odd_idx = np.asarray(even_odd.odd_indices, dtype=np.int64)
+    n_count = even_idx.size + odd_idx.size
+    n_values = np.arange(max(m, 1), max(m, 1) + n_count, dtype=np.int64)
+
+    def assemble_full(
+        even_even: Array,
+        even_odd_block: Array,
+        odd_even_block: Array,
+        odd_odd: Array,
+    ) -> Array:
+        full = np.zeros((n_count, n_count), dtype=np.complex128)
+        full[np.ix_(even_idx, even_idx)] = np.asarray(even_even, dtype=np.complex128)
+        full[np.ix_(even_idx, odd_idx)] = np.asarray(even_odd_block, dtype=np.complex128)
+        full[np.ix_(odd_idx, even_idx)] = np.asarray(odd_even_block, dtype=np.complex128)
+        full[np.ix_(odd_idx, odd_idx)] = np.asarray(odd_odd, dtype=np.complex128)
+        return full
+
+    T11 = assemble_full(even_odd.T11, even_odd.T12 * 0.0, even_odd.T21 * 0.0, odd_even.T11)
+    T22 = assemble_full(odd_even.T22, odd_even.T21 * 0.0, odd_even.T12 * 0.0, even_odd.T22)
+    T12 = assemble_full(
+        np.zeros((even_idx.size, even_idx.size), dtype=np.complex128),
+        even_odd.T12,
+        odd_even.T12,
+        np.zeros((odd_idx.size, odd_idx.size), dtype=np.complex128),
+    )
+    T21 = assemble_full(
+        np.zeros((even_idx.size, even_idx.size), dtype=np.complex128),
+        odd_even.T21,
+        even_odd.T21,
+        np.zeros((odd_idx.size, odd_idx.size), dtype=np.complex128),
+    )
+
+    if even_odd.R11 is None or odd_even.R11 is None:
+        R11 = None
+        R12 = None
+        R21 = None
+        R22 = None
+    else:
+        assert even_odd.R12 is not None
+        assert even_odd.R21 is not None
+        assert even_odd.R22 is not None
+        assert odd_even.R12 is not None
+        assert odd_even.R21 is not None
+        assert odd_even.R22 is not None
+        R11 = assemble_full(even_odd.R11, even_odd.R12 * 0.0, even_odd.R21 * 0.0, odd_even.R11)
+        R22 = assemble_full(
+            odd_even.R22,
+            odd_even.R21 * 0.0,
+            odd_even.R12 * 0.0,
+            even_odd.R22,
+        )
+        R12 = assemble_full(
+            np.zeros((even_idx.size, even_idx.size), dtype=np.complex128),
+            even_odd.R12,
+            odd_even.R12,
+            np.zeros((odd_idx.size, odd_idx.size), dtype=np.complex128),
+        )
+        R21 = assemble_full(
+            np.zeros((even_idx.size, even_idx.size), dtype=np.complex128),
+            odd_even.R21,
+            even_odd.R21,
+            np.zeros((odd_idx.size, odd_idx.size), dtype=np.complex128),
+        )
+
+    return AxisymmetricResolvedMBlock(
+        m=m,
+        n_values=n_values,
+        T11=T11,
+        T12=T12,
+        T21=T21,
+        T22=T22,
+        R11=R11,
+        R12=R12,
+        R21=R21,
+        R22=R22,
+    )
+
+
+def assemble_axisymmetric_tmatrix_block(
+    lmax: int,
+    resolved_blocks: list[AxisymmetricResolvedMBlock] | tuple[AxisymmetricResolvedMBlock, ...],
+) -> Array:
+    """Assemble a CELES-ordered dense particle `T` block from fixed-`m` sectors.
+
+    The fixed-`m` axisymmetric solve preserves azimuthal order. This helper
+    embeds those solved sectors into the full spherical-basis matrix used by
+    the generic solver path. Positive and negative `m` share the same same-
+    polarization couplings, while the cross-polarization couplings change sign
+    with `m`.
+    """
+
+    Nm = n_modes(int(lmax))
+    T = np.zeros((Nm, Nm), dtype=np.complex128)
+
+    for block in resolved_blocks:
+        m = int(block.m)
+        n_values = np.asarray(block.n_values, dtype=np.int64)
+        for row_idx, l1 in enumerate(n_values):
+            for col_idx, l2 in enumerate(n_values):
+                mm_values = (0,) if m == 0 else (m, -m)
+                for mm in mm_values:
+                    sign_m = 1 if mm >= 0 else -1
+                    idx_m_1 = index_vswf(int(l1), int(mm), 1, int(lmax))
+                    idx_m_2 = index_vswf(int(l1), int(mm), 2, int(lmax))
+                    idx_n_1 = index_vswf(int(l2), int(mm), 1, int(lmax))
+                    idx_n_2 = index_vswf(int(l2), int(mm), 2, int(lmax))
+
+                    T[idx_m_1, idx_n_1] = block.T11[row_idx, col_idx]
+                    T[idx_m_2, idx_n_2] = block.T22[row_idx, col_idx]
+                    T[idx_m_1, idx_n_2] = sign_m * block.T12[row_idx, col_idx]
+                    T[idx_m_2, idx_n_1] = sign_m * block.T21[row_idx, col_idx]
+
+    return T
+
+
+def solve_axisymmetric_tmatrix_blocks(
+    nmax: int,
+    relative_refractive_index: complex,
+    quadrature: AxisymmetricShapeQuadrature,
+    radial: ModifiedBesselProducts,
+    *,
+    include_internal: bool = False,
+) -> tuple[AxisymmetricResolvedMBlock, ...]:
+    """Solve all fixed-`m` sectors needed for one axisymmetric particle block.
+
+    This is the current reference orchestration layer for the spherical-basis
+    spheroid backend:
+    1. assemble raw `P/Q` blocks for each `m = 0..nmax`,
+    2. split each block into the two reflection-parity sectors,
+    3. solve the particle-local `TQ=-P` and optional `RQ=I` systems,
+    4. recombine the parity sectors into one full fixed-`m` block.
+    """
+
+    out: list[AxisymmetricResolvedMBlock] = []
+    for m in range(int(nmax) + 1):
+        angular = axisymmetric_angular_functions(int(nmax), int(m), quadrature)
+        pq = assemble_axisymmetric_pq_block(relative_refractive_index, quadrature, angular, radial)
+        even_odd_pq, odd_even_pq = split_axisymmetric_pq_block_by_parity(pq)
+        even_odd = solve_axisymmetric_tr_block(even_odd_pq, include_internal=include_internal)
+        odd_even = solve_axisymmetric_tr_block(odd_even_pq, include_internal=include_internal)
+        out.append(combine_axisymmetric_parity_blocks(even_odd, odd_even))
+    return tuple(out)
+
+
+def recommend_spheroid_n_theta(
+    lmax: int,
+    equatorial_radius: float,
+    polar_radius: float,
+) -> int:
+    """Return a conservative internal meridian quadrature order for spheroids.
+
+    The user-facing spheroid API should stay centered on `lmax`. This helper
+    therefore chooses a particle-local quadrature size internally from the
+    truncation order and aspect ratio, rather than forcing an additional knob
+    into the default solver workflow.
+    """
+
+    lmax = int(lmax)
+    if lmax < 1:
+        raise ValueError("lmax must be >= 1.")
+    profile = SpheroidShapeProfile(
+        equatorial_radius=float(equatorial_radius),
+        polar_radius=float(polar_radius),
+    )
+
+    aspect_ratio = profile.aspect_ratio
+    aspect_penalty = int(np.ceil(18.0 * np.log1p(aspect_ratio - 1.0)))
+    base = max(64, 16 * lmax)
+    return int(base + aspect_penalty)
+
+
+def spheroid_tmatrix_block(
+    lmax: int,
+    k_medium: complex,
+    equatorial_radius: float,
+    polar_radius: float,
+    n_particle: complex,
+    n_medium: complex = 1.0 + 0j,
+    *,
+    n_theta: int | None = None,
+) -> Array:
+    """Return the aligned-spheroid spherical-basis `T` block in CELES ordering.
+
+    This is the current reference spheroid backend for the generic solver path.
+    It keeps the cluster solver in spherical waves and prepares one dense
+    particle-local `T` block by:
+    1. assembling axisymmetric EBCM `P/Q` blocks,
+    2. solving the fixed-`m` particle-local systems,
+    3. embedding the result into CELES mode ordering.
+
+    `n_theta` is kept as an internal expert override. When omitted, a
+    conservative heuristic based on `lmax` and aspect ratio is used.
+    """
+
+    if n_theta is None:
+        n_theta = recommend_spheroid_n_theta(
+            lmax=int(lmax),
+            equatorial_radius=float(equatorial_radius),
+            polar_radius=float(polar_radius),
+        )
+
+    geom = spheroid_geometry_quadrature(
+        n_theta=int(n_theta),
+        equatorial_radius=float(equatorial_radius),
+        polar_radius=float(polar_radius),
+    )
+    rel_index = complex(n_particle) / complex(n_medium)
+    radial = modified_bessel_products(
+        nmax=int(lmax),
+        relative_refractive_index=rel_index,
+        x=np.asarray(complex(k_medium) * geom.radius, dtype=np.complex128),
+    )
+    solved = solve_axisymmetric_tmatrix_blocks(
+        int(lmax),
+        rel_index,
+        geom,
+        radial,
+        include_internal=False,
+    )
+    return assemble_axisymmetric_tmatrix_block(int(lmax), solved)

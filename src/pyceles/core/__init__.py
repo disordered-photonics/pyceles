@@ -54,6 +54,7 @@ from .particles import (
     spheres_from_arrays,
     spheroids_from_arrays,
 )
+from .svwf_rotation import rotate_svwf_tmatrix_block, svwf_rotation_matrix
 from .tmatrix import (
     layered_internal_ab_ratios,
     layered_mie_ab,
@@ -111,6 +112,8 @@ __all__ = [
     "layered_mie_ab",
     "layered_sphere_T_diagonal",
     "layered_internal_ab_ratios",
+    "svwf_rotation_matrix",
+    "rotate_svwf_tmatrix_block",
     "precompute_T_diagonal",
     "prepare_matvec",
     "pwp_to_svwf_regular",

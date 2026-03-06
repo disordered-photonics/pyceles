@@ -67,7 +67,7 @@ from tqdm.auto import tqdm
 
 from .geometry_bounds import conservative_set_diameter
 from .indexing import n_modes
-from .particles import Particle, ParticleTRepresentation, Sphere
+from .particles import Particle, ParticleTRepresentation, Sphere, particle_t_signature
 from .tmatrix import particle_T_diagonal, particle_T_matrix_blocks, sphere_T_diagonal
 from .translation import RadialLUT, translation_ab5_table, translation_block
 
@@ -780,7 +780,9 @@ def _default_group_factory(
                 particles=group_particles,
                 n_medium=context.n_medium,
             )
-        except (NotImplementedError, TypeError) as exc:
+        except NotImplementedError as exc:
+            raise NotImplementedError(str(exc)) from exc
+        except TypeError as exc:
             raise NotImplementedError(
                 "dense particle-T preparation requires canonical spherical-basis "
                 "T blocks for every particle in the selected group."
@@ -801,7 +803,9 @@ def _default_group_factory(
                 particles=list(axis_particles),
                 n_medium=context.n_medium,
             )
-        except (NotImplementedError, TypeError) as exc:
+        except NotImplementedError as exc:
+            raise NotImplementedError(str(exc)) from exc
+        except TypeError as exc:
             raise NotImplementedError(
                 "axisymmetric particle-T preparation requires canonical spherical-basis "
                 "T blocks for every particle in the selected group."
@@ -1063,34 +1067,34 @@ def precompute_T_diagonal(
     T_M = np.zeros((Ns, lmax + 1), dtype=out_dtype)
     T_N = np.zeros((Ns, lmax + 1), dtype=out_dtype)
 
-    # Fast reuse for identical spheres.
+    # Reuse one particle-local diagonal kernel across repeated particles that
+    # differ only by position. This keeps large repeated arrays cheap for both
+    # homogeneous and layered spheres, and later extends naturally to other
+    # diagonal-capable particle families.
     MAX_TMEMO_ENTRIES = 100_000
-    sphere_memo: dict[tuple[float, complex, complex, complex, int], tuple[Array, Array]] = {}
+    diagonal_memo: dict[tuple[object, ...], tuple[Array, Array]] = {}
     for i, p in enumerate(particles):
-        if isinstance(p, Sphere):
-            key = (
-                float(p.radius),
-                complex(p.refractive_index),
-                complex(k),
-                complex(n_medium),
-                int(lmax),
-            )
-            cached = sphere_memo.get(key)
-            if cached is None:
+        key = (
+            particle_t_signature(p),
+            complex(k),
+            complex(n_medium),
+            int(lmax),
+        )
+        cached = diagonal_memo.get(key)
+        if cached is None:
+            if isinstance(p, Sphere):
                 Td = sphere_T_diagonal(lmax, k, p.radius, p.refractive_index, n_medium)
-                cached = (
-                    np.asarray(Td[1], dtype=out_dtype).copy(),
-                    np.asarray(Td[2], dtype=out_dtype).copy(),
-                )
-                if len(sphere_memo) < MAX_TMEMO_ENTRIES:
-                    sphere_memo[key] = cached
-            T_M[i, :] = cached[0]
-            T_N[i, :] = cached[1]
-            continue
+            else:
+                Td = particle_T_diagonal(lmax=lmax, k_medium=k, particle=p, n_medium=n_medium)
+            cached = (
+                np.asarray(Td[1], dtype=out_dtype).copy(),
+                np.asarray(Td[2], dtype=out_dtype).copy(),
+            )
+            if len(diagonal_memo) < MAX_TMEMO_ENTRIES:
+                diagonal_memo[key] = cached
 
-        Td = particle_T_diagonal(lmax=lmax, k_medium=k, particle=p, n_medium=n_medium)
-        T_M[i, :] = np.asarray(Td[1], dtype=out_dtype)
-        T_N[i, :] = np.asarray(Td[2], dtype=out_dtype)
+        T_M[i, :] = cached[0]
+        T_N[i, :] = cached[1]
 
     return T_M, T_N
 

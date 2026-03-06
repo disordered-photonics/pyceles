@@ -37,7 +37,16 @@ import numpy as np
 from scipy.special import spherical_jn, spherical_yn
 
 from .indexing import n_modes
-from .particles import LayeredSphere, Particle, Sphere, Spheroid
+from .particles import (
+    LayeredSphere,
+    Particle,
+    Sphere,
+    Spheroid,
+    particle_intrinsic_t_signature,
+    particle_t_signature,
+)
+from .spheroid_ebcm import spheroid_tmatrix_block
+from .svwf_rotation import rotate_svwf_tmatrix_block
 
 
 def _riccati_jh(
@@ -460,7 +469,8 @@ def _unsupported_particle_message(particle: Particle) -> str:
     """Human-readable dispatch error for not-yet-supported particle types."""
     return (
         f"T-matrix for particle type '{type(particle).__name__}' is not implemented yet. "
-        "Supported particle backends are Sphere and LayeredSphere. "
+        "Supported particle backends are Sphere, LayeredSphere, and Spheroid "
+        "(via spherical-basis T blocks). "
         "Non-spherical solvers are planned separately."
     )
 
@@ -493,7 +503,10 @@ def particle_T_diagonal(
             sign=sign,
         )
     if isinstance(particle, Spheroid):
-        raise NotImplementedError(_unsupported_particle_message(particle))
+        raise NotImplementedError(
+            "Spheroid diagonal T entries are not available. Use the spherical-basis "
+            "particle T-block path instead."
+        )
     raise TypeError(f"Unsupported particle instance: {type(particle)!r}")
 
 
@@ -546,6 +559,24 @@ def particle_T_matrix_block(
     tested against the fast path without re-implementing particle physics.
     """
 
+    if isinstance(particle, Spheroid):
+        block = _aligned_spheroid_tmatrix_block(
+            lmax=lmax,
+            k_medium=k_medium,
+            particle=particle,
+            n_medium=n_medium,
+        )
+        angles: tuple[float, float, float] = (
+            float(particle.euler_angles[0]),
+            float(particle.euler_angles[1]),
+            float(particle.euler_angles[2]),
+        )
+        return rotate_svwf_tmatrix_block(
+            block,
+            int(lmax),
+            angles,
+        )
+
     Td = particle_T_diagonal(
         lmax=lmax,
         k_medium=k_medium,
@@ -559,6 +590,24 @@ def particle_T_matrix_block(
         np.asarray(Td[2], dtype=np.complex128),
     )
     return np.diag(diag)
+
+
+def _aligned_spheroid_tmatrix_block(
+    lmax: int,
+    k_medium: complex,
+    particle: Spheroid,
+    n_medium: complex,
+) -> np.ndarray:
+    """Return the aligned/body-frame spherical-basis T block for one spheroid."""
+
+    return spheroid_tmatrix_block(
+        lmax=lmax,
+        k_medium=k_medium,
+        equatorial_radius=particle.equatorial_radius,
+        polar_radius=particle.polar_radius,
+        n_particle=particle.refractive_index,
+        n_medium=n_medium,
+    )
 
 
 def particle_T_matrix_blocks(
@@ -575,21 +624,64 @@ def particle_T_matrix_blocks(
     denser `(Ng, Nm, Nm)` form expected by general prepared-operator paths.
     Future spheroid implementations can plug into the solver by teaching this
     dispatch how to build their spherical-basis T blocks.
+
+    Identical particles are prepared once per `(particle signature, medium,
+    truncation)` tuple and then reused across the subset. That matters for the
+    dense and axisymmetric fallback paths, where rebuilding a full block for
+    every repeated particle would be avoidable overhead.
     """
 
-    return np.stack(
-        [
-            particle_T_matrix_block(
-                lmax=lmax,
-                k_medium=k_medium,
-                particle=particle,
-                n_medium=n_medium,
-                sign=sign,
-            )
-            for particle in particles
-        ],
-        axis=0,
-    )
+    memo: dict[tuple[object, ...], np.ndarray] = {}
+    intrinsic_memo: dict[tuple[object, ...], np.ndarray] = {}
+    blocks: list[np.ndarray] = []
+    for particle in particles:
+        key = (
+            particle_t_signature(particle),
+            int(lmax),
+            complex(k_medium),
+            complex(n_medium),
+            int(sign),
+        )
+        block = memo.get(key)
+        if block is None:
+            if isinstance(particle, Spheroid):
+                intrinsic_key = (
+                    particle_intrinsic_t_signature(particle),
+                    int(lmax),
+                    complex(k_medium),
+                    complex(n_medium),
+                    int(sign),
+                )
+                aligned = intrinsic_memo.get(intrinsic_key)
+                if aligned is None:
+                    aligned = _aligned_spheroid_tmatrix_block(
+                        lmax=lmax,
+                        k_medium=k_medium,
+                        particle=particle,
+                        n_medium=n_medium,
+                    )
+                    intrinsic_memo[intrinsic_key] = aligned
+                block = rotate_svwf_tmatrix_block(
+                    aligned,
+                    int(lmax),
+                    (
+                        float(particle.euler_angles[0]),
+                        float(particle.euler_angles[1]),
+                        float(particle.euler_angles[2]),
+                    ),
+                )
+            else:
+                block = particle_T_matrix_block(
+                    lmax=lmax,
+                    k_medium=k_medium,
+                    particle=particle,
+                    n_medium=n_medium,
+                    sign=sign,
+                )
+            memo[key] = block
+        blocks.append(block)
+
+    return np.stack(blocks, axis=0)
 
 
 def particle_internal_ratios(
