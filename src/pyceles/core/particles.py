@@ -118,6 +118,72 @@ class Spheroid(Particle):
         return "axisymmetric"
 
 
+def _rotation_matrix_zyz_lab_to_body(euler_angles: Tuple[float, float, float]) -> np.ndarray:
+    """Return the lab-to-body rotation matrix for particle Euler angles.
+
+    The convention matches the particle-orientation usage elsewhere in
+    `pyceles`: a `z-y'-z''` Euler triplet with the body frame aligned to the
+    particle at zero angles.
+    """
+
+    alpha = float(euler_angles[0])
+    beta = float(euler_angles[1])
+    gamma = float(euler_angles[2])
+    rot_1 = np.array(
+        [
+            [np.cos(alpha), np.sin(alpha), 0.0],
+            [-np.sin(alpha), np.cos(alpha), 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=float,
+    )
+    rot_2 = np.array(
+        [
+            [np.cos(beta), 0.0, -np.sin(beta)],
+            [0.0, 1.0, 0.0],
+            [np.sin(beta), 0.0, np.cos(beta)],
+        ],
+        dtype=float,
+    )
+    rot_3 = np.array(
+        [
+            [np.cos(gamma), np.sin(gamma), 0.0],
+            [-np.sin(gamma), np.cos(gamma), 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=float,
+    )
+    return rot_3 @ rot_2 @ rot_1
+
+
+def particle_contains_points(
+    particle: Particle,
+    points: Sequence[Sequence[float]] | np.ndarray,
+) -> np.ndarray:
+    """Return a boolean mask for points inside the physical particle boundary."""
+
+    pts = np.asarray(points, dtype=float).reshape(-1, 3)
+    center = np.asarray(particle.position, dtype=float).reshape(3)
+    rel = pts - center[None, :]
+
+    if isinstance(particle, Sphere):
+        radius = float(particle.radius)
+        return np.sum(rel * rel, axis=1) < (radius**2)
+
+    if isinstance(particle, LayeredSphere):
+        radius = float(particle.layer_radii[-1])
+        return np.sum(rel * rel, axis=1) < (radius**2)
+
+    if isinstance(particle, Spheroid):
+        body = rel @ _rotation_matrix_zyz_lab_to_body(particle.euler_angles).T
+        a = float(particle.equatorial_radius)
+        c = float(particle.polar_radius)
+        rho2 = (body[:, 0] / a) ** 2 + (body[:, 1] / a) ** 2 + (body[:, 2] / c) ** 2
+        return rho2 < 1.0
+
+    raise TypeError(f"Unsupported particle instance: {type(particle)!r}")
+
+
 def particle_t_signature(particle: Particle) -> tuple[object, ...]:
     """Return a position-independent cache key for solver-facing particle-T data.
 

@@ -44,6 +44,40 @@ from .indexing import index_vswf, n_modes
 Array = np.ndarray
 
 
+def _double_factorial(n: int) -> int:
+    """Return the double factorial for small integer normalization helpers."""
+
+    n = int(n)
+    if n in (-1, 0):
+        return 1
+    if n < -1:
+        raise ValueError("double factorial is undefined for n < -1.")
+    out = 1
+    for k in range(n, 0, -2):
+        out *= k
+    return out
+
+
+def _axisymmetric_sector_scale(m: int) -> float:
+    """Return the per-|m| normalization for compact axisymmetric `P/Q` blocks.
+
+    The meridional EBCM reduction integrates out the azimuth analytically and
+    produces one compact block per non-negative `|m|`. In the CELES/SMUTHI
+    spherical-wave conventions used by `pyceles`, that compact block carries an
+    extra scalar normalization that depends only on `|m|`.
+
+    This factor cancels in `T = -P Q^{-1}`, so the scattering block is
+    unaffected, but it matters for internal-response maps such as `-P^{-1}` or
+    `Q^{-1}`. Applying it here keeps both the external and internal particle
+    responses in the same CELES mode normalization.
+    """
+
+    m = abs(int(m))
+    if m == 0:
+        return 1.0
+    return _double_factorial(2 * m - 3) / _double_factorial(2 * m - 2)
+
+
 @dataclass(frozen=True)
 class AxisymmetricShapeQuadrature:
     """Meridian geometry and polar quadrature for an axisymmetric profile.
@@ -53,9 +87,12 @@ class AxisymmetricShapeQuadrature:
     and legacy references are usually written in `theta`. Keeping both avoids
     repeated trig conversions during `P/Q` assembly.
 
-    When the quadrature is generated internally, the weights are doubled so
-    integrating over `theta in (0, pi/2)` reproduces the full
-    `theta in (0, pi)` integral for reflection-symmetric integrands.
+    When the quadrature is generated internally, the nodes come from a
+    Gauss-Legendre rule in `mu = cos(theta)` on the upper meridian
+    `mu in (0, 1)`. The stored weights are doubled so the upper-meridian
+    rule reproduces the full `mu in (-1, 1)` integral for reflection-
+    symmetric integrands, matching the SMARTIES spheroid preparation
+    convention.
     """
 
     mu: Array
@@ -150,9 +187,10 @@ class ModifiedBesselProducts:
     assembly avoid redundant work.
 
     The current implementation computes the products directly from SciPy's
-    spherical Bessel functions. The public shape is future-proof: a more
-    stable SMARTIES-style `F^+` recurrence can replace the internal kernel
-    later without changing the downstream `P/Q` assembly code.
+    spherical Bessel functions because that path is both accurate and fast for
+    the moderate aspect ratios currently targeted by `pyceles`. If extreme
+    aspect ratios become a priority later, a more cancellation-resistant
+    SMARTIES-style `F^+` recurrence can slot in behind the same tensor layout.
     """
 
     xipsi: Array
@@ -292,10 +330,10 @@ def axisymmetric_shape_quadrature(
         n_theta = int(n_theta)
         if n_theta < 1:
             raise ValueError("n_theta must be >= 1.")
-        nodes, weights = leggauss(n_theta)
-        mu_arr = 0.5 * (nodes + 1.0)
+        nodes, weights = leggauss(2 * n_theta)
+        mu_arr = nodes[n_theta:]
         theta_arr = np.arccos(mu_arr)
-        weight_arr = 0.5 * np.pi * weights
+        weight_arr = 2.0 * weights[n_theta:]
         uses_gauss_half_space = True
     elif mu is not None:
         mu_arr = np.asarray(mu, dtype=float).reshape(-1)
@@ -400,16 +438,6 @@ def _riccati_dpsi_table(max_order: int, z: Array) -> Array:
     return out
 
 
-def _riccati_dchi_table(max_order: int, z: Array) -> Array:
-    """Return derivatives `chi'_n(z)` with respect to the argument `z`."""
-
-    z_arr = np.asarray(z, dtype=np.complex128).reshape(-1)
-    out = np.empty((z_arr.size, max_order + 1), dtype=np.complex128)
-    for n in range(max_order + 1):
-        out[:, n] = spherical_yn(n, z_arr) + z_arr * spherical_yn(n, z_arr, derivative=True)
-    return out
-
-
 def _parity_masks(max_order: int) -> tuple[Array, Array]:
     """Return boolean masks for even and odd `n + k` parity."""
 
@@ -417,6 +445,55 @@ def _parity_masks(max_order: int) -> tuple[Array, Array]:
     parity = (orders[:, None] + orders[None, :]) % 2
     even_mask = parity == 0
     return even_mask, ~even_mask
+
+
+def _bessel_products_with_derivatives(base_products: Array, s: complex, x: Array) -> dict[str, Array]:
+    """Return derivative-related tensors derived from parity-even base products."""
+
+    base = np.asarray(base_products, dtype=np.complex128)
+    nmax = base.shape[0] - 2
+    x_arr = np.asarray(x, dtype=np.complex128).reshape(-1)
+    shape = (nmax + 2, nmax + 2, x_arr.size)
+    odd_shape = (nmax + 2, nmax + 2, x_arr.size)
+    xiprimepsi = np.zeros(odd_shape, dtype=np.complex128)
+    xipsiprime = np.zeros(odd_shape, dtype=np.complex128)
+    xiprimepsiprime_plus_nnp1 = np.zeros(shape, dtype=np.complex128)
+    xiprimepsiprime_plus_kkp1 = np.zeros(shape, dtype=np.complex128)
+    base_over_sx2 = np.zeros(shape, dtype=np.complex128)
+
+    for n in range(1, nmax + 1):
+        for k in range(2 - (n % 2), nmax + 1, 2):
+            xiprimepsiprime_plus_kkp1[n, k, :] = (
+                (k + (n + 1)) * (k + 1) * base[n - 1, k - 1, :]
+                + (k * (k + 1) - k * (n + 1)) * base[n - 1, k + 1, :]
+                + (k * (k + 1) - (k + 1) * n) * base[n + 1, k - 1, :]
+                + (k * (k + 1) + k * n) * base[n + 1, k + 1, :]
+            ) / ((2 * n + 1) * (2 * k + 1))
+            xiprimepsiprime_plus_nnp1[n, k, :] = (
+                (n * (n + 1) + (k + 1) * (n + 1)) * base[n - 1, k - 1, :]
+                + (n - k) * (n + 1) * base[n - 1, k + 1, :]
+                + ((n + 1) - (k + 1)) * n * base[n + 1, k - 1, :]
+                + (n * (n + 1) + k * n) * base[n + 1, k + 1, :]
+            ) / ((2 * n + 1) * (2 * k + 1))
+        for k in range(1 + (n % 2), nmax + 1, 2):
+            xiprimepsi[n, k, :] = (
+                (n + 1) * base[n - 1, k, :] - n * base[n + 1, k, :]
+            ) / (2 * n + 1)
+            xipsiprime[n, k, :] = (
+                (k + 1) * base[n, k - 1, :] - k * base[n, k + 1, :]
+            ) / (2 * k + 1)
+
+    base_over_sx2[1 : nmax + 1, 1 : nmax + 1, :] = (
+        base[1 : nmax + 1, 1 : nmax + 1, :] / (s * x_arr * x_arr)[None, None, :]
+    )
+    return {
+        "xipsi": base,
+        "xiprimepsi": xiprimepsi,
+        "xipsiprime": xipsiprime,
+        "xipsi_over_sx2": base_over_sx2,
+        "xiprimepsiprime_plus_nnp1": xiprimepsiprime_plus_nnp1,
+        "xiprimepsiprime_plus_kkp1": xiprimepsiprime_plus_kkp1,
+    }
 
 
 def modified_bessel_products(
@@ -445,8 +522,13 @@ def modified_bessel_products(
     - `xiprimepsi` / `xipsiprime` and their regular-field analogues are
       populated only for `n + k` odd.
 
-    This keeps the tensor layout close to the final `P/Q` assembly while
-    preserving a straightforward SciPy-based reference implementation.
+    This reference implementation keeps the radial products explicit in terms
+    of `xi_n(x) psi_k(sx)` and `psi_n(x) psi_k(sx)`. For the moderate aspect
+    ratios currently targeted by `pyceles`, this simpler direct path is both
+    accurate and slightly faster than the more elaborate SMARTIES `F^+` / `NB`
+    machinery. If extreme aspect ratios become a priority later, that more
+    cancellation-resistant scheme can be reintroduced without changing the
+    downstream `P/Q` assembly.
     """
 
     nmax = int(nmax)
@@ -466,29 +548,15 @@ def modified_bessel_products(
     max_order = nmax + 1
     psi_x = _riccati_psi_table(max_order, x_arr)
     chi_x = _riccati_chi_table(max_order, x_arr)
-    dpsi_x = _riccati_dpsi_table(max_order, x_arr)
-    dchi_x = _riccati_dchi_table(max_order, x_arr)
-
     sx = s * x_arr
     psi_sx = _riccati_psi_table(max_order, sx)
-    dpsi_sx = _riccati_dpsi_table(max_order, sx)
-
     xi_x = psi_x + 1j * chi_x
-    dxi_x = dpsi_x + 1j * dchi_x
+    dpsi_x = _riccati_dpsi_table(max_order, x_arr)
+    dpsi_sx = _riccati_dpsi_table(max_order, sx)
 
     shape = (max_order + 1, max_order + 1, x_arr.size)
     xipsi = np.zeros(shape, dtype=np.complex128)
     psipsi = np.zeros(shape, dtype=np.complex128)
-    xiprimepsi = np.zeros(shape, dtype=np.complex128)
-    xipsiprime = np.zeros(shape, dtype=np.complex128)
-    xipsi_over_sx2 = np.zeros(shape, dtype=np.complex128)
-    xiprimepsiprime_plus_nnp1_xipsi_over_sx2 = np.zeros(shape, dtype=np.complex128)
-    xiprimepsiprime_plus_kkp1_xipsi_over_sx2 = np.zeros(shape, dtype=np.complex128)
-    psiprimepsi = np.zeros(shape, dtype=np.complex128)
-    psipsiprime = np.zeros(shape, dtype=np.complex128)
-    psipsi_over_sx2 = np.zeros(shape, dtype=np.complex128)
-    psiprimepsiprime_plus_nnp1_psipsi_over_sx2 = np.zeros(shape, dtype=np.complex128)
-    psiprimepsiprime_plus_kkp1_psipsi_over_sx2 = np.zeros(shape, dtype=np.complex128)
     q11_diag_kernel = np.zeros((nmax, x_arr.size), dtype=np.complex128)
     q22_diag_kernel = np.zeros((nmax, x_arr.size), dtype=np.complex128)
     q22_diag_coupling_kernel = np.zeros((nmax, x_arr.size), dtype=np.complex128)
@@ -497,42 +565,29 @@ def modified_bessel_products(
     p22_diag_coupling_kernel = np.zeros((nmax, x_arr.size), dtype=np.complex128)
 
     even_mask, odd_mask = _parity_masks(max_order)
-    inv_sx2 = 1.0 / (s * (x_arr * x_arr))
 
     for n in range(max_order + 1):
         xi_n = xi_x[:, n]
         psi_n = psi_x[:, n]
-        dxi_n = dxi_x[:, n]
-        dpsi_n = dpsi_x[:, n]
-        nnp1 = n * (n + 1)
         for k in range(max_order + 1):
             psi_k = psi_sx[:, k]
-            dpsi_k = dpsi_sx[:, k]
-            kkp1 = k * (k + 1)
             if even_mask[n, k]:
-                base_xi = xi_n * psi_k
+                xipsi[n, k, :] = xi_n * psi_k
                 base_psi = psi_n * psi_k
-                xipsi[n, k, :] = base_xi
                 psipsi[n, k, :] = base_psi
-                xipsi_over_sx2[n, k, :] = base_xi * inv_sx2
-                psipsi_over_sx2[n, k, :] = base_psi * inv_sx2
-                xiprimepsiprime = dxi_n * dpsi_k
-                psiprimepsiprime = dpsi_n * dpsi_k
-                xiprimepsiprime_plus_nnp1_xipsi_over_sx2[n, k, :] = (
-                    xiprimepsiprime + nnp1 * xipsi_over_sx2[n, k, :]
-                )
-                xiprimepsiprime_plus_kkp1_xipsi_over_sx2[n, k, :] = (
-                    xiprimepsiprime + kkp1 * xipsi_over_sx2[n, k, :]
-                )
-                psiprimepsiprime_plus_nnp1_psipsi_over_sx2[n, k, :] = (
-                    psiprimepsiprime + nnp1 * psipsi_over_sx2[n, k, :]
-                )
-                psiprimepsiprime_plus_kkp1_psipsi_over_sx2[n, k, :] = (
-                    psiprimepsiprime + kkp1 * psipsi_over_sx2[n, k, :]
-                )
-            elif odd_mask[n, k]:
-                xiprimepsi[n, k, :] = dxi_n * psi_k
-                xipsiprime[n, k, :] = xi_n * dpsi_k
+
+    xi_terms = _bessel_products_with_derivatives(xipsi, s, x_arr)
+    psi_terms = _bessel_products_with_derivatives(psipsi, s, x_arr)
+
+    psiprimepsi = np.zeros(shape, dtype=np.complex128)
+    psipsiprime = np.zeros(shape, dtype=np.complex128)
+    for n in range(max_order + 1):
+        dpsi_n = dpsi_x[:, n]
+        psi_n = psi_x[:, n]
+        for k in range(max_order + 1):
+            if odd_mask[n, k]:
+                dpsi_k = dpsi_sx[:, k]
+                psi_k = psi_sx[:, k]
                 psiprimepsi[n, k, :] = dpsi_n * psi_k
                 psipsiprime[n, k, :] = psi_n * dpsi_k
 
@@ -561,16 +616,16 @@ def modified_bessel_products(
     return ModifiedBesselProducts(
         xipsi=xipsi,
         psipsi=psipsi,
-        xiprimepsi=xiprimepsi,
-        xipsiprime=xipsiprime,
-        xipsi_over_sx2=xipsi_over_sx2,
-        xiprimepsiprime_plus_nnp1_xipsi_over_sx2=(xiprimepsiprime_plus_nnp1_xipsi_over_sx2),
-        xiprimepsiprime_plus_kkp1_xipsi_over_sx2=(xiprimepsiprime_plus_kkp1_xipsi_over_sx2),
+        xiprimepsi=xi_terms["xiprimepsi"],
+        xipsiprime=xi_terms["xipsiprime"],
+        xipsi_over_sx2=xi_terms["xipsi_over_sx2"],
+        xiprimepsiprime_plus_nnp1_xipsi_over_sx2=xi_terms["xiprimepsiprime_plus_nnp1"],
+        xiprimepsiprime_plus_kkp1_xipsi_over_sx2=xi_terms["xiprimepsiprime_plus_kkp1"],
         psiprimepsi=psiprimepsi,
         psipsiprime=psipsiprime,
-        psipsi_over_sx2=psipsi_over_sx2,
-        psiprimepsiprime_plus_nnp1_psipsi_over_sx2=(psiprimepsiprime_plus_nnp1_psipsi_over_sx2),
-        psiprimepsiprime_plus_kkp1_psipsi_over_sx2=(psiprimepsiprime_plus_kkp1_psipsi_over_sx2),
+        psipsi_over_sx2=psi_terms["xipsi_over_sx2"],
+        psiprimepsiprime_plus_nnp1_psipsi_over_sx2=psi_terms["xiprimepsiprime_plus_nnp1"],
+        psiprimepsiprime_plus_kkp1_psipsi_over_sx2=psi_terms["xiprimepsiprime_plus_kkp1"],
         psi_x=psi_x,
         chi_x=chi_x,
         psi_sx=psi_sx,
@@ -671,6 +726,8 @@ def assemble_axisymmetric_pq_block(
     quadrature: AxisymmetricShapeQuadrature,
     angular: AxisymmetricAngularFunctions,
     radial: ModifiedBesselProducts,
+    *,
+    k_medium: complex,
 ) -> AxisymmetricPQBlock:
     """Assemble the raw `P/Q` matrices for one axisymmetric `m` block.
 
@@ -687,7 +744,9 @@ def assemble_axisymmetric_pq_block(
         raise ValueError("angular.n_values must be non-empty.")
 
     weights = np.asarray(quadrature.weights, dtype=np.float64)
-    dxdtwt = np.asarray(quadrature.dr_dtheta, dtype=np.float64) * weights
+    # SMARTIES writes this as dxdtwt with x(theta) = k * r(theta).
+    # The derivative-coupled terms therefore need d(k r)/dtheta, not just dr/dtheta.
+    dxdtwt = np.asarray(complex(k_medium) * quadrature.dr_dtheta, dtype=np.complex128) * weights
     An = np.sqrt((2.0 * n_values + 1.0) / (2.0 * n_values * (n_values + 1.0)))
     prefactor1 = ((s - 1.0) * (s + 1.0) / s) * (An[:, None] * An[None, :])
     nnp1 = n_values * (n_values + 1)
@@ -786,6 +845,16 @@ def assemble_axisymmetric_pq_block(
     np.fill_diagonal(Q22, q22_diag)
     np.fill_diagonal(P11, p11_diag)
     np.fill_diagonal(P22, p22_diag)
+
+    sector_scale = _axisymmetric_sector_scale(int(angular.m))
+    Q11 *= sector_scale
+    Q12 *= sector_scale
+    Q21 *= sector_scale
+    Q22 *= sector_scale
+    P11 *= sector_scale
+    P12 *= sector_scale
+    P21 *= sector_scale
+    P22 *= sector_scale
 
     return AxisymmetricPQBlock(
         m=int(angular.m),
@@ -947,6 +1016,57 @@ def solve_axisymmetric_tr_block(
     )
 
 
+def _solve_internal_from_scattered_parity_block(
+    parity_block: AxisymmetricParityBlock,
+) -> AxisymmetricTRBlock:
+    """Solve the parity-reduced scattered-to-internal map `c = C p`.
+
+    The boundary-matching matrices satisfy `p = -P c` on each fixed-`m`,
+    fixed-parity sector, so the internal regular coefficients follow from the
+    dense local solve `C = -P^{-1}`.
+    """
+
+    m = int(parity_block.m)
+    P11 = np.asarray(parity_block.P11, dtype=np.complex128)
+    P12 = np.asarray(parity_block.P12, dtype=np.complex128)
+    P21 = np.asarray(parity_block.P21, dtype=np.complex128)
+    P22 = np.asarray(parity_block.P22, dtype=np.complex128)
+
+    n_even = int(P11.shape[0])
+    n_odd = int(P22.shape[0])
+    zero_11 = np.zeros_like(P11)
+    zero_12 = np.zeros_like(P12)
+    zero_21 = np.zeros_like(P21)
+    zero_22 = np.zeros_like(P22)
+
+    if m == 0:
+        C11 = -_solve_right_inverse(P11)
+        C22 = -_solve_right_inverse(P22)
+        C12 = np.zeros((n_even, n_odd), dtype=np.complex128)
+        C21 = np.zeros((n_odd, n_even), dtype=np.complex128)
+    else:
+        P_full = np.block([[P11, P12], [P21, P22]])
+        C_full = -_solve_right_inverse(P_full)
+        C11 = C_full[:n_even, :n_even]
+        C12 = C_full[:n_even, n_even:]
+        C21 = C_full[n_even:, :n_even]
+        C22 = C_full[n_even:, n_even:]
+
+    return AxisymmetricTRBlock(
+        m=m,
+        even_indices=np.asarray(parity_block.even_indices, dtype=np.int64),
+        odd_indices=np.asarray(parity_block.odd_indices, dtype=np.int64),
+        T11=zero_11,
+        T12=zero_12,
+        T21=zero_21,
+        T22=zero_22,
+        R11=C11,
+        R12=C12,
+        R21=C21,
+        R22=C22,
+    )
+
+
 def combine_axisymmetric_parity_blocks(
     even_odd: AxisymmetricTRBlock,
     odd_even: AxisymmetricTRBlock,
@@ -1079,9 +1199,45 @@ def assemble_axisymmetric_tmatrix_block(
     return T
 
 
+def assemble_axisymmetric_internal_block(
+    lmax: int,
+    resolved_blocks: list[AxisymmetricResolvedMBlock] | tuple[AxisymmetricResolvedMBlock, ...],
+) -> Array:
+    """Assemble a CELES-ordered dense internal-response block from fixed-`m` sectors.
+
+    The returned matrix maps incident regular spherical-wave coefficients to
+    internal regular spherical-wave coefficients in the same CELES ordering.
+    """
+
+    Ns = lmax * (lmax + 2)
+    Nm = 2 * Ns
+    R = np.zeros((Nm, Nm), dtype=np.complex128)
+
+    for block in resolved_blocks:
+        if block.R11 is None or block.R12 is None or block.R21 is None or block.R22 is None:
+            raise ValueError("Resolved axisymmetric blocks do not contain internal-response data.")
+        m = int(block.m)
+        n_values = np.asarray(block.n_values, dtype=np.int64)
+        for row_idx, l1 in enumerate(n_values):
+            for col_idx, l2 in enumerate(n_values):
+                mm_values = (0,) if m == 0 else (m, -m)
+                for mm in mm_values:
+                    row_tau1 = index_vswf(int(l1), int(mm), 1, int(lmax))
+                    row_tau2 = index_vswf(int(l1), int(mm), 2, int(lmax))
+                    col_tau1 = index_vswf(int(l2), int(mm), 1, int(lmax))
+                    col_tau2 = index_vswf(int(l2), int(mm), 2, int(lmax))
+                    R[row_tau1, col_tau1] = block.R11[row_idx, col_idx]
+                    R[row_tau1, col_tau2] = block.R12[row_idx, col_idx]
+                    R[row_tau2, col_tau1] = block.R21[row_idx, col_idx]
+                    R[row_tau2, col_tau2] = block.R22[row_idx, col_idx]
+
+    return R
+
+
 def solve_axisymmetric_tmatrix_blocks(
     nmax: int,
     relative_refractive_index: complex,
+    k_medium: complex,
     quadrature: AxisymmetricShapeQuadrature,
     radial: ModifiedBesselProducts,
     *,
@@ -1100,7 +1256,13 @@ def solve_axisymmetric_tmatrix_blocks(
     out: list[AxisymmetricResolvedMBlock] = []
     for m in range(int(nmax) + 1):
         angular = axisymmetric_angular_functions(int(nmax), int(m), quadrature)
-        pq = assemble_axisymmetric_pq_block(relative_refractive_index, quadrature, angular, radial)
+        pq = assemble_axisymmetric_pq_block(
+            relative_refractive_index,
+            quadrature,
+            angular,
+            radial,
+            k_medium=k_medium,
+        )
         even_odd_pq, odd_even_pq = split_axisymmetric_pq_block_by_parity(pq)
         even_odd = solve_axisymmetric_tr_block(even_odd_pq, include_internal=include_internal)
         odd_even = solve_axisymmetric_tr_block(odd_even_pq, include_internal=include_internal)
@@ -1164,6 +1326,41 @@ def spheroid_tmatrix_block(
             equatorial_radius=float(equatorial_radius),
             polar_radius=float(polar_radius),
         )
+    T, _ = spheroid_tmatrix_and_internal_block(
+        lmax=int(lmax),
+        k_medium=k_medium,
+        equatorial_radius=equatorial_radius,
+        polar_radius=polar_radius,
+        n_particle=n_particle,
+        n_medium=n_medium,
+        n_theta=int(n_theta),
+    )
+    return T
+
+
+def spheroid_tmatrix_and_internal_block(
+    lmax: int,
+    k_medium: complex,
+    equatorial_radius: float,
+    polar_radius: float,
+    n_particle: complex,
+    n_medium: complex = 1.0 + 0j,
+    *,
+    n_theta: int | None = None,
+) -> tuple[Array, Array]:
+    """Return aligned spheroid `T` and scattered-to-internal dense blocks.
+
+    The second returned matrix maps solved scattered/outgoing spherical-wave
+    coefficients to internal regular spherical-wave coefficients. This mirrors
+    the role played by `sphere_internal_ratios(...)` for diagonal particles.
+    """
+
+    if n_theta is None:
+        n_theta = recommend_spheroid_n_theta(
+            lmax=int(lmax),
+            equatorial_radius=float(equatorial_radius),
+            polar_radius=float(polar_radius),
+        )
 
     geom = spheroid_geometry_quadrature(
         n_theta=int(n_theta),
@@ -1176,11 +1373,30 @@ def spheroid_tmatrix_block(
         relative_refractive_index=rel_index,
         x=np.asarray(complex(k_medium) * geom.radius, dtype=np.complex128),
     )
-    solved = solve_axisymmetric_tmatrix_blocks(
-        int(lmax),
-        rel_index,
-        geom,
-        radial,
-        include_internal=False,
+    resolved_t: list[AxisymmetricResolvedMBlock] = []
+    resolved_internal: list[AxisymmetricResolvedMBlock] = []
+    for m in range(0, int(lmax) + 1):
+        angular = axisymmetric_angular_functions(int(lmax), int(m), geom)
+        pq = assemble_axisymmetric_pq_block(
+            rel_index,
+            geom,
+            angular,
+            radial,
+            k_medium=k_medium,
+        )
+        even_odd_pq, odd_even_pq = split_axisymmetric_pq_block_by_parity(pq)
+        even_odd_t = solve_axisymmetric_tr_block(even_odd_pq, include_internal=False)
+        odd_even_t = solve_axisymmetric_tr_block(odd_even_pq, include_internal=False)
+        resolved_t.append(combine_axisymmetric_parity_blocks(even_odd_t, odd_even_t))
+
+        even_odd_internal = _solve_internal_from_scattered_parity_block(even_odd_pq)
+        odd_even_internal = _solve_internal_from_scattered_parity_block(odd_even_pq)
+        resolved_internal.append(
+            combine_axisymmetric_parity_blocks(even_odd_internal, odd_even_internal)
+        )
+
+    T = assemble_axisymmetric_tmatrix_block(int(lmax), tuple(resolved_t))
+    internal_from_scattered = assemble_axisymmetric_internal_block(
+        int(lmax), tuple(resolved_internal)
     )
-    return assemble_axisymmetric_tmatrix_block(int(lmax), solved)
+    return T, internal_from_scattered

@@ -564,6 +564,11 @@ def total_scattering_cross_section(
     """Total scattering cross section from far-field PWPs.
 
     Cross section is defined only for plane-wave excitation.
+
+    For endpoint-excluded uniform azimuth grids on ``[0, 2*pi)``, we enforce
+    periodic closure so the missing final interval is counted once. This is
+    the physically correct composite trapezoid rule on the circle and is
+    consistent with sphere/Mie benchmarks.
     """
     dcs = scattering_cross_section(
         source,

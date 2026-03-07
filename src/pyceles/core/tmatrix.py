@@ -45,7 +45,7 @@ from .particles import (
     particle_intrinsic_t_signature,
     particle_t_signature,
 )
-from .spheroid_ebcm import spheroid_tmatrix_block
+from .spheroid_ebcm import spheroid_tmatrix_and_internal_block
 from .svwf_rotation import rotate_svwf_tmatrix_block
 
 
@@ -600,14 +600,54 @@ def _aligned_spheroid_tmatrix_block(
 ) -> np.ndarray:
     """Return the aligned/body-frame spherical-basis T block for one spheroid."""
 
-    return spheroid_tmatrix_block(
+    return spheroid_tmatrix_and_internal_block(
         lmax=lmax,
         k_medium=k_medium,
         equatorial_radius=particle.equatorial_radius,
         polar_radius=particle.polar_radius,
         n_particle=particle.refractive_index,
         n_medium=n_medium,
+    )[0]
+
+
+def _aligned_spheroid_internal_block(
+    lmax: int,
+    k_medium: complex,
+    particle: Spheroid,
+    n_medium: complex,
+) -> np.ndarray:
+    """Return the aligned/body-frame scattered-to-internal block for one spheroid."""
+
+    return spheroid_tmatrix_and_internal_block(
+        lmax=lmax,
+        k_medium=k_medium,
+        equatorial_radius=particle.equatorial_radius,
+        polar_radius=particle.polar_radius,
+        n_particle=particle.refractive_index,
+        n_medium=n_medium,
+    )[1]
+
+
+def _spheroid_internal_block(
+    lmax: int,
+    k_medium: complex,
+    particle: Spheroid,
+    n_medium: complex,
+) -> np.ndarray:
+    """Return the lab-frame scattered-to-internal block for one spheroid."""
+
+    aligned = _aligned_spheroid_internal_block(
+        lmax=lmax,
+        k_medium=k_medium,
+        particle=particle,
+        n_medium=n_medium,
     )
+    angles: tuple[float, float, float] = (
+        float(particle.euler_angles[0]),
+        float(particle.euler_angles[1]),
+        float(particle.euler_angles[2]),
+    )
+    return rotate_svwf_tmatrix_block(aligned, int(lmax), angles)
 
 
 def particle_T_matrix_blocks(

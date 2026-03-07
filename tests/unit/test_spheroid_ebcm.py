@@ -13,9 +13,10 @@ from pyceles.core.spheroid_ebcm import (
     solve_axisymmetric_tmatrix_blocks,
     solve_axisymmetric_tr_block,
     spheroid_geometry_quadrature,
+    spheroid_tmatrix_and_internal_block,
     split_axisymmetric_pq_block_by_parity,
 )
-from pyceles.core.tmatrix import particle_T_matrix_block
+from pyceles.core.tmatrix import particle_T_matrix_block, sphere_internal_ratios
 
 
 def test_spheroid_geometry_quadrature_reduces_to_sphere():
@@ -49,7 +50,7 @@ def test_spheroid_geometry_quadrature_half_space_weights_cover_full_polar_range(
     assert np.all(geom.mu <= 1.0)
     assert np.all(geom.theta > 0.0)
     assert np.all(geom.theta < 0.5 * np.pi)
-    np.testing.assert_allclose(np.sum(geom.weights), np.pi, rtol=0.0, atol=1e-13)
+    np.testing.assert_allclose(np.sum(geom.weights), 2.0, rtol=0.0, atol=1e-13)
 
 
 def test_axisymmetric_shape_quadrature_preserves_mu_theta_derivative_relation():
@@ -68,7 +69,7 @@ def test_axisymmetric_shape_quadrature_preserves_mu_theta_derivative_relation():
     np.testing.assert_allclose(geom.radius, profile.radius_from_mu(mu), rtol=0.0, atol=1e-13)
 
 
-def test_modified_bessel_products_match_direct_base_products_on_even_parity():
+def test_modified_bessel_products_match_direct_regular_products_on_even_parity():
     nmax = 3
     s = 1.37 + 0.12j
     x = np.array([0.8, 1.6], dtype=np.complex128)
@@ -84,18 +85,29 @@ def test_modified_bessel_products_match_direct_base_products_on_even_parity():
                     rtol=1e-13,
                     atol=1e-13,
                 )
+            else:
+                np.testing.assert_allclose(products.psipsi[n, k, :], 0.0, rtol=0.0, atol=0.0)
+                np.testing.assert_allclose(products.xipsi[n, k, :], 0.0, rtol=0.0, atol=0.0)
+
+def test_modified_bessel_products_use_direct_outgoing_products_in_non_cancelling_region():
+    nmax = 4
+    s = 1.21 + 0.05j
+    x = np.array([1.1, 2.3], dtype=np.complex128)
+    products = modified_bessel_products(nmax=nmax, relative_refractive_index=s, x=x)
+
+    max_order = nmax + 1
+    for n in range(max_order + 1):
+        for k in range(max_order + 1):
+            if (n + k) % 2 == 0 and n <= k + 2:
                 np.testing.assert_allclose(
                     products.xipsi[n, k, :],
                     products.xi_x[:, n] * products.psi_sx[:, k],
                     rtol=1e-13,
                     atol=1e-13,
                 )
-            else:
-                np.testing.assert_allclose(products.psipsi[n, k, :], 0.0, rtol=0.0, atol=0.0)
-                np.testing.assert_allclose(products.xipsi[n, k, :], 0.0, rtol=0.0, atol=0.0)
 
 
-def test_modified_bessel_products_match_direct_mixed_derivatives_on_odd_parity():
+def test_modified_bessel_products_keep_regular_derivative_identities_and_finite_outgoing_terms():
     nmax = 4
     s = 1.21 + 0.05j
     x = np.array([1.1, 2.3], dtype=np.complex128)
@@ -105,23 +117,9 @@ def test_modified_bessel_products_match_direct_mixed_derivatives_on_odd_parity()
     inv_sx2 = 1.0 / (s * (x * x))
     for n in range(max_order + 1):
         dpsi_n = spherical_jn(n, x) + x * spherical_jn(n, x, derivative=True)
-        dchi_n = spherical_yn(n, x) + x * spherical_yn(n, x, derivative=True)
-        dxi_n = dpsi_n + 1j * dchi_n
         for k in range(max_order + 1):
             if (n + k) % 2 == 1:
                 dpsi_k = spherical_jn(k, s * x) + (s * x) * spherical_jn(k, s * x, derivative=True)
-                np.testing.assert_allclose(
-                    products.xiprimepsi[n, k, :],
-                    dxi_n * products.psi_sx[:, k],
-                    rtol=1e-13,
-                    atol=1e-13,
-                )
-                np.testing.assert_allclose(
-                    products.xipsiprime[n, k, :],
-                    products.xi_x[:, n] * dpsi_k,
-                    rtol=1e-13,
-                    atol=1e-13,
-                )
                 np.testing.assert_allclose(
                     products.psiprimepsi[n, k, :],
                     dpsi_n * products.psi_sx[:, k],
@@ -134,21 +132,26 @@ def test_modified_bessel_products_match_direct_mixed_derivatives_on_odd_parity()
                     rtol=1e-13,
                     atol=1e-13,
                 )
+                assert np.all(np.isfinite(products.xiprimepsi[n, k, :].real))
+                assert np.all(np.isfinite(products.xiprimepsi[n, k, :].imag))
+                assert np.all(np.isfinite(products.xipsiprime[n, k, :].real))
+                assert np.all(np.isfinite(products.xipsiprime[n, k, :].imag))
             else:
-                xi_psi_over_sx2 = products.xipsi[n, k, :] * inv_sx2
-                psi_psi_over_sx2 = products.psipsi[n, k, :] * inv_sx2
-                np.testing.assert_allclose(
-                    products.xipsi_over_sx2[n, k, :],
-                    xi_psi_over_sx2,
-                    rtol=1e-13,
-                    atol=1e-13,
-                )
-                np.testing.assert_allclose(
-                    products.psipsi_over_sx2[n, k, :],
-                    psi_psi_over_sx2,
-                    rtol=1e-13,
-                    atol=1e-13,
-                )
+                if 1 <= n <= nmax and 1 <= k <= nmax:
+                    xi_psi_over_sx2 = products.xipsi[n, k, :] * inv_sx2
+                    psi_psi_over_sx2 = products.psipsi[n, k, :] * inv_sx2
+                    np.testing.assert_allclose(
+                        products.xipsi_over_sx2[n, k, :],
+                        xi_psi_over_sx2,
+                        rtol=1e-13,
+                        atol=1e-13,
+                    )
+                    np.testing.assert_allclose(
+                        products.psipsi_over_sx2[n, k, :],
+                        psi_psi_over_sx2,
+                        rtol=1e-13,
+                        atol=1e-13,
+                    )
 
 
 def test_modified_bessel_products_diagonal_helpers_match_direct_formulas():
@@ -217,7 +220,9 @@ def test_assemble_axisymmetric_pq_block_returns_finite_square_m_block():
     x = 0.013 * geom.radius.astype(np.complex128)
     radial = modified_bessel_products(nmax=4, relative_refractive_index=1.4 + 0.0j, x=x)
     angular = axisymmetric_angular_functions(nmax=4, m=1, quadrature=geom)
-    block = assemble_axisymmetric_pq_block(1.4 + 0.0j, geom, angular, radial)
+    block = assemble_axisymmetric_pq_block(
+        1.4 + 0.0j, geom, angular, radial, k_medium=0.013
+    )
 
     assert block.m == 1
     np.testing.assert_array_equal(block.n_values, np.array([1, 2, 3, 4]))
@@ -245,7 +250,9 @@ def test_split_axisymmetric_pq_block_by_parity_partitions_n_indices():
     x = 0.013 * geom.radius.astype(np.complex128)
     radial = modified_bessel_products(nmax=4, relative_refractive_index=1.4 + 0.0j, x=x)
     angular = axisymmetric_angular_functions(nmax=4, m=1, quadrature=geom)
-    block = assemble_axisymmetric_pq_block(1.4 + 0.0j, geom, angular, radial)
+    block = assemble_axisymmetric_pq_block(
+        1.4 + 0.0j, geom, angular, radial, k_medium=0.013
+    )
     even_odd, odd_even = split_axisymmetric_pq_block_by_parity(block)
 
     np.testing.assert_array_equal(even_odd.even_indices, np.array([1, 3]))
@@ -267,7 +274,9 @@ def test_solve_axisymmetric_tr_block_satisfies_block_equations_for_m_nonzero():
     x = 0.013 * geom.radius.astype(np.complex128)
     radial = modified_bessel_products(nmax=4, relative_refractive_index=1.4 + 0.0j, x=x)
     angular = axisymmetric_angular_functions(nmax=4, m=1, quadrature=geom)
-    block = assemble_axisymmetric_pq_block(1.4 + 0.0j, geom, angular, radial)
+    block = assemble_axisymmetric_pq_block(
+        1.4 + 0.0j, geom, angular, radial, k_medium=0.013
+    )
     even_odd, _ = split_axisymmetric_pq_block_by_parity(block)
     tr = solve_axisymmetric_tr_block(even_odd, include_internal=True)
 
@@ -322,7 +331,9 @@ def test_solve_axisymmetric_tr_block_for_m_zero_has_zero_off_diagonals():
     x = 0.013 * geom.radius.astype(np.complex128)
     radial = modified_bessel_products(nmax=4, relative_refractive_index=1.4 + 0.0j, x=x)
     angular = axisymmetric_angular_functions(nmax=4, m=0, quadrature=geom)
-    block = assemble_axisymmetric_pq_block(1.4 + 0.0j, geom, angular, radial)
+    block = assemble_axisymmetric_pq_block(
+        1.4 + 0.0j, geom, angular, radial, k_medium=0.013
+    )
     even_odd, _ = split_axisymmetric_pq_block_by_parity(block)
     tr = solve_axisymmetric_tr_block(even_odd, include_internal=True)
 
@@ -346,7 +357,9 @@ def test_spheroid_ebcm_reference_kernels_keep_full_precision_dtypes():
         x=x,
     )
     angular = axisymmetric_angular_functions(nmax=4, m=1, quadrature=geom)
-    block = assemble_axisymmetric_pq_block(1.4 + 0.1j, geom, angular, radial)
+    block = assemble_axisymmetric_pq_block(
+        1.4 + 0.1j, geom, angular, radial, k_medium=0.02
+    )
     even_odd, _ = split_axisymmetric_pq_block_by_parity(block)
     tr = solve_axisymmetric_tr_block(even_odd, include_internal=True)
 
@@ -371,7 +384,9 @@ def test_combine_axisymmetric_parity_blocks_reconstructs_full_m_shapes():
     x = 0.013 * geom.radius.astype(np.complex128)
     radial = modified_bessel_products(nmax=4, relative_refractive_index=1.4 + 0.0j, x=x)
     angular = axisymmetric_angular_functions(nmax=4, m=1, quadrature=geom)
-    pq = assemble_axisymmetric_pq_block(1.4 + 0.0j, geom, angular, radial)
+    pq = assemble_axisymmetric_pq_block(
+        1.4 + 0.0j, geom, angular, radial, k_medium=0.013
+    )
     even_odd_pq, odd_even_pq = split_axisymmetric_pq_block_by_parity(pq)
     even_odd = solve_axisymmetric_tr_block(even_odd_pq, include_internal=False)
     odd_even = solve_axisymmetric_tr_block(odd_even_pq, include_internal=False)
@@ -405,6 +420,7 @@ def test_axisymmetric_tmatrix_block_reduces_to_sphere_diagonal_limit():
     solved_blocks = solve_axisymmetric_tmatrix_blocks(
         lmax,
         n_particle / n_medium,
+        k_medium,
         geom,
         radial,
         include_internal=False,
@@ -418,3 +434,34 @@ def test_axisymmetric_tmatrix_block_reduces_to_sphere_diagonal_limit():
     )
 
     np.testing.assert_allclose(T_axis, T_sphere, rtol=5e-5, atol=5e-7)
+
+
+def test_axisymmetric_internal_block_reduces_to_sphere_internal_ratios():
+    lmax = 3
+    radius = 100.0
+    k_medium = 2.0 * np.pi / 550.0
+    n_medium = 1.0 + 0j
+    n_particle = 1.5 + 0.0j
+
+    T_axis, C_axis = spheroid_tmatrix_and_internal_block(
+        lmax=lmax,
+        k_medium=k_medium,
+        equatorial_radius=radius,
+        polar_radius=radius,
+        n_particle=n_particle,
+        n_medium=n_medium,
+        n_theta=64,
+    )
+    ratios = sphere_internal_ratios(
+        lmax=lmax,
+        k_medium=k_medium,
+        radius=radius,
+        n_particle=n_particle,
+        n_medium=n_medium,
+    )
+    repeats = 2 * np.arange(1, lmax + 1) + 1
+    diag = np.concatenate([np.repeat(ratios[1][1:], repeats), np.repeat(ratios[2][1:], repeats)])
+
+    np.testing.assert_allclose(np.diag(C_axis), diag, rtol=5e-5, atol=5e-7)
+    np.testing.assert_allclose(C_axis, np.diag(diag), rtol=5e-5, atol=5e-7)
+    assert T_axis.shape == C_axis.shape

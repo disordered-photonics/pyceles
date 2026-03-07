@@ -6,15 +6,17 @@ we need them to be numerically stable.
 
 Implementation notes
 --------------------
-- Uses a Racah-style summation with log-factorials via SciPy `gammaln`.
+- Uses a Racah-style summation with log-factorials via SciPy `gammaln` for
+  `wigner_3j`.
 - `wigner_3j` is cached with `functools.cache` because translation-table calls
   revisit a constrained integer domain.
-- `wigner_d` / `wigner_D` are left uncached here; rotation matrices cache at the
-  block level because their keys include Euler angles from a continuous domain.
+- `wigner_d` stays uncached here; rotation matrices cache at the block level
+  because their keys include Euler angles from a continuous domain.
 """
 
 from __future__ import annotations
 
+import math
 from functools import cache
 
 import numpy as np
@@ -117,9 +119,9 @@ def wigner_3j(l1: int, l2: int, l3: int, m1: int, m2: int, m3: int) -> float:
 def wigner_d(l: int, m: int, m_prime: int, beta: float) -> float:
     """Return the real Wigner small-`d` coefficient `d^l_{m,m'}(beta)`.
 
-    This closed-form sum is used by particle-local SVWF rotations. The target
-    regime in `pyceles` is moderate `lmax`, so a direct stable reference
-    implementation is preferable to more specialized recurrence machinery.
+    This closed-form sum follows the CELES/SMUTHI phase convention used by the
+    SVWF rotation layer and is faster than the equivalent recurrence in the
+    moderate-`lmax` regime targeted by `pyceles`.
     """
 
     l = int(l)
@@ -136,27 +138,31 @@ def wigner_d(l: int, m: int, m_prime: int, beta: float) -> float:
     if k_min > k_max:
         return 0.0
 
-    log_pref = 0.5 * (
-        _log_factorial(l + m)
-        + _log_factorial(l - m)
-        + _log_factorial(l + m_prime)
-        + _log_factorial(l - m_prime)
+    prefactor = math.sqrt(
+        math.factorial(l + m)
+        * math.factorial(l - m)
+        * math.factorial(l + m_prime)
+        * math.factorial(l - m_prime)
     )
-    c_half = np.cos(0.5 * beta)
-    s_half = np.sin(0.5 * beta)
+    c_half = math.cos(0.5 * beta)
+    s_half = math.sin(0.5 * beta)
 
     total = 0.0
     for k in range(k_min, k_max + 1):
         denom = (
-            _log_factorial(l + m - k)
-            + _log_factorial(k)
-            + _log_factorial(m_prime - m + k)
-            + _log_factorial(l - m_prime - k)
+            math.factorial(l + m - k)
+            * math.factorial(k)
+            * math.factorial(m_prime - m + k)
+            * math.factorial(l - m_prime - k)
         )
-        phase = -1.0 if ((k - m + m_prime) % 2) else 1.0
         pow_c = 2 * l + m - m_prime - 2 * k
         pow_s = m_prime - m + 2 * k
-        total += phase * np.exp(log_pref - denom) * (c_half**pow_c) * (s_half**pow_s)
+        total += (
+            ((-1) ** k)
+            * (prefactor / denom)
+            * (c_half**pow_c)
+            * (s_half**pow_s)
+        )
 
     return float(total)
 
