@@ -5,8 +5,15 @@ from typing import Literal
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.patches import Circle, Ellipse
 
-from pyceles.core.particles import LayeredSphere, Particle, Sphere, Spheroid
+from pyceles.core.particles import (
+    LayeredSphere,
+    Particle,
+    Sphere,
+    Spheroid,
+    _rotation_matrix_zyz_lab_to_body,
+)
 from pyceles.core.sources import JonesPolarizedSource
 
 
@@ -39,6 +46,68 @@ def _slice_axis_labels(plane: str) -> tuple[str, str]:
     if p == "z":
         return r"$x$", r"$y$"
     raise ValueError("plane must be one of {'x', 'y', 'z'}")
+
+
+def _slice_plane_indices(plane: str) -> tuple[int, int, int]:
+    """Return `(normal, axis_0, axis_1)` indices for a Cartesian slice plane."""
+    p = str(plane).lower()
+    if p == "x":
+        return 0, 1, 2
+    if p == "y":
+        return 1, 0, 2
+    if p == "z":
+        return 2, 0, 1
+    raise ValueError("plane must be one of {'x', 'y', 'z'}")
+
+
+def _spheroid_slice_ellipse(
+    particle: Spheroid,
+    *,
+    plane: str,
+    plane_value: float,
+) -> tuple[tuple[float, float], float, float, float] | None:
+    """Return exact ellipse parameters for a spheroid cut by a Cartesian plane.
+
+    The returned tuple is `(center_xy, width, height, angle_deg)` in the
+    displayed in-plane coordinates used by the slice plot.
+    """
+
+    normal_idx, axis_0_idx, axis_1_idx = _slice_plane_indices(plane)
+    center = np.asarray(particle.position, dtype=float).reshape(3)
+    rel_plane = float(plane_value) - float(center[normal_idx])
+
+    a = float(particle.equatorial_radius)
+    c = float(particle.polar_radius)
+    d_body = np.diag([1.0 / (a * a), 1.0 / (a * a), 1.0 / (c * c)])
+    rot_lab_to_body = _rotation_matrix_zyz_lab_to_body(particle.euler_angles)
+    quadric = rot_lab_to_body.T @ d_body @ rot_lab_to_body
+
+    in_plane = np.array([axis_0_idx, axis_1_idx], dtype=int)
+    a_mat = quadric[np.ix_(in_plane, in_plane)]
+    g_vec = quadric[in_plane, normal_idx]
+    q_nn = float(quadric[normal_idx, normal_idx])
+
+    a_inv_g = np.linalg.solve(a_mat, g_vec)
+    shift = -rel_plane * a_inv_g
+    rhs = 1.0 - (rel_plane * rel_plane) * (q_nn - float(g_vec @ a_inv_g))
+    if rhs <= 0.0:
+        return None
+
+    evals, evecs = np.linalg.eigh(a_mat)
+    if np.any(evals <= 0.0):
+        return None
+
+    semi_axes = np.sqrt(rhs / evals)
+    order = np.argsort(semi_axes)[::-1]
+    semi_axes = semi_axes[order]
+    evecs = evecs[:, order]
+    major_axis = evecs[:, 0]
+    angle_deg = float(np.degrees(np.arctan2(major_axis[1], major_axis[0])))
+    center_xy = (
+        float(center[axis_0_idx] + shift[0]),
+        float(center[axis_1_idx] + shift[1]),
+    )
+    return center_xy, float(2.0 * semi_axes[0]), float(2.0 * semi_axes[1]), angle_deg
 
 
 def _component_panel_title(component_name: str) -> str:
@@ -196,25 +265,17 @@ def plot_spheres(
     color="w",
     linewidth=1.0,
 ):
-    """Plot sphere/shell intersections with a Cartesian slice plane.
+    """Plot particle intersections with a Cartesian slice plane.
 
     Geometry input is particle-native. `LayeredSphere` entries are drawn as
-    concentric shell outlines; `Sphere` entries as single outlines.
+    concentric shell outlines; `Sphere` entries as single outlines; `Spheroid`
+    entries use the exact planar ellipse plus a dashed circumscribing-sphere cut.
     """
     plane = str(plane).lower()
     if plane not in {"x", "y", "z"}:
         raise ValueError("plane must be one of {'x', 'y', 'z'}")
 
-    # Map slice plane to displayed coordinate pair.
-    if plane == "x":
-        slice_idx = 0
-        plot_i, plot_j = 1, 2
-    elif plane == "y":
-        slice_idx = 1
-        plot_i, plot_j = 0, 2
-    else:
-        slice_idx = 2
-        plot_i, plot_j = 0, 1
+    slice_idx, plot_i, plot_j = _slice_plane_indices(plane)
 
     for particle in particles:
         p = np.asarray(particle.position, dtype=float).reshape(3)
@@ -223,9 +284,38 @@ def plot_spheres(
         elif isinstance(particle, LayeredSphere):
             shell = np.asarray(particle.layer_radii, dtype=float).reshape(-1)
         elif isinstance(particle, Spheroid):
-            # Exact spheroid-slice overlays can be added once spheroidal
-            # kernels are implemented; for now use the circumscribing sphere.
+            ellipse = _spheroid_slice_ellipse(particle, plane=plane, plane_value=float(plane_value))
+            if ellipse is not None:
+                center_xy, width, height, angle_deg = ellipse
+                ax.add_patch(
+                    Ellipse(
+                        center_xy,
+                        width=width,
+                        height=height,
+                        angle=angle_deg,
+                        edgecolor=color,
+                        fill=False,
+                        alpha=alpha,
+                        linewidth=linewidth,
+                    )
+                )
             shell = np.asarray([float(particle.circumscribing_radius())], dtype=float)
+            rr = float(shell[-1])
+            dd = float(p[slice_idx] - float(plane_value))
+            if abs(dd) <= rr:
+                rp = np.sqrt(max(0.0, rr * rr - dd * dd))
+                ax.add_patch(
+                    Circle(
+                        (p[plot_i], p[plot_j]),
+                        rp,
+                        edgecolor=color,
+                        fill=False,
+                        alpha=alpha,
+                        linewidth=linewidth,
+                        linestyle="--",
+                    )
+                )
+            continue
         else:
             raise TypeError(f"Unsupported particle type {type(particle).__name__!r} for plotting.")
         rr = float(shell[-1])
@@ -237,7 +327,7 @@ def plot_spheres(
                 continue
             rp = np.sqrt(max(0.0, float(rs) * float(rs) - dd * dd))
             ax.add_patch(
-                plt.Circle(
+                Circle(
                     (p[plot_i], p[plot_j]),
                     rp,
                     edgecolor=color,

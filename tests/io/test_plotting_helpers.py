@@ -4,8 +4,9 @@ import numpy as np
 matplotlib.use("Agg", force=True)
 
 from matplotlib import pyplot as plt
+from matplotlib.patches import Circle, Ellipse
 
-from pyceles.core.particles import LayeredSphere, Sphere
+from pyceles.core.particles import LayeredSphere, Sphere, Spheroid
 from pyceles.io.plotting import (
     far_field_intensity,
     far_field_intensity_from_result,
@@ -93,6 +94,107 @@ def test_plot_spheres_can_overlay_layered_shells():
         plane_value=0.0,
     )
     assert len(ax.patches) == 2
+    plt.close(fig)
+
+
+def test_plot_spheres_draws_exact_spheroid_slice_and_circumscribing_circle():
+    fig, ax = plt.subplots()
+    plot_spheres(
+        ax,
+        particles=[
+            Spheroid(
+                position=(0.0, 0.0, 0.0),
+                equatorial_radius=2.0,
+                polar_radius=8.0,
+                refractive_index=1.5 + 0j,
+            )
+        ],
+        plane="y",
+        plane_value=0.0,
+    )
+    assert len(ax.patches) == 2
+    ellipse = next(p for p in ax.patches if isinstance(p, Ellipse) and not isinstance(p, Circle))
+    circle = next(p for p in ax.patches if isinstance(p, Circle))
+    np.testing.assert_allclose(ellipse.center, (0.0, 0.0), rtol=0.0, atol=1e-12)
+    np.testing.assert_allclose([ellipse.width, ellipse.height], [16.0, 4.0], rtol=0.0, atol=1e-12)
+    np.testing.assert_allclose(circle.center, (0.0, 0.0), rtol=0.0, atol=1e-12)
+    assert np.isclose(circle.radius, 8.0)
+    assert circle.get_linestyle() == "--"
+    plt.close(fig)
+
+
+def test_plot_spheres_scales_off_axis_spheroid_slice():
+    fig, ax = plt.subplots()
+    plot_spheres(
+        ax,
+        particles=[
+            Spheroid(
+                position=(0.0, 0.0, 0.0),
+                equatorial_radius=2.0,
+                polar_radius=8.0,
+                refractive_index=1.5 + 0j,
+            )
+        ],
+        plane="y",
+        plane_value=1.0,
+    )
+    ellipse = next(p for p in ax.patches if isinstance(p, Ellipse) and not isinstance(p, Circle))
+    scale = np.sqrt(1.0 - (1.0 / 2.0) ** 2)
+    np.testing.assert_allclose(
+        [ellipse.width, ellipse.height],
+        [16.0 * scale, 4.0 * scale],
+        rtol=0.0,
+        atol=1e-12,
+    )
+    plt.close(fig)
+
+
+def test_plot_spheres_draws_tilted_spheroid_slice_on_offset_plane():
+    fig, ax = plt.subplots()
+    plot_spheres(
+        ax,
+        particles=[
+            Spheroid(
+                position=(0.2, -0.1, 0.3),
+                equatorial_radius=2.0,
+                polar_radius=8.0,
+                refractive_index=1.5 + 0j,
+                euler_angles=(0.4, 0.9, -0.3),
+            )
+        ],
+        plane="x",
+        plane_value=0.7,
+    )
+    assert len(ax.patches) == 2
+    ellipse = next(p for p in ax.patches if isinstance(p, Ellipse) and not isinstance(p, Circle))
+    circle = next(p for p in ax.patches if isinstance(p, Circle))
+    assert abs(float(ellipse.angle)) > 1e-6
+    assert np.all(np.isfinite(ellipse.center))
+    assert ellipse.width > 0.0
+    assert ellipse.height > 0.0
+    assert circle.radius > 0.0
+    plt.close(fig)
+
+
+def test_plot_spheres_keeps_circumscribing_circle_when_plane_misses_spheroid():
+    fig, ax = plt.subplots()
+    plot_spheres(
+        ax,
+        particles=[
+            Spheroid(
+                position=(0.0, 0.0, 0.0),
+                equatorial_radius=2.0,
+                polar_radius=8.0,
+                refractive_index=1.5 + 0j,
+            )
+        ],
+        plane="y",
+        plane_value=7.0,
+    )
+    assert len(ax.patches) == 1
+    circle = ax.patches[0]
+    assert isinstance(circle, Circle)
+    assert circle.get_linestyle() == "--"
     plt.close(fig)
 
 
