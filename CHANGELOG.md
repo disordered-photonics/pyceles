@@ -49,6 +49,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added `n_particles` convenience properties on `Simulation` and
   `SimulationResult` for explicit particle counts independent of geometry input
   style.
+- Added spherical-basis homogeneous spheroid support:
+  - dense particle-local `Spheroid` `T` blocks in CELES ordering,
+  - SVWF rotation of aligned spheroid `T` blocks into the lab frame,
+  - spheroid internal-field evaluation in particle-dispatch near-field workflows.
+- Added isolated-spheroid regression coverage against local SMUTHI-generated
+  cross-section oracles.
+- Added sphere regression coverage against `miepython` for differential
+  scattering and selected exterior total-field samples.
 
 ### Changed
 - Source capability contract now includes
@@ -70,6 +78,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `SimulationResult.polarization_jones` is now reserved for propagating TE/TM
   sources and set to `None` for local dipole sources to avoid misleading
   placeholder metadata.
+- Total scattering cross-section integration now enforces periodic azimuth
+  closure on endpoint-excluded `alpha in [0, 2*pi)` grids, matching the
+  physically correct composite trapezoid rule on the circle and sphere/Mie
+  benchmarks.
+- Near-field internal-field replacement now treats exactly index-matched
+  particles as transparent so the total field remains equal to the incident
+  field everywhere in that case.
 - Breaking: introduced explicit phase split for multi-source workflows:
   - `Simulation.solve_sources(...)` is now the canonical solve-only API,
   - `Simulation.postprocess_sources(...)` performs optional channel postprocessing
