@@ -161,7 +161,7 @@ def compute_near_field_components(
     classification = None
     inside_hint = np.zeros(pts.shape[0], dtype=bool)
     if len(particles) > 0:
-        classification = classify_internal_points(pts, particles)
+        classification = classify_internal_points(pts, particles, n_medium=n_medium)
         inside_hint = np.asarray(classification.inside_any, dtype=bool)
     Es, Hs = compute_scattered_field(
         field_points,

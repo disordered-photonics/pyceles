@@ -47,10 +47,14 @@ class InternalPointClassification:
 def classify_internal_points(
     field_points: np.ndarray,
     particles: Sequence[Particle],
+    *,
+    n_medium: complex = 1.0 + 0j,
 ) -> InternalPointClassification:
     """Classify near-field points against particle circumscribing spheres.
 
     This broad-phase classification is exact for `Sphere` and `LayeredSphere`.
+    Exact index-matched particles are treated as transparent so the total field
+    remains equal to the incident field everywhere.
     """
     pts = np.asarray(field_points, dtype=float).reshape(-1, 3)
     part = list(particles)
@@ -65,11 +69,20 @@ def classify_internal_points(
             f"Internal point classification currently supports Sphere and LayeredSphere. Got {bad}."
         )
 
+    n_medium_c = complex(n_medium)
+
     for p in part:
-        center = np.asarray(p.position, dtype=float).reshape(3)
-        rr = float(p.circumscribing_radius())
-        R = pts - center[None, :]
-        idx = np.flatnonzero(np.sum(R * R, axis=1) < (rr**2)).astype(np.intp, copy=False)
+        if isinstance(p, Sphere) and complex(p.refractive_index) == n_medium_c:
+            idx = np.zeros((0,), dtype=np.intp)
+        elif isinstance(p, LayeredSphere) and all(
+            complex(n_layer) == n_medium_c for n_layer in p.layer_refractive_indices
+        ):
+            idx = np.zeros((0,), dtype=np.intp)
+        else:
+            center = np.asarray(p.position, dtype=float).reshape(3)
+            rr = float(p.circumscribing_radius())
+            R = pts - center[None, :]
+            idx = np.flatnonzero(np.sum(R * R, axis=1) < (rr**2)).astype(np.intp, copy=False)
         by_particle.append(idx)
         inside_any[idx] = True
 
@@ -851,9 +864,10 @@ def _compute_internal_field_particles(
     Internal helper backing the particle-dispatch path in
     :func:`compute_internal_field`.
 
-    It supports mixed particle lists with `Sphere` and `LayeredSphere`
-    entries. For layered spheres, each shell uses the physically correct piecewise radial basis
-    `A*j_l(k_j r) + B*h_l^(1)(k_j r)`, with `B=0` in the core.
+    It supports mixed particle lists with `Sphere`, `LayeredSphere`, and
+    `Spheroid` entries. For layered spheres, each shell uses the physically
+    correct piecewise radial basis `A*j_l(k_j r) + B*h_l^(1)(k_j r)`, with
+    `B=0` in the core.
     """
     pts = np.asarray(field_points, dtype=float).reshape(-1, 3)
     part = list(particles)

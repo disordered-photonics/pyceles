@@ -1,7 +1,9 @@
 from typing import Any, cast
 
 import numpy as np
+import pytest
 
+import pyceles as pcl
 from pyceles.core.fields import PlaneWave
 from pyceles.core.particles import LayeredSphere, Sphere
 from pyceles.postprocessing.nearfield import compute_near_field_components
@@ -164,3 +166,50 @@ def test_compute_near_field_components_supports_source_only_empty_particles():
         show_progress=False,
     )
     assert not np.any(out.inside_mask)
+
+
+@pytest.mark.parametrize("n_medium", [1.0, 1.33])
+def test_index_matched_sphere_total_field_matches_incident_plane_wave(n_medium: float):
+    points = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [10.0, 0.0, 0.0],
+            [6.0, -8.0, 5.0],
+            [0.0, 0.0, 80.0],
+            [20.0, -15.0, 70.0],
+        ],
+        dtype=float,
+    )
+    source = PlaneWave(
+        wavelength=550.0,
+        medium_n=n_medium + 0j,
+        polarization="TM",
+        polar_angle=0.0,
+        azimuthal_angle=0.0,
+        focal_point=(0.0, 0.0, 0.0),
+        amplitude=1.0,
+    )
+    run = pcl.Simulation(
+        pcl.SimulationConfig(
+            wavelength=550.0,
+            n_medium=n_medium + 0j,
+            lmax=4,
+            source=source,
+            solver_method="direct",
+            verbose=False,
+        ),
+        particles=[Sphere(position=(0.0, 0.0, 0.0), radius=40.0, refractive_index=n_medium + 0j)],
+    ).run(include_farfield=False)
+
+    nf = pcl.compute_near_field(run, points=points, channel="mixed", show_progress=False)
+
+    phase = np.exp(1j * (2.0 * np.pi / 550.0 * n_medium) * points[:, 2])
+    e_expected = np.stack([phase, np.zeros_like(phase), np.zeros_like(phase)], axis=1)
+    h_expected = np.stack(
+        [np.zeros_like(phase), n_medium * phase, np.zeros_like(phase)],
+        axis=1,
+    )
+
+    assert not np.any(nf.inside_mask)
+    np.testing.assert_allclose(nf.E_total, e_expected, rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(nf.H_total, h_expected, rtol=1e-12, atol=1e-12)
