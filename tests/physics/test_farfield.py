@@ -480,8 +480,8 @@ def test_plane_wave_cross_sections_from_coefficients_match_single_sphere_mie():
         n_medium=n_medium,
         lmax=8,
         source=source,
-        polar_angles=np.linspace(0.0, np.pi, 181),
-        azimuthal_angles=np.linspace(0.0, 2.0 * np.pi, 241, endpoint=False),
+        polar_angles=np.linspace(0.0, np.pi, 61),
+        azimuthal_angles=np.linspace(0.0, 2.0 * np.pi, 91, endpoint=False),
         solver_method="direct",
         verbose=False,
         compute_dtype="complex128",
@@ -628,7 +628,7 @@ def test_simulation_dual_basis_supports_slm_wrapped_gaussian_source():
         cfg,
         particles=_single_sphere_particles(radius=60.0, n_particle=1.5 + 0.01j),
     )
-    run = sim.run()
+    run = sim.run(include_farfield=False)
     assert run.coeffs_basis is not None
     assert run.polarization_jones is not None
     np.testing.assert_allclose(

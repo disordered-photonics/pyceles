@@ -111,12 +111,21 @@ _ORACLE: tuple[LayeredMSTMOracle, ...] = (
 )
 
 _RUN_CACHE: dict[tuple[str, Literal["TE", "TM"]], Any] = {}
+_CROSS_SECTION_RUN_CACHE: dict[tuple[str, Literal["TE", "TM"]], Any] = {}
 
 
-def _run_case(case: LayeredMSTMOracle, pol_name: Literal["TE", "TM"]) -> Any:
+def _run_case(
+    case: LayeredMSTMOracle,
+    pol_name: Literal["TE", "TM"],
+    *,
+    polar_count: int = 361,
+    azimuthal_count: int = 361,
+    cache: dict[tuple[str, Literal["TE", "TM"]], Any] | None = None,
+) -> Any:
+    cache_obj = _RUN_CACHE if cache is None else cache
     key = (case.name, pol_name)
-    if key in _RUN_CACHE:
-        return _RUN_CACHE[key]
+    if key in cache_obj:
+        return cache_obj[key]
 
     src = PlaneWave(
         wavelength=550.0,
@@ -132,8 +141,8 @@ def _run_case(case: LayeredMSTMOracle, pol_name: Literal["TE", "TM"]) -> Any:
         n_medium=1.0 + 0j,
         lmax=10,
         source=src,
-        polar_angles=np.linspace(0.0, np.pi, 361),
-        azimuthal_angles=np.linspace(0.0, 2.0 * np.pi, 361, endpoint=False),
+        polar_angles=np.linspace(0.0, np.pi, polar_count),
+        azimuthal_angles=np.linspace(0.0, 2.0 * np.pi, azimuthal_count, endpoint=False),
         solver_method="direct",
         verbose=False,
         compute_dtype="complex128",
@@ -149,8 +158,20 @@ def _run_case(case: LayeredMSTMOracle, pol_name: Literal["TE", "TM"]) -> Any:
             )
         ],
     ).run()
-    _RUN_CACHE[key] = run
+    cache_obj[key] = run
     return run
+
+
+def _run_cross_section_case(case: LayeredMSTMOracle, pol_name: Literal["TE", "TM"]) -> Any:
+    # Cross sections are much less sensitive to the far-field sampling density
+    # than the on-axis S11 ratio used below, so keep a cheaper dedicated cache.
+    return _run_case(
+        case,
+        pol_name,
+        polar_count=141,
+        azimuthal_count=141,
+        cache=_CROSS_SECTION_RUN_CACHE,
+    )
 
 
 def _unpolarized_farfield_map(
@@ -197,8 +218,8 @@ def _unpolarized_near_erms(case: LayeredMSTMOracle) -> np.ndarray:
 
 def test_layered_spheres_match_mstm_oracles_for_cross_sections():
     for case in _ORACLE:
-        run_te = _run_case(case, "TE")
-        run_tm = _run_case(case, "TM")
+        run_te = _run_cross_section_case(case, "TE")
+        run_tm = _run_cross_section_case(case, "TM")
         assert run_te.cross_sections is not None
         assert run_tm.cross_sections is not None
 

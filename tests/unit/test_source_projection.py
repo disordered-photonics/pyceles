@@ -746,10 +746,10 @@ def test_laguerre_gaussian_projection_matches_high_resolution_reference():
         azimuthal_phase=0.15,
     )
     lmax = 3
-    coarse_polar = np.linspace(0.0, np.pi, 481)
-    coarse_az = np.linspace(0.0, 2.0 * np.pi, 321, endpoint=False)
-    fine_polar = np.linspace(0.0, np.pi, 1001)
-    fine_az = np.linspace(0.0, 2.0 * np.pi, 721, endpoint=False)
+    coarse_polar = np.linspace(0.0, np.pi, 401)
+    coarse_az = np.linspace(0.0, 2.0 * np.pi, 241, endpoint=False)
+    fine_polar = np.linspace(0.0, np.pi, 641)
+    fine_az = np.linspace(0.0, 2.0 * np.pi, 401, endpoint=False)
 
     got = project_source_to_svwf(
         positions,
@@ -787,10 +787,10 @@ def test_focused_laguerre_projection_matches_high_resolution_reference():
         sine_condition_apodization=True,
     )
     lmax = 3
-    coarse_polar = np.linspace(0.0, np.pi, 501)
-    coarse_az = np.linspace(0.0, 2.0 * np.pi, 301, endpoint=False)
-    fine_polar = np.linspace(0.0, np.pi, 1001)
-    fine_az = np.linspace(0.0, 2.0 * np.pi, 721, endpoint=False)
+    coarse_polar = np.linspace(0.0, np.pi, 321)
+    coarse_az = np.linspace(0.0, 2.0 * np.pi, 201, endpoint=False)
+    fine_polar = np.linspace(0.0, np.pi, 721)
+    fine_az = np.linspace(0.0, 2.0 * np.pi, 481, endpoint=False)
 
     got = project_source_to_svwf(
         positions,
