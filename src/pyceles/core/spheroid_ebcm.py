@@ -447,7 +447,9 @@ def _parity_masks(max_order: int) -> tuple[Array, Array]:
     return even_mask, ~even_mask
 
 
-def _bessel_products_with_derivatives(base_products: Array, s: complex, x: Array) -> dict[str, Array]:
+def _bessel_products_with_derivatives(
+    base_products: Array, s: complex, x: Array
+) -> dict[str, Array]:
     """Return derivative-related tensors derived from parity-even base products."""
 
     base = np.asarray(base_products, dtype=np.complex128)
@@ -476,12 +478,12 @@ def _bessel_products_with_derivatives(base_products: Array, s: complex, x: Array
                 + (n * (n + 1) + k * n) * base[n + 1, k + 1, :]
             ) / ((2 * n + 1) * (2 * k + 1))
         for k in range(1 + (n % 2), nmax + 1, 2):
-            xiprimepsi[n, k, :] = (
-                (n + 1) * base[n - 1, k, :] - n * base[n + 1, k, :]
-            ) / (2 * n + 1)
-            xipsiprime[n, k, :] = (
-                (k + 1) * base[n, k - 1, :] - k * base[n, k + 1, :]
-            ) / (2 * k + 1)
+            xiprimepsi[n, k, :] = ((n + 1) * base[n - 1, k, :] - n * base[n + 1, k, :]) / (
+                2 * n + 1
+            )
+            xipsiprime[n, k, :] = ((k + 1) * base[n, k - 1, :] - k * base[n, k + 1, :]) / (
+                2 * k + 1
+            )
 
     base_over_sx2[1 : nmax + 1, 1 : nmax + 1, :] = (
         base[1 : nmax + 1, 1 : nmax + 1, :] / (s * x_arr * x_arr)[None, None, :]
@@ -1222,13 +1224,14 @@ def assemble_axisymmetric_internal_block(
             for col_idx, l2 in enumerate(n_values):
                 mm_values = (0,) if m == 0 else (m, -m)
                 for mm in mm_values:
+                    sign_m = 1 if mm >= 0 else -1
                     row_tau1 = index_vswf(int(l1), int(mm), 1, int(lmax))
                     row_tau2 = index_vswf(int(l1), int(mm), 2, int(lmax))
                     col_tau1 = index_vswf(int(l2), int(mm), 1, int(lmax))
                     col_tau2 = index_vswf(int(l2), int(mm), 2, int(lmax))
                     R[row_tau1, col_tau1] = block.R11[row_idx, col_idx]
-                    R[row_tau1, col_tau2] = block.R12[row_idx, col_idx]
-                    R[row_tau2, col_tau1] = block.R21[row_idx, col_idx]
+                    R[row_tau1, col_tau2] = sign_m * block.R12[row_idx, col_idx]
+                    R[row_tau2, col_tau1] = sign_m * block.R21[row_idx, col_idx]
                     R[row_tau2, col_tau2] = block.R22[row_idx, col_idx]
 
     return R

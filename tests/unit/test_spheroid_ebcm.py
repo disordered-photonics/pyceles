@@ -1,9 +1,11 @@
 import numpy as np
-from scipy.special import spherical_jn, spherical_yn
+from scipy.special import spherical_jn
 
+from pyceles.core.indexing import index_vswf
 from pyceles.core.particles import Sphere
 from pyceles.core.spheroid_ebcm import (
     SpheroidShapeProfile,
+    assemble_axisymmetric_internal_block,
     assemble_axisymmetric_pq_block,
     assemble_axisymmetric_tmatrix_block,
     axisymmetric_angular_functions,
@@ -88,6 +90,7 @@ def test_modified_bessel_products_match_direct_regular_products_on_even_parity()
             else:
                 np.testing.assert_allclose(products.psipsi[n, k, :], 0.0, rtol=0.0, atol=0.0)
                 np.testing.assert_allclose(products.xipsi[n, k, :], 0.0, rtol=0.0, atol=0.0)
+
 
 def test_modified_bessel_products_use_direct_outgoing_products_in_non_cancelling_region():
     nmax = 4
@@ -220,9 +223,7 @@ def test_assemble_axisymmetric_pq_block_returns_finite_square_m_block():
     x = 0.013 * geom.radius.astype(np.complex128)
     radial = modified_bessel_products(nmax=4, relative_refractive_index=1.4 + 0.0j, x=x)
     angular = axisymmetric_angular_functions(nmax=4, m=1, quadrature=geom)
-    block = assemble_axisymmetric_pq_block(
-        1.4 + 0.0j, geom, angular, radial, k_medium=0.013
-    )
+    block = assemble_axisymmetric_pq_block(1.4 + 0.0j, geom, angular, radial, k_medium=0.013)
 
     assert block.m == 1
     np.testing.assert_array_equal(block.n_values, np.array([1, 2, 3, 4]))
@@ -250,9 +251,7 @@ def test_split_axisymmetric_pq_block_by_parity_partitions_n_indices():
     x = 0.013 * geom.radius.astype(np.complex128)
     radial = modified_bessel_products(nmax=4, relative_refractive_index=1.4 + 0.0j, x=x)
     angular = axisymmetric_angular_functions(nmax=4, m=1, quadrature=geom)
-    block = assemble_axisymmetric_pq_block(
-        1.4 + 0.0j, geom, angular, radial, k_medium=0.013
-    )
+    block = assemble_axisymmetric_pq_block(1.4 + 0.0j, geom, angular, radial, k_medium=0.013)
     even_odd, odd_even = split_axisymmetric_pq_block_by_parity(block)
 
     np.testing.assert_array_equal(even_odd.even_indices, np.array([1, 3]))
@@ -274,9 +273,7 @@ def test_solve_axisymmetric_tr_block_satisfies_block_equations_for_m_nonzero():
     x = 0.013 * geom.radius.astype(np.complex128)
     radial = modified_bessel_products(nmax=4, relative_refractive_index=1.4 + 0.0j, x=x)
     angular = axisymmetric_angular_functions(nmax=4, m=1, quadrature=geom)
-    block = assemble_axisymmetric_pq_block(
-        1.4 + 0.0j, geom, angular, radial, k_medium=0.013
-    )
+    block = assemble_axisymmetric_pq_block(1.4 + 0.0j, geom, angular, radial, k_medium=0.013)
     even_odd, _ = split_axisymmetric_pq_block_by_parity(block)
     tr = solve_axisymmetric_tr_block(even_odd, include_internal=True)
 
@@ -331,9 +328,7 @@ def test_solve_axisymmetric_tr_block_for_m_zero_has_zero_off_diagonals():
     x = 0.013 * geom.radius.astype(np.complex128)
     radial = modified_bessel_products(nmax=4, relative_refractive_index=1.4 + 0.0j, x=x)
     angular = axisymmetric_angular_functions(nmax=4, m=0, quadrature=geom)
-    block = assemble_axisymmetric_pq_block(
-        1.4 + 0.0j, geom, angular, radial, k_medium=0.013
-    )
+    block = assemble_axisymmetric_pq_block(1.4 + 0.0j, geom, angular, radial, k_medium=0.013)
     even_odd, _ = split_axisymmetric_pq_block_by_parity(block)
     tr = solve_axisymmetric_tr_block(even_odd, include_internal=True)
 
@@ -357,9 +352,7 @@ def test_spheroid_ebcm_reference_kernels_keep_full_precision_dtypes():
         x=x,
     )
     angular = axisymmetric_angular_functions(nmax=4, m=1, quadrature=geom)
-    block = assemble_axisymmetric_pq_block(
-        1.4 + 0.1j, geom, angular, radial, k_medium=0.02
-    )
+    block = assemble_axisymmetric_pq_block(1.4 + 0.1j, geom, angular, radial, k_medium=0.02)
     even_odd, _ = split_axisymmetric_pq_block_by_parity(block)
     tr = solve_axisymmetric_tr_block(even_odd, include_internal=True)
 
@@ -384,9 +377,7 @@ def test_combine_axisymmetric_parity_blocks_reconstructs_full_m_shapes():
     x = 0.013 * geom.radius.astype(np.complex128)
     radial = modified_bessel_products(nmax=4, relative_refractive_index=1.4 + 0.0j, x=x)
     angular = axisymmetric_angular_functions(nmax=4, m=1, quadrature=geom)
-    pq = assemble_axisymmetric_pq_block(
-        1.4 + 0.0j, geom, angular, radial, k_medium=0.013
-    )
+    pq = assemble_axisymmetric_pq_block(1.4 + 0.0j, geom, angular, radial, k_medium=0.013)
     even_odd_pq, odd_even_pq = split_axisymmetric_pq_block_by_parity(pq)
     even_odd = solve_axisymmetric_tr_block(even_odd_pq, include_internal=False)
     odd_even = solve_axisymmetric_tr_block(odd_even_pq, include_internal=False)
@@ -465,3 +456,104 @@ def test_axisymmetric_internal_block_reduces_to_sphere_internal_ratios():
     np.testing.assert_allclose(np.diag(C_axis), diag, rtol=5e-5, atol=5e-7)
     np.testing.assert_allclose(C_axis, np.diag(diag), rtol=5e-5, atol=5e-7)
     assert T_axis.shape == C_axis.shape
+
+
+def test_axisymmetric_internal_block_applies_negative_m_cross_sign():
+    lmax = 4
+    k_medium = 2.0 * np.pi
+    geom = spheroid_geometry_quadrature(
+        n_theta=96,
+        equatorial_radius=2.0,
+        polar_radius=8.0,
+    )
+    rel_index = 1.2 + 0.0j
+    radial = modified_bessel_products(
+        nmax=lmax,
+        relative_refractive_index=rel_index,
+        x=(k_medium * geom.radius).astype(np.complex128),
+    )
+    solved = solve_axisymmetric_tmatrix_blocks(
+        lmax,
+        rel_index,
+        k_medium,
+        geom,
+        radial,
+        include_internal=True,
+    )
+    R = assemble_axisymmetric_internal_block(lmax, solved)
+    best_12 = 0.0
+    best_12_vals: tuple[complex, complex] | None = None
+    best_21 = 0.0
+    best_21_vals: tuple[complex, complex] | None = None
+    for m in range(1, lmax + 1):
+        for l1 in range(m, lmax + 1):
+            for l2 in range(m, lmax + 1):
+                idx_pos_12 = (index_vswf(l1, m, 1, lmax), index_vswf(l2, m, 2, lmax))
+                idx_neg_12 = (index_vswf(l1, -m, 1, lmax), index_vswf(l2, -m, 2, lmax))
+                pos_12 = R[idx_pos_12]
+                if abs(pos_12) > best_12:
+                    best_12 = abs(pos_12)
+                    best_12_vals = (pos_12, R[idx_neg_12])
+
+                idx_pos_21 = (index_vswf(l1, m, 2, lmax), index_vswf(l2, m, 1, lmax))
+                idx_neg_21 = (index_vswf(l1, -m, 2, lmax), index_vswf(l2, -m, 1, lmax))
+                pos_21 = R[idx_pos_21]
+                if abs(pos_21) > best_21:
+                    best_21 = abs(pos_21)
+                    best_21_vals = (pos_21, R[idx_neg_21])
+
+    assert best_12_vals is not None
+    assert best_21_vals is not None
+    assert best_12 > 1e-10
+    assert best_21 > 1e-10
+    np.testing.assert_allclose(best_12_vals[1], -best_12_vals[0], rtol=1e-10, atol=1e-10)
+    np.testing.assert_allclose(best_21_vals[1], -best_21_vals[0], rtol=1e-10, atol=1e-10)
+
+
+def test_internal_from_scattered_matches_incident_internal_times_t_inverse():
+    lmax = 4
+    k_medium = 2.0 * np.pi
+    n_medium = 1.0 + 0.0j
+    n_particle = 1.2 + 0.0j
+    equatorial_radius = 2.0
+    polar_radius = 8.0
+    n_theta = 96
+    rel_index = n_particle / n_medium
+
+    geom = spheroid_geometry_quadrature(
+        n_theta=n_theta,
+        equatorial_radius=equatorial_radius,
+        polar_radius=polar_radius,
+    )
+    radial = modified_bessel_products(
+        nmax=lmax,
+        relative_refractive_index=rel_index,
+        x=(k_medium * geom.radius).astype(np.complex128),
+    )
+    solved = solve_axisymmetric_tmatrix_blocks(
+        lmax,
+        rel_index,
+        k_medium,
+        geom,
+        radial,
+        include_internal=True,
+    )
+    T_from_blocks = assemble_axisymmetric_tmatrix_block(lmax, solved)
+    R_incident_to_internal = assemble_axisymmetric_internal_block(lmax, solved)
+
+    T, C_scattered_to_internal = spheroid_tmatrix_and_internal_block(
+        lmax=lmax,
+        k_medium=k_medium,
+        equatorial_radius=equatorial_radius,
+        polar_radius=polar_radius,
+        n_particle=n_particle,
+        n_medium=n_medium,
+        n_theta=n_theta,
+    )
+    np.testing.assert_allclose(T, T_from_blocks, rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(
+        C_scattered_to_internal,
+        R_incident_to_internal @ np.linalg.inv(T),
+        rtol=1e-8,
+        atol=1e-8,
+    )
