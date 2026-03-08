@@ -157,12 +157,7 @@ def wigner_d(l: int, m: int, m_prime: int, beta: float) -> float:
         )
         pow_c = 2 * l + m - m_prime - 2 * k
         pow_s = m_prime - m + 2 * k
-        total += (
-            ((-1) ** k)
-            * (prefactor / denom)
-            * (c_half**pow_c)
-            * (s_half**pow_s)
-        )
+        total += ((-1) ** k) * (prefactor / denom) * (c_half**pow_c) * (s_half**pow_s)
 
     return float(total)
 

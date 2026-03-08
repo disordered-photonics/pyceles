@@ -33,7 +33,7 @@ robustness over `compute_dtype` plumbing for now.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, cast
 
 import numpy as np
 from numpy.polynomial.legendre import leggauss
@@ -1142,23 +1142,31 @@ def combine_axisymmetric_parity_blocks(
                 "Axisymmetric block parity merge received incomplete internal sub-blocks "
                 f"for m={m}: missing {', '.join(missing)}."
             )
-        R11 = assemble_full(even_odd.R11, even_odd.R12 * 0.0, even_odd.R21 * 0.0, odd_even.R11)
+        r11_eo = cast(Array, even_odd.R11)
+        r12_eo = cast(Array, even_odd.R12)
+        r21_eo = cast(Array, even_odd.R21)
+        r22_eo = cast(Array, even_odd.R22)
+        r11_oe = cast(Array, odd_even.R11)
+        r12_oe = cast(Array, odd_even.R12)
+        r21_oe = cast(Array, odd_even.R21)
+        r22_oe = cast(Array, odd_even.R22)
+        R11 = assemble_full(r11_eo, r12_eo * 0.0, r21_eo * 0.0, r11_oe)
         R22 = assemble_full(
-            odd_even.R22,
-            odd_even.R21 * 0.0,
-            odd_even.R12 * 0.0,
-            even_odd.R22,
+            r22_oe,
+            r21_oe * 0.0,
+            r12_oe * 0.0,
+            r22_eo,
         )
         R12 = assemble_full(
             np.zeros((even_idx.size, even_idx.size), dtype=np.complex128),
-            even_odd.R12,
-            odd_even.R12,
+            r12_eo,
+            r12_oe,
             np.zeros((odd_idx.size, odd_idx.size), dtype=np.complex128),
         )
         R21 = assemble_full(
             np.zeros((even_idx.size, even_idx.size), dtype=np.complex128),
-            odd_even.R21,
-            even_odd.R21,
+            r21_oe,
+            r21_eo,
             np.zeros((odd_idx.size, odd_idx.size), dtype=np.complex128),
         )
 

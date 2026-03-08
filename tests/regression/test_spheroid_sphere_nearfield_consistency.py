@@ -71,7 +71,9 @@ def test_ar1_spheroid_matches_sphere_nearfield_along_hotspot_line() -> None:
     z = np.full_like(x, -0.75 * radius)
     points = np.stack([x, y, z], axis=1)
 
-    nf_sphere = pcl.compute_near_field(run_sphere, points=points, channel="mixed", show_progress=False)
+    nf_sphere = pcl.compute_near_field(
+        run_sphere, points=points, channel="mixed", show_progress=False
+    )
     nf_spheroid = pcl.compute_near_field(
         run_spheroid, points=points, channel="mixed", show_progress=False
     )
@@ -88,4 +90,3 @@ def test_ar1_spheroid_matches_sphere_nearfield_along_hotspot_line() -> None:
         rtol=1e-9,
         atol=1e-11,
     )
-

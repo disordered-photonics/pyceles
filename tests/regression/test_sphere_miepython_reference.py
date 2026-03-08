@@ -261,7 +261,9 @@ def test_sphere_differential_scattering_matches_miepython_oracles() -> None:
             include_farfield=True,
         )
         if run.config.source is None:
-            raise AssertionError("Sphere miepython regression expects an explicit PlaneWave source.")
+            raise AssertionError(
+                "Sphere miepython regression expects an explicit PlaneWave source."
+            )
         dcs = scattering_cross_section(
             cast(PlaneWave, run.config.source),
             run.farfield.scattered_te,

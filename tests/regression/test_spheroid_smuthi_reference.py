@@ -125,7 +125,15 @@ def test_spheroid_cross_sections_match_smuthi_oracles() -> None:
         assert run_te.cross_sections is not None
         assert run_tm.cross_sections is not None
 
-        np.testing.assert_allclose(run_te.cross_sections["C_ext"], case.cext_te, rtol=2e-5, atol=0.0)
-        np.testing.assert_allclose(run_tm.cross_sections["C_ext"], case.cext_tm, rtol=2e-5, atol=0.0)
-        np.testing.assert_allclose(run_te.cross_sections["C_sca"], case.csca_te, rtol=1e-3, atol=0.0)
-        np.testing.assert_allclose(run_tm.cross_sections["C_sca"], case.csca_tm, rtol=1e-3, atol=0.0)
+        np.testing.assert_allclose(
+            run_te.cross_sections["C_ext"], case.cext_te, rtol=2e-5, atol=0.0
+        )
+        np.testing.assert_allclose(
+            run_tm.cross_sections["C_ext"], case.cext_tm, rtol=2e-5, atol=0.0
+        )
+        np.testing.assert_allclose(
+            run_te.cross_sections["C_sca"], case.csca_te, rtol=1e-3, atol=0.0
+        )
+        np.testing.assert_allclose(
+            run_tm.cross_sections["C_sca"], case.csca_tm, rtol=1e-3, atol=0.0
+        )
