@@ -1124,12 +1124,24 @@ def combine_axisymmetric_parity_blocks(
         R21 = None
         R22 = None
     else:
-        assert even_odd.R12 is not None
-        assert even_odd.R21 is not None
-        assert even_odd.R22 is not None
-        assert odd_even.R12 is not None
-        assert odd_even.R21 is not None
-        assert odd_even.R22 is not None
+        missing: list[str] = []
+        if even_odd.R12 is None:
+            missing.append("even_odd.R12")
+        if even_odd.R21 is None:
+            missing.append("even_odd.R21")
+        if even_odd.R22 is None:
+            missing.append("even_odd.R22")
+        if odd_even.R12 is None:
+            missing.append("odd_even.R12")
+        if odd_even.R21 is None:
+            missing.append("odd_even.R21")
+        if odd_even.R22 is None:
+            missing.append("odd_even.R22")
+        if missing:
+            raise RuntimeError(
+                "Axisymmetric block parity merge received incomplete internal sub-blocks "
+                f"for m={m}: missing {', '.join(missing)}."
+            )
         R11 = assemble_full(even_odd.R11, even_odd.R12 * 0.0, even_odd.R21 * 0.0, odd_even.R11)
         R22 = assemble_full(
             odd_even.R22,
