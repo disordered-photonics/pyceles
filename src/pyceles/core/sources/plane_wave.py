@@ -1,0 +1,58 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, replace
+from typing import Tuple
+
+import numpy as np
+import numpy.typing as npt
+
+from ..projection import incident_coeffs_planewave
+from .base import PolarizationInput, polarization_to_jones
+
+
+@dataclass(frozen=True)
+class PlaneWave:
+    """Monochromatic plane-wave source in a homogeneous medium."""
+
+    wavelength: float
+    medium_n: complex = 1.0 + 0j
+    polarization: PolarizationInput = "TE"
+    polar_angle: float = 0.0
+    azimuthal_angle: float = 0.0
+    focal_point: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+    amplitude: float = 1.0
+
+    def __post_init__(self):
+        n = complex(self.medium_n)
+        if abs(n.imag) > 0:
+            raise ValueError(
+                "Embedding medium refractive index must be real for an incident field coming from infinity. "
+                f"Got medium_n={n!r}"
+            )
+        if not (n.real > 0):
+            raise ValueError(f"medium_n must be positive. Got {n!r}")
+        polarization_to_jones(self.polarization)
+
+    def jones_coefficients(self) -> tuple[complex, complex]:
+        """Return normalized TE/TM Jones weights for this plane wave."""
+        return polarization_to_jones(self.polarization)
+
+    def with_polarization(self, polarization: PolarizationInput) -> "PlaneWave":
+        """Clone plane wave with new polarization and unchanged propagation."""
+        return replace(self, polarization=polarization)
+
+    def has_finite_incident_power(self) -> bool:
+        """Plane waves carry infinite incident power in homogeneous media."""
+        return False
+
+    def incident_coeffs(
+        self,
+        positions: np.ndarray,
+        lmax: int,
+        *,
+        polar_angles: np.ndarray | None = None,
+        azimuthal_angles: np.ndarray | None = None,
+        dtype: npt.DTypeLike = np.complex128,
+    ) -> np.ndarray:
+        """Project plane-wave source to incident SVWF coefficients."""
+        return incident_coeffs_planewave(positions, lmax, self, dtype=dtype)
