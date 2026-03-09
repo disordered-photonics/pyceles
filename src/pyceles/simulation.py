@@ -372,6 +372,14 @@ class SimulationConfig:
     - `check_circumscribing_sphere_overlap=True` enforces disjoint
       circumscribing spheres (T-matrix superposition validity condition).
     - `circumscribing_sphere_overlap_atol` controls absolute geometric tolerance.
+    Near-field limitation:
+    - spheroid near fields still use the host-medium outgoing spherical SVWF
+      expansion outside the particle. This is acceptable away from the
+      circumscribing sphere, but not reliable for points inside that
+      circumscribing shell.
+    - experimental surface-integral, arbitrary-precision, and shell-only
+      spheroidal postprocessing variants were explored separately, but none is
+      currently part of the shipped configuration surface.
     The object gathers physical knobs (wavelength, source, truncation) and
     numerical policy (solver, precision, caching, preconditioning) so a run is
     reproducible and explicit.

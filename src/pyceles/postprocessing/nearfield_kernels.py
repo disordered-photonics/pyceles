@@ -513,6 +513,15 @@ def compute_scattered_field(
     Points outside the mask are left as zero. This is used by higher-level
     workflows to skip interior-particle points where the exterior scattered
     expansion is not physically meaningful.
+
+    Limitation
+    ----------
+    For spheroids, this evaluator still uses the outgoing spherical SVWF
+    expansion in the host medium. That path is not reliable for points outside
+    the physical spheroid but inside its circumscribing sphere; close-shell
+    spheroid near fields therefore remain unsupported on the main branch.
+    Experimental surface-integral, arbitrary-precision, and shell-only
+    spheroidal variants were investigated separately, but none is shipped here.
     """
     pts = np.asarray(field_points, np.float64)
     pos = np.asarray(positions, np.float64)
