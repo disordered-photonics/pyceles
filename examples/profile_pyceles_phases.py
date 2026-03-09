@@ -121,7 +121,12 @@ def main() -> None:
     parser.add_argument("--solver-rtol", type=float, default=1e-4)
     parser.add_argument("--solver-restart", type=int, default=100)
     parser.add_argument("--solver-maxiter", type=int, default=1000)
-    parser.add_argument("--radial-lut-dr", type=float, default=1.0)
+    parser.add_argument(
+        "--radial-lut-dr",
+        type=float,
+        default=0.0,
+        help="Radial LUT spacing in length units; 0 enables auto delta(kr)=1e-2.",
+    )
     parser.add_argument(
         "--force-general-initial-field",
         action="store_true",

@@ -492,7 +492,7 @@ def compute_scattered_field(
     k: float,
     lmax: int,
     n_medium: complex = 1.0 + 0j,
-    particle_distance_resolution: float = 1.0,
+    particle_distance_resolution: float = 0.0,
     lut: NearFieldRadialLUT | None = None,
     active_mask: np.ndarray | None = None,
     batch_size: int = 8192,
@@ -548,6 +548,16 @@ def compute_scattered_field(
         E_eval = np.zeros((pts_eval.shape[0], 3), dtype=accum_dtype)
         H_eval = np.zeros_like(E_eval)
 
+    dr = float(particle_distance_resolution)
+    if dr < 0.0:
+        raise ValueError(
+            f"`particle_distance_resolution` must be >= 0. Got {particle_distance_resolution!r}."
+        )
+    k_abs = float(abs(k))
+    if k_abs <= 0.0:
+        raise ValueError(f"`k` must be non-zero for near-field radial LUT setup. Got {k!r}.")
+    dr = (1.0e-2 / k_abs) if dr == 0.0 else dr
+
     if lut is None:
         # Size the near-field radial LUT with an O(N+M) conservative bound
         # instead of an exact O(N*M) center-point scan.
@@ -556,7 +566,7 @@ def compute_scattered_field(
             lmax=lmax,
             k=k,
             r_max=rmax,
-            dr=particle_distance_resolution,
+            dr=dr,
             dtype=compute_dtype,
         )
 
@@ -1313,7 +1323,7 @@ def _compute_initial_field_general(
             k=float(k),
             lmax=1,
             n_medium=nM,
-            particle_distance_resolution=float(getattr(beam, "radial_lut_dr", 1.0)),
+            particle_distance_resolution=float(getattr(beam, "radial_lut_dr", 0.0)),
             batch_size=int(batch_size),
             show_progress=show_progress,
             compute_dtype=compute_dtype,

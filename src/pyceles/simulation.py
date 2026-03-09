@@ -365,6 +365,9 @@ class SimulationConfig:
     - `solver_preconditioner`: optional callable preconditioner operator.
     - `solver_preconditioner_kind`: built-in preconditioner selection
       (`"none"` or `"grid_block"`).
+    - `radial_lut_dr`: radial LUT spacing in absolute length units.
+      Set `0` to enable the conservative auto value based on fixed
+      `delta(kr)=1e-2` with the embedding-medium wavenumber.
     Geometry validity options:
     - `check_circumscribing_sphere_overlap=True` enforces disjoint
       circumscribing spheres (T-matrix superposition validity condition).
@@ -392,7 +395,7 @@ class SimulationConfig:
     # Set both or neither.
     farfield_polar_angles: np.ndarray | None = None
     farfield_azimuthal_angles: np.ndarray | None = None
-    radial_lut_dr: float = 1.0
+    radial_lut_dr: float = 0.0
     force_general_initial_field: bool = False
     solver_method: Literal["auto", "gmres", "bicgstab", "lgmres", "gcrotmk", "direct"] = "direct"
     solver_direct_max_n: int = 15_000
@@ -425,8 +428,8 @@ class SimulationConfig:
             raise ValueError(f"`n_medium` must be real for this solver path. Got {n_medium!r}.")
         if not (float(n_medium.real) > 0.0):
             raise ValueError(f"`n_medium` must be positive. Got {n_medium!r}.")
-        if float(self.radial_lut_dr) <= 0.0:
-            raise ValueError(f"`radial_lut_dr` must be > 0. Got {self.radial_lut_dr!r}.")
+        if float(self.radial_lut_dr) < 0.0:
+            raise ValueError(f"`radial_lut_dr` must be >= 0. Got {self.radial_lut_dr!r}.")
         if float(self.circumscribing_sphere_overlap_atol) < 0.0:
             raise ValueError(
                 "`circumscribing_sphere_overlap_atol` must be >= 0. "

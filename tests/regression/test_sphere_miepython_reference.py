@@ -218,6 +218,10 @@ def _run_case(
         n_medium=n_medium + 0j,
         lmax=lmax,
         source=source,
+        # Keep this oracle pinned to the historical explicit LUT spacing so the
+        # regression only tracks sphere-vs-miepython agreement, not default
+        # radial-LUT policy changes.
+        radial_lut_dr=1.0,
         polar_angles=(
             np.asarray(polar_angles, dtype=float)
             if polar_angles is not None

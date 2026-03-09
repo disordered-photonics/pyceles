@@ -69,7 +69,11 @@ from .geometry_bounds import conservative_set_diameter
 from .indexing import n_modes
 from .particles import Particle, ParticleTRepresentation, Sphere, particle_t_signature
 from .tmatrix import particle_T_diagonal, particle_T_matrix_blocks, sphere_T_diagonal
-from .translation import RadialLUT, translation_ab5_table, translation_block
+from .translation import (
+    RadialLUT,
+    translation_ab5_table,
+    translation_block,
+)
 
 Array = np.ndarray
 
@@ -938,9 +942,16 @@ def prepare_matvec(
     k_f = float(k)
     ab5 = translation_ab5_table(int(lmax), dtype=op_dtype)
 
-    dr = float(radial_lut_dr)
-    if dr <= 0.0:
-        raise ValueError(f"radial_lut_dr must be > 0, got {dr}.")
+    dr_user = float(radial_lut_dr)
+    if dr_user < 0.0:
+        raise ValueError(f"radial_lut_dr must be >= 0, got {dr_user}.")
+    k_abs = float(abs(k_f))
+    if k_abs <= 0.0:
+        raise ValueError(f"`k` must be non-zero for radial LUT setup. Got {k_f!r}.")
+    # `radial_lut_dr` semantics:
+    # - > 0: explicit absolute spacing in geometry units
+    # - = 0: auto spacing from fixed `delta(kr)=1e-2`
+    dr = (1.0e-2 / k_abs) if dr_user == 0.0 else dr_user
     lut = RadialLUT(lmax=int(lmax), k=k_f, r_max=_infer_rmax(positions), dr=dr, dtype=op_dtype)
 
     particle_t = _prepare_particle_t_operator(

@@ -121,6 +121,12 @@ def _incident_coeffs_from_outgoing_expansion(
     pos_rcv = np.asarray(receiver_positions, dtype=float)
     pos_src = np.asarray(source_positions, dtype=float)
     coeffs_src = np.asarray(outgoing_coeffs, dtype=dtype)
+    dr_user = float(radial_lut_dr)
+    if dr_user < 0.0:
+        raise ValueError(f"`radial_lut_dr` must be >= 0. Got {radial_lut_dr!r}.")
+    k_abs = float(abs(k_medium))
+    if k_abs <= 0.0:
+        raise ValueError(f"`k_medium` must be non-zero for radial LUT setup. Got {k_medium!r}.")
     Ns = int(pos_rcv.shape[0])
     Nm = n_modes(int(lmax))
     out = np.zeros((Ns, Nm), dtype=dtype)
@@ -139,7 +145,7 @@ def _incident_coeffs_from_outgoing_expansion(
         lmax=int(lmax),
         k=float(k_medium),
         r_max=float(r_max),
-        dr=float(radial_lut_dr),
+        dr=(1.0e-2 / k_abs) if dr_user == 0.0 else dr_user,
         dtype=dtype,
     )
 
@@ -2087,7 +2093,7 @@ class DipoleSource:
     dipole_moment: tuple[complex, complex, complex] = (1.0 + 0j, 0.0 + 0j, 0.0 + 0j)
     position: tuple[float, float, float] = (0.0, 0.0, 0.0)
     amplitude: float = 1.0
-    radial_lut_dr: float = 1.0
+    radial_lut_dr: float = 0.0
 
     def __post_init__(self) -> None:
         n = complex(self.medium_n)
@@ -2102,8 +2108,8 @@ class DipoleSource:
         _as_float_triplet("position", self.position)
         if not np.isfinite(float(self.amplitude)):
             raise ValueError(f"`amplitude` must be finite. Got {self.amplitude!r}.")
-        if float(self.radial_lut_dr) <= 0.0:
-            raise ValueError(f"`radial_lut_dr` must be > 0. Got {self.radial_lut_dr!r}.")
+        if float(self.radial_lut_dr) < 0.0:
+            raise ValueError(f"`radial_lut_dr` must be >= 0. Got {self.radial_lut_dr!r}.")
 
     def has_finite_incident_power(self) -> bool:
         """Beam-power diagnostics do not apply to local dipole emitters."""
@@ -2215,7 +2221,7 @@ class DipoleCollection:
         default_factory=lambda: np.zeros((0, 3), dtype=np.complex128)
     )
     amplitude: float = 1.0
-    radial_lut_dr: float = 1.0
+    radial_lut_dr: float = 0.0
 
     def __post_init__(self) -> None:
         n = complex(self.medium_n)
@@ -2229,8 +2235,8 @@ class DipoleCollection:
         _normalize_dipole_collection_inputs(self.positions, self.dipole_moments)
         if not np.isfinite(float(self.amplitude)):
             raise ValueError(f"`amplitude` must be finite. Got {self.amplitude!r}.")
-        if float(self.radial_lut_dr) <= 0.0:
-            raise ValueError(f"`radial_lut_dr` must be > 0. Got {self.radial_lut_dr!r}.")
+        if float(self.radial_lut_dr) < 0.0:
+            raise ValueError(f"`radial_lut_dr` must be >= 0. Got {self.radial_lut_dr!r}.")
 
     def has_finite_incident_power(self) -> bool:
         """Beam-power diagnostics do not apply to local dipole emitters."""
