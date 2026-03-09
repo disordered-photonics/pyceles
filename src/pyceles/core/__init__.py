@@ -26,6 +26,7 @@ from .fields import (
 from .matvec import (
     AxisymmetricTGroup,
     CompositeParticleTOperator,
+    CouplingOperator,
     DenseTGroup,
     DiagonalTGroup,
     ParticleTGroupFactories,
@@ -86,6 +87,7 @@ __all__ = [
     "Source",
     "AxisymmetricTGroup",
     "CompositeParticleTOperator",
+    "CouplingOperator",
     "DenseTGroup",
     "DiagonalTGroup",
     "ParticleTGroupFactories",

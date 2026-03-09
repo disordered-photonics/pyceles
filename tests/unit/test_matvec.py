@@ -12,6 +12,7 @@ from pyceles.core.matvec import (
     DenseTGroup,
     DiagonalTGroup,
     ParticleTGroupFactories,
+    PreparedOperator,
     apply_A_numpy,
     assemble_dense_A_numpy,
     estimate_translation_cache_bytes,
@@ -21,6 +22,7 @@ from pyceles.core.matvec import (
     plan_particle_t_groups,
     precompute_T_diagonal,
     prepare_matvec,
+    require_pairwise_coupling,
     rhs_Tb_numpy,
 )
 from pyceles.core.particles import (
@@ -46,6 +48,14 @@ class _DenseTestParticle(Particle):
     @property
     def t_operator_representation(self) -> ParticleTRepresentation:
         return "dense"
+
+
+@dataclass(frozen=True)
+class _ScalingCoupling:
+    scale: complex
+
+    def apply(self, x: np.ndarray) -> np.ndarray:
+        return np.asarray(self.scale * np.asarray(x, dtype=np.complex128), dtype=np.complex128)
 
 
 @dataclass(frozen=True)
@@ -680,14 +690,36 @@ def test_block_cache_fills_once_and_reuses():
 
     Ns = positions.shape[0]
     expected_blocks = Ns * (Ns - 1)
+    coupling = require_pairwise_coupling(prepared.coupling)
 
     _ = prepared.apply_A(x)
-    cache_size_after_first = len(prepared._W_cache)
+    cache_size_after_first = len(coupling._W_cache)
     _ = prepared.apply_A(x)
-    cache_size_after_second = len(prepared._W_cache)
+    cache_size_after_second = len(coupling._W_cache)
 
     assert cache_size_after_first == expected_blocks
     assert cache_size_after_second == expected_blocks
+
+
+def test_prepared_operator_accepts_generic_coupling_protocol():
+    lmax, k, positions, _, _, particles, n_medium, x, _ = _sample_problem()
+    prepared = prepare_matvec(
+        lmax=lmax,
+        k=k,
+        particles=particles,
+        n_medium=n_medium,
+        radial_lut_dr=0.5,
+        cache_translation_blocks=False,
+    )
+    generic_prepared = PreparedOperator(
+        lmax=prepared.lmax,
+        k=prepared.k,
+        positions=prepared.positions,
+        particle_t=prepared.particle_t,
+        coupling=_ScalingCoupling(0.0 + 0.0j),
+        dtype=np.dtype(prepared.dtype),
+    )
+    np.testing.assert_allclose(generic_prepared.apply_A(x), x, rtol=1e-12, atol=1e-12)
 
 
 def test_estimate_translation_cache_bytes():

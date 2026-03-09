@@ -7,7 +7,7 @@ import numpy as np
 from tqdm.auto import tqdm
 
 from pyceles.core.indexing import n_modes
-from pyceles.core.matvec import PreparedOperator
+from pyceles.core.matvec import PreparedOperator, require_pairwise_coupling
 from pyceles.core.translation import translation_block
 
 
@@ -100,8 +100,9 @@ def _pair_block(
     store_translations: bool,
 ) -> np.ndarray:
     """Return one pair-translation block `W_ij`, optionally reusing cache."""
+    pairwise = require_pairwise_coupling(prepared.coupling)
     key = (int(i), int(j))
-    Wij = prepared._W_cache.get(key) if prepared.cache_translation_blocks else None
+    Wij = pairwise._W_cache.get(key) if pairwise.cache_translation_blocks else None
     if Wij is None:
         rvec = prepared.positions[i] - prepared.positions[j]
         Wij = translation_block(
@@ -109,11 +110,11 @@ def _pair_block(
             # prepared.k is real by construction in the current homogeneous-medium path.
             prepared.k,
             rvec,
-            ab5=prepared.ab5,
-            radial_lut=prepared.radial_lut,
+            ab5=pairwise.ab5,
+            radial_lut=pairwise.radial_lut,
         )
-        if store_translations and prepared.cache_translation_blocks:
-            prepared._W_cache[key] = Wij
+        if store_translations and pairwise.cache_translation_blocks:
+            pairwise._W_cache[key] = Wij
     return np.asarray(Wij, dtype=prepared.dtype)
 
 

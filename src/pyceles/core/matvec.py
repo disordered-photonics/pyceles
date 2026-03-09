@@ -59,7 +59,7 @@ and pair translation blocks.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable, Optional, Protocol, Sequence, TypeAlias
+from typing import Callable, Optional, Protocol, Sequence, TypeAlias, runtime_checkable
 
 import numpy as np
 import numpy.typing as npt
@@ -368,6 +368,25 @@ class ParticleTOperator(Protocol):
     def degree_diagonals(self) -> tuple[Array, Array] | None: ...
 
 
+@runtime_checkable
+class CouplingOperator(Protocol):
+    """Prepared many-body coupling operator `W`.
+
+    This is the extension seam for future periodic, FFT-accelerated, or hybrid
+    overlap-aware couplings. Solver code should depend only on this protocol,
+    not on the current free-space pairwise implementation.
+    """
+
+    def apply(self, x: Array) -> Array: ...
+
+
+@runtime_checkable
+class PrecomputableCouplingOperator(Protocol):
+    """Optional coupling protocol for backends that support eager precomputation."""
+
+    def populate(self, *, show_progress: bool = False) -> None: ...
+
+
 @dataclass
 class CompositeParticleTOperator:
     """Composite particle-local / single-particle T operator.
@@ -488,8 +507,8 @@ class PairwiseCouplingOperator:
         """Protocol-friendly alias for `apply_W`."""
         return self.apply_W(x)
 
-    def populate_translation_cache(self, *, show_progress: bool = False) -> None:
-        """Precompute and cache all pair translation blocks W_ij (i!=j)."""
+    def populate(self, *, show_progress: bool = False) -> None:
+        """Precompute and cache all pair translation blocks `W_ij`."""
         if not self.cache_translation_blocks:
             return
 
@@ -520,7 +539,7 @@ class PreparedOperator:
     k: float
     positions: Array
     particle_t: ParticleTOperator
-    coupling: PairwiseCouplingOperator
+    coupling: CouplingOperator
     dtype: np.dtype = np.dtype(np.complex128)
 
     def apply_W(self, x: Array) -> Array:
@@ -543,25 +562,10 @@ class PreparedOperator:
         """Return `T_i @ block` for one destination-particle block row."""
         return self.particle_t.apply_particle_block(particle_index, block)
 
-    def populate_translation_cache(self, *, show_progress: bool = False) -> None:
-        """Precompute and cache all pair translation blocks W_ij."""
-        self.coupling.populate_translation_cache(show_progress=show_progress)
-
-    @property
-    def ab5(self) -> Array:
-        return self.coupling.ab5
-
-    @property
-    def radial_lut(self) -> RadialLUT:
-        return self.coupling.radial_lut
-
-    @property
-    def cache_translation_blocks(self) -> bool:
-        return self.coupling.cache_translation_blocks
-
-    @property
-    def _W_cache(self) -> dict[tuple[int, int], Array]:
-        return self.coupling._W_cache
+    def populate_coupling(self, *, show_progress: bool = False) -> None:
+        """Trigger eager coupling precomputation when supported by the backend."""
+        if isinstance(self.coupling, PrecomputableCouplingOperator):
+            self.coupling.populate(show_progress=show_progress)
 
     @property
     def T_diag(self) -> Array:
@@ -583,6 +587,22 @@ class PreparedOperator:
         if diags is None:
             raise NotImplementedError("Prepared operator does not expose diagonal T_M/T_N data.")
         return diags[1]
+
+
+def require_pairwise_coupling(coupling: CouplingOperator) -> PairwiseCouplingOperator:
+    """Return the free-space pairwise coupling backend or raise a clear error.
+
+    Some current utilities still construct explicit translation blocks `W_ij`.
+    Those paths must narrow the generic coupling boundary explicitly instead of
+    assuming that every prepared operator is pairwise by construction.
+    """
+
+    if not isinstance(coupling, PairwiseCouplingOperator):
+        raise TypeError(
+            "This path currently requires the PairwiseCouplingOperator backend. "
+            f"Got {type(coupling).__name__}."
+        )
+    return coupling
 
 
 def plan_particle_t_groups(particles: Sequence[Particle]) -> tuple[ParticleTGroupPlan, ...]:
@@ -1039,7 +1059,8 @@ def assemble_dense_A_numpy(
     if show_progress:
         pair_iter = tqdm(pair_iter, total=Ns * (Ns - 1), desc="Assemble A (blockwise)")
 
-    cache = prepared._W_cache if use_cache else None
+    pairwise = require_pairwise_coupling(prepared.coupling)
+    cache = pairwise._W_cache if use_cache and pairwise.cache_translation_blocks else None
     for i, j in pair_iter:
         key = (i, j)
         Wij = cache.get(key) if cache is not None else None
@@ -1049,11 +1070,11 @@ def assemble_dense_A_numpy(
                 prepared.lmax,
                 prepared.k,
                 rvec,
-                ab5=prepared.ab5,
-                radial_lut=prepared.radial_lut,
+                ab5=pairwise.ab5,
+                radial_lut=pairwise.radial_lut,
             )
-            if store_blocks:
-                prepared._W_cache[key] = Wij
+            if store_blocks and pairwise.cache_translation_blocks:
+                pairwise._W_cache[key] = Wij
 
         blk = -prepared.apply_particle_block(i, Wij)
         rs = slice(i * Nm, (i + 1) * Nm)
