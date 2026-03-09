@@ -219,7 +219,7 @@ def test_particle_internal_ratios_layered_returns_core_regular_ratios():
     np.testing.assert_allclose(out[2], ref[2]["A"][0, :], rtol=1e-12, atol=1e-12)
 
 
-def test_particle_t_diagonal_spheroid_placeholder_raises():
+def test_particle_t_diagonal_spheroid_diagonal_path_raises():
     p_spheroid = Spheroid(
         position=(0.0, 0.0, 0.0),
         equatorial_radius=90.0,

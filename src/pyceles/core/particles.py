@@ -15,8 +15,9 @@ class Particle:
 
     Notes
     -----
-    `Sphere` and `LayeredSphere` are currently supported in active kernels.
-    Other shapes are included as explicit placeholders to expose planned API.
+    `Sphere`, `LayeredSphere`, and `Spheroid` are supported by active solver
+    kernels, though not every downstream postprocessing path is equally mature
+    for every particle family.
     """
 
     position: Tuple[float, float, float]
