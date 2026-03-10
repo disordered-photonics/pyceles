@@ -21,7 +21,7 @@ import numpy as np
 from pyceles.core.particles import LayeredSphere
 from pyceles.core.sources import PlaneWave
 from pyceles.io import far_field_intensity
-from pyceles.postprocessing.workflows import compute_near_field
+from pyceles.postprocessing.nearfield import compute_near_field
 from pyceles.simulation import Simulation, SimulationConfig
 
 

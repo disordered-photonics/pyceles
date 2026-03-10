@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 import numpy as np
@@ -8,7 +7,13 @@ import numpy as np
 from pyceles._dtypes import resolve_compute_accum_dtypes
 from pyceles.core.sources import JonesPolarizedSource
 
-from .nearfield_workflows import NearFieldComponents, compute_near_field_components
+from .components import NearFieldComponents, compute_near_field_components
+from .slice import (
+    NearFieldSlice,
+    interpolate_center_pixels,
+    reshape_field_points,
+    slice_plane_metadata,
+)
 
 if TYPE_CHECKING:
     from pyceles.simulation import SimulationResult
@@ -31,24 +36,6 @@ def _is_pure_channel_result(run: SimulationResult, channel: str, *, atol: float 
     return False
 
 
-@dataclass(frozen=True)
-class NearFieldSlice:
-    """Near-field payload on a 2D slice for plotting and diagnostics.
-
-    `field_maps` stores complex vector fields `(E, H)` for each family
-    (`initial`, `scattered`, `internal`, `total`) sampled on the same grid.
-    """
-
-    axis_0: np.ndarray
-    axis_1: np.ndarray
-    inside: np.ndarray
-    field_maps: dict[str, tuple[np.ndarray, np.ndarray]]
-    plane: str
-    plane_value: float
-    axis_0_label: str
-    axis_1_label: str
-
-
 def _mix_complex_vector_fields(
     a_te: complex,
     a_tm: complex,
@@ -66,12 +53,7 @@ def mix_near_field_components(
     a_te: complex,
     a_tm: complex,
 ) -> NearFieldComponents:
-    """Coherently mix TE/TM near-field components into one Jones channel.
-
-    This helper enables reuse when TE and TM channels were already evaluated
-    and a requested mixed Jones field should be formed without recomputing
-    near-field kernels.
-    """
+    """Coherently mix TE/TM near-field components into one Jones channel."""
     return NearFieldComponents(
         E_initial=_mix_complex_vector_fields(a_te, a_tm, nf_te.E_initial, nf_tm.E_initial),
         H_initial=_mix_complex_vector_fields(a_te, a_tm, nf_te.H_initial, nf_tm.H_initial),
@@ -110,11 +92,11 @@ def mix_near_field_slices(
     map_keys = set(slice_te.field_maps).intersection(set(slice_tm.field_maps))
     mixed_maps: dict[str, tuple[np.ndarray, np.ndarray]] = {}
     for key in map_keys:
-        E_te, H_te = slice_te.field_maps[key]
-        E_tm, H_tm = slice_tm.field_maps[key]
+        e_te, h_te = slice_te.field_maps[key]
+        e_tm, h_tm = slice_tm.field_maps[key]
         mixed_maps[key] = (
-            _mix_complex_vector_fields(a_te, a_tm, E_te, E_tm),
-            _mix_complex_vector_fields(a_te, a_tm, H_te, H_tm),
+            _mix_complex_vector_fields(a_te, a_tm, e_te, e_tm),
+            _mix_complex_vector_fields(a_te, a_tm, h_te, h_tm),
         )
 
     return NearFieldSlice(
@@ -129,33 +111,6 @@ def mix_near_field_slices(
     )
 
 
-def _slice_plane_metadata(plane: str) -> tuple[int, int, int, str, str]:
-    """Map plane label to normal/tangential coordinate indices and axis labels."""
-    p = str(plane).lower()
-    if p == "x":
-        return 0, 1, 2, "y", "z"
-    if p == "y":
-        return 1, 0, 2, "x", "z"
-    if p == "z":
-        return 2, 0, 1, "x", "y"
-    raise ValueError("plane must be one of 'x', 'y', or 'z'.")
-
-
-def _reshape_field_points(points: np.ndarray) -> tuple[np.ndarray, tuple[int, ...]]:
-    """Normalize arbitrary point inputs to flat `(N,3)` plus original leading shape."""
-    arr = np.asarray(points, dtype=float)
-    if arr.ndim == 1:
-        if arr.size != 3:
-            raise ValueError(
-                f"1D `points` input must have exactly 3 entries (x,y,z). Got shape {arr.shape}."
-            )
-        return arr.reshape(1, 3), ()
-    if arr.ndim >= 2 and arr.shape[-1] == 3:
-        lead_shape = tuple(arr.shape[:-1])
-        return arr.reshape(-1, 3), lead_shape
-    raise ValueError(f"`points` must be shaped (3,), (N,3), or (...,3). Got shape {arr.shape}.")
-
-
 def compute_near_field(
     run: SimulationResult,
     *,
@@ -164,25 +119,8 @@ def compute_near_field(
     show_progress: bool = True,
     force_general_initial_field: bool | None = None,
 ) -> NearFieldComponents:
-    """Evaluate near-field components on arbitrary point coordinates.
-
-    This is the geometry-agnostic counterpart of `compute_near_field_slice`.
-    Accepted `points` shapes are:
-    - `(3,)` for a single point
-    - `(N, 3)` for a point cloud
-    - `(..., 3)` for structured grids/volumes
-
-    Parameters
-    ----------
-    channel:
-        - ``"mixed"``: use the source polarization requested by the user
-          (default).
-        - ``"te"`` / ``"tm"``: evaluate one pure basis channel. Requires
-          `run.coeffs_basis` from `solve_polarization_basis=True`, or a pure
-          single-channel result from
-          `postprocess_sources(solve_sources(...))`.
-    """
-    pts_flat, lead_shape = _reshape_field_points(points)
+    """Evaluate near-field components on arbitrary point coordinates."""
+    pts_flat, lead_shape = reshape_field_points(points)
 
     source = run.config.source
     if source is None:
@@ -221,10 +159,7 @@ def compute_near_field(
                 )
             source_eff = source.with_polarization(pol_label)
 
-    # Initial-field near-field evaluation must use the source-projection angular
-    # quadrature, not necessarily the far-field display grid.
     source_polar_angles, source_azimuthal_angles = run.config.source_angular_grids()
-
     compute_dtype, accum_dtype = resolve_compute_accum_dtypes(
         compute_dtype=run.config.compute_dtype,
         accum_dtype=run.config.accum_dtype,
@@ -251,11 +186,9 @@ def compute_near_field(
         accum_dtype=accum_dtype,
     )
 
-    vec_shape: tuple[int, ...]
-    mask_shape: tuple[int, ...]
     if lead_shape == ():
-        vec_shape = (3,)
-        mask_shape = ()
+        vec_shape: tuple[int, ...] = (3,)
+        mask_shape: tuple[int, ...] = ()
     else:
         vec_shape = lead_shape + (3,)
         mask_shape = lead_shape
@@ -273,61 +206,6 @@ def compute_near_field(
     )
 
 
-def _neighbor_mean_inplace(arr: np.ndarray, i0: int, i1: int) -> None:
-    """Replace one sample with the mean of available 4-neighborhood samples."""
-    n0, n1 = arr.shape[0], arr.shape[1]
-    values = []
-    for d0, d1 in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-        j0 = i0 + d0
-        j1 = i1 + d1
-        if 0 <= j0 < n0 and 0 <= j1 < n1:
-            values.append(arr[j0, j1])
-    if values:
-        arr[i0, i1] = np.mean(np.asarray(values), axis=0)
-
-
-def _interpolate_center_pixels(
-    *,
-    run: SimulationResult,
-    axis_0_grid: np.ndarray,
-    axis_1_grid: np.ndarray,
-    field_maps: dict[str, tuple[np.ndarray, np.ndarray]],
-    plane: str,
-    plane_value: float,
-) -> None:
-    """Patch singular center pixels by local interpolation on exact center hits.
-
-    When a slice grid node lands exactly on a sphere center, some spherical-field
-    formulas can generate an isolated numerical artifact. This post-step replaces
-    only those exact-center pixels by neighbor means, leaving all other samples
-    untouched.
-    """
-    # Build 2D projected center coordinates for spheres whose centers lie on the slice.
-    p = np.asarray(run.positions, dtype=float)
-    normal_idx, axis_0_idx, axis_1_idx, _, _ = _slice_plane_metadata(plane)
-    on_plane = np.isclose(p[:, normal_idx], plane_value, atol=1e-12)
-    u = p[on_plane, axis_0_idx]
-    v = p[on_plane, axis_1_idx]
-
-    if u.size == 0:
-        return
-
-    axis_0_values = np.asarray(axis_0_grid[0, :], dtype=float)
-    axis_1_values = np.asarray(axis_1_grid[:, 0], dtype=float)
-    for uu, vv in zip(u, v):
-        i0 = int(np.argmin(np.abs(axis_0_values - uu)))
-        i1 = int(np.argmin(np.abs(axis_1_values - vv)))
-        if not (
-            np.isclose(axis_0_values[i0], uu, atol=1e-12)
-            and np.isclose(axis_1_values[i1], vv, atol=1e-12)
-        ):
-            continue
-        for key in field_maps:
-            E_map, H_map = field_maps[key]
-            _neighbor_mean_inplace(E_map, i1, i0)
-            _neighbor_mean_inplace(H_map, i1, i0)
-
-
 def compute_near_field_slice(
     run: SimulationResult,
     *,
@@ -343,17 +221,7 @@ def compute_near_field_slice(
     force_general_initial_field: bool | None = None,
     center_pixel_policy: Literal["none", "interpolate"] = "interpolate",
 ) -> NearFieldSlice:
-    """Evaluate near fields on an axis-aligned planar slice.
-
-    This is a convenience wrapper for visualization workflows. For arbitrary
-    points/grids/volumes use `compute_near_field`.
-
-    Notes
-    -----
-    Unpolarized near fields are not represented as a single complex vector
-    field. For incoherent TE/TM averaging, evaluate `channel="te"` and
-    `channel="tm"` separately and combine intensity-level observables.
-    """
+    """Evaluate near fields on an axis-aligned planar slice."""
     if float(dx) <= 0.0:
         raise ValueError(f"`dx` must be > 0. Got {dx!r}.")
 
@@ -369,7 +237,7 @@ def compute_near_field_slice(
     plane_name = str(plane).lower()
     if plane_name not in {"x", "y", "z"}:
         raise ValueError(f"`plane` must be one of 'x', 'y', or 'z'. Got {plane!r}.")
-    _, _, _, axis_0_label, axis_1_label = _slice_plane_metadata(plane_name)
+    _, _, _, axis_0_label, axis_1_label = slice_plane_metadata(plane_name)
     policy = str(center_pixel_policy).lower()
     if policy not in {"none", "interpolate"}:
         raise ValueError(
@@ -378,14 +246,18 @@ def compute_near_field_slice(
 
     axis_0_vals = np.arange(float(axis_0_min), float(axis_0_max) + float(dx), float(dx))
     axis_1_vals = np.arange(float(axis_1_min), float(axis_1_max) + float(dx), float(dx))
-    A0, A1 = np.meshgrid(axis_0_vals, axis_1_vals, indexing="xy")
-    A_const = np.zeros_like(A0)
+    axis_0_grid, axis_1_grid = np.meshgrid(axis_0_vals, axis_1_vals, indexing="xy")
+    axis_const = np.zeros_like(axis_0_grid)
     if plane_name == "x":
-        pts = np.stack([np.full_like(A0, float(plane_value)), A0, A1], axis=-1)
+        pts = np.stack(
+            [np.full_like(axis_0_grid, float(plane_value)), axis_0_grid, axis_1_grid], axis=-1
+        )
     elif plane_name == "z":
-        pts = np.stack([A0, A1, np.full_like(A0, float(plane_value))], axis=-1)
+        pts = np.stack(
+            [axis_0_grid, axis_1_grid, np.full_like(axis_0_grid, float(plane_value))], axis=-1
+        )
     else:
-        pts = np.stack([A0, A_const + float(plane_value), A1], axis=-1)
+        pts = np.stack([axis_0_grid, axis_const + float(plane_value), axis_1_grid], axis=-1)
 
     nf = compute_near_field(
         run,
@@ -414,21 +286,31 @@ def compute_near_field_slice(
         ),
     }
     if policy == "interpolate":
-        _interpolate_center_pixels(
+        interpolate_center_pixels(
             run=run,
-            axis_0_grid=A0,
-            axis_1_grid=A1,
+            axis_0_grid=axis_0_grid,
+            axis_1_grid=axis_1_grid,
             field_maps=field_maps,
             plane=plane_name,
             plane_value=float(plane_value),
         )
     return NearFieldSlice(
-        axis_0=A0,
-        axis_1=A1,
-        inside=nf.inside_mask.reshape(A1.shape),
+        axis_0=axis_0_grid,
+        axis_1=axis_1_grid,
+        inside=nf.inside_mask.reshape(axis_1_grid.shape),
         field_maps=field_maps,
         plane=plane_name,
         plane_value=float(plane_value),
         axis_0_label=axis_0_label,
         axis_1_label=axis_1_label,
     )
+
+
+__all__ = [
+    "NearFieldComponents",
+    "NearFieldSlice",
+    "compute_near_field",
+    "compute_near_field_slice",
+    "mix_near_field_components",
+    "mix_near_field_slices",
+]

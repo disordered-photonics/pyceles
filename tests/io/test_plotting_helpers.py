@@ -17,7 +17,7 @@ from pyceles.io.plotting import (
     plot_spheres,
     unpolarized_near_field_intensity,
 )
-from pyceles.postprocessing.workflows import NearFieldSlice
+from pyceles.postprocessing.nearfield import NearFieldSlice
 
 
 def test_near_field_component_extracts_expected_channels():
@@ -241,7 +241,9 @@ def test_plot_source_showcase_slices_returns_3x5_layout(monkeypatch):
             axis_1_label="v",
         )
 
-    monkeypatch.setattr("pyceles.postprocessing.workflows.compute_near_field_slice", _fake_slice)
+    monkeypatch.setattr(
+        "pyceles.postprocessing.nearfield.workflows.compute_near_field_slice", _fake_slice
+    )
     run = type(
         "Run",
         (),

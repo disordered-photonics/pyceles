@@ -20,7 +20,7 @@ from .hdf5 import (
 )
 
 if TYPE_CHECKING:
-    from pyceles.postprocessing.workflows import NearFieldSlice
+    from pyceles.postprocessing.nearfield.slice import NearFieldSlice
     from pyceles.simulation import SimulationResult
 
 

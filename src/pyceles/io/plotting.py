@@ -682,7 +682,7 @@ def plot_source_showcase_slices(
       consistency across columns;
     - explicit limits override that auto-scaling.
     """
-    from pyceles.postprocessing.workflows import compute_near_field_slice
+    from pyceles.postprocessing.nearfield.workflows import compute_near_field_slice
 
     family = str(field_component).lower()
     if family not in {"initial", "scattered", "internal", "total"}:

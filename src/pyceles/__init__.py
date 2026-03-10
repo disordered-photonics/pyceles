@@ -30,7 +30,7 @@ from pyceles.postprocessing.dipole_metrics import (
     compute_dipole_ldos_enhancement,
     compute_dipole_power_ldos,
 )
-from pyceles.postprocessing.workflows import (
+from pyceles.postprocessing.nearfield import (
     NearFieldSlice,
     compute_near_field,
     compute_near_field_slice,

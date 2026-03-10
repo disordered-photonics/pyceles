@@ -7,7 +7,7 @@ from pyceles.core.particles import Sphere, spheres_from_arrays
 from pyceles.io.workflows import load_simulation_h5, save_simulation_h5
 from pyceles.linear.solvers import LinearSolveResult
 from pyceles.postprocessing.farfield import FarFieldPatterns
-from pyceles.postprocessing.workflows import NearFieldSlice
+from pyceles.postprocessing.nearfield import NearFieldSlice
 from pyceles.simulation import Simulation, SimulationConfig, SimulationResult
 
 

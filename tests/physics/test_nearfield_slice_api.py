@@ -4,7 +4,7 @@ import numpy as np
 
 from pyceles.core.fields import PlaneWave
 from pyceles.core.particles import Sphere
-from pyceles.postprocessing.workflows import compute_near_field_slice
+from pyceles.postprocessing.nearfield import compute_near_field_slice
 from pyceles.simulation import Simulation, SimulationConfig
 
 

@@ -8,12 +8,10 @@ import numpy.typing as npt
 
 from pyceles.core.particles import Particle
 
-from .nearfield_kernels import (
-    classify_internal_points,
-    compute_initial_field,
-    compute_internal_field,
-    compute_scattered_field,
-)
+from .classification import classify_internal_points
+from .initial import compute_initial_field
+from .internal import compute_internal_field
+from .scattered import compute_scattered_field
 
 
 @dataclass(frozen=True)
@@ -38,6 +36,16 @@ class NearFieldComponents:
     inside_mask: np.ndarray
 
 
+def _positions_from_particles(particles: Sequence[Particle]) -> np.ndarray:
+    """Return `(Ns,3)` centers derived from canonical particle descriptors."""
+    part = tuple(particles)
+    if len(part) == 0:
+        return np.zeros((0, 3), dtype=float)
+    return np.asarray([np.asarray(p.position, dtype=float) for p in part], dtype=float).reshape(
+        -1, 3
+    )
+
+
 def compute_total_field(
     field_points: np.ndarray,
     coeffs: np.ndarray,
@@ -56,29 +64,7 @@ def compute_total_field(
     compute_dtype: npt.DTypeLike = np.complex128,
     accum_dtype: npt.DTypeLike = np.complex128,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Compute total fields (everywhere) in CELES convention.
-
-    Outside spheres:
-        E_total = E_initial + E_scattered
-
-    Inside spheres:
-        E_total is replaced by the internal (regular) field evaluated with the
-        internal coefficients (i.e. the physical total field inside the particle).
-
-    This mirrors the logic in `celes_output.totalEField/totalHField`.
-
-    Parameters
-    ----------
-    polar_angles, azimuthal_angles:
-        Source-projection angular quadrature grids used for the incident
-        wavebundle contribution.
-
-    Returns
-    -------
-    E_total, H_total, inside_mask
-        `inside_mask` is True where the point was inside any sphere.
-    """
-
+    """Compute total fields everywhere in CELES convention."""
     out = compute_near_field_components(
         field_points,
         coeffs=coeffs,
@@ -99,16 +85,6 @@ def compute_total_field(
     return out.E_total, out.H_total, out.inside_mask
 
 
-def _positions_from_particles(particles: Sequence[Particle]) -> np.ndarray:
-    """Return `(Ns,3)` centers derived from canonical particle descriptors."""
-    part = tuple(particles)
-    if len(part) == 0:
-        return np.zeros((0, 3), dtype=float)
-    return np.asarray([np.asarray(p.position, dtype=float) for p in part], dtype=float).reshape(
-        -1, 3
-    )
-
-
 def compute_near_field_components(
     field_points: np.ndarray,
     *,
@@ -127,24 +103,11 @@ def compute_near_field_components(
     compute_dtype: npt.DTypeLike = np.complex128,
     accum_dtype: npt.DTypeLike = np.complex128,
 ) -> NearFieldComponents:
-    """Compute full near-field decomposition in one pass over shared points.
-
-    This is the canonical near-field evaluator used by higher-level workflows.
-    It returns physically separated components so users can inspect incident,
-    scattering, and internal contributions before/after the inside replacement.
-    Geometry input is canonical and particle-native: scatterer centers are
-    derived from `particles` only.
-    The angular grids are the source-projection quadrature nodes for the
-    incident field, not generic far-field display bins.
-    Compared to the baseline CELES workflow, scattered-field evaluation here
-    skips points known to be inside spheres, because those samples are replaced
-    by internal fields in the physical total-field definition.
-    """
-
+    """Compute full near-field decomposition in one pass over shared points."""
     pts = np.asarray(field_points, dtype=float)
     pos = _positions_from_particles(particles)
 
-    Ei, Hi = compute_initial_field(
+    ei, hi = compute_initial_field(
         field_points,
         k=k,
         n_medium=n_medium,
@@ -163,7 +126,7 @@ def compute_near_field_components(
     if len(particles) > 0:
         classification = classify_internal_points(pts, particles, n_medium=n_medium)
         inside_hint = np.asarray(classification.inside_any, dtype=bool)
-    Es, Hs = compute_scattered_field(
+    es, hs = compute_scattered_field(
         field_points,
         pos,
         coeffs,
@@ -177,15 +140,14 @@ def compute_near_field_components(
         accum_dtype=accum_dtype,
     )
 
-    Eint = np.zeros_like(Ei)
-    Hint = np.zeros_like(Hi)
+    eint = np.zeros_like(ei)
+    hint = np.zeros_like(hi)
     inside = np.zeros(pts.shape[0], dtype=bool)
-
-    Et = Ei + Es
-    Ht = Hi + Hs
+    et = ei + es
+    ht = hi + hs
 
     if len(particles) > 0:
-        Eint, Hint, inside = compute_internal_field(
+        eint, hint, inside = compute_internal_field(
             field_points,
             coeffs,
             k=k,
@@ -197,27 +159,32 @@ def compute_near_field_components(
             compute_dtype=compute_dtype,
             accum_dtype=accum_dtype,
         )
-        # Exterior scattered-field expansions are not physically valid inside
-        # particles and can diverge at exact sphere centers; sanitize these
-        # entries so downstream storage/downcasting remains stable.
-        Es[inside] = 0
-        Hs[inside] = 0
-        Et[inside] = Eint[inside]
-        Ht[inside] = Hint[inside]
+        es[inside] = 0
+        hs[inside] = 0
+        et[inside] = eint[inside]
+        ht[inside] = hint[inside]
 
     return NearFieldComponents(
-        E_initial=Ei,
-        H_initial=Hi,
-        E_scattered=Es,
-        H_scattered=Hs,
-        E_internal=Eint,
-        H_internal=Hint,
-        E_total=Et,
-        H_total=Ht,
+        E_initial=ei,
+        H_initial=hi,
+        E_scattered=es,
+        H_scattered=hs,
+        E_internal=eint,
+        H_internal=hint,
+        E_total=et,
+        H_total=ht,
         inside_mask=inside,
     )
 
 
-def poynting(E: np.ndarray, H: np.ndarray) -> np.ndarray:
+def poynting(e: np.ndarray, h: np.ndarray) -> np.ndarray:
     """Time-averaged Poynting vector S = 0.5 * Re(E x H*)."""
-    return 0.5 * np.real(np.cross(E, np.conj(H)))
+    return 0.5 * np.real(np.cross(e, np.conj(h)))
+
+
+__all__ = [
+    "NearFieldComponents",
+    "compute_near_field_components",
+    "compute_total_field",
+    "poynting",
+]

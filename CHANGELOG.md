@@ -130,6 +130,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Breaking: `compute_near_field_slice(...)` now uses only
   `axis_0_min/axis_0_max/axis_1_min/axis_1_max` bounds; legacy
   `x_min/x_max/z_min/z_max` aliases were removed.
+- Breaking: the near-field public package surface is now
+  `pyceles.postprocessing.nearfield`; the temporary
+  `pyceles.postprocessing.workflows` import path was removed during the
+  near-field package split.
 - Breaking: near-field plotting overlays are now particle-native:
   `plot_spheres(...)`, `plot_nearfield_panels(...)`,
   `plot_nearfield_panels_channels(...)`, and
@@ -218,9 +222,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Core/postprocessing architecture was reorganized into responsibility-based modules:
   - source models and source-side helpers in `core.sources`,
   - SVWF projection kernels in `core.projection`,
-  - near-field kernels in `postprocessing.nearfield_kernels`,
-  - near-field orchestration in `postprocessing.nearfield_workflows`,
-  while keeping `core.fields` and `postprocessing.nearfield` as public API facades.
+  - near-field implementation under the `postprocessing.nearfield` package
+    (`classification`, `components`, `slice`, `workflows`, and kernel modules),
+  while keeping `core.fields` as the remaining public compatibility facade.
 - LUT max-radius inference is now conservative and cheap:
   - translation `RadialLUT` sizing switched from pairwise `O(N^2)` distance scan to `O(N)` geometry bound,
   - near-field radial LUT sizing switched from exact `O(N*M)` sphere-point scan to an `O(N+M)` conservative bound.

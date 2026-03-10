@@ -54,9 +54,9 @@ def test_internal_modules_do_not_import_facades() -> None:
 
     Why this exists
     ---------------
-    `pyceles.core.fields` and `pyceles.postprocessing.nearfield` are public
-    compatibility facades. Internal modules should import canonical
-    implementations directly to avoid accidental layering regressions.
+    `pyceles.core.fields` is a public compatibility facade. Internal modules
+    should import canonical implementations directly to avoid accidental
+    layering regressions.
 
     Why AST (instead of token scanning)
     -----------------------------------
@@ -81,12 +81,11 @@ def test_internal_modules_do_not_import_facades() -> None:
         src_root / "core" / "__init__.py",
         src_root / "core" / "fields.py",
         src_root / "postprocessing" / "__init__.py",
-        src_root / "postprocessing" / "nearfield.py",
+        src_root / "postprocessing" / "nearfield" / "__init__.py",
     }
 
     forbidden_facades = {
         "pyceles.core.fields",
-        "pyceles.postprocessing.nearfield",
     }
 
     violations: list[str] = []

@@ -1,7 +1,7 @@
 import numpy as np
 
-from pyceles.postprocessing.nearfield import NearFieldComponents
-from pyceles.postprocessing.workflows import (
+from pyceles.postprocessing.nearfield import (
+    NearFieldComponents,
     NearFieldSlice,
     mix_near_field_components,
     mix_near_field_slices,

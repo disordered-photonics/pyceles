@@ -21,19 +21,17 @@ from .farfield import (
 from .nearfield import (
     NearFieldComponents,
     NearFieldRadialLUT,
+    NearFieldSlice,
     compute_initial_field,
     compute_internal_field,
+    compute_near_field,
     compute_near_field_components,
+    compute_near_field_slice,
     compute_scattered_field,
     compute_total_field,
-    poynting,
-)
-from .workflows import (
-    NearFieldSlice,
-    compute_near_field,
-    compute_near_field_slice,
     mix_near_field_components,
     mix_near_field_slices,
+    poynting,
 )
 
 __all__ = [

@@ -14,7 +14,7 @@ import numpy as np
 
 from pyceles._dtypes import resolve_compute_accum_dtypes
 from pyceles.core.sources import DipoleCollection, DipoleSource
-from pyceles.postprocessing.nearfield_kernels import compute_scattered_field
+from pyceles.postprocessing.nearfield.scattered import compute_scattered_field
 
 if TYPE_CHECKING:
     from pyceles.simulation import SimulationResult
