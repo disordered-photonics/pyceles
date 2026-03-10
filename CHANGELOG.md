@@ -149,6 +149,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `plot_nearfield_panels_channels(...)`, and
   `plot_nearfield_poynting_overlay(...)` consume `particles=[...]` geometry
   instead of parallel `positions`/`radii` inputs.
+- Internal simulation workflow ownership now lives under the
+  `pyceles.simulation` package (`config`, `results`, `solve`, `postprocess`,
+  `workflow`) instead of one monolithic `simulation.py` owner, while keeping
+  the public `from pyceles.simulation import ...` package surface stable.
 - `SimulationResult` now stores only canonical `particles`; convenience
   `positions`/`circumscribing_radii` views are derived properties rather than
   duplicated stored payloads.

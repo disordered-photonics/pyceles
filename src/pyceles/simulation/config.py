@@ -1,0 +1,288 @@
+from __future__ import annotations
+
+"""Simulation configuration model and angular-grid validation helpers."""
+
+import warnings
+from dataclasses import dataclass, field
+from typing import Callable, Literal
+
+import numpy as np
+
+from pyceles._dtypes import resolve_compute_accum_dtypes
+from pyceles.core.angular import uniform_periodic_azimuth_grid, uniform_polar_grid
+from pyceles.core.sources import Source
+
+
+def _as_1d_float_array(name: str, values: np.ndarray) -> np.ndarray:
+    """Validate monotone angular quadrature nodes used in field integrations."""
+    arr = np.asarray(values, dtype=float)
+    if arr.ndim != 1:
+        raise ValueError(f"`{name}` must be a 1D array; got shape {arr.shape}.")
+    if arr.size < 2:
+        raise ValueError(f"`{name}` must contain at least 2 samples; got {arr.size}.")
+    if not np.all(np.isfinite(arr)):
+        raise ValueError(f"`{name}` must contain only finite values.")
+    if np.any(np.diff(arr) <= 0.0):
+        raise ValueError(f"`{name}` must be strictly increasing.")
+    return arr
+
+
+def validate_angular_grid_pair(
+    *,
+    polar_name: str,
+    azimuthal_name: str,
+    polar_values: np.ndarray,
+    azimuthal_values: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Validate one `(beta, alpha)` angular-grid pair used in quadratures/PWPs."""
+    polar = _as_1d_float_array(polar_name, polar_values)
+    azimuth = _as_1d_float_array(azimuthal_name, azimuthal_values)
+    if polar[0] < -1e-12 or polar[-1] > np.pi + 1e-12:
+        raise ValueError(f"`{polar_name}` must lie within [0, pi].")
+    if azimuth[0] < -1e-12 or azimuth[-1] > 2.0 * np.pi + 1e-12:
+        raise ValueError(f"`{azimuthal_name}` must lie within [0, 2*pi].")
+    return polar, azimuth
+
+
+def warn_redundant_periodic_azimuth_endpoint(*, azimuth_name: str, azimuth: np.ndarray) -> None:
+    """Warn on duplicated periodic endpoints (0 and 2*pi) in azimuth grids."""
+    if azimuth.size < 2:
+        return
+    a0 = float(azimuth[0])
+    a1 = float(azimuth[-1])
+    if (
+        np.isclose(a0, 0.0, rtol=0.0, atol=1e-12)
+        and np.isclose(a1, 2.0 * np.pi, rtol=0.0, atol=1e-12)
+        and np.isclose(a1 - a0, 2.0 * np.pi, rtol=0.0, atol=1e-12)
+    ):
+        warnings.warn(
+            f"`{azimuth_name}` includes both 0 and 2*pi. For periodic angular integrals, "
+            "prefer `endpoint=False` on [0, 2*pi) to avoid redundant work and keep periodic fast paths enabled.",
+            UserWarning,
+            stacklevel=3,
+        )
+
+
+@dataclass(frozen=True)
+class SimulationConfig:
+    """High-level configuration for one homogeneous-medium many-particle run."""
+
+    wavelength: float = 550.0
+    n_medium: complex = 1.0 + 0j
+    lmax: int = 3
+    source: Source | None = None
+    polar_angles: np.ndarray = field(default_factory=lambda: uniform_polar_grid(5001))
+    azimuthal_angles: np.ndarray = field(default_factory=lambda: uniform_periodic_azimuth_grid(201))
+    source_polar_angles: np.ndarray | None = None
+    source_azimuthal_angles: np.ndarray | None = None
+    farfield_polar_angles: np.ndarray | None = None
+    farfield_azimuthal_angles: np.ndarray | None = None
+    radial_lut_dr: float = 0.0
+    force_general_initial_field: bool = False
+    solver_method: Literal["auto", "gmres", "bicgstab", "lgmres", "gcrotmk", "direct"] = "direct"
+    solver_direct_max_n: int = 15_000
+    solver_rtol: float = 1e-5
+    solver_compute_final_residual: bool = True
+    solver_restart: int = 100
+    solver_maxiter: int = 1000
+    solver_warm_start: np.ndarray | None = None
+    solver_preconditioner: Callable[[np.ndarray], np.ndarray] | None = None
+    solver_preconditioner_kind: Literal["none", "grid_block"] = "none"
+    solver_preconditioner_subdivisions: int | tuple[int, int, int] = 2
+    solver_preconditioner_cubic_bbox: bool = True
+    solver_preconditioner_max_block_unknowns: int | None = None
+    compute_dtype: Literal["complex64", "complex128"] = "complex128"
+    accum_dtype: Literal["complex64", "complex128"] = "complex128"
+    cache_translation_blocks: bool = False
+    check_circumscribing_sphere_overlap: bool = True
+    circumscribing_sphere_overlap_atol: float = 0.0
+    solve_polarization_basis: bool = False
+    verbose: bool = True
+
+    def __post_init__(self) -> None:
+        if not (float(self.wavelength) > 0.0):
+            raise ValueError(f"`wavelength` must be > 0. Got {self.wavelength!r}.")
+        if int(self.lmax) < 1:
+            raise ValueError(f"`lmax` must be >= 1. Got {self.lmax!r}.")
+        n_medium = complex(self.n_medium)
+        if abs(n_medium.imag) > 0.0:
+            raise ValueError(f"`n_medium` must be real for this solver path. Got {n_medium!r}.")
+        if not (float(n_medium.real) > 0.0):
+            raise ValueError(f"`n_medium` must be positive. Got {n_medium!r}.")
+        if float(self.radial_lut_dr) < 0.0:
+            raise ValueError(f"`radial_lut_dr` must be >= 0. Got {self.radial_lut_dr!r}.")
+        if float(self.circumscribing_sphere_overlap_atol) < 0.0:
+            raise ValueError(
+                "`circumscribing_sphere_overlap_atol` must be >= 0. "
+                f"Got {self.circumscribing_sphere_overlap_atol!r}."
+            )
+        if not isinstance(self.check_circumscribing_sphere_overlap, (bool, np.bool_)):
+            raise ValueError("`check_circumscribing_sphere_overlap` must be a boolean.")
+        if not isinstance(self.force_general_initial_field, (bool, np.bool_)):
+            raise ValueError("`force_general_initial_field` must be a boolean.")
+        if float(self.solver_rtol) <= 0.0:
+            raise ValueError(f"`solver_rtol` must be > 0. Got {self.solver_rtol!r}.")
+        if not isinstance(self.solver_compute_final_residual, (bool, np.bool_)):
+            raise ValueError("`solver_compute_final_residual` must be a boolean.")
+        if int(self.solver_restart) < 1:
+            raise ValueError(f"`solver_restart` must be >= 1. Got {self.solver_restart!r}.")
+        if int(self.solver_maxiter) < 1:
+            raise ValueError(f"`solver_maxiter` must be >= 1. Got {self.solver_maxiter!r}.")
+        if int(self.solver_direct_max_n) < 1:
+            raise ValueError(
+                f"`solver_direct_max_n` must be >= 1. Got {self.solver_direct_max_n!r}."
+            )
+        if self.solver_preconditioner is not None and not callable(self.solver_preconditioner):
+            raise ValueError("`solver_preconditioner` must be callable or None.")
+        if self.solver_preconditioner_kind not in {"none", "grid_block"}:
+            raise ValueError(
+                "`solver_preconditioner_kind` must be one of {'none', 'grid_block'}. "
+                f"Got {self.solver_preconditioner_kind!r}."
+            )
+        if self.solver_preconditioner is not None and self.solver_preconditioner_kind != "none":
+            raise ValueError(
+                "Set either custom `solver_preconditioner` or built-in "
+                "`solver_preconditioner_kind`, not both."
+            )
+        subdiv = self.solver_preconditioner_subdivisions
+        if isinstance(subdiv, (int, np.integer)):
+            if int(subdiv) < 1:
+                raise ValueError(
+                    "`solver_preconditioner_subdivisions` must be >= 1. "
+                    f"Got {self.solver_preconditioner_subdivisions!r}."
+                )
+        elif isinstance(subdiv, (tuple, list)) and len(subdiv) == 3:
+            if any(int(v) < 1 for v in subdiv):
+                raise ValueError(
+                    "`solver_preconditioner_subdivisions` tuple entries must be >= 1. "
+                    f"Got {self.solver_preconditioner_subdivisions!r}."
+                )
+        else:
+            raise ValueError(
+                "`solver_preconditioner_subdivisions` must be an int or length-3 tuple/list. "
+                f"Got {self.solver_preconditioner_subdivisions!r}."
+            )
+        if (
+            self.solver_preconditioner_max_block_unknowns is not None
+            and int(self.solver_preconditioner_max_block_unknowns) < 1
+        ):
+            raise ValueError(
+                "`solver_preconditioner_max_block_unknowns` must be >= 1 when set. "
+                f"Got {self.solver_preconditioner_max_block_unknowns!r}."
+            )
+        if self.solver_warm_start is not None:
+            ws = np.asarray(self.solver_warm_start)
+            if ws.ndim not in (1, 2):
+                raise ValueError("`solver_warm_start` must be 1D, 2D, or None.")
+        resolve_compute_accum_dtypes(
+            compute_dtype=self.compute_dtype,
+            accum_dtype=self.accum_dtype,
+        )
+
+        method = str(self.solver_method).lower()
+        allowed = {"auto", "gmres", "bicgstab", "lgmres", "gcrotmk", "direct"}
+        if method not in allowed:
+            raise ValueError(
+                f"`solver_method` must be one of {sorted(allowed)}. Got {self.solver_method!r}."
+            )
+
+        _, az_shared = validate_angular_grid_pair(
+            polar_name="polar_angles",
+            azimuthal_name="azimuthal_angles",
+            polar_values=self.polar_angles,
+            azimuthal_values=self.azimuthal_angles,
+        )
+        warn_redundant_periodic_azimuth_endpoint(azimuth_name="azimuthal_angles", azimuth=az_shared)
+
+        has_source_polar = self.source_polar_angles is not None
+        has_source_azimuth = self.source_azimuthal_angles is not None
+        if has_source_polar != has_source_azimuth:
+            raise ValueError(
+                "Set both `source_polar_angles` and `source_azimuthal_angles`, or set neither."
+            )
+        if has_source_polar:
+            _, az_source = validate_angular_grid_pair(
+                polar_name="source_polar_angles",
+                azimuthal_name="source_azimuthal_angles",
+                polar_values=np.asarray(self.source_polar_angles),
+                azimuthal_values=np.asarray(self.source_azimuthal_angles),
+            )
+            warn_redundant_periodic_azimuth_endpoint(
+                azimuth_name="source_azimuthal_angles", azimuth=az_source
+            )
+
+        has_farfield_polar = self.farfield_polar_angles is not None
+        has_farfield_azimuth = self.farfield_azimuthal_angles is not None
+        if has_farfield_polar != has_farfield_azimuth:
+            raise ValueError(
+                "Set both `farfield_polar_angles` and `farfield_azimuthal_angles`, or set neither."
+            )
+        if has_farfield_polar:
+            _, az_farfield = validate_angular_grid_pair(
+                polar_name="farfield_polar_angles",
+                azimuthal_name="farfield_azimuthal_angles",
+                polar_values=np.asarray(self.farfield_polar_angles),
+                azimuthal_values=np.asarray(self.farfield_azimuthal_angles),
+            )
+            warn_redundant_periodic_azimuth_endpoint(
+                azimuth_name="farfield_azimuthal_angles", azimuth=az_farfield
+            )
+
+        if self.source is not None:
+            if not isinstance(self.source, Source):
+                raise TypeError(
+                    "`source` must satisfy the pyceles Source protocol "
+                    "(wavelength/medium_n + incident_coeffs + has_finite_incident_power APIs). "
+                    f"Got {type(self.source).__name__}."
+                )
+            source_wavelength = float(self.source.wavelength)
+            source_n_medium = complex(self.source.medium_n)
+            if not np.isclose(source_wavelength, float(self.wavelength), rtol=0.0, atol=0.0):
+                raise ValueError(
+                    "Configuration mismatch: `source.wavelength` must match `SimulationConfig.wavelength` "
+                    f"({source_wavelength!r} != {self.wavelength!r})."
+                )
+            if not np.isclose(source_n_medium, n_medium, rtol=0.0, atol=0.0):
+                raise ValueError(
+                    "Configuration mismatch: `source.medium_n` must match `SimulationConfig.n_medium` "
+                    f"({source_n_medium!r} != {n_medium!r})."
+                )
+
+    def source_angular_grids(self) -> tuple[np.ndarray, np.ndarray]:
+        polar_values = (
+            self.polar_angles if self.source_polar_angles is None else self.source_polar_angles
+        )
+        azimuthal_values = (
+            self.azimuthal_angles
+            if self.source_azimuthal_angles is None
+            else self.source_azimuthal_angles
+        )
+        return validate_angular_grid_pair(
+            polar_name="source_polar_angles",
+            azimuthal_name="source_azimuthal_angles",
+            polar_values=np.asarray(polar_values),
+            azimuthal_values=np.asarray(azimuthal_values),
+        )
+
+    def farfield_angular_grids(self) -> tuple[np.ndarray, np.ndarray]:
+        polar_values = (
+            self.polar_angles if self.farfield_polar_angles is None else self.farfield_polar_angles
+        )
+        azimuthal_values = (
+            self.azimuthal_angles
+            if self.farfield_azimuthal_angles is None
+            else self.farfield_azimuthal_angles
+        )
+        return validate_angular_grid_pair(
+            polar_name="farfield_polar_angles",
+            azimuthal_name="farfield_azimuthal_angles",
+            polar_values=np.asarray(polar_values),
+            azimuthal_values=np.asarray(azimuthal_values),
+        )
+
+
+__all__ = [
+    "SimulationConfig",
+    "validate_angular_grid_pair",
+    "warn_redundant_periodic_azimuth_endpoint",
+]

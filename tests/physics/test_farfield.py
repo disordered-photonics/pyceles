@@ -761,13 +761,14 @@ def test_simulation_dual_basis_farfield_matches_single_channel_run():
 
 
 def test_simulation_dual_basis_avoids_redundant_mixed_solve_and_farfield(monkeypatch):
-    import pyceles.simulation as simulation_module
+    import pyceles.simulation.postprocess as simulation_postprocess_module
+    import pyceles.simulation.solve as simulation_solve_module
 
     solve_rhs_shapes = []
     farfield_calls = 0
 
-    solve_linear_system_real = simulation_module.solve_linear_system
-    compute_far_field_patterns_real = simulation_module.compute_far_field_patterns
+    solve_linear_system_real = simulation_solve_module.solve_linear_system
+    compute_far_field_patterns_real = simulation_postprocess_module.compute_far_field_patterns
 
     def _solve_linear_system_wrapped(A_mv, b, **kwargs):
         solve_rhs_shapes.append(np.asarray(b).shape)
@@ -778,9 +779,13 @@ def test_simulation_dual_basis_avoids_redundant_mixed_solve_and_farfield(monkeyp
         farfield_calls += 1
         return compute_far_field_patterns_real(*args, **kwargs)
 
-    monkeypatch.setattr(simulation_module, "solve_linear_system", _solve_linear_system_wrapped)
     monkeypatch.setattr(
-        simulation_module,
+        simulation_solve_module,
+        "solve_linear_system",
+        _solve_linear_system_wrapped,
+    )
+    monkeypatch.setattr(
+        simulation_postprocess_module,
         "compute_far_field_patterns",
         _compute_far_field_patterns_wrapped,
     )
@@ -815,17 +820,21 @@ def test_simulation_dual_basis_avoids_redundant_mixed_solve_and_farfield(monkeyp
 
 
 def test_solve_sources_reuses_dense_lu_factorization(monkeypatch):
-    import pyceles.simulation as simulation_module
+    import pyceles.simulation.solve as simulation_solve_module
 
     lu_factor_calls = 0
-    factorize_dense_matrix_real = simulation_module.factorize_dense_matrix
+    factorize_dense_matrix_real = simulation_solve_module.factorize_dense_matrix
 
     def _factorize_wrapped(A_dense, **kwargs):
         nonlocal lu_factor_calls
         lu_factor_calls += 1
         return factorize_dense_matrix_real(A_dense, **kwargs)
 
-    monkeypatch.setattr(simulation_module, "factorize_dense_matrix", _factorize_wrapped)
+    monkeypatch.setattr(
+        simulation_solve_module,
+        "factorize_dense_matrix",
+        _factorize_wrapped,
+    )
 
     source = PlaneWave(
         wavelength=550.0,
