@@ -134,6 +134,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pyceles.postprocessing.nearfield`; the temporary
   `pyceles.postprocessing.workflows` import path was removed during the
   near-field package split.
+- Breaking: the far-field public package surface is now
+  `pyceles.postprocessing.farfield`; the old monolithic
+  `postprocessing/farfield.py` implementation was split into package modules
+  (`patterns`, `power`, `cross_sections`, `common`) with `__init__.py` as the
+  public entry point.
 - Breaking: near-field plotting overlays are now particle-native:
   `plot_spheres(...)`, `plot_nearfield_panels(...)`,
   `plot_nearfield_panels_channels(...)`, and
