@@ -7,7 +7,7 @@ import numpy as np
 from tqdm.auto import tqdm
 
 from pyceles.core.indexing import n_modes
-from pyceles.core.matvec import PreparedOperator, require_pairwise_coupling
+from pyceles.core.operators import PreparedOperator, require_pairwise_coupling
 from pyceles.core.translation import translation_block
 
 

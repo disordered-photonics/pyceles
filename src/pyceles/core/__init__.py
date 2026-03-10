@@ -23,7 +23,7 @@ from .fields import (
     svwf_outgoing_to_pwp,
     svwf_regular_to_pwp,
 )
-from .matvec import (
+from .operators import (
     AxisymmetricTGroup,
     CompositeParticleTOperator,
     CouplingOperator,

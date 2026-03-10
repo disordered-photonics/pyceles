@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from pyceles.core.indexing import n_modes
-from pyceles.core.matvec import (
+from pyceles.core.operators import (
     AxisymmetricTGroup,
     CompositeParticleTOperator,
     DenseTGroup,
@@ -167,7 +167,7 @@ def test_precompute_t_diagonal_reuses_identical_particle_kernels(monkeypatch):
         return original(*args, **kwargs)
 
     monkeypatch.setattr(
-        "pyceles.core.matvec.particle_T_diagonal",
+        "pyceles.core.operators.prepare.particle_T_diagonal",
         counted_particle_t_diagonal,
     )
 

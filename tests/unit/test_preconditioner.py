@@ -5,7 +5,7 @@ import pytest
 
 from pyceles.core.fields import PlaneWave
 from pyceles.core.indexing import n_modes
-from pyceles.core.matvec import (
+from pyceles.core.operators import (
     CompositeParticleTOperator,
     DenseTGroup,
     DiagonalTGroup,

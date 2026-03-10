@@ -1,0 +1,114 @@
+from __future__ import annotations
+
+"""Prepared single-particle scattering-operator boundary."""
+
+from dataclasses import dataclass, field
+from typing import Protocol, Sequence
+
+import numpy as np
+
+from pyceles.core.indexing import n_modes
+
+from .groups import PreparedParticleTGroup
+
+Array = np.ndarray
+
+
+class ParticleTOperator(Protocol):
+    """Prepared particle-local (single-particle) scattering operator `T`."""
+
+    lmax: int
+    n_particles: int
+    dtype: np.dtype
+
+    def apply(self, x: Array) -> Array: ...
+
+    def rhs(self, b: Array) -> Array: ...
+
+    def apply_particle_block(self, particle_index: int, block: Array) -> Array: ...
+
+    def mode_diagonal(self) -> Array | None: ...
+
+    def degree_diagonals(self) -> tuple[Array, Array] | None: ...
+
+
+@dataclass
+class CompositeParticleTOperator:
+    """Composite particle-local / single-particle T operator."""
+
+    lmax: int
+    n_particles: int
+    groups: Sequence[PreparedParticleTGroup]
+    dtype: np.dtype = np.dtype(np.complex128)
+    _particle_to_group: np.ndarray = field(init=False, repr=False)
+    _particle_to_local: np.ndarray = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        ns = int(self.n_particles)
+        group_of = np.full(ns, -1, dtype=np.int64)
+        local_of = np.full(ns, -1, dtype=np.int64)
+        for gidx, group in enumerate(self.groups):
+            ids = np.asarray(group.particle_indices, dtype=np.int64).reshape(-1)
+            if ids.size == 0:
+                raise ValueError("Particle-T operator groups must be non-empty.")
+            if np.any(ids < 0) or np.any(ids >= ns):
+                raise ValueError("Particle-T operator group indices out of bounds.")
+            if np.any(group_of[ids] != -1):
+                raise ValueError("Particle-T operator groups must not overlap.")
+            group_of[ids] = gidx
+            local_of[ids] = np.arange(ids.size, dtype=np.int64)
+        if np.any(group_of < 0):
+            raise ValueError("Particle-T operator groups must cover all particles.")
+        self._particle_to_group = group_of
+        self._particle_to_local = local_of
+
+    @property
+    def n_modes(self) -> int:
+        return n_modes(self.lmax)
+
+    def apply(self, x: Array) -> Array:
+        arr = np.asarray(x, dtype=self.dtype).reshape(self.n_particles, self.n_modes)
+        out = np.zeros_like(arr, dtype=self.dtype)
+        for group in self.groups:
+            ids = np.asarray(group.particle_indices, dtype=np.int64)
+            out[ids] = group.apply_subset(arr[ids])
+        return out.reshape(self.n_particles * self.n_modes)
+
+    def rhs(self, b: Array) -> Array:
+        arr = np.asarray(b, dtype=self.dtype).reshape(self.n_particles, self.n_modes)
+        out = np.zeros_like(arr, dtype=self.dtype)
+        for group in self.groups:
+            ids = np.asarray(group.particle_indices, dtype=np.int64)
+            out[ids] = group.rhs_subset(arr[ids])
+        return out.reshape(self.n_particles * self.n_modes)
+
+    def apply_particle_block(self, particle_index: int, block: Array) -> Array:
+        i = int(particle_index)
+        gidx = int(self._particle_to_group[i])
+        local = int(self._particle_to_local[i])
+        return self.groups[gidx].apply_local_block(local, block)
+
+    def mode_diagonal(self) -> Array | None:
+        out = np.empty((self.n_particles, self.n_modes), dtype=self.dtype)
+        for group in self.groups:
+            ids = np.asarray(group.particle_indices, dtype=np.int64)
+            diag = group.mode_diagonal()
+            if diag is None:
+                return None
+            out[ids] = np.asarray(diag, dtype=self.dtype)
+        return out
+
+    def degree_diagonals(self) -> tuple[Array, Array] | None:
+        out_m = np.empty((self.n_particles, self.lmax + 1), dtype=self.dtype)
+        out_n = np.empty((self.n_particles, self.lmax + 1), dtype=self.dtype)
+        for group in self.groups:
+            ids = np.asarray(group.particle_indices, dtype=np.int64)
+            diags = group.degree_diagonals()
+            if diags is None:
+                return None
+            out_m[ids] = np.asarray(diags[0], dtype=self.dtype)
+            out_n[ids] = np.asarray(diags[1], dtype=self.dtype)
+        return out_m, out_n
+
+
+__all__ = ["CompositeParticleTOperator", "ParticleTOperator"]

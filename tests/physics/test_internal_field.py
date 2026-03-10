@@ -1,7 +1,7 @@
 import numpy as np
 
 from pyceles.core.fields import PlaneWave, incident_coeffs_planewave
-from pyceles.core.matvec import make_prepared_A_and_rhs, prepare_matvec
+from pyceles.core.operators import make_prepared_A_and_rhs, prepare_matvec
 from pyceles.core.particles import Sphere, spheres_from_arrays
 from pyceles.postprocessing.nearfield import compute_internal_field
 

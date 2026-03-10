@@ -115,6 +115,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `core.matvec.precompute_T_diagonal(...)` now use particle descriptors as the
   canonical API (`particles=[...]`), and thin `*_from_particles` aliases were
   removed.
+- Breaking: prepared-operator ownership now lives under
+  `pyceles.core.operators`; the old monolithic `core/matvec.py` module was
+  split into package modules (`base`, `groups`, `single_body`,
+  `coupling_pairwise`, `coupling_dense`, `prepare`) with no compatibility
+  facade kept.
 - Added canonical particle-construction helpers
   (`spheres_from_arrays`, `layered_spheres_from_arrays`,
   `spheroids_from_arrays`).

@@ -13,7 +13,7 @@ from pyceles._logo import print_logo
 from pyceles._version import __version__
 from pyceles.core.angular import uniform_periodic_azimuth_grid, uniform_polar_grid
 from pyceles.core.indexing import n_modes
-from pyceles.core.matvec import (
+from pyceles.core.operators import (
     PreparedOperator,
     assemble_dense_A_numpy,
     prepare_matvec,

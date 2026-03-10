@@ -13,7 +13,7 @@ import numpy as np
 import pyceles as pcl
 from pyceles.core.fields import project_source_to_svwf
 from pyceles.core.indexing import n_modes
-from pyceles.core.matvec import (
+from pyceles.core.operators import (
     estimate_translation_cache_bytes,
     make_prepared_A_and_rhs,
     prepare_matvec,
