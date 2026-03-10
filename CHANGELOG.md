@@ -67,6 +67,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `SimulationConfig.azimuthal_angles` default now uses periodic sampling on
   `[0, 2*pi)` (`endpoint=False`) to keep periodic azimuth fast paths active by
   default.
+- `SimulationConfig` shared default angular grids now use
+  `uniform_polar_grid(1801)` and `uniform_periodic_azimuth_grid(360)`, which
+  are lighter than the previous defaults while still signaling the distinct
+  polar/azimuth quadrature roles through their counts.
 - Angular-grid setup now uses canonical helpers:
   `core.uniform_polar_grid(n)` and
   `core.uniform_periodic_azimuth_grid(n)`.

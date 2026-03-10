@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-"""Public far-field package for PWPs, power diagnostics, and cross sections."""
+"""Public far-field package for PWPs, power diagnostics, and cross sections.
+
+The package surface is organized by physical ownership:
+- `patterns`: assemble scattered/initial/total plane-wave spectra
+- `power`: finite-power beam flux and decomposition diagnostics
+- `cross_sections`: plane-wave-normalized scattering/extinction/absorption
+"""
 
 from .cross_sections import (
     absorption_cross_section,

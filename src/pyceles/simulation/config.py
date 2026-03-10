@@ -14,7 +14,13 @@ from pyceles.core.sources import Source
 
 
 def _as_1d_float_array(name: str, values: np.ndarray) -> np.ndarray:
-    """Validate monotone angular quadrature nodes used in field integrations."""
+    """Validate one monotone angular node vector used in quadratures or PWPs.
+
+    These arrays represent sampled polar or azimuthal directions. Requiring a
+    finite, strictly increasing 1D grid avoids ambiguous trapezoidal weights
+    and prevents duplicate angular directions from silently polluting source
+    projection or far-field integrations.
+    """
     arr = np.asarray(values, dtype=float)
     if arr.ndim != 1:
         raise ValueError(f"`{name}` must be a 1D array; got shape {arr.shape}.")
@@ -34,7 +40,7 @@ def validate_angular_grid_pair(
     polar_values: np.ndarray,
     azimuthal_values: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Validate one `(beta, alpha)` angular-grid pair used in quadratures/PWPs."""
+    """Validate one `(beta, alpha)` angular-grid pair used in quadratures or PWPs."""
     polar = _as_1d_float_array(polar_name, polar_values)
     azimuth = _as_1d_float_array(azimuthal_name, azimuthal_values)
     if polar[0] < -1e-12 or polar[-1] > np.pi + 1e-12:
@@ -45,7 +51,7 @@ def validate_angular_grid_pair(
 
 
 def warn_redundant_periodic_azimuth_endpoint(*, azimuth_name: str, azimuth: np.ndarray) -> None:
-    """Warn on duplicated periodic endpoints (0 and 2*pi) in azimuth grids."""
+    """Warn when a periodic azimuth grid duplicates both 0 and 2*pi endpoints."""
     if azimuth.size < 2:
         return
     a0 = float(azimuth[0])
@@ -65,14 +71,39 @@ def warn_redundant_periodic_azimuth_endpoint(*, azimuth_name: str, azimuth: np.n
 
 @dataclass(frozen=True)
 class SimulationConfig:
-    """High-level configuration for one homogeneous-medium many-particle run."""
+    """High-level configuration for one homogeneous-medium many-particle run.
+
+    The config gathers physical inputs (wavelength, embedding medium, source,
+    truncation) together with numerical policy (angular grids, solver strategy,
+    precision, caching, preconditioning) so a run remains explicit and
+    reproducible.
+
+    Grid policy:
+    - `polar_angles` / `azimuthal_angles` are the shared CELES-like defaults
+      used by source projection and far-field sampling unless stage-specific
+      overrides are provided.
+    - The defaults intentionally use an odd-count polar grid and a periodic
+      endpoint-excluded azimuth grid so their different quadrature roles are
+      visible from the counts alone.
+
+    Geometry / physics policy:
+    - the current homogeneous-medium solver path assumes real `n_medium`
+    - circumscribing-sphere overlap checks remain enabled by default because
+      the multiple-scattering T-matrix formulation assumes disjoint
+      circumscribing spheres
+
+    Near-field limitation:
+    - spheroid postprocessing still uses the spherical outgoing SVWF expansion
+      outside the particle, so points inside the circumscribing shell but
+      outside the physical spheroid remain unreliable.
+    """
 
     wavelength: float = 550.0
     n_medium: complex = 1.0 + 0j
     lmax: int = 3
     source: Source | None = None
-    polar_angles: np.ndarray = field(default_factory=lambda: uniform_polar_grid(5001))
-    azimuthal_angles: np.ndarray = field(default_factory=lambda: uniform_periodic_azimuth_grid(201))
+    polar_angles: np.ndarray = field(default_factory=lambda: uniform_polar_grid(1801))
+    azimuthal_angles: np.ndarray = field(default_factory=lambda: uniform_periodic_azimuth_grid(360))
     source_polar_angles: np.ndarray | None = None
     source_azimuthal_angles: np.ndarray | None = None
     farfield_polar_angles: np.ndarray | None = None

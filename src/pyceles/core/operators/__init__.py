@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-"""Prepared many-body operator package."""
+"""Prepared many-body operator package.
+
+This package owns the solver-side split between particle-local scattering
+operators `T` and inter-particle coupling operators `W`. New coupling backends
+such as periodic, FFT, FMM, or GPU variants should plug in here through the
+owned coupling and preparation modules rather than re-entangling the operator
+stack into one file.
+"""
 
 from .base import Array, CouplingOperator, PrecomputableCouplingOperator, PreparedOperator
 from .coupling_dense import (

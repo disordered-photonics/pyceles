@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-"""Simulation result containers and result-shaping helpers."""
+"""Simulation result containers and result-shaping helpers.
+
+These dataclasses are intentionally frozen because they represent completed
+solve/postprocess payloads that should be safe to pass around without hidden
+mutation. The mutable state lives in the `Simulation` orchestrator caches, not
+in result objects.
+"""
 
 from dataclasses import dataclass
 from typing import Mapping

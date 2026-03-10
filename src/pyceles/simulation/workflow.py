@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-"""High-level Simulation orchestrator."""
+"""High-level `Simulation` orchestrator.
+
+The class holds geometry/config state plus reusable prepared-operator caches,
+while the actual solve and postprocess logic lives in sibling modules so those
+policies can grow without collapsing the workflow layer back into one file.
+"""
 
 from typing import Mapping, Sequence
 

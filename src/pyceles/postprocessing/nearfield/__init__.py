@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-"""Canonical near-field implementation package."""
+"""Canonical near-field implementation package.
+
+The package surface mirrors the physical decomposition used throughout
+`pyceles`: initial, scattered, internal, and total fields, plus slice helpers
+and point-classification utilities used to decide which contribution is valid
+at each observation point.
+"""
 
 from .classification import InternalPointClassification, classify_internal_points
 from .components import (
