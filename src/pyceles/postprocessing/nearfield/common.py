@@ -83,8 +83,15 @@ def build_internal_mode_tensors(
     return m_all, n_all
 
 
+def clear_caches() -> None:
+    """Clear process-global near-field helper caches."""
+
+    mode_indices_by_l.cache_clear()
+
+
 __all__ = [
     "build_internal_mode_tensors",
+    "clear_caches",
     "contract_modes",
     "dx_xz_hankel1",
     "mode_indices_by_l",

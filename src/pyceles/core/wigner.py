@@ -48,7 +48,7 @@ def _log_factorial(n: int) -> float:
 # tied to those modes (including m3 = -m1-m2 in the translated convention).
 # So reachable tuples are a constrained subset of all integers, not arbitrary.
 # If many distinct lmax values are explored in one long process, call
-# clear_cache() between runs to release memory.
+# clear_caches() between runs to release memory.
 @cache
 def wigner_3j(l1: int, l2: int, l3: int, m1: int, m2: int, m3: int) -> float:
     """Compute the Wigner 3j symbol (l1 l2 l3; m1 m2 m3) for integer arguments."""
@@ -190,7 +190,7 @@ def wigner_D(l: int, m: int, m_prime: int, alpha: float, beta: float, gamma: flo
     )
 
 
-def clear_cache() -> None:
-    """Clear the global Wigner cache."""
+def clear_caches() -> None:
+    """Clear process-global Wigner caches."""
 
     wigner_3j.cache_clear()

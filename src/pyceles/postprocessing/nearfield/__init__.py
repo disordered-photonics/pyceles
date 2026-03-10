@@ -9,6 +9,7 @@ at each observation point.
 """
 
 from .classification import InternalPointClassification, classify_internal_points
+from .common import clear_caches
 from .components import (
     NearFieldComponents,
     compute_near_field_components,
@@ -32,6 +33,7 @@ __all__ = [
     "NearFieldRadialLUT",
     "NearFieldSlice",
     "classify_internal_points",
+    "clear_caches",
     "compute_initial_field",
     "compute_internal_field",
     "compute_near_field",

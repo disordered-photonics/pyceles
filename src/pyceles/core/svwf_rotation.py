@@ -126,3 +126,9 @@ def rotate_svwf_tmatrix_block(
             rotated[row_slice, :] = block.T @ rotated_cols[row_slice, :]
 
     return rotated
+
+
+def clear_caches() -> None:
+    """Clear process-global SVWF rotation block caches."""
+
+    _scalar_rotation_block_cached.cache_clear()

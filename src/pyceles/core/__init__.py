@@ -55,6 +55,8 @@ from .particles import (
     spheres_from_arrays,
     spheroids_from_arrays,
 )
+from .spherical import clear_caches as _clear_spherical_caches
+from .svwf_rotation import clear_caches as _clear_svwf_rotation_caches
 from .svwf_rotation import rotate_svwf_tmatrix_block, svwf_rotation_matrix
 from .tmatrix import (
     layered_internal_ab_ratios,
@@ -65,6 +67,24 @@ from .tmatrix import (
     particle_T_matrix_block,
     particle_T_matrix_blocks,
 )
+from .translation import clear_caches as _clear_translation_caches
+from .wigner import clear_caches as _clear_wigner_caches
+
+
+def clear_caches() -> None:
+    """Clear process-global core precompute caches.
+
+    This is an explicit memory-management tool for interactive work and large
+    parameter sweeps. `pyceles` does not clear these caches automatically
+    because repeated solves in the same process often benefit from keeping the
+    translation, rotation, and angular-recurrence tables warm.
+    """
+
+    _clear_translation_caches()
+    _clear_spherical_caches()
+    _clear_svwf_rotation_caches()
+    _clear_wigner_caches()
+
 
 __all__ = [
     "Spheroid",
@@ -101,6 +121,7 @@ __all__ = [
     "assemble_dense_A_numpy",
     "apply_A_numpy",
     "apply_W_numpy",
+    "clear_caches",
     "estimate_translation_cache_bytes",
     "make_axisymmetric_block_group_factory",
     "make_axisymmetric_group_factory",

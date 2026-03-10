@@ -57,6 +57,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cross-section oracles.
 - Added sphere regression coverage against `miepython` for differential
   scattering and selected exterior total-field samples.
+- Added explicit cache-clearing helpers for interactive workflows:
+  - `pyceles.core.clear_caches()`
+  - `pyceles.postprocessing.nearfield.clear_caches()`
+  so long-lived sessions can release process-global precompute tables on demand.
 
 ### Changed
 - Source capability contract now includes

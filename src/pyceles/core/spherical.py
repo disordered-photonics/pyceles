@@ -227,3 +227,9 @@ def spherical_functions_trigon(ct: Any, st: Any, lmax: int, xp=None, *, return_p
     if return_plm:
         return pi, tau, plm
     return pi, tau
+
+
+def clear_caches() -> None:
+    """Clear process-global spherical recurrence caches."""
+
+    _legendre_scalar_tables.cache_clear()

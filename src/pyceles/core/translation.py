@@ -164,6 +164,19 @@ def translation_ab5_table(lmax: int, dtype=np.complex128) -> np.ndarray:
     return _translation_ab5_table_cached(int(lmax), np.dtype(dtype).str)
 
 
+def clear_caches() -> None:
+    """Clear process-global translation precompute caches.
+
+    This is intended for long interactive sessions and exploratory parameter
+    sweeps where many distinct `(lmax, dtype)` combinations may be visited in a
+    single Python process. `pyceles` does not clear these caches automatically
+    because repeated solves often benefit from keeping translation tables warm.
+    """
+
+    _translation_ab5_table_cached.cache_clear()
+    _translation_mode_pair_tables.cache_clear()
+
+
 @cache
 def _translation_mode_pair_tables(lmax: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Precompute mode-pair tables for fast translation block assembly.
