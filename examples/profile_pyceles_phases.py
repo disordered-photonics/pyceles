@@ -81,8 +81,9 @@ def _profile_phase(
     prof = cProfile.Profile()
     t0 = time.perf_counter()
     if cuda_profiler_api:
-        cupy, _ = import_cupy()
-        profile_context = cupy.profiler.profile()
+        import cupyx.profiler
+
+        profile_context = cupyx.profiler.profile()
     else:
         profile_context = nullcontext()
     with profile_context:
