@@ -149,14 +149,18 @@ def _translation_matvec_raw_kernel(lmax: int, dtype_str: str):
         __shared__ {real_type} p_pdm_shared[{n_p_pdm}];
         __shared__ {real_type} cos_mphi_shared[{n_phase}];
         __shared__ {real_type} sin_mphi_shared[{n_phase}];
+        __shared__ {real_type} r_shared;
+        __shared__ {real_type} ct_shared;
+        __shared__ {real_type} st_shared;
+        __shared__ {real_type} phi_shared;
 
         const int tau1 = mode_tau[n1];
         const int l1 = mode_l[n1];
         const int m1 = mode_m[n1];
 
         for (int s1 = blockIdx.y; s1 < ns; s1 += gridDim.y) {{
-            {real_type} re_incr = 0;
-            {real_type} im_incr = 0;
+            {real_type} re_incr = ({real_type})0;
+            {real_type} im_incr = ({real_type})0;
 
             for (int s2 = 0; s2 < ns; ++s2) {{
                 if (s2 == s1) {{
@@ -166,33 +170,47 @@ def _translation_matvec_raw_kernel(lmax: int, dtype_str: str):
                 if (threadIdx.x == 0) {{
                     // Geometry and angular factors depend only on the particle pair
                     // (s1, s2), not on the output mode. Compute them once per block
-                    // and let all mode threads reuse them.
+                    // and let all mode threads reuse them. The heavier table
+                    // fills below are then distributed cooperatively.
                     const {real_type} x21 = positions[3 * s1] - positions[3 * s2];
                     const {real_type} y21 = positions[3 * s1 + 1] - positions[3 * s2 + 1];
                     const {real_type} z21 = positions[3 * s1 + 2] - positions[3 * s2 + 2];
-                    const {real_type} r = {math["sqrt"]}(x21 * x21 + y21 * y21 + z21 * z21);
-                    const {real_type} ct = z21 / r;
-                    const {real_type} st = {math["sqrt"]}({math["max"]}(({real_type})0, ({real_type})1 - ct * ct));
-                    const {real_type} phi = {math["atan2"]}(y21, x21);
+                    r_shared = {math["sqrt"]}(x21 * x21 + y21 * y21 + z21 * z21);
+                    ct_shared = z21 / r_shared;
+                    st_shared = {math["sqrt"]}(
+                        {math["max"]}(({real_type})0, ({real_type})1 - ct_shared * ct_shared)
+                    );
+                    phi_shared = {math["atan2"]}(y21, x21);
+                }}
+                __syncthreads();
 
-                    for (int p = 0; p < {n_orders}; ++p) {{
-                        re_h_shared[p] = hankel_lookup_linear(p, r, re_h, inv_dr, last_index);
-                        im_h_shared[p] = hankel_lookup_linear(p, r, im_h, inv_dr, last_index);
-                        for (int absdm = 0; absdm <= p; ++absdm) {{
-                            p_pdm_shared[p * (p + 1) / 2 + absdm] =
-                                assoc_legendre_function(p, absdm, ct, st, plm_coeffs);
-                        }}
+                for (int p = threadIdx.x; p < {n_orders}; p += blockDim.x) {{
+                    re_h_shared[p] = hankel_lookup_linear(p, r_shared, re_h, inv_dr, last_index);
+                    im_h_shared[p] = hankel_lookup_linear(p, r_shared, im_h, inv_dr, last_index);
+                    for (int absdm = 0; absdm <= p; ++absdm) {{
+                        p_pdm_shared[p * (p + 1) / 2 + absdm] =
+                            assoc_legendre_function(p, absdm, ct_shared, st_shared, plm_coeffs);
                     }}
-
+                }}
+                if (threadIdx.x == 0) {{
+                    // We keep the direct trig form here for readability.
+                    // A recurrence-based phase-table fill was tested on the
+                    // 5k-particle c64 benchmark and did not produce a material
+                    // end-to-end improvement.
                     for (int dm = -2 * {lmax}; dm <= 2 * {lmax}; ++dm) {{
                         const int idx = dm + 2 * {lmax};
-                        cos_mphi_shared[idx] = {math["cos"]}(({real_type})dm * phi);
-                        sin_mphi_shared[idx] = {math["sin"]}(({real_type})dm * phi);
+                        cos_mphi_shared[idx] = {math["cos"]}(({real_type})dm * phi_shared);
+                        sin_mphi_shared[idx] = {math["sin"]}(({real_type})dm * phi_shared);
                     }}
                 }}
                 __syncthreads();
 
                 for (int n2 = 0; n2 < nmodes; ++n2) {{
+                    // We intentionally read x[s2, n2] directly from global memory.
+                    // Profiling on the 5k-particle c64 benchmark showed that
+                    // staging this small mode vector in shared memory did not
+                    // produce a material end-to-end speedup, while it made the
+                    // kernel more verbose and stateful.
                     const {real_type} re_x_tmp = re_x[s2 * nmodes + n2];
                     const {real_type} im_x_tmp = im_x[s2 * nmodes + n2];
                     const int delta_m = mode_m[n2] - m1;
@@ -404,6 +422,11 @@ class CuPyPairwiseCouplingOperator:
         # - complex128 keeps one warp per block to limit register pressure,
         # - complex64 uses up to two warps when available,
         # - the tile is capped by both the device limit and the actual mode count.
+        #
+        # We also tested allowing "helper" threads above the active mode count
+        # so extra lanes could participate in the cooperative pair setup.
+        # On the 5k-particle c64 benchmark that was slower overall, so we keep
+        # the tighter mode-count-capped launch.
         #
         # This remains valid for modestly larger lmax because `blocks_x` grows as
         # needed. For very large N we cap the grid height at the device maximum
