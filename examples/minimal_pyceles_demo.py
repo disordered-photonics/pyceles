@@ -180,18 +180,32 @@ def _render_quick_ldos_map(
 
 
 def main() -> None:
-    # 4 non-overlapping spheres in the y=0 plane (good for y-slice near-field plotting)
-    positions = np.array(
-        [
-            [-360.0, 0.0, -120.0],
-            [-80.0, 0.0, 100.0],
-            [180.0, 0.0, -80.0],
-            [420.0, 0.0, 140.0],
-        ],
-        dtype=float,
-    )
-    radii = np.array([110.0, 90.0, 120.0, 80.0], dtype=float)
-    n_particle = np.array([1.5 + 0.0j, 2.5 + 0.0j, 1.5 + 0.1j, 2.5 + 0.2j], dtype=np.complex128)
+    # Mixed particle families in the y=0 plane to exercise the CuPy raw-kernel
+    # coupling path together with diagonal and dense single-body T groups.
+    particles = [
+        pcl.Sphere(
+            position=(-360.0, 0.0, -120.0),
+            radius=110.0,
+            refractive_index=1.5 + 0.0j,
+        ),
+        pcl.LayeredSphere(
+            position=(-80.0, 0.0, 100.0),
+            layer_radii=(55.0, 90.0),
+            layer_refractive_indices=(1.3 + 0.0j, 2.5 + 0.0j),
+        ),
+        pcl.Spheroid(
+            position=(180.0, 0.0, -80.0),
+            equatorial_radius=85.0,
+            polar_radius=120.0,
+            refractive_index=1.5 + 0.1j,
+            euler_angles=(0.15, 0.4, -0.2),
+        ),
+        pcl.Sphere(
+            position=(420.0, 0.0, 140.0),
+            radius=80.0,
+            refractive_index=2.5 + 0.2j,
+        ),
+    ]
 
     source = pcl.PlaneWave(
         wavelength=550.0,
@@ -210,14 +224,11 @@ def main() -> None:
         accum_dtype="complex128",
         polar_angles=pcl.core.uniform_polar_grid(721),
         azimuthal_angles=pcl.core.uniform_periodic_azimuth_grid(360),
-        solver_method="auto",
+        operator_backend="cupy",
+        solver_method="gmres",
+        solver_restart=10,
+        solver_maxiter=150,
         verbose=True,
-    )
-
-    particles = pcl.core.spheres_from_arrays(
-        positions=positions,
-        radii=radii,
-        refractive_indices=n_particle,
     )
     sim = pcl.Simulation(cfg, particles=particles)
     run = sim.run()
@@ -264,7 +275,10 @@ def main() -> None:
         accum_dtype="complex128",
         polar_angles=pcl.core.uniform_polar_grid(721),
         azimuthal_angles=pcl.core.uniform_periodic_azimuth_grid(360),
-        solver_method="direct",
+        operator_backend="cupy",
+        solver_method="gmres",
+        solver_restart=10,
+        solver_maxiter=150,
         solver_compute_final_residual=False,
         verbose=True,
     )

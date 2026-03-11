@@ -662,7 +662,7 @@ def test_prepare_matvec_accepts_mixed_sphere_and_layered():
     assert np.all(np.isfinite(y))
 
 
-def test_prepare_matvec_cupy_rejects_non_diagonal_particle_groups():
+def test_prepare_matvec_cupy_matches_numpy_for_mixed_particle_groups():
     lmax, k, positions, radii, n_particle, _, n_medium, _, _ = _sample_problem()
     particles: list[Particle] = [
         Sphere(
@@ -677,17 +677,38 @@ def test_prepare_matvec_cupy_rejects_non_diagonal_particle_groups():
             refractive_index=complex(n_particle[1]),
         ),
     ]
+    rng = np.random.default_rng(11)
+    x = np.asarray(
+        rng.standard_normal(len(particles) * n_modes(lmax))
+        + 1j * rng.standard_normal(len(particles) * n_modes(lmax)),
+        dtype=np.complex128,
+    )
 
-    with pytest.raises(NotImplementedError, match="supports only diagonal single-body groups"):
-        prepare_matvec(
-            lmax=lmax,
-            k=k,
-            particles=particles,
-            n_medium=n_medium,
-            radial_lut_dr=0.5,
-            cache_translation_blocks=False,
-            backend="cupy",
-        )
+    prepared_numpy = prepare_matvec(
+        lmax=lmax,
+        k=k,
+        particles=particles,
+        n_medium=n_medium,
+        radial_lut_dr=0.5,
+        cache_translation_blocks=False,
+        backend="numpy",
+    )
+    prepared_cupy = prepare_matvec(
+        lmax=lmax,
+        k=k,
+        particles=particles,
+        n_medium=n_medium,
+        radial_lut_dr=0.5,
+        cache_translation_blocks=False,
+        backend="cupy",
+    )
+
+    np.testing.assert_allclose(
+        prepared_cupy.apply_A(x),
+        prepared_numpy.apply_A(x),
+        rtol=5e-9,
+        atol=5e-10,
+    )
 
 
 def test_prepare_matvec_cupy_rejects_translation_block_cache():

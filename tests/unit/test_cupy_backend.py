@@ -60,6 +60,28 @@ def _plane_wave_source(wavelength: float, n_medium: complex) -> pcl.PlaneWave:
     )
 
 
+def _mixed_cluster_particles() -> tuple[Particle, ...]:
+    return (
+        pcl.Sphere(
+            position=(-220.0, 0.0, -40.0),
+            radius=70.0,
+            refractive_index=1.52 + 0.01j,
+        ),
+        pcl.LayeredSphere(
+            position=(40.0, 0.0, 30.0),
+            layer_radii=(45.0, 85.0),
+            layer_refractive_indices=(1.35 + 0.0j, 1.68 + 0.02j),
+        ),
+        pcl.Spheroid(
+            position=(250.0, 0.0, -20.0),
+            equatorial_radius=60.0,
+            polar_radius=95.0,
+            refractive_index=1.47 + 0.03j,
+            euler_angles=(0.1, 0.35, -0.2),
+        ),
+    )
+
+
 def _sim_cfg(
     *,
     operator_backend: Literal["numpy", "cupy"],
@@ -272,4 +294,48 @@ def test_cupy_simulation_run_matches_numpy_for_coeffs_farfield_and_nearfield(
         np.asarray(nf_numpy.H_scattered),
         rtol=nf_rtol,
         atol=nf_atol,
+    )
+
+
+def test_cupy_mixed_particle_groups_match_numpy_for_solve_and_backscatter() -> None:
+    wavelength = 550.0
+    n_medium = 1.0 + 0j
+    particles = _mixed_cluster_particles()
+    source = _plane_wave_source(wavelength, n_medium)
+
+    cfg_numpy = _sim_cfg(
+        operator_backend="numpy",
+        compute_dtype="complex128",
+        wavelength=wavelength,
+        n_medium=n_medium,
+        source=source,
+    )
+    cfg_cupy = _sim_cfg(
+        operator_backend="cupy",
+        compute_dtype="complex128",
+        wavelength=wavelength,
+        n_medium=n_medium,
+        source=source,
+    )
+
+    run_numpy = pcl.Simulation(cfg_numpy, particles=particles).run(include_farfield=True)
+    run_cupy = pcl.Simulation(cfg_cupy, particles=particles).run(include_farfield=True)
+
+    np.testing.assert_allclose(run_cupy.coeffs, run_numpy.coeffs, rtol=5e-8, atol=5e-10)
+
+    intensity_numpy = far_field_intensity(
+        run_numpy.farfield.scattered_te,
+        run_numpy.farfield.scattered_tm,
+    )
+    intensity_cupy = far_field_intensity(
+        run_cupy.farfield.scattered_te,
+        run_cupy.farfield.scattered_tm,
+    )
+    kz = np.asarray(run_numpy.farfield.scattered_te["kz"], dtype=float)
+    backward_mask = kz <= 0.0
+    np.testing.assert_allclose(
+        intensity_cupy[backward_mask],
+        intensity_numpy[backward_mask],
+        rtol=5e-8,
+        atol=5e-10,
     )

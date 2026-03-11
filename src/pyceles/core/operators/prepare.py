@@ -28,7 +28,7 @@ from .groups import (
     plan_particle_t_groups,
 )
 from .single_body import CompositeParticleTOperator, ParticleTOperator
-from .single_body_cupy import CuPyDiagonalParticleTOperator
+from .single_body_cupy import wrap_particle_t_groups_cupy
 
 Array = np.ndarray
 
@@ -259,36 +259,29 @@ def prepare_matvec(
                 "The CuPy operator backend exposes only the direct raw-kernel coupling path. "
                 "Translation-block caching is not supported."
             )
-        if particle_t_group_factories is not None:
-            raise NotImplementedError(
-                "The CuPy operator backend does not support custom particle-T group factories."
-            )
-        plans = plan_particle_t_groups(tuple(part))
-        unsupported = [plan for plan in plans if plan.representation != "diagonal"]
-        if unsupported:
-            labels = ", ".join(
-                f"{unsupported_plan.representation}:{tuple(int(i) for i in unsupported_plan.particle_indices)}"
-                for unsupported_plan in unsupported
-            )
-            raise NotImplementedError(
-                "The CuPy operator backend supports only diagonal single-body groups "
-                f"(spheres/layered spheres). Unsupported groups: {labels}."
-            )
-        T_M, T_N = precompute_T_diagonal(
+        # The CuPy backend accepts mixed diagonal/dense groups, including
+        # axisymmetric particles such as spheroids, by uploading explicit
+        # spherical-basis T blocks to the GPU. It does not currently wrap the
+        # narrower callback-only axisymmetric group hooks onto device, because
+        # the current particle families can already use the explicit-block path
+        # and future database-driven particle types are expected to do the same.
+        cpu_particle_t = _prepare_particle_t_operator(
             lmax=int(lmax),
             k=k_f,
             particles=part,
             n_medium=n_medium,
             dtype=op_dtype,
+            group_factories=particle_t_group_factories,
         )
         particle_t = cast(
             ParticleTOperator,
-            CuPyDiagonalParticleTOperator(
+            wrap_particle_t_groups_cupy(
+                cast(
+                    tuple[DiagonalTGroup | DenseTGroup | AxisymmetricTGroup, ...],
+                    tuple(cpu_particle_t.groups),
+                ),
                 lmax=int(lmax),
                 n_particles=len(part),
-                T_diag=build_T_mode_diagonal(int(lmax), T_M, T_N),
-                T_M=T_M,
-                T_N=T_N,
                 dtype=op_dtype,
             ),
         )
