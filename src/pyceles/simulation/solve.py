@@ -108,9 +108,15 @@ def solve_sources_core(
     k = k0 * float(np.real(cfg.n_medium))
 
     solver_name = str(cfg.solver_method).lower()
-    will_use_direct = solver_name == "direct" or (
-        solver_name == "auto" and unknowns <= int(cfg.solver_direct_max_n)
+    operator_backend = cfg.operator_backend
+    will_use_direct = operator_backend == "numpy" and (
+        solver_name == "direct"
+        or (solver_name == "auto" and unknowns <= int(cfg.solver_direct_max_n))
     )
+    if operator_backend == "cupy" and solver_name == "direct":
+        raise ValueError(
+            "`solver_method='direct'` is not supported with `operator_backend='cupy'`."
+        )
     if cfg.verbose:
         print_startup_logo_once()
         print(
@@ -169,6 +175,7 @@ def solve_sources_core(
                 radial_lut_dr=cfg.radial_lut_dr,
                 cache_translation_blocks=cfg.cache_translation_blocks,
                 operator_dtype=compute_dtype,
+                backend=operator_backend,
             )
             sim._prepared_operator_cache = prepared
             sim._prepared_operator_dtype = np.dtype(compute_dtype)
@@ -249,9 +256,15 @@ def solve_sources_core(
         warm_start = np.asarray(warm_start)[:, 0]
 
     solver_preconditioner = cfg.solver_preconditioner
+    if operator_backend == "cupy" and (
+        solver_preconditioner is not None or cfg.solver_preconditioner_kind != "none"
+    ):
+        raise NotImplementedError(
+            "The CuPy operator backend does not support yet custom or built-in preconditioners."
+        )
     if (
         solver_preconditioner is None
-        and str(cfg.solver_preconditioner_kind).lower() == "grid_block"
+        and cfg.solver_preconditioner_kind == "grid_block"
         and not will_use_direct
         and unknowns > 0
     ):
@@ -296,6 +309,7 @@ def solve_sources_core(
             maxiter=int(cfg.solver_maxiter),
             direct_max_n=int(cfg.solver_direct_max_n),
             dtype=compute_dtype,
+            backend=operator_backend,
             show_progress=bool(cfg.verbose),
             compute_final_residual=compute_final_residual,
         )

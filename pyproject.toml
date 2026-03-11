@@ -43,6 +43,9 @@ notebooks = [
   "jupyter",
   "ipykernel",
 ]
+gpu = [
+  "cupy>=14",
+]
 
 [tool.setuptools]
 package-dir = { "" = "src" }

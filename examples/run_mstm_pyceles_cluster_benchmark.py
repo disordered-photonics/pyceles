@@ -1,12 +1,12 @@
-"""Benchmark pyceles against MSTM v4.0 for tilted Gaussian-beam clusters.
+"""Benchmark NumPy/CuPy pyceles runs against MSTM v4.0 for tilted Gaussian-beam clusters.
 
-This is the single maintained pyceles-vs-MSTM comparison script. It can run
-MSTM and pyceles for the same configuration and produces:
+This is the single maintained cluster comparison script. It can run MSTM and
+one or more pyceles operator backends for the same configuration and produces:
 - efficiency comparisons (Qext, Qabs, Qsca, up/down hemispheres),
 - near-field component maps (Re Ex/Ey/Ez and Re Hx/Hy/Hz) for TE/TM,
 - S11 hemisphere maps from MSTM scattering_map_model=1 and pyceles overlays,
 - S11 incident-plane semilogy curves from MSTM scattering_map_model=0 and pyceles overlays,
-- RMSE/rel-RMSE statistics.
+- RMSE/rel-RMSE statistics for pyceles-vs-MSTM and NumPy-vs-CuPy.
 
 Conventions used here:
 - fixed channel mapping: pyceles te -> MSTM par, pyceles tm -> MSTM perp,
@@ -39,6 +39,7 @@ from pyceles.io import (
 
 SolverMethod = Literal["auto", "gmres", "bicgstab", "lgmres", "gcrotmk", "direct"]
 ComplexDType = Literal["complex64", "complex128"]
+OperatorBackend = Literal["numpy", "cupy"]
 # Fixed channel mapping used throughout benchmark diagnostics.
 MSTM_POLARIZATION_MAPPING: dict[str, str] = {"te": "par", "tm": "perp"}
 MSTM_NEARFIELD_PHASE_CORRECTION: dict[str, complex] = {"par": (-1.0 + 0.0j), "perp": (1.0 + 0.0j)}
@@ -76,6 +77,7 @@ class BenchmarkConfig:
     py_solver_restart: int = 100
     py_compute_dtype: ComplexDType = "complex128"
     py_accum_dtype: ComplexDType = "complex128"
+    py_operator_backends: tuple[OperatorBackend, ...] = ("numpy", "cupy")
     mstm_mie_epsilon: float = -3.0
     mstm_solution_epsilon: float = 1.0e-5
     mstm_max_iterations: int = 10000
@@ -548,7 +550,11 @@ def _mstm_dimless_to_physical(points_dimless: np.ndarray, wavelength: float) -> 
 
 
 def _pyceles_run(
-    cfg: BenchmarkConfig, sphere_data: np.ndarray, nearfield_points: np.ndarray
+    cfg: BenchmarkConfig,
+    sphere_data: np.ndarray,
+    nearfield_points: np.ndarray,
+    *,
+    operator_backend: OperatorBackend,
 ) -> dict[str, Any]:
     positions = np.asarray(sphere_data[:, 1:4], dtype=float)
     radii = np.asarray(sphere_data[:, 0], dtype=float)
@@ -577,6 +583,7 @@ def _pyceles_run(
         solver_maxiter=int(cfg.py_solver_maxiter),
         solver_restart=int(cfg.py_solver_restart),
         solver_direct_max_n=20_000,
+        operator_backend=operator_backend,
         compute_dtype=cfg.py_compute_dtype,
         accum_dtype=cfg.py_accum_dtype,
         verbose=False,
@@ -673,6 +680,7 @@ def _pyceles_run(
         rr_out = [float(v) for v in rr_val.tolist()]
 
     return {
+        "operator_backend": operator_backend,
         "solver": {
             "method": str(multi.solver_result.method),
             "iterations": iterations_out,
@@ -680,6 +688,10 @@ def _pyceles_run(
             "rhs_count": int(multi.solver_result.rhs_count),
         },
         "efficiencies_basis": eff_basis,
+        "coeffs_basis": {
+            "te": np.asarray(run_basis["te"].coeffs, dtype=np.complex128),
+            "tm": np.asarray(run_basis["tm"].coeffs, dtype=np.complex128),
+        },
         "farfield_map": {
             "alpha": alpha,
             "beta": beta,
@@ -920,6 +932,81 @@ def _compare_farfield_s11(mstm_map: dict[str, Any], py_map: dict[str, Any]) -> d
             "pearson_r": float("nan"),
         }
     return out
+
+
+def _compare_pyceles_coefficients(
+    model_coeffs: dict[str, np.ndarray], ref_coeffs: dict[str, np.ndarray]
+) -> dict[str, Any]:
+    out: dict[str, Any] = {"per_channel": {}}
+    rels: list[float] = []
+    max_abs: list[float] = []
+    for channel in ("te", "tm"):
+        model = np.asarray(model_coeffs[channel], dtype=np.complex128)
+        ref = np.asarray(ref_coeffs[channel], dtype=np.complex128)
+        rel = _rel_rmse_complex(model, ref)
+        mad = float(np.max(np.abs(model - ref))) if model.size else float("nan")
+        out["per_channel"][channel] = {
+            "rel_rmse": float(rel),
+            "max_abs_delta": mad,
+            "n": int(model.size),
+        }
+        rels.append(rel)
+        max_abs.append(mad)
+    out["mean_rel_rmse"] = float(np.nanmean(rels))
+    out["max_abs_delta"] = float(np.nanmax(max_abs))
+    return out
+
+
+def _compare_pyceles_nearfield(
+    model_nf: dict[str, np.ndarray],
+    ref_nf: dict[str, np.ndarray],
+    outside_mask: np.ndarray,
+) -> dict[str, Any]:
+    out: dict[str, Any] = {"per_channel": {}}
+    rels_all: list[float] = []
+    rels_out: list[float] = []
+    for py_ch in ("te", "tm"):
+        e_model = np.asarray(model_nf[f"E_{py_ch}"], dtype=np.complex128)
+        h_model = np.asarray(model_nf[f"H_{py_ch}"], dtype=np.complex128)
+        e_ref = np.asarray(ref_nf[f"E_{py_ch}"], dtype=np.complex128)
+        h_ref = np.asarray(ref_nf[f"H_{py_ch}"], dtype=np.complex128)
+        e_all = _rel_rmse_complex(e_model, e_ref)
+        h_all = _rel_rmse_complex(h_model, h_ref)
+        e_out = _rel_rmse_complex(e_model, e_ref, mask=outside_mask)
+        h_out = _rel_rmse_complex(h_model, h_ref, mask=outside_mask)
+        out["per_channel"][py_ch] = {
+            "E_rel_rmse_all": float(e_all),
+            "H_rel_rmse_all": float(h_all),
+            "E_rel_rmse_outside": float(e_out),
+            "H_rel_rmse_outside": float(h_out),
+        }
+        rels_all.extend([e_all, h_all])
+        rels_out.extend([e_out, h_out])
+    out["mean_rel_rmse_all"] = float(np.nanmean(rels_all))
+    out["mean_rel_rmse_outside"] = float(np.nanmean(rels_out))
+    out["n_points_all"] = int(np.asarray(model_nf["E_te"]).shape[0])
+    out["n_points_outside"] = int(np.sum(outside_mask))
+    return out
+
+
+def _compare_pyceles_farfield(model_map: dict[str, Any], ref_map: dict[str, Any]) -> dict[str, Any]:
+    alpha_model = np.asarray(model_map["alpha"], dtype=float)
+    beta_model = np.asarray(model_map["beta"], dtype=float)
+    alpha_ref = np.asarray(ref_map["alpha"], dtype=float)
+    beta_ref = np.asarray(ref_map["beta"], dtype=float)
+    if not np.array_equal(alpha_model, alpha_ref) or not np.array_equal(beta_model, beta_ref):
+        raise RuntimeError("pyceles backend far-field grids do not match.")
+
+    model = np.asarray(model_map["I_unpolarized"], dtype=float)
+    ref = np.asarray(ref_map["I_unpolarized"], dtype=float)
+    kz = np.asarray(ref_map["kz"], dtype=float)
+    forward_mask = kz >= 0.0
+    backward_mask = kz <= 0.0
+    return {
+        "forward": _real_metrics(model[forward_mask], ref[forward_mask]),
+        "backward": _real_metrics(model[backward_mask], ref[backward_mask]),
+        "combined": _real_metrics(model, ref),
+    }
 
 
 def _grid_index_arrays(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -1274,6 +1361,14 @@ def main() -> None:
         default=BenchmarkConfig.py_accum_dtype,
     )
     parser.add_argument(
+        "--py-operator-backends",
+        type=str,
+        nargs="+",
+        choices=["numpy", "cupy"],
+        default=list(BenchmarkConfig.py_operator_backends),
+        help="pyceles operator backends to run under the shared benchmark configuration.",
+    )
+    parser.add_argument(
         "--mstm-mie-epsilon",
         type=float,
         default=None,
@@ -1350,6 +1445,7 @@ def main() -> None:
         py_solver_restart=int(args.py_solver_restart),
         py_compute_dtype=cast(ComplexDType, args.py_compute_dtype),
         py_accum_dtype=cast(ComplexDType, args.py_accum_dtype),
+        py_operator_backends=tuple(cast(list[OperatorBackend], args.py_operator_backends)),
         mstm_mie_epsilon=mstm_mie_epsilon,
         mstm_solution_epsilon=mstm_solution_epsilon,
         mstm_max_iterations=int(args.mstm_max_iterations),
@@ -1430,38 +1526,82 @@ def main() -> None:
 
     mstm_coords_dimless = np.asarray(mstm_nf["coords"], dtype=float)
     mstm_coords_physical = _mstm_dimless_to_physical(mstm_coords_dimless, cfg.wavelength)
-    py_out = _pyceles_run(cfg, sphere_data, mstm_coords_physical)
+    py_runs = {
+        backend: _pyceles_run(
+            cfg,
+            sphere_data,
+            mstm_coords_physical,
+            operator_backend=backend,
+        )
+        for backend in cfg.py_operator_backends
+    }
     chosen_mapping = dict(MSTM_POLARIZATION_MAPPING)
-    eff_cmp = _eff_compare_fixed_mapping(py_out["efficiencies_basis"], mstm_out, chosen_mapping)
+    eff_cmp = {
+        backend: _eff_compare_fixed_mapping(run["efficiencies_basis"], mstm_out, chosen_mapping)
+        for backend, run in py_runs.items()
+    }
 
     positions = np.asarray(sphere_data[:, 1:4], dtype=float)
     radii = np.asarray(sphere_data[:, 0], dtype=float)
     # Use pyceles inside-mask bookkeeping instead of re-implementing point-in-sphere checks.
-    inside = np.asarray(py_out["nearfield_basis"]["inside_te"], dtype=bool) | np.asarray(
-        py_out["nearfield_basis"]["inside_tm"], dtype=bool
-    )
+    inside = np.zeros(np.asarray(mstm_nf["coords"]).shape[0], dtype=bool)
+    for run in py_runs.values():
+        inside |= np.asarray(run["nearfield_basis"]["inside_te"], dtype=bool)
+        inside |= np.asarray(run["nearfield_basis"]["inside_tm"], dtype=bool)
     outside = ~inside
 
-    nearfield_cmp = _compare_nearfield(
-        chosen_mapping=chosen_mapping,
-        py_nf=py_out["nearfield_basis"],
-        mstm_nf=mstm_nf,
-        outside_mask=outside,
-    )
-    farfield_map_cmp = _compare_farfield_s11(
-        mstm_map=mstm_out["scattering_map"],
-        py_map=py_out["farfield_map"],
-    )
+    nearfield_cmp = {
+        backend: _compare_nearfield(
+            chosen_mapping=chosen_mapping,
+            py_nf=run["nearfield_basis"],
+            mstm_nf=mstm_nf,
+            outside_mask=outside,
+        )
+        for backend, run in py_runs.items()
+    }
+    farfield_map_cmp = {
+        backend: _compare_farfield_s11(
+            mstm_map=mstm_out["scattering_map"],
+            py_map=run["farfield_map"],
+        )
+        for backend, run in py_runs.items()
+    }
 
     curve0 = mstm_out_map0.get("scattering_curve_incident", {})
     theta0 = np.asarray(curve0.get("theta_deg", np.zeros((0,), dtype=float)), dtype=float)
     s110 = np.asarray(curve0.get("s11", np.zeros((0,), dtype=float)), dtype=float)
-    py_curve0 = _sample_py_s11_at_theta(
-        py_out["farfield_map"],
-        theta0,
-        incident_azimuthal_angle=float(cfg.azimuthal_angle),
-    )
-    farfield_curve_cmp = _real_metrics(py_curve0, s110 / S11_SCALE_MODEL0)
+    py_curve0 = {
+        backend: _sample_py_s11_at_theta(
+            run["farfield_map"],
+            theta0,
+            incident_azimuthal_angle=float(cfg.azimuthal_angle),
+        )
+        for backend, run in py_runs.items()
+    }
+    farfield_curve_cmp = {
+        backend: _real_metrics(curve, s110 / S11_SCALE_MODEL0)
+        for backend, curve in py_curve0.items()
+    }
+
+    backend_pair_cmp: dict[str, Any] = {}
+    if "numpy" in py_runs and "cupy" in py_runs:
+        backend_pair_cmp = {
+            "coefficients_basis": _compare_pyceles_coefficients(
+                py_runs["cupy"]["coeffs_basis"], py_runs["numpy"]["coeffs_basis"]
+            ),
+            "nearfield": _compare_pyceles_nearfield(
+                py_runs["cupy"]["nearfield_basis"],
+                py_runs["numpy"]["nearfield_basis"],
+                outside_mask=outside,
+            ),
+            "farfield_s11_map": _compare_pyceles_farfield(
+                py_runs["cupy"]["farfield_map"],
+                py_runs["numpy"]["farfield_map"],
+            ),
+            "farfield_s11_curve": _real_metrics(py_curve0["cupy"], py_curve0["numpy"]),
+            "reference_backend": "numpy",
+            "model_backend": "cupy",
+        }
 
     # Build phase-aligned MSTM near-field channels for side-by-side maps.
     mstm_by_pol = {
@@ -1479,50 +1619,65 @@ def main() -> None:
         },
     }
     py_by_pol = {
-        "te": {
-            "E": np.asarray(py_out["nearfield_basis"]["E_te"], dtype=np.complex128),
-            "H": np.asarray(py_out["nearfield_basis"]["H_te"], dtype=np.complex128),
-        },
-        "tm": {
-            "E": np.asarray(py_out["nearfield_basis"]["E_tm"], dtype=np.complex128),
-            "H": np.asarray(py_out["nearfield_basis"]["H_tm"], dtype=np.complex128),
-        },
+        backend: {
+            "te": {
+                "E": np.asarray(run["nearfield_basis"]["E_te"], dtype=np.complex128),
+                "H": np.asarray(run["nearfield_basis"]["H_te"], dtype=np.complex128),
+            },
+            "tm": {
+                "E": np.asarray(run["nearfield_basis"]["E_tm"], dtype=np.complex128),
+                "H": np.asarray(run["nearfield_basis"]["H_tm"], dtype=np.complex128),
+            },
+        }
+        for backend, run in py_runs.items()
     }
-    for py_ch in ("te", "tm"):
-        ms_ch = chosen_mapping[py_ch]
-        _plot_nearfield_component_pairs(
-            py_fields=py_by_pol[py_ch]["E"],
-            mstm_fields=mstm_by_pol[ms_ch]["E"],
-            coords_phys=mstm_coords_physical,
-            positions=positions,
-            radii=radii,
-            out_path=cfg.outdir / f"{cfg.output_prefix}_{py_ch}_nearfield_E_pairs.png",
-            channel_label=py_ch.upper(),
-            field_label="E",
-        )
-        _plot_nearfield_component_pairs(
-            py_fields=py_by_pol[py_ch]["H"],
-            mstm_fields=mstm_by_pol[ms_ch]["H"],
-            coords_phys=mstm_coords_physical,
-            positions=positions,
-            radii=radii,
-            out_path=cfg.outdir / f"{cfg.output_prefix}_{py_ch}_nearfield_H_pairs.png",
-            channel_label=py_ch.upper(),
-            field_label="H",
-        )
+    plot_outputs: dict[str, str] = {}
+    for backend, fields in py_by_pol.items():
+        for py_ch in ("te", "tm"):
+            ms_ch = chosen_mapping[py_ch]
+            e_path = cfg.outdir / f"{cfg.output_prefix}_{backend}_{py_ch}_nearfield_E_pairs.png"
+            h_path = cfg.outdir / f"{cfg.output_prefix}_{backend}_{py_ch}_nearfield_H_pairs.png"
+            _plot_nearfield_component_pairs(
+                py_fields=fields[py_ch]["E"],
+                mstm_fields=mstm_by_pol[ms_ch]["E"],
+                coords_phys=mstm_coords_physical,
+                positions=positions,
+                radii=radii,
+                out_path=e_path,
+                channel_label=f"{backend.upper()} {py_ch.upper()}",
+                field_label="E",
+            )
+            _plot_nearfield_component_pairs(
+                py_fields=fields[py_ch]["H"],
+                mstm_fields=mstm_by_pol[ms_ch]["H"],
+                coords_phys=mstm_coords_physical,
+                positions=positions,
+                radii=radii,
+                out_path=h_path,
+                channel_label=f"{backend.upper()} {py_ch.upper()}",
+                field_label="H",
+            )
+            plot_outputs[f"{backend}_{py_ch}_E"] = str(e_path)
+            plot_outputs[f"{backend}_{py_ch}_H"] = str(h_path)
 
-    _plot_s11_maps_with_pyceles_helpers(
-        py_map=py_out["farfield_map"],
-        mstm_map=mstm_out["scattering_map"],
-        out_py_path=cfg.outdir / f"{cfg.output_prefix}_s11_pyceles_hemispheres.png",
-        out_mstm_path=cfg.outdir / f"{cfg.output_prefix}_s11_mstm_hemispheres.png",
-    )
-    _plot_s11_curve_semilogy(
-        theta_deg=theta0,
-        py_s11=py_curve0,
-        mstm_s11_rescaled=s110 / S11_SCALE_MODEL0,
-        out_path=cfg.outdir / f"{cfg.output_prefix}_s11_model0_semilogy.png",
-    )
+        py_s11_path = cfg.outdir / f"{cfg.output_prefix}_{backend}_s11_pyceles_hemispheres.png"
+        mstm_s11_path = cfg.outdir / f"{cfg.output_prefix}_{backend}_s11_mstm_hemispheres.png"
+        curve_path = cfg.outdir / f"{cfg.output_prefix}_{backend}_s11_model0_semilogy.png"
+        _plot_s11_maps_with_pyceles_helpers(
+            py_map=py_runs[backend]["farfield_map"],
+            mstm_map=mstm_out["scattering_map"],
+            out_py_path=py_s11_path,
+            out_mstm_path=mstm_s11_path,
+        )
+        _plot_s11_curve_semilogy(
+            theta_deg=theta0,
+            py_s11=py_curve0[backend],
+            mstm_s11_rescaled=s110 / S11_SCALE_MODEL0,
+            out_path=curve_path,
+        )
+        plot_outputs[f"{backend}_s11_pyceles"] = str(py_s11_path)
+        plot_outputs[f"{backend}_s11_mstm"] = str(mstm_s11_path)
+        plot_outputs[f"{backend}_s11_scattering_map_model_0_semilogy"] = str(curve_path)
 
     mstm_summary = {
         k: v
@@ -1558,6 +1713,7 @@ def main() -> None:
             "py_solver_restart": cfg.py_solver_restart,
             "py_compute_dtype": cfg.py_compute_dtype,
             "py_accum_dtype": cfg.py_accum_dtype,
+            "py_operator_backends": list(cfg.py_operator_backends),
             "mstm_mie_epsilon": cfg.mstm_mie_epsilon,
             "mstm_solution_epsilon": cfg.mstm_solution_epsilon,
             "mstm_solution_epsilon_source": (
@@ -1591,12 +1747,16 @@ def main() -> None:
             "n_points_outside_cluster": int(np.sum(outside)),
         },
         "pyceles": {
-            "solver": py_out["solver"],
-            "efficiencies_basis": py_out["efficiencies_basis"],
-            "farfield_grid_shape": [
-                int(np.asarray(py_out["farfield_map"]["alpha"]).size),
-                int(np.asarray(py_out["farfield_map"]["beta"]).size),
-            ],
+            backend: {
+                "operator_backend": run["operator_backend"],
+                "solver": run["solver"],
+                "efficiencies_basis": run["efficiencies_basis"],
+                "farfield_grid_shape": [
+                    int(np.asarray(run["farfield_map"]["alpha"]).size),
+                    int(np.asarray(run["farfield_map"]["beta"]).size),
+                ],
+            }
+            for backend, run in py_runs.items()
         },
         "comparison": {
             "polarization_mapping": {
@@ -1616,23 +1776,16 @@ def main() -> None:
                 "note": "scattering_map_model=0 has an extra pi factor relative to scattering_map_model=1 for normalize_s11=false in MSTM v4.0 print path.",
             },
             "efficiency_fixed_mapping": eff_cmp,
-            "nearfield_field_kind": py_out["nearfield_basis"]["kind"],
+            "nearfield_field_kind": {
+                backend: run["nearfield_basis"]["kind"] for backend, run in py_runs.items()
+            },
             "nearfield_field": nearfield_cmp,
             "farfield_frame_note": "Compared in target/lab frame (MSTM incident_frame=f).",
             "farfield_s11_map_scattering_map_model_1_fixed_scale": farfield_map_cmp,
             "farfield_s11_curve_scattering_map_model_0_fixed_scale": farfield_curve_cmp,
+            "pyceles_backend_pair": backend_pair_cmp,
         },
-        "plot_outputs": {
-            "te_E": str(cfg.outdir / f"{cfg.output_prefix}_te_nearfield_E_pairs.png"),
-            "te_H": str(cfg.outdir / f"{cfg.output_prefix}_te_nearfield_H_pairs.png"),
-            "tm_E": str(cfg.outdir / f"{cfg.output_prefix}_tm_nearfield_E_pairs.png"),
-            "tm_H": str(cfg.outdir / f"{cfg.output_prefix}_tm_nearfield_H_pairs.png"),
-            "s11_pyceles": str(cfg.outdir / f"{cfg.output_prefix}_s11_pyceles_hemispheres.png"),
-            "s11_mstm": str(cfg.outdir / f"{cfg.output_prefix}_s11_mstm_hemispheres.png"),
-            "s11_scattering_map_model_0_semilogy": str(
-                cfg.outdir / f"{cfg.output_prefix}_s11_model0_semilogy.png"
-            ),
-        },
+        "plot_outputs": plot_outputs,
     }
     summary_path = cfg.outdir / f"{cfg.output_prefix}_summary.json"
     summary_path.write_text(json.dumps(out, indent=2), encoding="utf-8")

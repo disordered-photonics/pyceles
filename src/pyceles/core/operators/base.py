@@ -7,6 +7,8 @@ from typing import Protocol, runtime_checkable
 
 import numpy as np
 
+from pyceles._optional import coerce_array
+
 from .single_body import ParticleTOperator
 
 Array = np.ndarray
@@ -41,7 +43,9 @@ class PreparedOperator:
         return self.coupling.apply(x)
 
     def apply_A(self, x: Array) -> Array:
-        return np.asarray(x, dtype=self.dtype) - self.particle_t.apply(self.apply_W(x))
+        wx = self.apply_W(x)
+        x_arr = coerce_array(x, dtype=self.dtype, prefer_cupy=False)
+        return x_arr - self.particle_t.apply(wx)
 
     def rhs(self, b: Array) -> Array:
         return self.particle_t.rhs(b)

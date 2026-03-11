@@ -2,19 +2,21 @@ from __future__ import annotations
 
 """Operator-preparation orchestration for the many-body `A = I - T W` system."""
 
-from typing import Sequence
+from typing import Literal, Sequence, cast
 
 import numpy as np
 import numpy.typing as npt
 
+from pyceles._optional import import_cupy
 from pyceles.core.geometry_bounds import conservative_set_diameter
 from pyceles.core.indexing import n_modes
 from pyceles.core.particles import Particle, Sphere, particle_t_signature
 from pyceles.core.tmatrix import particle_T_diagonal, particle_T_matrix_blocks, sphere_T_diagonal
 from pyceles.core.translation import RadialLUT, translation_ab5_table
 
-from .base import PreparedOperator
+from .base import CouplingOperator, PreparedOperator
 from .coupling_pairwise import PairwiseCouplingOperator
+from .coupling_pairwise_cupy import CuPyPairwiseCouplingOperator
 from .groups import (
     AxisymmetricTGroup,
     DenseTGroup,
@@ -25,7 +27,8 @@ from .groups import (
     PreparedParticleTGroup,
     plan_particle_t_groups,
 )
-from .single_body import CompositeParticleTOperator
+from .single_body import CompositeParticleTOperator, ParticleTOperator
+from .single_body_cupy import CuPyDiagonalParticleTOperator
 
 Array = np.ndarray
 
@@ -208,6 +211,7 @@ def prepare_matvec(
     cache_translation_blocks: bool = False,
     operator_dtype: npt.DTypeLike = np.complex128,
     particle_t_group_factories: ParticleTGroupFactories | None = None,
+    backend: Literal["numpy", "cupy"] = "numpy",
 ) -> PreparedOperator:
     """Prepare reusable `A = I - T W` data from explicit particle descriptors."""
     part = list(particles)
@@ -227,23 +231,80 @@ def prepare_matvec(
     dr = (1.0e-2 / k_abs) if dr_user == 0.0 else dr_user
     lut = RadialLUT(lmax=int(lmax), k=k_f, r_max=_infer_rmax(positions), dr=dr, dtype=op_dtype)
 
-    particle_t = _prepare_particle_t_operator(
-        lmax=int(lmax),
-        k=k_f,
-        particles=part,
-        n_medium=n_medium,
-        dtype=op_dtype,
-        group_factories=particle_t_group_factories,
-    )
-    coupling = PairwiseCouplingOperator(
-        lmax=int(lmax),
-        k=k_f,
-        positions=positions,
-        ab5=ab5,
-        radial_lut=lut,
-        dtype=op_dtype,
-        cache_translation_blocks=bool(cache_translation_blocks),
-    )
+    backend_name = backend
+    particle_t: ParticleTOperator
+    coupling: CouplingOperator
+    if backend_name == "numpy":
+        particle_t = _prepare_particle_t_operator(
+            lmax=int(lmax),
+            k=k_f,
+            particles=part,
+            n_medium=n_medium,
+            dtype=op_dtype,
+            group_factories=particle_t_group_factories,
+        )
+        coupling = PairwiseCouplingOperator(
+            lmax=int(lmax),
+            k=k_f,
+            positions=positions,
+            ab5=ab5,
+            radial_lut=lut,
+            dtype=op_dtype,
+            cache_translation_blocks=bool(cache_translation_blocks),
+        )
+    elif backend_name == "cupy":
+        import_cupy()
+        if cache_translation_blocks:
+            raise NotImplementedError(
+                "The CuPy operator backend exposes only the direct raw-kernel coupling path. "
+                "Translation-block caching is not supported."
+            )
+        if particle_t_group_factories is not None:
+            raise NotImplementedError(
+                "The CuPy operator backend does not support custom particle-T group factories."
+            )
+        plans = plan_particle_t_groups(tuple(part))
+        unsupported = [plan for plan in plans if plan.representation != "diagonal"]
+        if unsupported:
+            labels = ", ".join(
+                f"{unsupported_plan.representation}:{tuple(int(i) for i in unsupported_plan.particle_indices)}"
+                for unsupported_plan in unsupported
+            )
+            raise NotImplementedError(
+                "The CuPy operator backend supports only diagonal single-body groups "
+                f"(spheres/layered spheres). Unsupported groups: {labels}."
+            )
+        T_M, T_N = precompute_T_diagonal(
+            lmax=int(lmax),
+            k=k_f,
+            particles=part,
+            n_medium=n_medium,
+            dtype=op_dtype,
+        )
+        particle_t = cast(
+            ParticleTOperator,
+            CuPyDiagonalParticleTOperator(
+                lmax=int(lmax),
+                n_particles=len(part),
+                T_diag=build_T_mode_diagonal(int(lmax), T_M, T_N),
+                T_M=T_M,
+                T_N=T_N,
+                dtype=op_dtype,
+            ),
+        )
+        coupling = cast(
+            CouplingOperator,
+            CuPyPairwiseCouplingOperator(
+                lmax=int(lmax),
+                k=k_f,
+                positions=positions,
+                ab5=ab5,
+                radial_lut=lut,
+                dtype=op_dtype,
+            ),
+        )
+    else:
+        raise ValueError(f"Unknown operator backend '{backend}'. Use 'numpy' or 'cupy'.")
 
     return PreparedOperator(
         lmax=int(lmax),

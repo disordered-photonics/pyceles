@@ -662,6 +662,49 @@ def test_prepare_matvec_accepts_mixed_sphere_and_layered():
     assert np.all(np.isfinite(y))
 
 
+def test_prepare_matvec_cupy_rejects_non_diagonal_particle_groups():
+    lmax, k, positions, radii, n_particle, _, n_medium, _, _ = _sample_problem()
+    particles: list[Particle] = [
+        Sphere(
+            position=tuple(positions[0].tolist()),
+            radius=float(radii[0]),
+            refractive_index=complex(n_particle[0]),
+        ),
+        Spheroid(
+            position=tuple(positions[1].tolist()),
+            equatorial_radius=float(radii[1]),
+            polar_radius=float(radii[1]) * 1.25,
+            refractive_index=complex(n_particle[1]),
+        ),
+    ]
+
+    with pytest.raises(NotImplementedError, match="supports only diagonal single-body groups"):
+        prepare_matvec(
+            lmax=lmax,
+            k=k,
+            particles=particles,
+            n_medium=n_medium,
+            radial_lut_dr=0.5,
+            cache_translation_blocks=False,
+            backend="cupy",
+        )
+
+
+def test_prepare_matvec_cupy_rejects_translation_block_cache():
+    lmax, k, _, _, _, particles, n_medium, _, _ = _sample_problem()
+
+    with pytest.raises(NotImplementedError, match="direct raw-kernel coupling path"):
+        prepare_matvec(
+            lmax=lmax,
+            k=k,
+            particles=particles,
+            n_medium=n_medium,
+            radial_lut_dr=0.5,
+            cache_translation_blocks=True,
+            backend="cupy",
+        )
+
+
 def test_apply_A_lookup_vs_direct_coupling_agree():
     """Lookup-coupling path should match explicit per-distance coupling evaluation."""
     lmax, k, positions, _, _, particles, n_medium, x, _ = _sample_problem()

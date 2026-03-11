@@ -4,6 +4,8 @@ from pyceles.core.indexing import index_vswf, iter_modes, n_modes
 from pyceles.core.spherical import legendre_normalized_trigon
 from pyceles.core.translation import (
     RadialLUT,
+    _translation_ab5_compact_tables,
+    _translation_plm_coeff_table,
     spherical_bessel_jy,
     translation_ab5_table,
     translation_block,
@@ -78,6 +80,35 @@ def test_translation_block_entry_matches_direct_formula():
 
     expected = np.exp(1j * dm * phi) * np.sum(ab5[dst, src, :] * h * plm[:, abs(dm)])
     np.testing.assert_allclose(W[dst, src], expected, rtol=1e-12, atol=1e-12)
+
+
+def test_translation_plm_coeff_table_matches_scalar_legendre_values():
+    lmax = 3
+    max_degree = 2 * lmax
+    ct = 0.37
+    st = float(np.sqrt(1.0 - ct * ct))
+    plm = legendre_normalized_trigon(np.asarray(ct), np.asarray(st), max_degree, xp=np)
+
+    for coeff_dtype, rtol, atol in ((np.float32, 1e-6, 1e-7), (np.float64, 1e-12, 1e-12)):
+        coeff_tab = _translation_plm_coeff_table(lmax, dtype=coeff_dtype)
+        for l in range(max_degree + 1):
+            for m in range(l + 1):
+                got = 0.0
+                jj = 0
+                for lam in range(l - m, -1, -2):
+                    got += (st**m) * (ct**lam) * float(coeff_tab[jj, m, l])
+                    jj += 1
+                np.testing.assert_allclose(got, float(plm[l, m]), rtol=rtol, atol=atol)
+
+
+def test_translation_compact_ab5_tables_follow_requested_precision():
+    re64, im64 = _translation_ab5_compact_tables(3, dtype=np.complex64)
+    re128, im128 = _translation_ab5_compact_tables(3, dtype=np.complex128)
+
+    assert re64.dtype == np.float32
+    assert im64.dtype == np.float32
+    assert re128.dtype == np.float64
+    assert im128.dtype == np.float64
 
 
 def test_radial_lut_is_linear_interpolation_not_nearest():

@@ -1,6 +1,8 @@
 import numpy as np
+import pytest
 
 from pyceles.io.hdf5 import load_solution_h5, save_solution_h5
+from pyceles.linear import solvers
 from pyceles.linear.solvers import (
     direct_dense_scipy,
     estimate_dense_matrix_bytes,
@@ -181,6 +183,101 @@ def test_solve_linear_system_direct_can_skip_final_residual_with_lu_only():
     assert calls == 0
     assert np.isnan(float(out.residual_norm))
     assert np.isnan(float(out.relative_residual))
+
+
+def test_solve_linear_system_cupy_backend_rejects_direct():
+    b = np.array([1.0 + 0j, 2.0 + 0j])
+    with pytest.raises(ValueError, match="supports only GMRES"):
+        solve_linear_system(
+            lambda x: x,
+            b,
+            method="direct",
+            backend="cupy",
+            show_progress=False,
+        )
+
+
+def test_gmres_cupy_reports_clear_import_failure(monkeypatch):
+    def fail_import():
+        raise RuntimeError("broken cuda path")
+
+    monkeypatch.setattr(solvers, "import_cupy", fail_import)
+    b = np.array([1.0 + 0j, 2.0 + 0j], dtype=np.complex128)
+    with pytest.raises(RuntimeError, match="broken cuda path"):
+        solvers.gmres_cupy(lambda x: x, b, show_progress=False)
+
+
+def test_gmres_cupy_drives_restart_cycles_with_true_residual_progress(monkeypatch):
+    class _FakeLinearOperator:
+        def __init__(self, shape, matvec, dtype):
+            self.shape = shape
+            self.matvec = matvec
+            self.dtype = dtype
+
+    class _FakeSparseLinalg:
+        LinearOperator = _FakeLinearOperator
+
+        def __init__(self):
+            self.calls: list[tuple[int, int]] = []
+
+        def gmres(
+            self,
+            A,
+            b,
+            x0=None,
+            *,
+            M=None,
+            rtol=1e-5,
+            atol=0.0,
+            restart=None,
+            maxiter=None,
+            callback=None,
+            callback_type=None,
+        ):
+            self.calls.append((int(restart), int(maxiter)))
+            x_prev = np.zeros_like(b) if x0 is None else np.asarray(x0)
+            # One restart cycle halves the remaining error.
+            x_next = x_prev + 0.5 * (np.asarray(b) - x_prev)
+            return x_next, int(restart)
+
+    class _FakeCuPy:
+        def __init__(self):
+            self.linalg = type("_Linalg", (), {"norm": staticmethod(np.linalg.norm)})()
+
+        @staticmethod
+        def asarray(x, dtype=None):
+            return np.asarray(x, dtype=dtype)
+
+        @staticmethod
+        def array(x, dtype=None):
+            return np.array(x, dtype=dtype)
+
+        @staticmethod
+        def zeros_like(x, dtype=None):
+            return np.zeros_like(np.asarray(x), dtype=dtype)
+
+    fake_sparse = _FakeSparseLinalg()
+    fake_cupy = _FakeCuPy()
+    monkeypatch.setattr(solvers, "import_cupy", lambda: (fake_cupy, fake_sparse))
+    progress: list[float] = []
+    b = np.array([1.0 + 0j, -2.0 + 0j], dtype=np.complex128)
+
+    out = solvers.gmres_cupy(
+        lambda x: np.asarray(x),
+        b,
+        rtol=0.2,
+        restart=2,
+        maxiter=6,
+        callback=progress.append,
+        show_progress=False,
+    )
+
+    assert fake_sparse.calls == [(2, 2), (2, 2), (2, 2)]
+    assert int(out.iterations) == 6
+    assert out.residual_history is not None
+    assert np.asarray(progress).shape == (3,)
+    assert progress[0] > progress[-1]
+    assert float(out.relative_residual) <= 0.2
 
 
 def test_solve_linear_system_preconditioner_hook_identity():

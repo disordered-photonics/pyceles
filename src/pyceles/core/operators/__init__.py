@@ -21,6 +21,7 @@ from .coupling_pairwise import (
     apply_W_numpy,
     require_pairwise_coupling,
 )
+from .coupling_pairwise_cupy import CuPyPairwiseCouplingOperator
 from .groups import (
     AxisymmetricTGroup,
     DenseTGroup,
@@ -36,12 +37,15 @@ from .groups import (
 )
 from .prepare import build_T_mode_diagonal, precompute_T_diagonal, prepare_matvec, rhs_Tb_numpy
 from .single_body import CompositeParticleTOperator, ParticleTOperator
+from .single_body_cupy import CuPyDiagonalParticleTOperator
 
 __all__ = [
     "Array",
     "AxisymmetricTGroup",
     "CompositeParticleTOperator",
     "CouplingOperator",
+    "CuPyDiagonalParticleTOperator",
+    "CuPyPairwiseCouplingOperator",
     "DenseTGroup",
     "DiagonalTGroup",
     "PairwiseCouplingOperator",

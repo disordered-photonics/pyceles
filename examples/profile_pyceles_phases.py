@@ -5,12 +5,14 @@ import cProfile
 import json
 import pstats
 import time
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Literal, cast
 
 import numpy as np
 
 import pyceles as pcl
+from pyceles._optional import import_cupy
 from pyceles.core.fields import project_source_to_svwf
 from pyceles.core.indexing import n_modes
 from pyceles.core.operators import (
@@ -69,11 +71,25 @@ def _profile_phase(
     out_dir: Path,
     top_n: int,
     fn,
+    synchronize_gpu: bool = False,
+    cuda_profiler_api: bool = False,
     **kwargs,
 ) -> tuple[Any, dict[str, Any]]:
+    if synchronize_gpu:
+        cupy, _ = import_cupy()
+        cupy.cuda.Stream.null.synchronize()
     prof = cProfile.Profile()
     t0 = time.perf_counter()
-    result = prof.runcall(fn, **kwargs)
+    if cuda_profiler_api:
+        cupy, _ = import_cupy()
+        profile_context = cupy.profiler.profile()
+    else:
+        profile_context = nullcontext()
+    with profile_context:
+        result = prof.runcall(fn, **kwargs)
+    if synchronize_gpu:
+        cupy, _ = import_cupy()
+        cupy.cuda.Stream.null.synchronize()
     elapsed = time.perf_counter() - t0
 
     prof_path = out_dir / f"{phase}.prof"
@@ -118,8 +134,14 @@ def main() -> None:
     parser.add_argument("--beam-width", type=float, default=2000.0)
     parser.add_argument("--amplitude", type=float, default=1.0)
     parser.add_argument("--solver", type=str, default="gmres")
+    parser.add_argument(
+        "--operator-backend",
+        choices=("numpy", "cupy"),
+        default="numpy",
+        help="Prepared-operator backend used for the many-body solve.",
+    )
     parser.add_argument("--solver-rtol", type=float, default=1e-4)
-    parser.add_argument("--solver-restart", type=int, default=100)
+    parser.add_argument("--solver-restart", type=int, default=20)
     parser.add_argument("--solver-maxiter", type=int, default=1000)
     parser.add_argument(
         "--radial-lut-dr",
@@ -156,12 +178,28 @@ def main() -> None:
     )
     parser.add_argument("--top-n", type=int, default=80)
     parser.add_argument("--out-dir", type=Path, default=Path("outputs/profiling"))
+    parser.add_argument(
+        "--cuda-profiler-api",
+        action="store_true",
+        help="Wrap profiled phases in cupyx.profiler.profile() for external Nsight/NVProf capture.",
+    )
+    parser.add_argument(
+        "--skip-farfield",
+        action="store_true",
+        help="Skip far-field profiling and summary payloads.",
+    )
+    parser.add_argument(
+        "--skip-nearfield",
+        action="store_true",
+        help="Skip near-field profiling and summary payloads.",
+    )
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
     source_model = cast(Literal["planewave", "gaussian"], args.source_model)
     polarization = cast(Literal["TE", "TM"], args.polarization)
     compute_dtype_name = cast(Literal["complex64", "complex128"], args.compute_dtype)
     accum_dtype_name = cast(Literal["complex64", "complex128"], args.accum_dtype)
+    operator_backend = cast(Literal["numpy", "cupy"], args.operator_backend)
 
     root = _find_repo_root()
     out_dir = (root / args.out_dir).resolve()
@@ -207,13 +245,39 @@ def main() -> None:
         solver_rtol=float(args.solver_rtol),
         solver_restart=int(args.solver_restart),
         solver_maxiter=int(args.solver_maxiter),
+        operator_backend=operator_backend,
         compute_dtype=compute_dtype_name,
         accum_dtype=accum_dtype_name,
         verbose=not args.quiet,
     )
+    if args.skip_farfield and not args.skip_nearfield:
+        raise ValueError(
+            "--skip-farfield currently requires --skip-nearfield as well because "
+            "the near-field profiling path still constructs a SimulationResult "
+            "that expects a far-field payload."
+        )
+    if operator_backend == "cupy" and args.preconditioner_mode != "none":
+        raise ValueError(
+            "The CuPy operator backend does not support built-in preconditioners. "
+            "Use --preconditioner-mode none."
+        )
+    if operator_backend == "cupy" and args.cache_mode != "off":
+        raise ValueError(
+            "The CuPy operator backend exposes only the direct raw-kernel path. "
+            "Use --cache-mode off."
+        )
+    if operator_backend == "cupy" and str(args.solver).lower() == "direct":
+        raise ValueError("The CuPy operator backend does not support direct solves.")
+    if operator_backend == "cupy" and int(args.solver_restart) >= 100 and not args.quiet:
+        print(
+            "Note: CuPy GMRES checks convergence once per restart cycle. "
+            "Large restart values can make the first progress update very late."
+        )
 
     if not args.quiet:
-        print(f"Preparing problem: N={positions.shape[0]}, lmax={cfg.lmax}")
+        print(
+            f"Preparing problem: N={positions.shape[0]}, lmax={cfg.lmax}, backend={operator_backend}"
+        )
 
     n_spheres = positions.shape[0]
     n_modes_l = n_modes(cfg.lmax)
@@ -275,6 +339,7 @@ def main() -> None:
             radial_lut_dr=cfg.radial_lut_dr,
             cache_translation_blocks=cache_on,
             operator_dtype=np.dtype(cfg.compute_dtype),
+            backend=operator_backend,
         )
         A_mv, rhs = make_prepared_A_and_rhs(prepared, rhs_input)
         n_unknowns = int(rhs.shape[0])
@@ -320,10 +385,14 @@ def main() -> None:
                 maxiter=cfg.solver_maxiter,
                 direct_max_n=cfg.solver_direct_max_n,
                 dtype=np.dtype(cfg.compute_dtype),
+                backend=operator_backend,
                 show_progress=not args.quiet,
+                synchronize_gpu=operator_backend == "cupy",
+                cuda_profiler_api=bool(args.cuda_profiler_api and operator_backend == "cupy"),
             )
             solver_runs.append(
                 {
+                    "operator_backend": operator_backend,
                     "cache_translation_blocks": bool(cache_on),
                     "preconditioner": str(preconditioner_effective),
                     "preconditioner_build_s": preconditioner_build_s,
@@ -346,78 +415,87 @@ def main() -> None:
 
     coeffs = primary_solver_res.x.reshape(n_spheres, n_modes_l)
 
-    if not args.quiet:
-        print("Profiling phase: farfield")
-    farfield, farfield_summary = _profile_phase(
-        phase="farfield",
-        out_dir=out_dir,
-        top_n=args.top_n,
-        fn=compute_far_field_patterns,
-        positions=positions,
-        coeffs=coeffs,
-        k=k,
-        lmax=cfg.lmax,
-        polar_angles=farfield_polar_angles,
-        azimuthal_angles=farfield_azimuthal_angles,
-        source=source,
-        dtype=np.dtype(cfg.compute_dtype),
-        show_progress=not args.quiet,
-    )
-
-    run = pcl.SimulationResult(
-        config=cfg,
-        particles=tuple(
-            pcl.core.spheres_from_arrays(
-                positions=positions,
-                radii=radii,
-                refractive_indices=n_particle,
-            )
-        ),
-        k=k,
-        k0=k0,
-        coeffs=coeffs,
-        rhs=rhs.reshape(n_spheres, n_modes_l),
-        initial_coeffs=b,
-        initial_coeffs_basis=None,
-        coeffs_basis=None,
-        solver_result=primary_solver_res,
-        solver_result_basis=None,
-        farfield=farfield,
-        farfield_basis=None,
-        power=None,
-        power_basis=None,
-        cross_sections=None,
-        cross_sections_basis=None,
-        unpolarized=None,
-        decomposition_forward=None,
-        decomposition_backward=None,
-        decomposition_forward_basis=None,
-        decomposition_backward_basis=None,
-        polarization_jones=source.jones_coefficients(),
-    )
-
-    if not args.quiet:
-        print("Profiling phase: nearfield")
-    near_field, nearfield_summary = _profile_phase(
-        phase="nearfield",
-        out_dir=out_dir,
-        top_n=args.top_n,
-        fn=pcl.compute_near_field_slice,
-        run=run,
-        axis_0_min=-4000.0,
-        axis_0_max=4000.0,
-        axis_1_min=-3000.0,
-        axis_1_max=5000.0,
-        dx=float(args.dx),
-        plane="y",
-        plane_value=0.0,
-        show_progress=not args.quiet,
-        force_general_initial_field=bool(args.force_general_initial_field),
-        center_pixel_policy="interpolate",
-    )
-
     phases: list[dict[str, Any]] = [sr["summary"] for sr in solver_runs]
-    phases.extend([farfield_summary, nearfield_summary])
+    farfield = None
+    farfield_summary = None
+    if not args.skip_farfield:
+        if not args.quiet:
+            print("Profiling phase: farfield")
+        farfield, farfield_summary = _profile_phase(
+            phase="farfield",
+            out_dir=out_dir,
+            top_n=args.top_n,
+            fn=compute_far_field_patterns,
+            positions=positions,
+            coeffs=coeffs,
+            k=k,
+            lmax=cfg.lmax,
+            polar_angles=farfield_polar_angles,
+            azimuthal_angles=farfield_azimuthal_angles,
+            source=source,
+            dtype=np.dtype(cfg.compute_dtype),
+            show_progress=not args.quiet,
+        )
+        phases.append(farfield_summary)
+
+    near_field = None
+    nearfield_summary = None
+    if not args.skip_nearfield:
+        if farfield is None:
+            raise RuntimeError("Internal error: near-field profiling requires farfield payload.")
+        run = pcl.SimulationResult(
+            config=cfg,
+            particles=tuple(
+                pcl.core.spheres_from_arrays(
+                    positions=positions,
+                    radii=radii,
+                    refractive_indices=n_particle,
+                )
+            ),
+            k=k,
+            k0=k0,
+            coeffs=coeffs,
+            rhs=rhs.reshape(n_spheres, n_modes_l),
+            initial_coeffs=b,
+            initial_coeffs_basis=None,
+            coeffs_basis=None,
+            solver_result=primary_solver_res,
+            solver_result_basis=None,
+            farfield=farfield,
+            farfield_basis=None,
+            power=None,
+            power_basis=None,
+            cross_sections=None,
+            cross_sections_basis=None,
+            unpolarized=None,
+            decomposition_forward=None,
+            decomposition_backward=None,
+            decomposition_forward_basis=None,
+            decomposition_backward_basis=None,
+            polarization_jones=source.jones_coefficients(),
+        )
+
+        if not args.quiet:
+            print("Profiling phase: nearfield")
+        near_field, nearfield_summary = _profile_phase(
+            phase="nearfield",
+            out_dir=out_dir,
+            top_n=args.top_n,
+            fn=pcl.compute_near_field_slice,
+            run=run,
+            axis_0_min=-4000.0,
+            axis_0_max=4000.0,
+            axis_1_min=-3000.0,
+            axis_1_max=5000.0,
+            dx=float(args.dx),
+            plane="y",
+            plane_value=0.0,
+            show_progress=not args.quiet,
+            force_general_initial_field=bool(args.force_general_initial_field),
+            center_pixel_policy="interpolate",
+        )
+        phases.append(nearfield_summary)
+
     summary = {
         "config": {
             "n_particles": int(args.n_particles),
@@ -434,6 +512,7 @@ def main() -> None:
             "beam_width": float(args.beam_width),
             "amplitude": float(args.amplitude),
             "solver": str(args.solver),
+            "operator_backend": operator_backend,
             "solver_rtol": float(args.solver_rtol),
             "solver_restart": int(args.solver_restart),
             "solver_maxiter": int(args.solver_maxiter),
@@ -443,10 +522,15 @@ def main() -> None:
             "cache_mode": str(args.cache_mode),
             "preconditioner_mode": str(args.preconditioner_mode),
             "preconditioner_subdivisions": int(args.preconditioner_subdivisions),
+            "skip_farfield": bool(args.skip_farfield),
+            "skip_nearfield": bool(args.skip_nearfield),
+            "cuda_profiler_api": bool(args.cuda_profiler_api),
         },
         "estimated_translation_cache_bytes": int(cache_bytes_est),
         "solver_runs": solver_runs,
-        "nearfield_grid_shape": [int(near_field.axis_0.shape[0]), int(near_field.axis_0.shape[1])],
+        "nearfield_grid_shape": None
+        if near_field is None
+        else [int(near_field.axis_0.shape[0]), int(near_field.axis_0.shape[1])],
         "phases": phases,
     }
 

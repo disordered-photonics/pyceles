@@ -122,6 +122,7 @@ class SimulationConfig:
     solver_preconditioner_subdivisions: int | tuple[int, int, int] = 2
     solver_preconditioner_cubic_bbox: bool = True
     solver_preconditioner_max_block_unknowns: int | None = None
+    operator_backend: Literal["numpy", "cupy"] = "numpy"
     compute_dtype: Literal["complex64", "complex128"] = "complex128"
     accum_dtype: Literal["complex64", "complex128"] = "complex128"
     cache_translation_blocks: bool = False
@@ -215,6 +216,17 @@ class SimulationConfig:
         if method not in allowed:
             raise ValueError(
                 f"`solver_method` must be one of {sorted(allowed)}. Got {self.solver_method!r}."
+            )
+        backend = str(self.operator_backend).lower()
+        if backend not in {"numpy", "cupy"}:
+            raise ValueError(
+                "`operator_backend` must be one of {'numpy', 'cupy'}. "
+                f"Got {self.operator_backend!r}."
+            )
+        if backend == "cupy" and bool(self.cache_translation_blocks):
+            raise ValueError(
+                "`cache_translation_blocks=True` is not supported with `operator_backend='cupy'`. "
+                "The CuPy backend currently uses only the direct raw-kernel coupling path."
             )
 
         _, az_shared = validate_angular_grid_pair(

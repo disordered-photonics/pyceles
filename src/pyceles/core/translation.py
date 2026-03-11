@@ -10,7 +10,7 @@ import numpy.typing as npt
 from scipy.special import spherical_jn, spherical_yn
 
 from .indexing import index_vswf, iter_modes, n_modes
-from .spherical import legendre_normalized_trigon_scalar
+from .spherical import _legendre_scalar_tables, legendre_normalized_trigon_scalar
 from .wigner import wigner_3j
 
 # SciPy spherical_yn is defined for real arguments; CELES assumes real k in the embedding medium.
@@ -174,6 +174,8 @@ def clear_caches() -> None:
     """
 
     _translation_ab5_table_cached.cache_clear()
+    _translation_ab5_compact_tables_cached.cache_clear()
+    _translation_plm_coeff_table_cached.cache_clear()
     _translation_mode_pair_tables.cache_clear()
 
 
@@ -199,6 +201,97 @@ def _translation_mode_pair_tables(lmax: int) -> tuple[np.ndarray, np.ndarray, np
     dm_i = dm.astype(np.int32, copy=False)
     dm_lookup = dm_i + (2 * lmax)
     return dm_i, absdm, dm_lookup.astype(np.int32, copy=False)
+
+
+def _poly_linear_combo(
+    lhs: np.ndarray, rhs: np.ndarray, *, lhs_scale: float, rhs_scale: float
+) -> np.ndarray:
+    """Return `lhs_scale * lhs + rhs_scale * rhs` for 1D polynomial-coefficient arrays."""
+    out_size = max(lhs.size, rhs.size)
+    out = np.zeros((out_size,), dtype=np.float64)
+    out[: lhs.size] += lhs_scale * lhs
+    out[: rhs.size] += rhs_scale * rhs
+    return out
+
+
+@cache
+def _translation_ab5_compact_tables_cached(
+    lmax: int, dtype_str: str
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return CELES-style flattened real/imag `ab5` tables for direct GPU kernels."""
+    lmax = int(lmax)
+    ab5 = np.asarray(_translation_ab5_table_cached(lmax, dtype_str))
+    real_dtype = np.float32 if np.dtype(dtype_str) == np.dtype(np.complex64) else np.float64
+    re_entries: list[float] = []
+    im_entries: list[float] = []
+    for tau1, l1, m1, n1 in iter_modes(lmax):
+        for tau2, l2, m2, n2 in iter_modes(lmax):
+            p_min = max(abs(m1 - m2), abs(l1 - l2) + abs(tau1 - tau2))
+            for p in range(p_min, l1 + l2 + 1):
+                entry = ab5[n1, n2, p]
+                re_entries.append(float(np.real(entry)))
+                im_entries.append(float(np.imag(entry)))
+    return (
+        np.asarray(re_entries, dtype=real_dtype),
+        np.asarray(im_entries, dtype=real_dtype),
+    )
+
+
+def _translation_ab5_compact_tables(lmax: int, dtype=np.complex64) -> tuple[np.ndarray, np.ndarray]:
+    """Return CELES-style flattened real/imag `ab5` tables for direct GPU kernels."""
+    return _translation_ab5_compact_tables_cached(int(lmax), np.dtype(dtype).str)
+
+
+@cache
+def _translation_plm_coeff_table_cached(lmax: int, dtype_str: str) -> np.ndarray:
+    """Return CELES-style trigonometric Legendre coefficient table up to degree `2*lmax`."""
+    lmax = int(lmax)
+    out_dtype = np.float32 if np.dtype(dtype_str) == np.dtype(np.float32) else np.float64
+    max_degree = 2 * lmax
+    max_terms = lmax + 1
+    q_poly: list[list[np.ndarray]] = [
+        [np.zeros((0,), dtype=np.float64) for _ in range(max_degree + 1)]
+        for _ in range(max_degree + 1)
+    ]
+
+    q_poly[0][0] = np.asarray([np.sqrt(2.0) / 2.0], dtype=np.float64)
+    if max_degree >= 1:
+        q_poly[1][0] = np.asarray([0.0, np.sqrt(3.0 / 2.0)], dtype=np.float64)
+
+    a0, b0, c_mm, a_lm, b_lm = _legendre_scalar_tables(max_degree)
+    for l in range(1, max_degree):
+        q_poly[l + 1][0] = _poly_linear_combo(
+            np.pad(q_poly[l][0], (1, 0)),
+            q_poly[l - 1][0],
+            lhs_scale=float(a0[l]),
+            rhs_scale=-float(b0[l]),
+        )
+
+    for m in range(1, max_degree + 1):
+        q_poly[m][m] = np.asarray([c_mm[m]], dtype=np.float64)
+        for l in range(m, max_degree):
+            q_poly[l + 1][m] = _poly_linear_combo(
+                np.pad(q_poly[l][m], (1, 0)),
+                q_poly[l - 1][m],
+                lhs_scale=float(a_lm[l, m]),
+                rhs_scale=-float(b_lm[l, m]),
+            )
+
+    coeffs = np.zeros((max_terms, max_degree + 1, max_degree + 1), dtype=out_dtype)
+    for l in range(max_degree + 1):
+        for m in range(l + 1):
+            poly = q_poly[l][m]
+            jj = 0
+            for lam in range(l - m, -1, -2):
+                coeffs[jj, m, l] = out_dtype(poly[lam]) if lam < poly.size else out_dtype(0.0)
+                jj += 1
+    coeffs.setflags(write=False)
+    return coeffs
+
+
+def _translation_plm_coeff_table(lmax: int, dtype=np.float32) -> np.ndarray:
+    """Return CELES-style trigonometric Legendre coefficient table up to degree `2*lmax`."""
+    return _translation_plm_coeff_table_cached(int(lmax), np.dtype(dtype).str)
 
 
 def translation_block(

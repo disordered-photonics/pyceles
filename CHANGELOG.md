@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Added a CuPy backend for diagonal sphere/layered-sphere clusters:
+  - `SimulationConfig(operator_backend="cupy")`
+  - CuPy GMRES solver wrapper
+  - diagonal-only GPU single-body `T` path
+  - fused direct pairwise `W·x` RawKernel backend for `complex64` and `complex128`
+    with GPU-resident translation precompute tables.
 - Added a reusable source-compliance test helper and contract tests to ensure
   built-in/new source classes expose required `Source` protocol methods and
   capability metadata.
@@ -63,6 +69,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so long-lived sessions can release process-global precompute tables on demand.
 
 ### Changed
+- `solve_linear_system(..., backend="cupy")` supports GMRES for the GPU solve
+  path; direct solves and built-in/custom preconditioners remain NumPy-only.
+- `operator_backend="cupy"` uses the fused direct raw-kernel coupling path for
+  GPU pairwise matvecs.
+- `examples/profile_pyceles_phases.py` now accepts
+  `--operator-backend {numpy,cupy}` and synchronizes GPU work when timing the
+  solver phase so CuPy wall times are meaningful.
 - Source capability contract now includes
   `Source.has_finite_incident_power()`, used as the canonical policy gate for
   finite-beam-only diagnostics across simulation and far-field workflows.
