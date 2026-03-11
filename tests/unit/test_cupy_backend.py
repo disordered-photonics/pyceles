@@ -9,7 +9,8 @@ import pyceles as pcl
 from pyceles._optional import import_cupy
 from pyceles.core.indexing import n_modes
 from pyceles.core.operators import prepare_matvec
-from pyceles.core.particles import spheres_from_arrays
+from pyceles.core.particles import Particle, spheres_from_arrays
+from pyceles.io import far_field_intensity
 
 
 def _cupy_available() -> bool:
@@ -26,6 +27,64 @@ def _cupy_available() -> bool:
 
 
 pytestmark = pytest.mark.skipif(not _cupy_available(), reason="CuPy runtime unavailable")
+
+
+def _small_cluster_particles() -> tuple[Particle, ...]:
+    positions = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [220.0, 25.0, -60.0],
+            [-180.0, 90.0, 70.0],
+        ],
+        dtype=float,
+    )
+    radii = np.array([80.0, 82.0, 79.0], dtype=float)
+    n_particle = np.array([1.59 + 0.0j, 1.61 + 0.0j, 1.58 + 0.0j], dtype=np.complex128)
+    return tuple(
+        spheres_from_arrays(
+            positions=positions,
+            radii=radii,
+            refractive_indices=n_particle,
+        )
+    )
+
+
+def _plane_wave_source(wavelength: float, n_medium: complex) -> pcl.PlaneWave:
+    return pcl.PlaneWave(
+        wavelength=wavelength,
+        medium_n=n_medium,
+        polarization="TE",
+        polar_angle=0.3,
+        azimuthal_angle=0.2,
+        amplitude=1.0,
+    )
+
+
+def _sim_cfg(
+    *,
+    operator_backend: Literal["numpy", "cupy"],
+    compute_dtype: Literal["complex64", "complex128"],
+    wavelength: float,
+    n_medium: complex,
+    source: pcl.PlaneWave,
+) -> pcl.SimulationConfig:
+    return pcl.SimulationConfig(
+        wavelength=wavelength,
+        n_medium=n_medium,
+        lmax=3,
+        source=source,
+        polar_angles=pcl.core.uniform_polar_grid(181),
+        azimuthal_angles=pcl.core.uniform_periodic_azimuth_grid(36),
+        radial_lut_dr=0.5,
+        solver_method="gmres",
+        solver_rtol=1e-10 if compute_dtype == "complex128" else 1e-6,
+        solver_restart=10,
+        solver_maxiter=120,
+        operator_backend=operator_backend,
+        compute_dtype=compute_dtype,
+        accum_dtype="complex128",
+        verbose=False,
+    )
 
 
 @pytest.mark.parametrize(
@@ -100,95 +159,117 @@ def test_cupy_prepared_operator_matches_numpy_for_diagonal_spheres(
 
 
 @pytest.mark.parametrize(
-    ("operator_dtype", "rtol", "atol"),
+    (
+        "operator_dtype",
+        "coeff_rtol",
+        "coeff_atol",
+        "ff_back_rtol",
+        "ff_back_atol",
+        "nf_rtol",
+        "nf_atol",
+    ),
     [
-        (np.complex64, 3e-5, 3e-6),
-        (np.complex128, 2e-5, 2e-8),
+        (np.complex64, 3e-5, 3e-6, 4e-5, 2e-6, 3e-5, 3e-6),
+        (np.complex128, 5e-9, 5e-10, 5e-9, 5e-10, 1e-8, 1e-9),
     ],
 )
-def test_cupy_simulation_run_matches_numpy_for_farfield_observables(
-    operator_dtype: np.dtype, rtol: float, atol: float
+def test_cupy_simulation_run_matches_numpy_for_coeffs_farfield_and_nearfield(
+    operator_dtype: np.dtype,
+    coeff_rtol: float,
+    coeff_atol: float,
+    ff_back_rtol: float,
+    ff_back_atol: float,
+    nf_rtol: float,
+    nf_atol: float,
 ) -> None:
-    lmax = 3
     wavelength = 550.0
     n_medium = 1.0 + 0j
-    positions = np.array(
-        [
-            [0.0, 0.0, 0.0],
-            [220.0, 25.0, -60.0],
-            [-180.0, 90.0, 70.0],
-        ],
-        dtype=float,
-    )
-    radii = np.array([80.0, 82.0, 79.0], dtype=float)
-    n_particle = np.array([1.59 + 0.0j, 1.61 + 0.0j, 1.58 + 0.0j], dtype=np.complex128)
-    particles = tuple(
-        spheres_from_arrays(
-            positions=positions,
-            radii=radii,
-            refractive_indices=n_particle,
-        )
-    )
-    source = pcl.PlaneWave(
-        wavelength=wavelength,
-        medium_n=n_medium,
-        polarization="TE",
-        polar_angle=0.3,
-        azimuthal_angle=0.2,
-        amplitude=1.0,
-    )
+    particles = _small_cluster_particles()
+    source = _plane_wave_source(wavelength, n_medium)
 
     compute_dtype: Literal["complex64", "complex128"] = (
         "complex64" if operator_dtype == np.complex64 else "complex128"
     )
-    cfg_numpy = pcl.SimulationConfig(
-        wavelength=wavelength,
-        n_medium=n_medium,
-        lmax=lmax,
-        source=source,
-        polar_angles=pcl.core.uniform_polar_grid(181),
-        azimuthal_angles=pcl.core.uniform_periodic_azimuth_grid(36),
-        radial_lut_dr=0.5,
-        solver_method="gmres",
-        solver_rtol=1e-6,
-        solver_restart=10,
-        solver_maxiter=80,
+    cfg_numpy = _sim_cfg(
         operator_backend="numpy",
         compute_dtype=compute_dtype,
-        accum_dtype="complex128",
-        verbose=False,
-    )
-    cfg_cupy = pcl.SimulationConfig(
         wavelength=wavelength,
         n_medium=n_medium,
-        lmax=lmax,
         source=source,
-        polar_angles=pcl.core.uniform_polar_grid(181),
-        azimuthal_angles=pcl.core.uniform_periodic_azimuth_grid(36),
-        radial_lut_dr=0.5,
-        solver_method="gmres",
-        solver_rtol=1e-6,
-        solver_restart=10,
-        solver_maxiter=80,
+    )
+    cfg_cupy = _sim_cfg(
         operator_backend="cupy",
         compute_dtype=compute_dtype,
-        accum_dtype="complex128",
-        verbose=False,
+        wavelength=wavelength,
+        n_medium=n_medium,
+        source=source,
     )
 
     run_numpy = pcl.Simulation(cfg_numpy, particles=particles).run(include_farfield=True)
     run_cupy = pcl.Simulation(cfg_cupy, particles=particles).run(include_farfield=True)
 
-    np.testing.assert_allclose(run_cupy.coeffs, run_numpy.coeffs, rtol=rtol, atol=atol)
+    np.testing.assert_allclose(
+        run_cupy.coeffs,
+        run_numpy.coeffs,
+        rtol=coeff_rtol,
+        atol=coeff_atol,
+    )
     np.testing.assert_allclose(
         run_cupy.farfield.scattered_te["coeff"],
         run_numpy.farfield.scattered_te["coeff"],
-        rtol=rtol,
-        atol=atol,
+        rtol=coeff_rtol,
+        atol=coeff_atol,
     )
     np.testing.assert_allclose(
         run_cupy.farfield.scattered_tm["coeff"],
         run_numpy.farfield.scattered_tm["coeff"],
-        rtol=rtol,
-        atol=atol,
+        rtol=coeff_rtol,
+        atol=coeff_atol,
+    )
+
+    intensity_numpy = far_field_intensity(
+        run_numpy.farfield.scattered_te, run_numpy.farfield.scattered_tm
+    )
+    intensity_cupy = far_field_intensity(
+        run_cupy.farfield.scattered_te, run_cupy.farfield.scattered_tm
+    )
+    kz = np.asarray(run_numpy.farfield.scattered_te["kz"], dtype=float)
+    backward_mask = kz <= 0.0
+    np.testing.assert_allclose(
+        intensity_cupy[backward_mask],
+        intensity_numpy[backward_mask],
+        rtol=ff_back_rtol,
+        atol=ff_back_atol,
+    )
+
+    nearfield_points = np.array(
+        [
+            [82.0, 0.0, 0.0],
+            [0.0, 84.0, 0.0],
+            [220.0 + 83.5, 25.0, -60.0],
+            [-180.0, 90.0 + 81.5, 70.0],
+            [30.0, -15.0, 110.0],
+            [220.0, 25.0, -60.0 + 86.0],
+        ],
+        dtype=float,
+    )
+    nf_numpy = pcl.compute_near_field(
+        run_numpy, points=nearfield_points, channel="mixed", show_progress=False
+    )
+    nf_cupy = pcl.compute_near_field(
+        run_cupy, points=nearfield_points, channel="mixed", show_progress=False
+    )
+
+    np.testing.assert_array_equal(np.asarray(nf_cupy.inside_mask), np.asarray(nf_numpy.inside_mask))
+    np.testing.assert_allclose(
+        np.asarray(nf_cupy.E_scattered),
+        np.asarray(nf_numpy.E_scattered),
+        rtol=nf_rtol,
+        atol=nf_atol,
+    )
+    np.testing.assert_allclose(
+        np.asarray(nf_cupy.H_scattered),
+        np.asarray(nf_numpy.H_scattered),
+        rtol=nf_rtol,
+        atol=nf_atol,
     )
