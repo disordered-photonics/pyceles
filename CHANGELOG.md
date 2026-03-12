@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-03-12
+
 ### Added
 - Added a CuPy backend for diagonal sphere/layered-sphere clusters:
   - `SimulationConfig(operator_backend="cupy")`
@@ -85,6 +87,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--operator-backend {numpy,cupy}` and
   `--postprocessing-backend {inherit,numpy,cupy}`, and synchronizes GPU work
   when timing the solver phase so CuPy wall times are meaningful.
+- The built-in grid-block preconditioner default is now `3x3x3` subdivisions,
+  reflecting current benchmark guidance for moderate block sizes.
 - Source capability contract now includes
   `Source.has_finite_incident_power()`, used as the canonical policy gate for
   finite-beam-only diagnostics across simulation and far-field workflows.
