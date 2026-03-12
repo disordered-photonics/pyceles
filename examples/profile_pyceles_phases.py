@@ -183,7 +183,7 @@ def main() -> None:
     parser.add_argument(
         "--preconditioner-subdivisions",
         type=int,
-        default=2,
+        default=3,
         help="Grid subdivisions per axis for built-in grid_block preconditioner.",
     )
     parser.add_argument("--top-n", type=int, default=80)

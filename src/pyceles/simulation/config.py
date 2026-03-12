@@ -127,7 +127,7 @@ class SimulationConfig:
     solver_warm_start: np.ndarray | None = None
     solver_preconditioner: Callable[[np.ndarray], np.ndarray] | None = None
     solver_preconditioner_kind: Literal["none", "grid_block"] = "none"
-    solver_preconditioner_subdivisions: int | tuple[int, int, int] = 2
+    solver_preconditioner_subdivisions: int | tuple[int, int, int] = 3
     solver_preconditioner_cubic_bbox: bool = True
     solver_preconditioner_max_block_unknowns: int | None = None
     operator_backend: Literal["numpy", "cupy"] = "numpy"
