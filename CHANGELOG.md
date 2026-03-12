@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SimulationConfig(postprocessing_backend="inherit" | "numpy" | "cupy")`.
 - Added a first CuPy postprocessing slice for scattered far-field SVWF-to-PWP
   assembly while keeping the public far-field payloads NumPy-shaped.
+- Added CuPy near-field postprocessing for the scattered field, the dominant
+  Gaussian/general initial-field paths, and homogeneous-sphere internal fields,
+  while keeping mixed non-spherical internal-field cases on the reference
+  implementation.
 - Added a reusable source-compliance test helper and contract tests to ensure
   built-in/new source classes expose required `Source` protocol methods and
   capability metadata.
@@ -74,8 +78,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - `solve_linear_system(..., backend="cupy")` uses GMRES for the GPU iterative
-  solve path; direct solves and built-in/custom preconditioners remain
-  NumPy-only.
+  solve path; direct solves remain NumPy-only.
 - `operator_backend="cupy"` uses the fused direct raw-kernel coupling path for
   GPU pairwise matvecs.
 - `examples/profile_pyceles_phases.py` now accepts

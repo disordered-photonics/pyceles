@@ -293,6 +293,8 @@ def test_cupy_simulation_run_matches_numpy_for_coeffs_farfield_and_nearfield(
 
     nearfield_points = np.array(
         [
+            [0.0, 0.0, 0.0],
+            [220.0, 25.0, -60.0],
             [82.0, 0.0, 0.0],
             [0.0, 84.0, 0.0],
             [220.0 + 83.5, 25.0, -60.0],
@@ -305,9 +307,13 @@ def test_cupy_simulation_run_matches_numpy_for_coeffs_farfield_and_nearfield(
     nf_numpy = pcl.compute_near_field(
         run_numpy, points=nearfield_points, channel="mixed", show_progress=False
     )
-    nf_cupy = pcl.compute_near_field(
-        run_cupy, points=nearfield_points, channel="mixed", show_progress=False
-    )
+    try:
+        nf_cupy = pcl.compute_near_field(
+            run_cupy, points=nearfield_points, channel="mixed", show_progress=False
+        )
+    except Exception as exc:
+        _skip_on_cupy_temp_permission(exc)
+        raise
 
     np.testing.assert_array_equal(np.asarray(nf_cupy.inside_mask), np.asarray(nf_numpy.inside_mask))
     np.testing.assert_allclose(
@@ -319,6 +325,30 @@ def test_cupy_simulation_run_matches_numpy_for_coeffs_farfield_and_nearfield(
     np.testing.assert_allclose(
         np.asarray(nf_cupy.H_scattered),
         np.asarray(nf_numpy.H_scattered),
+        rtol=nf_rtol,
+        atol=nf_atol,
+    )
+    np.testing.assert_allclose(
+        np.asarray(nf_cupy.E_initial),
+        np.asarray(nf_numpy.E_initial),
+        rtol=nf_rtol,
+        atol=nf_atol,
+    )
+    np.testing.assert_allclose(
+        np.asarray(nf_cupy.H_initial),
+        np.asarray(nf_numpy.H_initial),
+        rtol=nf_rtol,
+        atol=nf_atol,
+    )
+    np.testing.assert_allclose(
+        np.asarray(nf_cupy.E_total),
+        np.asarray(nf_numpy.E_total),
+        rtol=nf_rtol,
+        atol=nf_atol,
+    )
+    np.testing.assert_allclose(
+        np.asarray(nf_cupy.H_total),
+        np.asarray(nf_numpy.H_total),
         rtol=nf_rtol,
         atol=nf_atol,
     )

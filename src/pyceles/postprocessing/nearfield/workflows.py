@@ -160,6 +160,7 @@ def compute_near_field(
             source_eff = source.with_polarization(pol_label)
 
     source_polar_angles, source_azimuthal_angles = run.config.source_angular_grids()
+    postprocessing_backend = run.config.resolved_postprocessing_backend()
     compute_dtype, accum_dtype = resolve_compute_accum_dtypes(
         compute_dtype=run.config.compute_dtype,
         accum_dtype=run.config.accum_dtype,
@@ -182,6 +183,7 @@ def compute_near_field(
             else bool(force_general_initial_field)
         ),
         lut_dr=run.config.radial_lut_dr,
+        backend=postprocessing_backend,
         compute_dtype=compute_dtype,
         accum_dtype=accum_dtype,
     )

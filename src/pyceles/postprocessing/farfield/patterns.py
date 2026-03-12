@@ -152,19 +152,20 @@ def _scattered_field_plane_wave_pattern_cupy(
     pwp_te_coeff = cupy.zeros((Na, Nb), dtype=complex_dtype)
     pwp_tm_coeff = cupy.zeros((Na, Nb), dtype=complex_dtype)
 
-    sphere_iter = range(0, Ns, 16)
     if show_progress:
         try:
             from tqdm.auto import tqdm
 
-            sphere_iter = tqdm(sphere_iter, desc="PWP (SVWF->PWP)")
+            sphere_pbar = tqdm(total=Ns, desc="PWP (SVWF->PWP)")
         except Exception:
-            pass
+            sphere_pbar = None
+    else:
+        sphere_pbar = None
 
-    # Batch a modest number of spheres per launch. This avoids the original
-    # Python sphere loop while keeping the `(chunk, alpha, beta)` workspace
-    # bounded and easy to reason about.
-    for start in sphere_iter:
+    # Batch a modest number of spheres per launch. The device work is chunked,
+    # but the user-facing progress remains expressed in physical spheres rather
+    # than implementation chunks.
+    for start in range(0, Ns, 16):
         stop = min(start + 16, Ns)
         pos_chunk = positions_gpu[start:stop]
         coeff_chunk = coeffs_gpu[start:stop]
@@ -184,6 +185,11 @@ def _scattered_field_plane_wave_pattern_cupy(
 
         pwp_te_coeff += cupy.sum(spec_te * phase, axis=0) / (2.0 * np.pi)
         pwp_tm_coeff += cupy.sum(spec_tm * phase, axis=0) / (2.0 * np.pi)
+        if sphere_pbar is not None:
+            sphere_pbar.update(stop - start)
+
+    if sphere_pbar is not None:
+        sphere_pbar.close()
 
     return (
         {

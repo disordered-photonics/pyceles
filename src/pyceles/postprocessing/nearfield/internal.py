@@ -7,6 +7,7 @@ import numpy.typing as npt
 from scipy.special import spherical_jn, spherical_yn
 from tqdm.auto import tqdm
 
+from pyceles._optional import asnumpy, import_cupy
 from pyceles.core.indexing import n_modes
 from pyceles.core.particles import (
     LayeredSphere,
@@ -36,6 +37,7 @@ def compute_internal_field(
     _point_classification: InternalPointClassification | None = None,
     n_medium: complex = 1.0 + 0j,
     show_progress: bool = False,
+    backend: str = "numpy",
     compute_dtype: npt.DTypeLike = np.complex128,
     accum_dtype: npt.DTypeLike = np.complex128,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -49,6 +51,7 @@ def compute_internal_field(
         classification=_point_classification,
         n_medium=n_medium,
         show_progress=show_progress,
+        backend=backend,
         compute_dtype=compute_dtype,
         accum_dtype=accum_dtype,
     )
@@ -66,6 +69,7 @@ def _compute_internal_field_homogeneous_spheres(
     inside_indices_by_sphere: Sequence[np.ndarray] | None = None,
     n_medium: complex = 1.0 + 0j,
     show_progress: bool = False,
+    backend: str = "numpy",
     compute_dtype: npt.DTypeLike = np.complex128,
     accum_dtype: npt.DTypeLike = np.complex128,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -100,11 +104,28 @@ def _compute_internal_field_homogeneous_spheres(
     h = np.zeros((n_points, 3), dtype=accum_dtype)
     inside = np.zeros(n_points, dtype=bool)
 
+    eps = 1e-12
+
+    if str(backend).lower() == "cupy":
+        return _compute_internal_field_homogeneous_spheres_cupy(
+            pts,
+            pos,
+            rad,
+            np.asarray(coeffs, dtype=compute_dtype),
+            k=k,
+            lmax=lmax,
+            n_particle=n_particle_arr,
+            inside_indices_by_sphere=inside_indices_by_sphere,
+            n_medium=n_medium_c,
+            show_progress=show_progress,
+            compute_dtype=compute_dtype,
+            accum_dtype=accum_dtype,
+        )
+
     sphere_iter = range(n_spheres)
     if show_progress:
         sphere_iter = tqdm(sphere_iter, desc="Internal field (spheres)", leave=True)
 
-    eps = 1e-12
     mode_by_l = mode_indices_by_l(lmax)
 
     for j_sphere in sphere_iter:
@@ -176,6 +197,127 @@ def _compute_internal_field_homogeneous_spheres(
     return e, h, inside
 
 
+def _compute_internal_field_homogeneous_spheres_cupy(
+    field_points: np.ndarray,
+    positions: np.ndarray,
+    radii: np.ndarray,
+    coeffs: np.ndarray,
+    *,
+    k: float,
+    lmax: int,
+    n_particle: np.ndarray,
+    inside_indices_by_sphere: Sequence[np.ndarray] | None,
+    n_medium: complex,
+    show_progress: bool,
+    compute_dtype: np.dtype,
+    accum_dtype: np.dtype,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """CuPy homogeneous-sphere internal field path.
+
+    The current GPU internal-field slice targets the dominant sphere case while
+    keeping layered spheres and spheroids on the established CPU reference
+    path. Mixed clusters therefore still work: sphere subsets can use CuPy
+    while the more specialized particle families retain their validated NumPy
+    kernels until a clearer hotspot justifies porting them.
+    """
+    cupy, _ = import_cupy()
+    compute_dtype_cp = (
+        cupy.complex64 if compute_dtype == np.dtype(np.complex64) else cupy.complex128
+    )
+    accum_dtype_cp = cupy.complex64 if accum_dtype == np.dtype(np.complex64) else cupy.complex128
+    real_dtype_cp = cupy.float32 if compute_dtype == np.dtype(np.complex64) else cupy.float64
+    eps = real_dtype_cp(1e-12)
+
+    n_points = field_points.shape[0]
+    n_spheres = positions.shape[0]
+    e = np.zeros((n_points, 3), dtype=accum_dtype)
+    h = np.zeros((n_points, 3), dtype=accum_dtype)
+    inside = np.zeros(n_points, dtype=bool)
+    sphere_iter = range(n_spheres)
+    if show_progress:
+        sphere_iter = tqdm(sphere_iter, desc="Internal field (spheres)", leave=True)
+
+    pts_gpu = cupy.asarray(field_points, dtype=real_dtype_cp)
+    coeffs_gpu = cupy.asarray(np.asarray(coeffs, dtype=compute_dtype), dtype=compute_dtype_cp)
+    mode_by_l = mode_indices_by_l(lmax)
+
+    for j_sphere in sphere_iter:
+        if inside_indices_by_sphere is None:
+            r_full = field_points - positions[j_sphere]
+            r2_full = np.sum(r_full * r_full, axis=1)
+            idx = np.flatnonzero(r2_full < (radii[j_sphere] ** 2))
+        else:
+            idx = np.asarray(inside_indices_by_sphere[j_sphere], dtype=np.intp).reshape(-1)
+        if idx.size == 0:
+            continue
+
+        inside[idx] = True
+        idx_gpu = cupy.asarray(idx, dtype=cupy.int64)
+        center_gpu = cupy.asarray(positions[j_sphere], dtype=real_dtype_cp)
+        rvec = pts_gpu[idx_gpu] - center_gpu[None, :]
+        r2 = cupy.sum(rvec * rvec, axis=1)
+        r = cupy.sqrt(r2)
+        r_safe = cupy.where(r < eps, eps, r)
+
+        x = rvec[:, 0]
+        y = rvec[:, 1]
+        z = rvec[:, 2]
+        rho = cupy.sqrt(x * x + y * y)
+        ct = z / r_safe
+        st = rho / r_safe
+        phi = cupy.arctan2(y, x)
+
+        e_r = cupy.stack([st * cupy.cos(phi), st * cupy.sin(phi), ct], axis=1)
+        e_theta = cupy.stack([ct * cupy.cos(phi), ct * cupy.sin(phi), -st], axis=1)
+        e_phi = cupy.stack([-cupy.sin(phi), cupy.cos(phi), cupy.zeros_like(phi)], axis=1)
+        pi_all, tau_all, p_all = spherical_functions_trigon(ct, st, lmax, xp=cupy, return_plm=True)
+
+        n_s = complex(n_particle[j_sphere])
+        k_s = k * (n_s / n_medium)
+        kr = compute_dtype_cp(k_s) * r_safe.astype(compute_dtype_cp, copy=False)
+        ratios = sphere_internal_ratios(lmax, k, radii[j_sphere], n_s, n_medium)
+        ratio_m = ratios[1]
+        ratio_n = ratios[2]
+
+        e_gpu = cupy.zeros((idx.size, 3), dtype=accum_dtype_cp)
+        h_gpu = cupy.zeros_like(e_gpu)
+        for l in range(1, lmax + 1):
+            z_l = cupy.asarray(spherical_jn(l, asnumpy(kr)), dtype=compute_dtype_cp)
+            dz_l = cupy.asarray(
+                spherical_jn(l, asnumpy(kr), derivative=True), dtype=compute_dtype_cp
+            )
+            dxxz = z_l + kr * dz_l
+
+            m_vals, abs_m, n1_idx, n2_idx = mode_by_l[l - 1]
+            m_all, n_all = build_internal_mode_tensors(
+                l=l,
+                m_vals=m_vals,
+                abs_m=abs_m,
+                phi=phi,
+                e_r=e_r,
+                e_theta=e_theta,
+                e_phi=e_phi,
+                pi_all=pi_all,
+                tau_all=tau_all,
+                p_all=p_all,
+                z_l=z_l,
+                dxxz=dxxz,
+                kr=kr,
+                compute_dtype=compute_dtype,
+            )
+            a_int = coeffs_gpu[j_sphere, n1_idx].astype(compute_dtype_cp, copy=False) * ratio_m[l]
+            b_int = coeffs_gpu[j_sphere, n2_idx].astype(compute_dtype_cp, copy=False) * ratio_n[l]
+            e_gpu += contract_modes(a_int, m_all).astype(accum_dtype_cp, copy=False)
+            e_gpu += contract_modes(b_int, n_all).astype(accum_dtype_cp, copy=False)
+            h_gpu += (-1j * n_s) * contract_modes(a_int, n_all).astype(accum_dtype_cp, copy=False)
+            h_gpu += (-1j * n_s) * contract_modes(b_int, m_all).astype(accum_dtype_cp, copy=False)
+
+        e[idx] += asnumpy(e_gpu).astype(accum_dtype, copy=False)
+        h[idx] += asnumpy(h_gpu).astype(accum_dtype, copy=False)
+
+    return e, h, inside
+
+
 def _compute_internal_field_particles(
     field_points: np.ndarray,
     particles: Sequence[Particle],
@@ -186,6 +328,7 @@ def _compute_internal_field_particles(
     classification: InternalPointClassification | None = None,
     n_medium: complex = 1.0 + 0j,
     show_progress: bool = False,
+    backend: str = "numpy",
     compute_dtype: npt.DTypeLike = np.complex128,
     accum_dtype: npt.DTypeLike = np.complex128,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -248,6 +391,7 @@ def _compute_internal_field_particles(
             inside_indices_by_sphere=inside_idx,
             n_medium=n_medium_c,
             show_progress=show_progress,
+            backend=backend,
             compute_dtype=compute_dtype,
             accum_dtype=accum_dtype,
         )
@@ -291,6 +435,7 @@ def _compute_internal_field_particles(
             inside_indices_by_sphere=inside_idx,
             n_medium=n_medium_c,
             show_progress=show_progress,
+            backend=backend,
             compute_dtype=compute_dtype,
             accum_dtype=accum_dtype,
         )

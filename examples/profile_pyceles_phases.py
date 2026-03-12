@@ -289,7 +289,10 @@ def main() -> None:
     if cfg.resolved_postprocessing_backend() == "cupy" and not args.quiet:
         print(
             "Note: CuPy postprocessing currently accelerates scattered far-field "
-            "PWP assembly. Near-field kernels still use the NumPy reference path."
+            "PWP assembly, the dominant Gaussian/general initial-field paths, "
+            "the scattered near-field component, and homogeneous-sphere internal "
+            "fields. Mixed non-spherical internal-field cases still fall back to "
+            "the NumPy reference path."
         )
 
     if not args.quiet:

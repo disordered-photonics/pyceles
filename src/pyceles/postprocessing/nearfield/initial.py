@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from importlib import import_module
+
 import numpy as np
 import numpy.typing as npt
 from scipy.special import jv
 from tqdm.auto import tqdm
 
+from pyceles._optional import asnumpy, import_cupy
 from pyceles.core.angular import (
     beam_axis_and_frame,
     is_uniform_periodic_azimuth,
@@ -37,6 +40,7 @@ def _compute_initial_field_gaussian_normal_incidence_analytic(
     polar_angles: np.ndarray,
     azimuthal_angles: np.ndarray,
     show_progress: bool,
+    backend: str,
     compute_dtype: np.dtype,
     accum_dtype: np.dtype,
 ) -> tuple[np.ndarray, np.ndarray] | None:
@@ -91,6 +95,7 @@ def _compute_initial_field_gaussian_normal_incidence_analytic(
             polar_angles=polar_angles,
             azimuthal_angles=azimuthal_angles,
             show_progress=show_progress,
+            backend=backend,
             compute_dtype=compute_dtype,
             accum_dtype=accum_dtype,
         )
@@ -106,6 +111,7 @@ def _compute_initial_field_gaussian_normal_incidence_analytic(
             polar_angles=polar_angles,
             azimuthal_angles=azimuthal_angles,
             show_progress=False,
+            backend=backend,
             compute_dtype=compute_dtype,
             accum_dtype=accum_dtype,
         )
@@ -149,6 +155,97 @@ def _compute_initial_field_gaussian_normal_incidence_analytic(
         hemi_label = "bwd"
     nonzero_mask = beta_weighted != 0.0
     active_beta = np.flatnonzero(hemi_mask & nonzero_mask)
+    if str(backend).lower() == "cupy":
+        cupy, _ = import_cupy()
+        cupyx_special = import_module("cupyx.scipy.special")
+        compute_dtype_cp = (
+            cupy.complex64 if compute_dtype == np.dtype(np.complex64) else cupy.complex128
+        )
+        accum_dtype_cp = (
+            cupy.complex64 if accum_dtype == np.dtype(np.complex64) else cupy.complex128
+        )
+        real_dtype_cp = cupy.float32 if compute_dtype == np.dtype(np.complex64) else cupy.float64
+        two_i_pi_cp = compute_dtype_cp(2j * np.pi)
+
+        z_gpu = cupy.asarray(z, dtype=real_dtype_cp)
+        rho_gpu = cupy.asarray(rho, dtype=real_dtype_cp)
+        u1_gpu = cupy.asarray(u1, dtype=real_dtype_cp)
+        u2_gpu = cupy.asarray(u2, dtype=real_dtype_cp)
+        u3_gpu = cupy.asarray(u3, dtype=real_dtype_cp)
+        u4_gpu = cupy.asarray(u4, dtype=real_dtype_cp)
+        sb_gpu = cupy.asarray(sb[active_beta], dtype=real_dtype_cp)
+        cb_gpu = cupy.asarray(cb[active_beta], dtype=real_dtype_cp)
+        bw_gpu = cupy.asarray(beta_weighted[active_beta], dtype=compute_dtype_cp)
+        c_plus_gpu = cupy.asarray(c_plus[active_beta], dtype=real_dtype_cp)
+        c_minus_gpu = cupy.asarray(c_minus[active_beta], dtype=real_dtype_cp)
+        c_splus_gpu = cupy.asarray(c_splus[active_beta], dtype=real_dtype_cp)
+        c_sminus_gpu = cupy.asarray(c_sminus[active_beta], dtype=real_dtype_cp)
+
+        e_gpu = cupy.zeros((pts.shape[0], 3), dtype=accum_dtype_cp)
+        h_gpu = cupy.zeros_like(e_gpu)
+        beta_batch = 32
+        beta_pbar = None
+        if show_progress:
+            hemi_total = int(np.count_nonzero(hemi_mask))
+            desc = (
+                f"Initial field (non-zero {hemi_label} betas {int(active_beta.size)}/{hemi_total})"
+            )
+            beta_pbar = tqdm(total=int(active_beta.size), desc=desc)
+
+        for start in range(0, int(active_beta.size), beta_batch):
+            stop = min(int(active_beta.size), start + beta_batch)
+            sb_i = sb_gpu[start:stop][:, None]
+            cb_i = cb_gpu[start:stop][:, None]
+            bw_i = bw_gpu[start:stop][:, None]
+            c_plus_i = c_plus_gpu[start:stop][:, None]
+            c_minus_i = c_minus_gpu[start:stop][:, None]
+            c_splus_i = c_splus_gpu[start:stop][:, None]
+            c_sminus_i = c_sminus_gpu[start:stop][:, None]
+
+            q = (real_dtype_cp(k) * sb_i) * rho_gpu[None, :]
+            j0 = cupyx_special.j0(q).astype(real_dtype_cp, copy=False)
+            j1 = cupyx_special.j1(q).astype(real_dtype_cp, copy=False)
+            # CuPy exposes j0/j1 but not the generic cylindrical J_v ufunc.
+            # Build J2 from the standard recurrence so the whole Gaussian
+            # initial-field kernel stays on device.
+            j2 = cupy.where(
+                cupy.abs(q) > real_dtype_cp(1e-12),
+                (real_dtype_cp(2.0) / q) * j1 - j0,
+                real_dtype_cp(0.0),
+            ).astype(real_dtype_cp, copy=False)
+            phase_z = cupy.exp(1j * (real_dtype_cp(k) * cb_i) * z_gpu[None, :]).astype(
+                compute_dtype_cp, copy=False
+            )
+            wgt = (bw_i * phase_z).astype(compute_dtype_cp, copy=False)
+
+            ex = (-s * pi_r * c_plus_i) * j0 + (pi_r * c_minus_i) * (u1_gpu[None, :] * j2)
+            ey = (c * pi_r * c_plus_i) * j0 - (pi_r * c_minus_i) * (u2_gpu[None, :] * j2)
+            ez = (two_i_pi_cp * (propagation * sb_i)) * (u3_gpu[None, :] * j1)
+            hx = (-c * pi_r * c_splus_i) * j0 - (pi_r * c_sminus_i) * (u2_gpu[None, :] * j2)
+            hy = (-s * pi_r * c_splus_i) * j0 - (pi_r * c_sminus_i) * (u1_gpu[None, :] * j2)
+            hz = (two_i_pi_cp * sb_i) * (u4_gpu[None, :] * j1)
+
+            e_gpu[:, 0] += cupy.sum((wgt * ex).astype(accum_dtype_cp, copy=False), axis=0)
+            e_gpu[:, 1] += cupy.sum((wgt * ey).astype(accum_dtype_cp, copy=False), axis=0)
+            e_gpu[:, 2] += cupy.sum((wgt * ez).astype(accum_dtype_cp, copy=False), axis=0)
+            h_gpu[:, 0] += n_medium_c * cupy.sum(
+                (wgt * hx).astype(accum_dtype_cp, copy=False), axis=0
+            )
+            h_gpu[:, 1] += n_medium_c * cupy.sum(
+                (wgt * hy).astype(accum_dtype_cp, copy=False), axis=0
+            )
+            h_gpu[:, 2] += n_medium_c * cupy.sum(
+                (wgt * hz).astype(accum_dtype_cp, copy=False), axis=0
+            )
+            if beta_pbar is not None:
+                beta_pbar.update(stop - start)
+
+        if beta_pbar is not None:
+            beta_pbar.close()
+        return asnumpy(e_gpu).astype(accum_dtype, copy=False), asnumpy(h_gpu).astype(
+            accum_dtype, copy=False
+        )
+
     beta_iter = active_beta
     if show_progress:
         hemi_total = int(np.count_nonzero(hemi_mask))
@@ -201,6 +298,7 @@ def _compute_initial_field_gaussian_rotated_fast(
     polar_angles: np.ndarray,
     azimuthal_angles: np.ndarray,
     show_progress: bool,
+    backend: str,
     compute_dtype: np.dtype,
     accum_dtype: np.dtype,
 ) -> tuple[np.ndarray, np.ndarray] | None:
@@ -232,6 +330,7 @@ def _compute_initial_field_gaussian_rotated_fast(
         polar_angles=np.asarray(polar_angles, dtype=float),
         azimuthal_angles=np.asarray(azimuthal_angles, dtype=float),
         show_progress=show_progress,
+        backend=backend,
         compute_dtype=np.dtype(compute_dtype),
         accum_dtype=np.dtype(accum_dtype),
     )
@@ -254,6 +353,7 @@ def compute_initial_field(
     batch_size: int = 2048,
     show_progress: bool = True,
     force_general_initial_field: bool = False,
+    backend: str = "numpy",
     compute_dtype: npt.DTypeLike = np.complex128,
     accum_dtype: npt.DTypeLike = np.complex128,
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -267,6 +367,7 @@ def compute_initial_field(
             polar_angles=np.asarray(polar_angles, float),
             azimuthal_angles=np.asarray(azimuthal_angles, float),
             show_progress=show_progress,
+            backend=backend,
             compute_dtype=np.dtype(compute_dtype),
             accum_dtype=np.dtype(accum_dtype),
         )
@@ -282,6 +383,7 @@ def compute_initial_field(
         azimuthal_angles=np.asarray(azimuthal_angles, float),
         batch_size=int(batch_size),
         show_progress=show_progress,
+        backend=backend,
         compute_dtype=np.dtype(compute_dtype),
         accum_dtype=np.dtype(accum_dtype),
     )
@@ -297,6 +399,7 @@ def _compute_initial_field_general(
     azimuthal_angles: np.ndarray,
     batch_size: int,
     show_progress: bool,
+    backend: str,
     compute_dtype: np.dtype,
     accum_dtype: np.dtype,
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -317,6 +420,7 @@ def _compute_initial_field_general(
             particle_distance_resolution=float(getattr(beam, "radial_lut_dr", 0.0)),
             batch_size=int(batch_size),
             show_progress=show_progress,
+            backend=backend,
             compute_dtype=compute_dtype,
             accum_dtype=accum_dtype,
         )
@@ -435,6 +539,56 @@ def _compute_initial_field_general(
     v_all[:, :, 3] = w_te_all * hx_te + w_tm_all * hx_tm
     v_all[:, :, 4] = w_te_all * hy_te + w_tm_all * hy_tm
     v_all[:, :, 5] = w_te_all * hz_te + w_tm_all * hz_tm
+
+    if str(backend).lower() == "cupy":
+        cupy, _ = import_cupy()
+        compute_dtype_cp = (
+            cupy.complex64 if compute_dtype == np.dtype(np.complex64) else cupy.complex128
+        )
+        accum_dtype_cp = (
+            cupy.complex64 if accum_dtype == np.dtype(np.complex64) else cupy.complex128
+        )
+        pts_gpu = cupy.asarray(pts, dtype=cupy.float64)
+        e_gpu = cupy.zeros((pts.shape[0], 3), dtype=accum_dtype_cp)
+        h_gpu = cupy.zeros_like(e_gpu)
+        alpha_iter = range(n_alpha)
+        if show_progress:
+            alpha_iter = tqdm(
+                range(n_alpha),
+                desc="Initial field (alpha)",
+                total=n_alpha,
+            )
+        for ja in alpha_iter:
+            alpha_w = alpha_weights[ja]
+            if alpha_w == 0.0:
+                continue
+            active_beta = np.flatnonzero((w_te_all[ja, :] != 0) | (w_tm_all[ja, :] != 0))
+            if active_beta.size == 0:
+                continue
+            kx = cupy.asarray(kx_all[ja, active_beta], dtype=cupy.float64)
+            ky = cupy.asarray(ky_all[ja, active_beta], dtype=cupy.float64)
+            kz = cupy.asarray(kz_all[ja, active_beta], dtype=cupy.float64)
+            v = cupy.asarray(v_all[ja, active_beta, :], dtype=compute_dtype_cp)
+            for s in range(0, n_points, batch_size_eff):
+                e_idx = min(n_points, s + batch_size_eff)
+                p = pts_gpu[s:e_idx, :]
+                phase_arg = (
+                    p[:, 0, None] * kx[None, :]
+                    + p[:, 1, None] * ky[None, :]
+                    + p[:, 2, None] * kz[None, :]
+                )
+                phase = cupy.exp(1j * phase_arg).astype(compute_dtype_cp, copy=False)
+                weighted = phase @ v
+                weighted_acc = (alpha_w * weighted).astype(accum_dtype_cp, copy=False)
+                e_gpu[s:e_idx, 0] += weighted_acc[:, 0]
+                e_gpu[s:e_idx, 1] += weighted_acc[:, 1]
+                e_gpu[s:e_idx, 2] += weighted_acc[:, 2]
+                h_gpu[s:e_idx, 0] += n_medium_c * weighted_acc[:, 3]
+                h_gpu[s:e_idx, 1] += n_medium_c * weighted_acc[:, 4]
+                h_gpu[s:e_idx, 2] += n_medium_c * weighted_acc[:, 5]
+        return asnumpy(e_gpu).astype(accum_dtype, copy=False), asnumpy(h_gpu).astype(
+            accum_dtype, copy=False
+        )
 
     for ja in tqdm(
         range(n_alpha), desc="Initial field (alpha)", total=n_alpha, disable=not show_progress

@@ -61,6 +61,7 @@ def compute_total_field(
     show_progress: bool = False,
     force_general_initial_field: bool = False,
     lut_dr: float = 1.0,
+    backend: str = "numpy",
     compute_dtype: npt.DTypeLike = np.complex128,
     accum_dtype: npt.DTypeLike = np.complex128,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -79,6 +80,7 @@ def compute_total_field(
         show_progress=show_progress,
         force_general_initial_field=force_general_initial_field,
         lut_dr=lut_dr,
+        backend=backend,
         compute_dtype=compute_dtype,
         accum_dtype=accum_dtype,
     )
@@ -100,6 +102,7 @@ def compute_near_field_components(
     show_progress: bool = False,
     force_general_initial_field: bool = False,
     lut_dr: float = 1.0,
+    backend: str = "numpy",
     compute_dtype: npt.DTypeLike = np.complex128,
     accum_dtype: npt.DTypeLike = np.complex128,
 ) -> NearFieldComponents:
@@ -117,6 +120,7 @@ def compute_near_field_components(
         batch_size=batch_size,
         show_progress=show_progress,
         force_general_initial_field=force_general_initial_field,
+        backend=backend,
         compute_dtype=compute_dtype,
         accum_dtype=accum_dtype,
     )
@@ -134,6 +138,7 @@ def compute_near_field_components(
         lmax=lmax,
         n_medium=n_medium,
         show_progress=show_progress,
+        backend=backend,
         particle_distance_resolution=lut_dr,
         active_mask=(~inside_hint) if np.any(inside_hint) else None,
         compute_dtype=compute_dtype,
@@ -156,6 +161,7 @@ def compute_near_field_components(
             _point_classification=classification,
             n_medium=n_medium,
             show_progress=show_progress,
+            backend=backend,
             compute_dtype=compute_dtype,
             accum_dtype=accum_dtype,
         )

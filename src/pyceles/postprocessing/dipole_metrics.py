@@ -136,6 +136,10 @@ def compute_dipole_power_ldos(
         compute_dtype=run.config.compute_dtype,
         accum_dtype=run.config.accum_dtype,
     )
+    # Dipole power/LDOS sampling is downstream postprocessing, so it should
+    # inherit the same backend policy as far-field / near-field workflows.
+    # This keeps local emitter studies on the CuPy scattered-field path when
+    # the run was configured for GPU postprocessing.
     E_scat, _ = compute_scattered_field(
         dip_pos,
         np.asarray(run.positions, dtype=float),
@@ -145,6 +149,7 @@ def compute_dipole_power_ldos(
         n_medium=complex(run.config.n_medium),
         particle_distance_resolution=float(run.config.radial_lut_dr),
         show_progress=bool(show_progress),
+        backend=run.config.resolved_postprocessing_backend(),
         compute_dtype=compute_dtype,
         accum_dtype=accum_dtype,
     )

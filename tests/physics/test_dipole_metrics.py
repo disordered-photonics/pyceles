@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 import pyceles as pcl
+import pyceles.postprocessing.dipole_metrics as dipole_metrics
 from pyceles.core.particles import spheres_from_arrays
 
 
@@ -173,3 +174,37 @@ def test_dipole_ldos_uses_channel_source_from_postprocess_sources():
         rtol=1e-13,
         atol=0.0,
     )
+
+
+def test_dipole_power_ldos_inherits_resolved_postprocessing_backend(monkeypatch):
+    source = pcl.DipoleSource(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        position=(10.0, 0.0, -20.0),
+        dipole_moment=(1.0 + 0.0j, 0.0 + 0.0j, 0.0 + 0.0j),
+    )
+    cfg = pcl.SimulationConfig(
+        wavelength=550.0,
+        n_medium=1.0 + 0j,
+        lmax=1,
+        source=source,
+        solver_method="direct",
+        operator_backend="numpy",
+        postprocessing_backend="cupy",
+        verbose=False,
+    )
+    run = pcl.Simulation(cfg, particles=[]).run(include_farfield=False)
+
+    seen: dict[str, str] = {}
+
+    def _fake_compute_scattered_field(*args, **kwargs):
+        seen["backend"] = kwargs["backend"]
+        pts = np.asarray(args[0], dtype=float)
+        zeros = np.zeros((pts.shape[0], 3), dtype=np.complex128)
+        return zeros, zeros
+
+    monkeypatch.setattr(dipole_metrics, "compute_scattered_field", _fake_compute_scattered_field)
+    out = pcl.compute_dipole_power_ldos(run)
+
+    assert seen["backend"] == "cupy"
+    np.testing.assert_allclose(out.enhancement, 1.0, rtol=1e-13, atol=0.0)
