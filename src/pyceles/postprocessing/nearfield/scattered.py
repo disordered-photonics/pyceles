@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import cache
 from typing import Any
 
 import numpy as np
@@ -13,6 +14,33 @@ from pyceles.core.indexing import n_modes
 from pyceles.core.spherical import spherical_functions_trigon
 
 from .common import contract_modes, dx_xz_hankel1, mode_indices_by_l, sph_hankel1
+
+
+@cache
+def _mode_indices_by_l_cupy(
+    lmax: int,
+    *,
+    real_dtype_name: str,
+) -> tuple[tuple[Any, Any, Any, Any], ...]:
+    """Cache per-``l`` mode tables on device for repeated CuPy near-field calls.
+
+    The index tables themselves are tiny, but rebuilding and re-uploading them
+    on every scattered-field call is unnecessary. Caching them once per
+    ``(lmax, real_dtype)`` keeps the hot path focused on particle/point work.
+    """
+    cupy, _ = import_cupy()
+    real_dtype_cp = getattr(cupy, real_dtype_name)
+    out = []
+    for m_vals, abs_m, n1_idx, n2_idx in mode_indices_by_l(int(lmax)):
+        out.append(
+            (
+                cupy.asarray(m_vals, dtype=real_dtype_cp),
+                cupy.asarray(abs_m, dtype=cupy.int32),
+                cupy.asarray(n1_idx, dtype=cupy.int32),
+                cupy.asarray(n2_idx, dtype=cupy.int32),
+            )
+        )
+    return tuple(out)
 
 
 @dataclass(frozen=True)
@@ -360,17 +388,12 @@ def _compute_scattered_field_cupy(
     e_gpu = cupy.zeros((pts_eval.shape[0], 3), dtype=accum_dtype_cp)
     h_gpu = cupy.zeros_like(e_gpu)
 
-    mode_by_l = []
-    for m_vals, abs_m, n1_idx, n2_idx in mode_indices_by_l(lmax):
-        mode_by_l.append(
-            (
-                cupy.asarray(m_vals, dtype=real_dtype_cp),
-                cupy.asarray(abs_m, dtype=cupy.int32),
-                cupy.asarray(n1_idx, dtype=cupy.int32),
-                cupy.asarray(n2_idx, dtype=cupy.int32),
-            )
-        )
-
+    mode_by_l = _mode_indices_by_l_cupy(lmax, real_dtype_name=real_dtype_cp.__name__)
+    # The fixed sphere chunk is the leanest policy we have shipped so far.
+    # A more elaborate hardware-aware chunk heuristic was benchmarked here, but
+    # the gains were not robust across near-field canvases and regressed the
+    # dense `dx=10` profile. Keep the simple default until a clearer win
+    # justifies more policy surface.
     sphere_chunk_size = 8
     sphere_pbar = None
     if show_progress:
