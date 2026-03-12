@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Iterable, Literal
 
 import numpy as np
 from tqdm.auto import tqdm
 
+from pyceles._optional import asnumpy, import_cupy, is_cupy_array
 from pyceles.core.indexing import n_modes
-from pyceles.core.operators import PreparedOperator, require_pairwise_coupling
+from pyceles.core.operators import PreparedOperator
 from pyceles.core.translation import translation_block
 
 
@@ -100,9 +101,16 @@ def _pair_block(
     store_translations: bool,
 ) -> np.ndarray:
     """Return one pair-translation block `W_ij`, optionally reusing cache."""
-    pairwise = require_pairwise_coupling(prepared.coupling)
+    coupling = prepared.coupling
+    if not hasattr(coupling, "ab5") or not hasattr(coupling, "radial_lut"):
+        raise TypeError(
+            "Grid-block preconditioning currently requires a pairwise free-space "
+            f"coupling backend exposing `ab5` and `radial_lut`. Got {type(coupling).__name__}."
+        )
+    cache_enabled = bool(getattr(coupling, "cache_translation_blocks", False))
+    cache_dict = getattr(coupling, "_W_cache", None)
     key = (int(i), int(j))
-    Wij = pairwise._W_cache.get(key) if pairwise.cache_translation_blocks else None
+    Wij = cache_dict.get(key) if cache_enabled and isinstance(cache_dict, dict) else None
     if Wij is None:
         rvec = prepared.positions[i] - prepared.positions[j]
         Wij = translation_block(
@@ -110,11 +118,11 @@ def _pair_block(
             # prepared.k is real by construction in the current homogeneous-medium path.
             prepared.k,
             rvec,
-            ab5=pairwise.ab5,
-            radial_lut=pairwise.radial_lut,
+            ab5=np.asarray(coupling.ab5, dtype=prepared.dtype),
+            radial_lut=coupling.radial_lut,
         )
-        if store_translations and pairwise.cache_translation_blocks:
-            pairwise._W_cache[key] = Wij
+        if store_translations and cache_enabled and isinstance(cache_dict, dict):
+            cache_dict[key] = Wij
     return np.asarray(Wij, dtype=prepared.dtype)
 
 
@@ -136,7 +144,10 @@ def _assemble_local_A_block(
                 continue
             cs = slice(lj * Nm, (lj + 1) * Nm)
             Wij = _pair_block(prepared, int(gi), int(gj), store_translations=store_translations)
-            A[rs, cs] = -prepared.apply_particle_block(int(gi), Wij)
+            A[rs, cs] = -np.asarray(
+                asnumpy(prepared.apply_particle_block(int(gi), Wij)),
+                dtype=prepared.dtype,
+            )
     return A
 
 
@@ -205,15 +216,78 @@ class GridBlockPreconditioner:
         return tuple(int(b.size) for b in self.particle_blocks)
 
 
+@dataclass
+class CuPyGridBlockPreconditioner:
+    """GPU-resident grid-block preconditioner with CPU assembly and GPU LU solves.
+
+    The local dense blocks are still assembled through the prepared-operator
+    boundary on CPU. That keeps the block-preconditioner logic representation-
+    agnostic and avoids duplicating translation/local-operator assembly paths.
+    Once assembled, each block is uploaded and LU-factorized on device so CuPy
+    GMRES applies the preconditioner without leaving the GPU hot path.
+    """
+
+    particle_blocks: list[np.ndarray]
+    lu_factors: list[tuple[object, object]]
+    n_particles: int
+    n_modes: int
+    dtype: np.dtype
+
+    def __call__(self, x: np.ndarray) -> np.ndarray:
+        return self.apply(x)
+
+    def apply(self, x: np.ndarray) -> np.ndarray:
+        cupy, _ = import_cupy()
+        import cupyx.scipy.linalg
+
+        arr = np.asarray(x) if not is_cupy_array(x) else x
+        arr_gpu = cupy.asarray(arr, dtype=self.dtype)
+        if arr_gpu.ndim == 1:
+            if arr_gpu.size != self.n_particles * self.n_modes:
+                raise ValueError(
+                    f"Input length must be {self.n_particles * self.n_modes}, got {arr_gpu.size}."
+                )
+            arr3 = arr_gpu.reshape(self.n_particles, self.n_modes, 1)
+            squeeze = True
+        elif arr_gpu.ndim == 2:
+            if arr_gpu.shape[0] != self.n_particles * self.n_modes:
+                raise ValueError(
+                    f"Input first dimension must be {self.n_particles * self.n_modes}, got {arr_gpu.shape[0]}."
+                )
+            arr3 = arr_gpu.reshape(self.n_particles, self.n_modes, arr_gpu.shape[1])
+            squeeze = False
+        else:
+            raise ValueError(f"Input must be 1D or 2D. Got shape {arr_gpu.shape}.")
+
+        out = cupy.zeros_like(arr3, dtype=self.dtype)
+        for ids, lu_payload in zip(self.particle_blocks, self.lu_factors):
+            rhs_loc = arr3[ids, :, :].reshape(ids.size * self.n_modes, -1)
+            sol_loc = cupyx.scipy.linalg.lu_solve(lu_payload, rhs_loc)
+            out[ids, :, :] = sol_loc.reshape(ids.size, self.n_modes, -1)
+
+        out2 = out.reshape(self.n_particles * self.n_modes, -1)
+        out_ret = out2[:, 0] if squeeze else out2
+        return out_ret if is_cupy_array(x) else asnumpy(out_ret)
+
+    @property
+    def n_blocks(self) -> int:
+        return len(self.particle_blocks)
+
+    @property
+    def block_sizes(self) -> tuple[int, ...]:
+        return tuple(int(b.size) for b in self.particle_blocks)
+
+
 def make_grid_block_preconditioner(
     prepared: PreparedOperator,
     *,
+    backend: Literal["numpy", "cupy"] = "numpy",
     subdivisions: int | tuple[int, int, int] = 2,
     cubic_bbox: bool = True,
     max_block_unknowns: int | None = None,
     store_translations: bool = False,
     show_progress: bool = False,
-) -> GridBlockPreconditioner:
+) -> GridBlockPreconditioner | CuPyGridBlockPreconditioner:
     """Build a regular-grid block-diagonal preconditioner.
 
     The particle cloud is partitioned on a regular 3D grid. For each populated
@@ -246,7 +320,12 @@ def make_grid_block_preconditioner(
         block_iter = tqdm(blocks, desc="Build block preconditioner", total=len(blocks))
 
     lu_factors: list[tuple[np.ndarray, np.ndarray]] = []
+    lu_factors_gpu: list[tuple[object, object]] = []
     kept_blocks: list[np.ndarray] = []
+    use_cupy = backend == "cupy"
+    if use_cupy:
+        cupy, _ = import_cupy()
+        import cupyx.scipy.linalg
     for ids in block_iter:
         nblk_u = int(ids.size * Nm)
         if max_u is not None and nblk_u > max_u:
@@ -259,10 +338,22 @@ def make_grid_block_preconditioner(
             ids,
             store_translations=bool(store_translations),
         )
-        lu, piv = scipy.linalg.lu_factor(Ablk, overwrite_a=False, check_finite=False)
-        lu_factors.append((lu, piv))
+        if use_cupy:
+            Ablk_gpu = cupy.asarray(Ablk, dtype=prepared.dtype)
+            lu_factors_gpu.append(cupyx.scipy.linalg.lu_factor(Ablk_gpu))
+        else:
+            lu, piv = scipy.linalg.lu_factor(Ablk, overwrite_a=False, check_finite=False)
+            lu_factors.append((lu, piv))
         kept_blocks.append(np.asarray(ids, dtype=np.int64))
 
+    if use_cupy:
+        return CuPyGridBlockPreconditioner(
+            particle_blocks=kept_blocks,
+            lu_factors=lu_factors_gpu,
+            n_particles=Ns,
+            n_modes=Nm,
+            dtype=np.dtype(prepared.dtype),
+        )
     return GridBlockPreconditioner(
         particle_blocks=kept_blocks,
         lu_factors=lu_factors,

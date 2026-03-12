@@ -1,4 +1,5 @@
 from .preconditioner import (
+    CuPyGridBlockPreconditioner,
     GridBlockPreconditioner,
     make_grid_block_preconditioner,
     regular_grid_partition,
@@ -31,6 +32,7 @@ __all__ = [
     "gmres_scipy",
     "lgmres_scipy",
     "solve_linear_system",
+    "CuPyGridBlockPreconditioner",
     "GridBlockPreconditioner",
     "make_grid_block_preconditioner",
     "regular_grid_partition",

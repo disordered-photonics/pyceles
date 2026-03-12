@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import os
+import tempfile
+from pathlib import Path
+
 import numpy as np
 import pytest
 
+from pyceles._optional import import_cupy
 from pyceles.core.fields import PlaneWave
 from pyceles.core.indexing import n_modes
 from pyceles.core.operators import (
@@ -16,6 +21,30 @@ from pyceles.core.operators import (
 from pyceles.core.particles import layered_spheres_from_arrays, spheres_from_arrays
 from pyceles.linear.preconditioner import make_grid_block_preconditioner, regular_grid_partition
 from pyceles.simulation import Simulation, SimulationConfig
+
+
+def _cupy_available() -> bool:
+    try:
+        cupy, _ = import_cupy()
+    except RuntimeError:
+        return False
+    try:
+        x = cupy.arange(1, dtype=cupy.float32)
+        cupy.cuda.Stream.null.synchronize()
+        return int(cupy.asnumpy(x)[0]) == 0
+    except Exception:
+        return False
+
+
+cupy_available = pytest.mark.skipif(not _cupy_available(), reason="CuPy runtime unavailable")
+
+
+def _configure_cupy_tempdir() -> None:
+    temp_root = Path("outputs/test_cupy_tmp").resolve()
+    temp_root.mkdir(parents=True, exist_ok=True)
+    os.environ["TMP"] = str(temp_root)
+    os.environ["TEMP"] = str(temp_root)
+    tempfile.tempdir = str(temp_root)
 
 
 def _sample_prepared():
@@ -196,6 +225,94 @@ def test_grid_block_preconditioner_handles_mixed_diagonal_and_dense_groups():
     np.testing.assert_allclose(x_rec, x, rtol=1e-10, atol=1e-10)
 
 
+@cupy_available
+def test_grid_block_preconditioner_exact_for_single_cupy_block() -> None:
+    _configure_cupy_tempdir()
+    prepared = _sample_prepared()
+    prepared_cupy = prepare_matvec(
+        lmax=prepared.lmax,
+        k=prepared.k,
+        particles=spheres_from_arrays(
+            positions=prepared.positions,
+            radii=np.array([80.0, 82.0, 79.0], dtype=float),
+            refractive_indices=np.array(
+                [1.59 + 0.0j, 1.61 + 0.0j, 1.58 + 0.0j], dtype=np.complex128
+            ),
+        ),
+        n_medium=1.0 + 0j,
+        radial_lut_dr=1.0,
+        cache_translation_blocks=False,
+        operator_dtype=np.complex128,
+        backend="cupy",
+    )
+    A = assemble_dense_A_numpy(prepared, show_progress=False, use_cache=False, store_blocks=False)
+    try:
+        precond = make_grid_block_preconditioner(
+            prepared_cupy,
+            backend="cupy",
+            subdivisions=1,
+            cubic_bbox=True,
+            show_progress=False,
+        )
+    except PermissionError as exc:
+        pytest.skip(f"Local CuPy NVRTC temp-dir cleanup issue on this machine: {exc}")
+
+    n = prepared.positions.shape[0] * n_modes(prepared.lmax)
+    rng = np.random.default_rng(44)
+    x = rng.standard_normal(n) + 1j * rng.standard_normal(n)
+    y = A @ x
+    x_rec = precond(y)
+    np.testing.assert_allclose(x_rec, x, rtol=1e-10, atol=1e-10)
+
+
+@cupy_available
+def test_cupy_grid_block_preconditioner_matches_numpy_apply() -> None:
+    _configure_cupy_tempdir()
+    prepared_numpy = _sample_prepared()
+    prepared_cupy = prepare_matvec(
+        lmax=prepared_numpy.lmax,
+        k=prepared_numpy.k,
+        particles=spheres_from_arrays(
+            positions=prepared_numpy.positions,
+            radii=np.array([80.0, 82.0, 79.0], dtype=float),
+            refractive_indices=np.array(
+                [1.59 + 0.0j, 1.61 + 0.0j, 1.58 + 0.0j], dtype=np.complex128
+            ),
+        ),
+        n_medium=1.0 + 0j,
+        radial_lut_dr=1.0,
+        cache_translation_blocks=False,
+        operator_dtype=np.complex128,
+        backend="cupy",
+    )
+    try:
+        precond_numpy = make_grid_block_preconditioner(
+            prepared_numpy,
+            backend="numpy",
+            subdivisions=2,
+            cubic_bbox=True,
+            show_progress=False,
+        )
+        precond_cupy = make_grid_block_preconditioner(
+            prepared_cupy,
+            backend="cupy",
+            subdivisions=2,
+            cubic_bbox=True,
+            show_progress=False,
+        )
+    except PermissionError as exc:
+        pytest.skip(f"Local CuPy NVRTC temp-dir cleanup issue on this machine: {exc}")
+
+    n = prepared_numpy.positions.shape[0] * n_modes(prepared_numpy.lmax)
+    rng = np.random.default_rng(45)
+    x = rng.standard_normal(n) + 1j * rng.standard_normal(n)
+    try:
+        cupy_out = precond_cupy(x)
+    except PermissionError as exc:
+        pytest.skip(f"Local CuPy NVRTC temp-dir cleanup issue on this machine: {exc}")
+    np.testing.assert_allclose(cupy_out, precond_numpy(x), rtol=1e-10, atol=1e-10)
+
+
 def test_simulation_supports_builtin_grid_block_preconditioner():
     source = PlaneWave(
         wavelength=550.0,
@@ -239,6 +356,60 @@ def test_simulation_supports_builtin_grid_block_preconditioner():
         ),
     )
     run = sim.run()
+    assert run.solver_result.info == 0
+
+
+@cupy_available
+def test_simulation_supports_builtin_grid_block_preconditioner_with_cupy_backend():
+    _configure_cupy_tempdir()
+    source = PlaneWave(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        polarization="TE",
+        polar_angle=0.0,
+        azimuthal_angle=0.0,
+        amplitude=1.0,
+    )
+    cfg = SimulationConfig(
+        wavelength=550.0,
+        n_medium=1.0 + 0j,
+        lmax=2,
+        source=source,
+        polar_angles=np.linspace(0.0, np.pi, 51),
+        azimuthal_angles=np.linspace(0.0, 2.0 * np.pi, 48, endpoint=False),
+        solver_method="gmres",
+        solver_rtol=1e-4,
+        solver_restart=10,
+        solver_maxiter=80,
+        solver_preconditioner_kind="grid_block",
+        solver_preconditioner_subdivisions=2,
+        verbose=False,
+        compute_dtype="complex64",
+        accum_dtype="complex128",
+        operator_backend="cupy",
+    )
+    sim = Simulation(
+        cfg,
+        particles=spheres_from_arrays(
+            positions=np.array(
+                [
+                    [0.0, 0.0, 0.0],
+                    [240.0, 15.0, -40.0],
+                    [-210.0, 45.0, 35.0],
+                ],
+                dtype=float,
+            ),
+            radii=np.array([70.0, 72.0, 68.0], dtype=float),
+            refractive_indices=np.array(
+                [1.59 + 0.0j, 1.61 + 0.0j, 1.58 + 0.0j],
+                dtype=np.complex128,
+            ),
+        ),
+    )
+    try:
+        run = sim.run()
+    except PermissionError as exc:
+        pytest.skip(f"Local CuPy NVRTC temp-dir cleanup issue on this machine: {exc}")
     assert run.solver_result.info == 0
 
 

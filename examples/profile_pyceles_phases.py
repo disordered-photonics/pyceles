@@ -257,11 +257,6 @@ def main() -> None:
             "the near-field profiling path still constructs a SimulationResult "
             "that expects a far-field payload."
         )
-    if operator_backend == "cupy" and args.preconditioner_mode != "none":
-        raise ValueError(
-            "The CuPy operator backend does not support built-in preconditioners. "
-            "Use --preconditioner-mode none."
-        )
     if operator_backend == "cupy" and args.cache_mode != "off":
         raise ValueError(
             "The CuPy operator backend exposes only the direct raw-kernel path. "
@@ -273,6 +268,12 @@ def main() -> None:
         print(
             "Note: CuPy GMRES checks convergence once per restart cycle. "
             "Large restart values can make the first progress update very late."
+        )
+    if operator_backend == "cupy" and args.preconditioner_mode != "none" and not args.quiet:
+        print(
+            "Note: CuPy grid-block preconditioning is supported, but on the "
+            "tested dilute benchmark clusters it has been highly restart- and "
+            "geometry-dependent rather than a universal speed win."
         )
 
     if not args.quiet:
@@ -360,6 +361,7 @@ def main() -> None:
                     t_pc0 = time.perf_counter()
                     preconditioner = make_grid_block_preconditioner(
                         prepared,
+                        backend=operator_backend,
                         subdivisions=int(args.preconditioner_subdivisions),
                         cubic_bbox=True,
                         max_block_unknowns=None,

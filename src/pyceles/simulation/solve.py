@@ -256,11 +256,10 @@ def solve_sources_core(
         warm_start = np.asarray(warm_start)[:, 0]
 
     solver_preconditioner = cfg.solver_preconditioner
-    if operator_backend == "cupy" and (
-        solver_preconditioner is not None or cfg.solver_preconditioner_kind != "none"
-    ):
+    if operator_backend == "cupy" and solver_preconditioner is not None:
         raise NotImplementedError(
-            "The CuPy operator backend does not support yet custom or built-in preconditioners."
+            "The CuPy operator backend does not support yet custom preconditioner callables. "
+            "Use the built-in `solver_preconditioner_kind='grid_block'` path instead."
         )
     if (
         solver_preconditioner is None
@@ -274,6 +273,7 @@ def solve_sources_core(
             )
         solver_preconditioner = make_grid_block_preconditioner(
             prepared,
+            backend=operator_backend,
             subdivisions=cfg.solver_preconditioner_subdivisions,
             cubic_bbox=bool(cfg.solver_preconditioner_cubic_bbox),
             max_block_unknowns=cfg.solver_preconditioner_max_block_unknowns,
