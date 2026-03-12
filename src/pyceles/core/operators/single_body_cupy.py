@@ -137,6 +137,39 @@ class CuPyCompositeParticleTOperator:
         out = cupy.zeros((self.n_particles, self.n_modes), dtype=self.dtype)
         for group in self.groups:
             ids = np.asarray(group.particle_indices, dtype=np.int64)
+            # Large sphere-only CuPy runs usually prepare one diagonal group
+            # covering a contiguous particle range. Keep that case slice-based.
+            #
+            # Why this matters:
+            # - the older implementation gathered one particle at a time with
+            #   `stack([arr[i] for i in ids])`,
+            # - then scattered results back one particle at a time,
+            # - Nsight Systems profiling showed that pattern generated a storm
+            #   of tiny device-to-device copies, one `nmodes`-sized block per
+            #   particle per matvec.
+            #
+            # For `lmax=3` and `complex64`, that meant ~240-byte D2D copies.
+            # The profiler count matched `n_particles * n_matvecs` almost
+            # exactly, which made the origin of the issue unambiguous.
+            #
+            # A contiguous group lets us express the same logic as one slice
+            # read and one slice write. That preserves the group abstraction
+            # while removing the per-particle gather/scatter churn from the
+            # hot iterative path.
+            #
+            # Non-contiguous groups still use the older safe path below. That
+            # matters for mixed clusters where representation groups can be
+            # interleaved in particle order. If those cases become performance
+            # critical later, they likely need a dedicated grouped-index kernel
+            # rather than Python-level per-particle assembly.
+            contiguous = ids.size > 0 and np.all(ids[1:] == ids[:-1] + 1)
+            if contiguous:
+                start = int(ids[0])
+                stop = int(ids[-1]) + 1
+                subset = arr[start:stop]
+                subset_out = cupy.asarray(group.apply_subset(subset), dtype=self.dtype)
+                out[start:stop] = subset_out
+                continue
             subset = cupy.stack([arr[int(i)] for i in ids], axis=0)
             subset_out = cupy.asarray(group.apply_subset(subset), dtype=self.dtype)
             for local, particle_index in enumerate(ids):

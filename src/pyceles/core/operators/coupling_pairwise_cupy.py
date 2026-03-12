@@ -431,6 +431,11 @@ class CuPyPairwiseCouplingOperator:
         # This remains valid for modestly larger lmax because `blocks_x` grows as
         # needed. For very large N we cap the grid height at the device maximum
         # and let the kernel walk destination particles with a grid-stride loop.
+        #
+        # Forcing `48` and `64` threads per block in the case of `lmax=4` case
+        # (`nmodes=48`) by forcing on the 5k-particle c64 benchmark did not bring
+        # any material advantage over the default policy, so we keep the leaner
+        # mode-count-capped heuristic.
         if self.dtype == np.dtype(np.complex128):
             target_threads = warp_size
         else:
