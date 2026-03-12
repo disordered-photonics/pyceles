@@ -453,35 +453,50 @@ def _compute_scattered_field_cupy(
 
                 a_vec = coeff_chunk[:, n1_idx].astype(compute_dtype_cp, copy=False)
                 b_vec = coeff_chunk[:, n2_idx].astype(compute_dtype_cp, copy=False)
+                # Contract over the mode index first so we do not materialize
+                # the full `(sphere, batch, mode, xyz)` M/N tensors. The
+                # algebra is the same as the reference formulation, but the GPU
+                # path only keeps a handful of scalar fields per `(sphere,point)`
+                # pair alive before combining them with the basis vectors.
+                a_phase = a_vec[:, None, :] * eimphi
+                b_phase = b_vec[:, None, :] * eimphi
 
-                theta_phi_m = (
-                    impi[:, :, :, None] * e_theta[:, :, None, :]
-                    - tau_lm[:, :, :, None] * e_phi[:, :, None, :]
-                )
-                m_all = pref * z[:, :, None, None] * theta_phi_m * eimphi[:, :, :, None]
+                a_impi = cupy.sum(a_phase * impi, axis=2)
+                a_tau = cupy.sum(a_phase * tau_lm, axis=2)
+                a_p = cupy.sum(a_phase * p_lm, axis=2)
+                b_impi = cupy.sum(b_phase * impi, axis=2)
+                b_tau = cupy.sum(b_phase * tau_lm, axis=2)
+                b_p = cupy.sum(b_phase * p_lm, axis=2)
 
-                radial_er = (real_dtype_cp(l * (l + 1.0)) * z_over_kr)[:, :, None] * p_lm
-                mix_theta_phi = (
-                    tau_lm[:, :, :, None] * e_theta[:, :, None, :]
-                    + impi[:, :, :, None] * e_phi[:, :, None, :]
-                )
-                n_all = (
+                m_from_a = (
                     pref
-                    * (
-                        radial_er[:, :, :, None] * e_r[:, :, None, :]
-                        + dxxz_over_kr[:, :, None, None] * mix_theta_phi
-                    )
-                    * eimphi[:, :, :, None]
+                    * z[:, :, None]
+                    * (a_impi[:, :, None] * e_theta - a_tau[:, :, None] * e_phi)
+                )
+                m_from_b = (
+                    pref
+                    * z[:, :, None]
+                    * (b_impi[:, :, None] * e_theta - b_tau[:, :, None] * e_phi)
+                )
+
+                radial_pref = real_dtype_cp(l * (l + 1.0))
+                n_from_a = pref * (
+                    (radial_pref * z_over_kr * a_p)[:, :, None] * e_r
+                    + dxxz_over_kr[:, :, None]
+                    * (a_tau[:, :, None] * e_theta + a_impi[:, :, None] * e_phi)
+                )
+                n_from_b = pref * (
+                    (radial_pref * z_over_kr * b_p)[:, :, None] * e_r
+                    + dxxz_over_kr[:, :, None]
+                    * (b_tau[:, :, None] * e_theta + b_impi[:, :, None] * e_phi)
                 )
 
                 e_chunk += cupy.sum(
-                    cupy.einsum("sm,sbmc->sbc", a_vec, m_all, optimize=True)
-                    + cupy.einsum("sm,sbmc->sbc", b_vec, n_all, optimize=True),
+                    m_from_a + n_from_b,
                     axis=0,
                 ).astype(accum_dtype_cp, copy=False)
                 h_chunk += medium_factor * cupy.sum(
-                    cupy.einsum("sm,sbmc->sbc", a_vec, n_all, optimize=True)
-                    + cupy.einsum("sm,sbmc->sbc", b_vec, m_all, optimize=True),
+                    n_from_a + m_from_b,
                     axis=0,
                 ).astype(accum_dtype_cp, copy=False)
 
