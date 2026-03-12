@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Mapping
 
 import numpy as np
+from tqdm.auto import tqdm
 
 from pyceles._dtypes import resolve_compute_accum_dtypes
 from pyceles.core.indexing import n_modes
@@ -25,6 +26,30 @@ from .helpers import (
     warn_dipoles_inside_circumspheres,
 )
 from .results import SolvedSourcesResult
+
+
+def _assemble_dense_operator_via_matvec(
+    A_mv,
+    *,
+    n: int,
+    dtype: np.dtype,
+    show_progress: bool,
+) -> np.ndarray:
+    """Assemble a dense operator by applying the prepared matvec to basis vectors.
+
+    This is the generic dense fallback used when a backend-specific blockwise
+    assembler is not available yet. It keeps the direct-solve/LU-cache workflow
+    usable on the CuPy backend without forcing a separate dense-assembly kernel.
+    """
+    A = np.empty((n, n), dtype=dtype)
+    eye = np.eye(n, dtype=dtype)
+    col_iter = range(n)
+    if show_progress:
+        col_iter = tqdm(col_iter, desc="Assemble A (dense via matvec)")
+    for j in col_iter:
+        A[:, j] = np.asarray(A_mv(eye[:, j]), dtype=dtype)
+    return A
+
 
 if TYPE_CHECKING:
     from .workflow import Simulation
@@ -109,14 +134,9 @@ def solve_sources_core(
 
     solver_name = str(cfg.solver_method).lower()
     operator_backend = cfg.operator_backend
-    will_use_direct = operator_backend == "numpy" and (
-        solver_name == "direct"
-        or (solver_name == "auto" and unknowns <= int(cfg.solver_direct_max_n))
+    will_use_direct = solver_name == "direct" or (
+        solver_name == "auto" and unknowns <= int(cfg.solver_direct_max_n)
     )
-    if operator_backend == "cupy" and solver_name == "direct":
-        raise ValueError(
-            "`solver_method='direct'` is not supported with `operator_backend='cupy'`."
-        )
     if cfg.verbose:
         print_startup_logo_once()
         print(
@@ -197,12 +217,24 @@ def solve_sources_core(
                 or sim._dense_operator_dtype != compute_dtype
             )
             if need_dense:
-                A_dense = assemble_dense_A_numpy(
-                    prepared,
-                    show_progress=bool(cfg.verbose),
-                    use_cache=bool(cfg.cache_translation_blocks),
-                    store_blocks=False,
-                )
+                if operator_backend == "numpy":
+                    A_dense = assemble_dense_A_numpy(
+                        prepared,
+                        show_progress=bool(cfg.verbose),
+                        use_cache=bool(cfg.cache_translation_blocks),
+                        store_blocks=False,
+                    )
+                else:
+                    if A_mv is None:
+                        raise RuntimeError(
+                            "Internal error: direct dense assembly requires prepared A_mv."
+                        )
+                    A_dense = _assemble_dense_operator_via_matvec(
+                        A_mv,
+                        n=unknowns,
+                        dtype=np.dtype(compute_dtype),
+                        show_progress=bool(cfg.verbose),
+                    )
                 sim._dense_operator_cache = A_dense
                 sim._dense_operator_dtype = np.dtype(compute_dtype)
             else:
@@ -215,7 +247,11 @@ def solve_sources_core(
             if need_dense_lu:
                 if A_dense is None:
                     raise RuntimeError("Internal error: direct solve requires dense operator.")
-                sim._dense_lu_cache = factorize_dense_matrix(A_dense, dtype=compute_dtype)
+                sim._dense_lu_cache = factorize_dense_matrix(
+                    A_dense,
+                    dtype=compute_dtype,
+                    backend=operator_backend,
+                )
                 sim._dense_lu_dtype = np.dtype(compute_dtype)
             A_lu: DenseLUFactorization | None = sim._dense_lu_cache
         else:

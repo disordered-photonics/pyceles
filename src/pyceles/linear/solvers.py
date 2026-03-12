@@ -41,7 +41,7 @@ class LinearSolveResult:
 
 
 GmresResult = LinearSolveResult
-DenseLUFactorization = tuple[np.ndarray, np.ndarray]
+DenseLUFactorization = tuple[object, object]
 
 
 def estimate_dense_matrix_bytes(n: int, *, dtype: npt.DTypeLike = np.complex128) -> int:
@@ -57,14 +57,21 @@ def factorize_dense_matrix(
     A_dense: np.ndarray,
     *,
     dtype: npt.DTypeLike = np.complex128,
+    backend: Literal["numpy", "cupy"] = "numpy",
 ) -> DenseLUFactorization:
     """Return LU factorization payload for repeated direct solves."""
-    import scipy.linalg
-
     solve_dtype = np.dtype(dtype)
     A = np.asarray(A_dense, dtype=solve_dtype)
     if A.ndim != 2 or A.shape[0] != A.shape[1]:
         raise ValueError(f"`A_dense` must be a square 2D matrix. Got shape {A.shape}.")
+    if backend == "cupy":
+        cupy, _ = import_cupy()
+        import cupyx.scipy.linalg
+
+        A_gpu = cupy.asarray(A)
+        return cupyx.scipy.linalg.lu_factor(A_gpu, overwrite_a=False, check_finite=True)
+    import scipy.linalg
+
     lu, piv = scipy.linalg.lu_factor(A, overwrite_a=False, check_finite=False)
     return np.asarray(lu), np.asarray(piv)
 
@@ -785,6 +792,108 @@ def direct_dense_scipy(
     )
 
 
+def direct_dense_cupy(
+    A_mv: Callable[[np.ndarray], np.ndarray],
+    b: np.ndarray,
+    *,
+    A_dense: Optional[np.ndarray] = None,
+    A_factorized: DenseLUFactorization | None = None,
+    max_n: int = 15000,
+    dtype: npt.DTypeLike = np.complex128,
+    show_progress: bool = True,
+    compute_final_residual: bool = True,
+) -> LinearSolveResult:
+    """Dense direct solve on GPU via CuPy/cuSOLVER.
+
+    The dense matrix may still be assembled on CPU today; this path uploads it,
+    factorizes it once on device, and reuses the LU payload across repeated RHS.
+    """
+    cupy, _ = import_cupy()
+    import cupyx.scipy.linalg
+
+    solve_dtype = np.dtype(dtype)
+    b_arr = np.asarray(b, dtype=solve_dtype)
+    if b_arr.ndim == 1:
+        b_mat = b_arr.reshape(-1, 1)
+        squeezed = True
+    elif b_arr.ndim == 2:
+        b_mat = b_arr
+        squeezed = False
+    else:
+        raise ValueError(f"`b` must be 1D or 2D. Got shape {b_arr.shape}.")
+
+    n = b_mat.shape[0]
+    nrhs = b_mat.shape[1]
+    if n > int(max_n):
+        raise ValueError(
+            f"Direct dense solve disabled for n={n} (> max_n={max_n}). "
+            "Use an iterative method or raise `max_n` explicitly."
+        )
+
+    A_for_residual: np.ndarray | None = None
+    if A_dense is not None:
+        A_for_residual = np.asarray(A_dense, dtype=solve_dtype)
+        if A_for_residual.shape != (n, n):
+            raise ValueError(f"A_dense must have shape ({n},{n}), got {A_for_residual.shape}.")
+
+    setup_mode = "assemble+factorize"
+    if A_factorized is not None:
+        setup_mode = "reuse_lu"
+        lu_payload = A_factorized
+    else:
+        if A_for_residual is None:
+            A = np.empty((n, n), dtype=solve_dtype)
+            eye = np.eye(n, dtype=solve_dtype)
+            col_iter = range(n)
+            if show_progress:
+                col_iter = tqdm(col_iter, desc="Assemble A (dense via matvec)")
+            for j in col_iter:
+                A[:, j] = np.asarray(A_mv(eye[:, j]), dtype=solve_dtype)
+            A_for_residual = A
+        else:
+            setup_mode = "factorize_dense"
+        A_gpu = cupy.asarray(A_for_residual)
+        lu_payload = cupyx.scipy.linalg.lu_factor(A_gpu, overwrite_a=False, check_finite=True)
+
+    if show_progress:
+        residual_mode = "on" if compute_final_residual else "off"
+        print(
+            "[solver] Direct dense solve [cupy]:"
+            f" n={n} nrhs={nrhs} setup={setup_mode} final_residual_check={residual_mode}"
+        )
+    b_gpu = cupy.asarray(b_mat)
+    t0 = time.perf_counter()
+    x_gpu = cupyx.scipy.linalg.lu_solve(lu_payload, b_gpu, overwrite_b=False, check_finite=True)
+    cupy.cuda.Stream.null.synchronize()
+    if show_progress:
+        dt = time.perf_counter() - t0
+        print(f"[solver] Direct dense solve [cupy] completed in {dt:.3f} s")
+
+    x_mat = asnumpy(x_gpu)
+    residual_op = (lambda v: A_for_residual @ np.asarray(v)) if A_for_residual is not None else A_mv
+    if squeezed:
+        x = x_mat[:, 0]
+        return _finalize_result(
+            residual_op,
+            b_mat[:, 0],
+            x,
+            info=0,
+            iterations=1,
+            method="direct[cupy]",
+            compute_final_residual=compute_final_residual,
+        )
+    return _finalize_multi_result(
+        residual_op,
+        b_mat,
+        x_mat,
+        info=np.zeros((x_mat.shape[1],), dtype=int),
+        iterations=np.ones((x_mat.shape[1],), dtype=int),
+        method="direct[cupy]",
+        residual_history=[None] * x_mat.shape[1],
+        compute_final_residual=compute_final_residual,
+    )
+
+
 def solve_linear_system(
     A_mv: Callable[[np.ndarray], np.ndarray],
     b: np.ndarray,
@@ -810,7 +919,7 @@ def solve_linear_system(
     If `method` resolves to `direct`, an optional preassembled `A_dense` can be
     supplied to avoid expensive column-by-column assembly via `A_mv`, and an
     optional `A_factorized=(lu, piv)` payload can be supplied to reuse LU
-    factorization across repeated direct solves.
+    factorization across repeated direct solves on either NumPy or CuPy backends.
 
     Parameters
     ----------
@@ -841,9 +950,11 @@ def solve_linear_system(
     m = str(method).lower()
     backend_name = backend
     if m == "auto":
-        m = "gmres" if backend_name == "cupy" else ("direct" if n <= int(direct_max_n) else "gmres")
-    if backend_name == "cupy" and m != "gmres":
-        raise ValueError("The CuPy linear-solver backend supports only GMRES (or method='auto').")
+        m = "direct" if n <= int(direct_max_n) else "gmres"
+    if backend_name == "cupy" and m not in {"gmres", "direct"}:
+        raise ValueError(
+            "The CuPy linear-solver backend currently supports only GMRES or direct solves."
+        )
 
     x0_mat: np.ndarray | None = None
     if x0 is not None:
@@ -858,7 +969,8 @@ def solve_linear_system(
             raise ValueError(f"`x0` must match `b` shape {b_mat.shape}. Got {x0_mat.shape}.")
 
     if m == "direct":
-        out = direct_dense_scipy(
+        direct_impl = direct_dense_cupy if backend_name == "cupy" else direct_dense_scipy
+        out = direct_impl(
             A_mv,
             b_mat if nrhs > 1 else b_mat[:, 0],
             A_dense=A_dense,

@@ -185,13 +185,13 @@ def test_solve_linear_system_direct_can_skip_final_residual_with_lu_only():
     assert np.isnan(float(out.relative_residual))
 
 
-def test_solve_linear_system_cupy_backend_rejects_direct():
+def test_solve_linear_system_cupy_backend_rejects_bicgstab():
     b = np.array([1.0 + 0j, 2.0 + 0j])
-    with pytest.raises(ValueError, match="supports only GMRES"):
+    with pytest.raises(ValueError, match="supports only GMRES or direct"):
         solve_linear_system(
             lambda x: x,
             b,
-            method="direct",
+            method="bicgstab",
             backend="cupy",
             show_progress=False,
         )
