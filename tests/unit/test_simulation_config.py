@@ -8,11 +8,27 @@ from pyceles.simulation import SimulationConfig
 def test_simulation_config_accepts_cupy_operator_backend() -> None:
     cfg = SimulationConfig(operator_backend="cupy", verbose=False)
     assert cfg.operator_backend == "cupy"
+    assert cfg.resolved_postprocessing_backend() == "cupy"
+
+
+def test_simulation_config_accepts_explicit_postprocessing_backend() -> None:
+    cfg = SimulationConfig(
+        operator_backend="cupy",
+        postprocessing_backend="numpy",
+        verbose=False,
+    )
+    assert cfg.postprocessing_backend == "numpy"
+    assert cfg.resolved_postprocessing_backend() == "numpy"
 
 
 def test_simulation_config_rejects_unknown_operator_backend() -> None:
     with pytest.raises(ValueError, match="operator_backend"):
         SimulationConfig(operator_backend="cuda", verbose=False)  # type: ignore[arg-type]
+
+
+def test_simulation_config_rejects_unknown_postprocessing_backend() -> None:
+    with pytest.raises(ValueError, match="postprocessing_backend"):
+        SimulationConfig(postprocessing_backend="cuda", verbose=False)  # type: ignore[arg-type]
 
 
 def test_simulation_config_rejects_cupy_translation_block_cache() -> None:

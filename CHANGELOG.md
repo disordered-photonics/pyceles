@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - diagonal-only GPU single-body `T` path
   - fused direct pairwise `W·x` RawKernel backend for `complex64` and `complex128`
     with GPU-resident translation precompute tables.
+- Added inherited postprocessing backend selection via
+  `SimulationConfig(postprocessing_backend="inherit" | "numpy" | "cupy")`.
+- Added a first CuPy postprocessing slice for scattered far-field SVWF-to-PWP
+  assembly while keeping the public far-field payloads NumPy-shaped.
 - Added a reusable source-compliance test helper and contract tests to ensure
   built-in/new source classes expose required `Source` protocol methods and
   capability metadata.
@@ -75,8 +79,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `operator_backend="cupy"` uses the fused direct raw-kernel coupling path for
   GPU pairwise matvecs.
 - `examples/profile_pyceles_phases.py` now accepts
-  `--operator-backend {numpy,cupy}` and synchronizes GPU work when timing the
-  solver phase so CuPy wall times are meaningful.
+  `--operator-backend {numpy,cupy}` and
+  `--postprocessing-backend {inherit,numpy,cupy}`, and synchronizes GPU work
+  when timing the solver phase so CuPy wall times are meaningful.
 - Source capability contract now includes
   `Source.has_finite_incident_power()`, used as the canonical policy gate for
   finite-beam-only diagnostics across simulation and far-field workflows.

@@ -86,6 +86,14 @@ class SimulationConfig:
       endpoint-excluded azimuth grid so their different quadrature roles are
       visible from the counts alone.
 
+    Backend policy:
+    - `operator_backend` controls the many-body solve backend.
+    - `postprocessing_backend` defaults to `"inherit"`, which reuses the
+      chosen operator backend so a CuPy solve naturally prefers CuPy
+      postprocessing where accelerated kernels exist.
+    - Stage-specific postprocessing kernels may still fall back to the NumPy
+      reference implementation when no accelerated path has shipped yet.
+
     Geometry / physics policy:
     - the current homogeneous-medium solver path assumes real `n_medium`
     - circumscribing-sphere overlap checks remain enabled by default because
@@ -123,6 +131,7 @@ class SimulationConfig:
     solver_preconditioner_cubic_bbox: bool = True
     solver_preconditioner_max_block_unknowns: int | None = None
     operator_backend: Literal["numpy", "cupy"] = "numpy"
+    postprocessing_backend: Literal["inherit", "numpy", "cupy"] = "inherit"
     compute_dtype: Literal["complex64", "complex128"] = "complex128"
     accum_dtype: Literal["complex64", "complex128"] = "complex128"
     cache_translation_blocks: bool = False
@@ -223,6 +232,12 @@ class SimulationConfig:
                 "`operator_backend` must be one of {'numpy', 'cupy'}. "
                 f"Got {self.operator_backend!r}."
             )
+        post_backend = str(self.postprocessing_backend).lower()
+        if post_backend not in {"inherit", "numpy", "cupy"}:
+            raise ValueError(
+                "`postprocessing_backend` must be one of {'inherit', 'numpy', 'cupy'}. "
+                f"Got {self.postprocessing_backend!r}."
+            )
         if backend == "cupy" and bool(self.cache_translation_blocks):
             raise ValueError(
                 "`cache_translation_blocks=True` is not supported with `operator_backend='cupy'`. "
@@ -322,6 +337,19 @@ class SimulationConfig:
             polar_values=np.asarray(polar_values),
             azimuthal_values=np.asarray(azimuthal_values),
         )
+
+    def resolved_postprocessing_backend(self) -> Literal["numpy", "cupy"]:
+        """Return the effective postprocessing backend for this run.
+
+        `"inherit"` keeps the common case terse: users who opt into the CuPy
+        solve backend usually want postprocessing to stay on the same array
+        backend whenever an accelerated implementation exists. Explicit
+        overrides remain available for diagnostics and mixed-backend
+        experiments.
+        """
+        if self.postprocessing_backend == "inherit":
+            return self.operator_backend
+        return self.postprocessing_backend
 
 
 __all__ = [

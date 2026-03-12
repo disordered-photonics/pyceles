@@ -154,6 +154,7 @@ def build_single_channel_result(
             polar_angles=farfield_polar_angles,
             azimuthal_angles=farfield_azimuthal_angles,
             source=source,
+            backend=cfg.resolved_postprocessing_backend(),
             dtype=compute_dtype,
             show_progress=bool(cfg.verbose),
         )

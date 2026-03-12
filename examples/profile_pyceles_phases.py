@@ -141,6 +141,15 @@ def main() -> None:
         default="numpy",
         help="Prepared-operator backend used for the many-body solve.",
     )
+    parser.add_argument(
+        "--postprocessing-backend",
+        choices=("inherit", "numpy", "cupy"),
+        default="inherit",
+        help=(
+            "Backend used by postprocessing kernels. 'inherit' reuses the "
+            "operator backend and is the intended accelerated default."
+        ),
+    )
     parser.add_argument("--solver-rtol", type=float, default=1e-4)
     parser.add_argument("--solver-restart", type=int, default=20)
     parser.add_argument("--solver-maxiter", type=int, default=1000)
@@ -201,6 +210,7 @@ def main() -> None:
     compute_dtype_name = cast(Literal["complex64", "complex128"], args.compute_dtype)
     accum_dtype_name = cast(Literal["complex64", "complex128"], args.accum_dtype)
     operator_backend = cast(Literal["numpy", "cupy"], args.operator_backend)
+    postprocessing_backend = cast(Literal["inherit", "numpy", "cupy"], args.postprocessing_backend)
 
     root = _find_repo_root()
     out_dir = (root / args.out_dir).resolve()
@@ -247,6 +257,7 @@ def main() -> None:
         solver_restart=int(args.solver_restart),
         solver_maxiter=int(args.solver_maxiter),
         operator_backend=operator_backend,
+        postprocessing_backend=postprocessing_backend,
         compute_dtype=compute_dtype_name,
         accum_dtype=accum_dtype_name,
         verbose=not args.quiet,
@@ -274,6 +285,11 @@ def main() -> None:
             "Note: CuPy grid-block preconditioning is supported, but on the "
             "tested dilute benchmark clusters it has been highly restart- and "
             "geometry-dependent rather than a universal speed win."
+        )
+    if cfg.resolved_postprocessing_backend() == "cupy" and not args.quiet:
+        print(
+            "Note: CuPy postprocessing currently accelerates scattered far-field "
+            "PWP assembly. Near-field kernels still use the NumPy reference path."
         )
 
     if not args.quiet:
@@ -436,6 +452,7 @@ def main() -> None:
             polar_angles=farfield_polar_angles,
             azimuthal_angles=farfield_azimuthal_angles,
             source=source,
+            backend=cfg.resolved_postprocessing_backend(),
             dtype=np.dtype(cfg.compute_dtype),
             show_progress=not args.quiet,
         )
@@ -516,6 +533,7 @@ def main() -> None:
             "amplitude": float(args.amplitude),
             "solver": str(args.solver),
             "operator_backend": operator_backend,
+            "postprocessing_backend": postprocessing_backend,
             "solver_rtol": float(args.solver_rtol),
             "solver_restart": int(args.solver_restart),
             "solver_maxiter": int(args.solver_maxiter),

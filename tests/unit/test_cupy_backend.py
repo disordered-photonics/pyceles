@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import tempfile
+from pathlib import Path
 from typing import Literal
 
 import numpy as np
@@ -27,6 +30,26 @@ def _cupy_available() -> bool:
 
 
 pytestmark = pytest.mark.skipif(not _cupy_available(), reason="CuPy runtime unavailable")
+
+
+def _configure_cupy_tempdir() -> None:
+    tmp_root = Path.cwd() / "outputs" / "test_cupy_tmp"
+    tmp_root.mkdir(parents=True, exist_ok=True)
+    os.environ["TMP"] = str(tmp_root)
+    os.environ["TEMP"] = str(tmp_root)
+    tempfile.tempdir = str(tmp_root)
+
+
+_configure_cupy_tempdir()
+
+
+def _skip_on_cupy_temp_permission(exc: Exception) -> None:
+    if (
+        isinstance(exc, PermissionError)
+        or "Permission denied" in str(exc)
+        or "Accesso negato" in str(exc)
+    ):
+        pytest.skip(f"Local CuPy temp-directory permission issue: {exc}")
 
 
 def _small_cluster_particles() -> tuple[Particle, ...]:
@@ -228,7 +251,11 @@ def test_cupy_simulation_run_matches_numpy_for_coeffs_farfield_and_nearfield(
     )
 
     run_numpy = pcl.Simulation(cfg_numpy, particles=particles).run(include_farfield=True)
-    run_cupy = pcl.Simulation(cfg_cupy, particles=particles).run(include_farfield=True)
+    try:
+        run_cupy = pcl.Simulation(cfg_cupy, particles=particles).run(include_farfield=True)
+    except Exception as exc:
+        _skip_on_cupy_temp_permission(exc)
+        raise
 
     np.testing.assert_allclose(
         run_cupy.coeffs,
@@ -319,7 +346,11 @@ def test_cupy_mixed_particle_groups_match_numpy_for_solve_and_backscatter() -> N
     )
 
     run_numpy = pcl.Simulation(cfg_numpy, particles=particles).run(include_farfield=True)
-    run_cupy = pcl.Simulation(cfg_cupy, particles=particles).run(include_farfield=True)
+    try:
+        run_cupy = pcl.Simulation(cfg_cupy, particles=particles).run(include_farfield=True)
+    except Exception as exc:
+        _skip_on_cupy_temp_permission(exc)
+        raise
 
     np.testing.assert_allclose(run_cupy.coeffs, run_numpy.coeffs, rtol=5e-8, atol=5e-10)
 
