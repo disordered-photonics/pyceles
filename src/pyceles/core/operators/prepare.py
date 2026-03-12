@@ -168,7 +168,7 @@ def _prepare_particle_t_operator(
     dtype: np.dtype,
     group_factories: ParticleTGroupFactories | None = None,
 ) -> CompositeParticleTOperator:
-    """Prepare the particle-local operator using planned representation groups."""
+    """Prepare the particle-local operator using the selected representation groups."""
     part = tuple(particles)
     context = ParticleTPreparationContext(
         lmax=int(lmax),

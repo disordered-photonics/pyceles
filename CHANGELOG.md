@@ -69,8 +69,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so long-lived sessions can release process-global precompute tables on demand.
 
 ### Changed
-- `solve_linear_system(..., backend="cupy")` supports GMRES for the GPU solve
-  path; direct solves and built-in/custom preconditioners remain NumPy-only.
+- `solve_linear_system(..., backend="cupy")` uses GMRES for the GPU iterative
+  solve path; direct solves and built-in/custom preconditioners remain
+  NumPy-only.
 - `operator_backend="cupy"` uses the fused direct raw-kernel coupling path for
   GPU pairwise matvecs.
 - `examples/profile_pyceles_phases.py` now accepts

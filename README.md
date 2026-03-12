@@ -339,12 +339,10 @@ Current CuPy feature-parity gaps relative to the NumPy reference path include:
 - spheroid internal near-field kernels,
 - mixed non-spherical internal-field subsets,
 - callback-only axisymmetric single-body GPU wrappers.
-
 Current performance milestones after that direct GPU backend are:
 - improve the CuPy raw kernel and surrounding solve path for larger low-`lmax` clusters,
 - extend GPU acceleration further into postprocessing-heavy workflows,
 - add an accelerated `O(N log N)` coupling backend for regimes where brute-force `O(N^2)` is no longer viable.
-
 A previous CELES experiment with rotation-translation-rotation (RTR) coupling idea
 was explored as a possible alternative translation backend. After matching the RTR
 block formulas to the shipped CELES-compatible translation conventions, the prototype
