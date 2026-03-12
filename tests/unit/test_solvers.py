@@ -1,3 +1,6 @@
+import sys
+import types
+
 import numpy as np
 import pytest
 
@@ -195,6 +198,34 @@ def test_solve_linear_system_cupy_backend_rejects_bicgstab():
             backend="cupy",
             show_progress=False,
         )
+
+
+def test_factorize_dense_matrix_cupy_requests_inplace_overwrite(monkeypatch):
+    calls: list[tuple[bool, bool]] = []
+
+    class _FakeCuPy:
+        @staticmethod
+        def asarray(x, dtype=None):
+            return np.asarray(x, dtype=dtype)
+
+    fake_linalg = types.SimpleNamespace()
+
+    def _lu_factor(a, overwrite_a=False, check_finite=True):
+        calls.append((bool(overwrite_a), bool(check_finite)))
+        return (np.asarray(a), np.array([0], dtype=int))
+
+    fake_linalg.lu_factor = _lu_factor
+    monkeypatch.setitem(sys.modules, "cupyx.scipy.linalg", fake_linalg)
+    monkeypatch.setattr(solvers, "import_cupy", lambda: (_FakeCuPy(), None))
+
+    A = np.eye(2, dtype=np.complex64)
+    solvers.factorize_dense_matrix(
+        A,
+        dtype=np.complex64,
+        backend="cupy",
+        overwrite_input=True,
+    )
+    assert calls == [(True, True)]
 
 
 def test_gmres_cupy_reports_clear_import_failure(monkeypatch):

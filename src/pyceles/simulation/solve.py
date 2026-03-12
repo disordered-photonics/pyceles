@@ -251,8 +251,16 @@ def solve_sources_core(
                     A_dense,
                     dtype=compute_dtype,
                     backend=operator_backend,
+                    overwrite_input=(operator_backend == "cupy"),
                 )
                 sim._dense_lu_dtype = np.dtype(compute_dtype)
+                # On the CuPy direct path, the cached LU payload is the useful
+                # repeated-RHS asset. Releasing the unfactorized dense operator
+                # after in-place GPU LU factorization keeps VRAM available for
+                # the factorization workspace and subsequent postprocessing.
+                if operator_backend == "cupy":
+                    sim._dense_operator_cache = None
+                    sim._dense_operator_dtype = None
             A_lu: DenseLUFactorization | None = sim._dense_lu_cache
         else:
             A_lu = None

@@ -58,6 +58,7 @@ def factorize_dense_matrix(
     *,
     dtype: npt.DTypeLike = np.complex128,
     backend: Literal["numpy", "cupy"] = "numpy",
+    overwrite_input: bool = False,
 ) -> DenseLUFactorization:
     """Return LU factorization payload for repeated direct solves."""
     solve_dtype = np.dtype(dtype)
@@ -69,10 +70,22 @@ def factorize_dense_matrix(
         import cupyx.scipy.linalg
 
         A_gpu = cupy.asarray(A)
-        return cupyx.scipy.linalg.lu_factor(A_gpu, overwrite_a=False, check_finite=True)
+        # For the GPU direct path, the LU payload is the persistent object we
+        # actually want to keep. Allowing cuSOLVER to overwrite the dense matrix
+        # avoids carrying both A and LU in device memory when callers are done
+        # with the unfactorized operator.
+        return cupyx.scipy.linalg.lu_factor(
+            A_gpu,
+            overwrite_a=bool(overwrite_input),
+            check_finite=True,
+        )
     import scipy.linalg
 
-    lu, piv = scipy.linalg.lu_factor(A, overwrite_a=False, check_finite=False)
+    lu, piv = scipy.linalg.lu_factor(
+        A,
+        overwrite_a=bool(overwrite_input),
+        check_finite=False,
+    )
     return np.asarray(lu), np.asarray(piv)
 
 
