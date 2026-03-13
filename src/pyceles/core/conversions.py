@@ -2,6 +2,7 @@ from __future__ import annotations
 
 """Canonical basis-conversion helpers for SVWF/PVWF workflows."""
 
+from functools import cache
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -14,6 +15,67 @@ from .spherical import spherical_functions_trigon
 
 if TYPE_CHECKING:
     from .sources import AngularSpectrumSource
+
+
+def _array_cache_key(arr: np.ndarray) -> tuple[tuple[int, ...], str, bytes]:
+    """Return a hashable cache key for a small angular grid."""
+
+    a = np.ascontiguousarray(np.asarray(arr))
+    return tuple(a.shape), a.dtype.str, a.tobytes()
+
+
+def _array_from_cache_key(key: tuple[tuple[int, ...], str, bytes]) -> np.ndarray:
+    """Rebuild an array stored through `_array_cache_key`."""
+
+    shape, dtype_str, payload = key
+    return np.frombuffer(payload, dtype=np.dtype(dtype_str)).reshape(shape).copy()
+
+
+@cache
+def _cached_pwp_conversion_tables(
+    lmax: int,
+    alpha_key: tuple[tuple[int, ...], str, bytes],
+    beta_key: tuple[tuple[int, ...], str, bytes],
+    dtype_str: str,
+) -> tuple[np.ndarray, ...]:
+    """Return reusable SVWF<->PWP angular basis tables for one grid.
+
+    The non-MLFMM code paths call the same conversions repeatedly on fixed
+    angular grids. Caching the expensive transformation-coefficient tables here
+    keeps the generic helpers readable while avoiding redundant setup work in
+    both the prototype and the shipped conversion paths.
+    """
+
+    alpha = _array_from_cache_key(alpha_key).astype(float, copy=False).reshape(-1)
+    beta = _array_from_cache_key(beta_key).astype(float, copy=False).reshape(-1)
+    ctype = np.dtype(dtype_str)
+    lmax_i = int(lmax)
+    Nm = n_modes(lmax_i)
+    Nscl = n_scalar(lmax_i)
+
+    wa = periodic_azimuthal_weights(alpha).astype(np.float64, copy=False)
+    wb = trapezoidal_weights(beta).astype(np.float64, copy=False) * np.sin(beta)
+    cb = np.cos(beta)
+    sb = np.sin(beta)
+    PI, TAU = spherical_functions_trigon(cb, sb, lmax_i, xp=np)
+
+    Bdag_pol1 = np.zeros((Nm, beta.size), dtype=ctype)
+    Bdag_pol2 = np.zeros((Nm, beta.size), dtype=ctype)
+    B_te = np.zeros((Nm, beta.size), dtype=ctype)
+    B_tm = np.zeros((Nm, beta.size), dtype=ctype)
+    m_of_mode = np.zeros((Nm,), dtype=np.int32)
+    for tau, l, m, n in iter_modes(lmax_i):
+        m_of_mode[n] = m
+        sidx = scalar_index(l, m)
+        idx = (tau - 1) * Nscl + sidx
+        Bdag_pol1[idx, :] = transformation_coefficients(PI, TAU, tau, l, m, 1, dagger=True)
+        Bdag_pol2[idx, :] = transformation_coefficients(PI, TAU, tau, l, m, 2, dagger=True)
+        B_te[n, :] = transformation_coefficients(PI, TAU, tau, l, m, pol=1, dagger=False)
+        B_tm[n, :] = transformation_coefficients(PI, TAU, tau, l, m, pol=2, dagger=False)
+
+    eima = np.exp(1j * alpha[:, None] * m_of_mode[None, :]).astype(ctype, copy=False)
+    mode_weight = np.exp(-1j * alpha[:, None] * m_of_mode[None, :]).astype(ctype, copy=False)
+    return wa, wb, Bdag_pol1, Bdag_pol2, B_te, B_tm, m_of_mode, eima, mode_weight
 
 
 def transformation_coefficients(
@@ -66,7 +128,6 @@ def pwp_to_svwf_regular(
     lmax = int(lmax)
     Ns = pos.shape[0]
     Nm = n_modes(lmax)
-    Nscl = n_scalar(lmax)
     ctype = np.dtype(dtype)
 
     k = float(k)
@@ -128,27 +189,17 @@ def pwp_to_svwf_regular(
     ky = ky_te
     kz = kz_te
 
-    wa = periodic_azimuthal_weights(alpha).astype(np.float64)
-    wb = trapezoidal_weights(beta).astype(np.float64) * np.sin(beta)
-
-    cb = np.cos(beta)
-    sb = np.sin(beta)
-    PI, TAU = spherical_functions_trigon(cb, sb, lmax, xp=np)
-
-    Bdag_pol1 = np.zeros((Nm, beta.size), dtype=ctype)
-    Bdag_pol2 = np.zeros((Nm, beta.size), dtype=ctype)
-    m_of_mode = np.zeros((Nm,), dtype=np.int32)
-    for tau in (1, 2):
-        for l in range(1, lmax + 1):
-            for m in range(-l, l + 1):
-                sidx = scalar_index(l, m)
-                idx = (tau - 1) * Nscl + sidx
-                m_of_mode[idx] = m
-                Bdag_pol1[idx, :] = transformation_coefficients(PI, TAU, tau, l, m, 1, dagger=True)
-                Bdag_pol2[idx, :] = transformation_coefficients(PI, TAU, tau, l, m, 2, dagger=True)
+    wa, wb, Bdag_pol1, Bdag_pol2, _B_te, _B_tm, _m_of_mode, _eima, mode_weight = (
+        _cached_pwp_conversion_tables(
+            lmax,
+            _array_cache_key(alpha),
+            _array_cache_key(beta),
+            ctype.str,
+        )
+    )
 
     aI = np.zeros((Ns, Nm), dtype=ctype)
-    for ia, alpha_a in enumerate(alpha):
+    for ia, _alpha_a in enumerate(alpha):
         if wa[ia] == 0.0:
             continue
         gte_row = gte[ia, :]
@@ -170,9 +221,9 @@ def pwp_to_svwf_regular(
         g2 = gtm_row[active_beta][None, :] * Bdag_pol2[:, active_beta]
         mode_beta = (g1 + g2) * wb[active_beta][None, :]
 
-        mode_weight = np.exp(-1j * m_of_mode * alpha_a) * wa[ia]
+        weight_row = mode_weight[ia] * wa[ia]
         contrib = phase @ mode_beta.T
-        aI += contrib * mode_weight[None, :]
+        aI += contrib * weight_row[None, :]
 
     return np.asarray(4.0 * aI, dtype=ctype)
 
@@ -231,26 +282,19 @@ def _svwf_to_pwp_common(
 
     agrid = alpha[:, None]
     bgrid = beta[None, :]
-    sb = np.sin(beta)
-    cb = np.cos(beta)
 
     kx = (k * np.sin(bgrid) * np.cos(agrid)).astype(float)
     ky = (k * np.sin(bgrid) * np.sin(agrid)).astype(float)
     kz = np.broadcast_to(k * np.cos(beta), kx.shape).astype(float)
 
-    PI, TAU = spherical_functions_trigon(cb, sb, lmax, xp=np)
-
-    Nm = n_modes(lmax)
-    B_te = np.zeros((Nm, Nb), dtype=ctype)
-    B_tm = np.zeros((Nm, Nb), dtype=ctype)
-    m_of_n = np.zeros(Nm, dtype=int)
-
-    for tau, l, m, n in iter_modes(lmax):
-        m_of_n[n] = m
-        B_te[n, :] = transformation_coefficients(PI, TAU, tau, l, m, pol=1, dagger=False)
-        B_tm[n, :] = transformation_coefficients(PI, TAU, tau, l, m, pol=2, dagger=False)
-
-    eima = np.exp(1j * alpha[:, None] * m_of_n[None, :]).astype(ctype, copy=False)
+    _wa, _wb, _Bdag_pol1, _Bdag_pol2, B_te, B_tm, _m_of_mode, eima, _mode_weight = (
+        _cached_pwp_conversion_tables(
+            lmax,
+            _array_cache_key(alpha),
+            _array_cache_key(beta),
+            ctype.str,
+        )
+    )
 
     pwp_te = {
         "beta": beta,
