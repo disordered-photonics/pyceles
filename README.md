@@ -351,6 +351,14 @@ reference block builder on the public `500`-particle benchmark (`~26x` slower at
 `~38x` slower at `lmax=4`). RTR therefore remains an interesting mathematical
 direction, but not competitive against pyceles' low-`lmax` brute-force path.
 
+A previous CELES experiment with rotation-translation-rotation (RTR) coupling idea
+was explored as a possible alternative translation backend. After matching the RTR
+block formulas to the shipped CELES-compatible translation conventions, the prototype
+reproduced translation blocks accurately but remained much slower than the current
+reference block builder on the public `500`-particle benchmark (`~26x` slower at `lmax=3`,
+`~38x` slower at `lmax=4`). RTR therefore remains an interesting mathematical
+direction, but not competitive against pyceles' low-`lmax` brute-force path.
+
 ## Recent CPU benchmark snapshot
 
 Measured on a laptop with:
