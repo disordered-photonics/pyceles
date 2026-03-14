@@ -216,6 +216,14 @@ def test_factorize_dense_matrix_cupy_requests_inplace_overwrite(monkeypatch):
 
     fake_linalg.lu_factor = _lu_factor
     monkeypatch.setitem(sys.modules, "cupyx.scipy.linalg", fake_linalg)
+    cupyx_pkg = sys.modules.get("cupyx")
+    if cupyx_pkg is not None:
+        scipy_pkg = getattr(cupyx_pkg, "scipy", None)
+        if scipy_pkg is not None:
+            monkeypatch.setattr(scipy_pkg, "linalg", fake_linalg, raising=False)
+    scipy_pkg = sys.modules.get("cupyx.scipy")
+    if scipy_pkg is not None:
+        monkeypatch.setattr(scipy_pkg, "linalg", fake_linalg, raising=False)
     monkeypatch.setattr(solvers, "import_cupy", lambda: (_FakeCuPy(), None))
 
     A = np.eye(2, dtype=np.complex64)

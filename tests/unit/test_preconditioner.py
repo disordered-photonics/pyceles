@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import tempfile
 from pathlib import Path
+from typing import Generator
 
 import numpy as np
 import pytest
@@ -45,6 +46,27 @@ def _configure_cupy_tempdir() -> None:
     os.environ["TMP"] = str(temp_root)
     os.environ["TEMP"] = str(temp_root)
     tempfile.tempdir = str(temp_root)
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _cupy_tempdir_env() -> Generator[None, None, None]:
+    prev_tmp = os.environ.get("TMP")
+    prev_temp = os.environ.get("TEMP")
+    prev_tempdir = tempfile.tempdir
+    try:
+        _configure_cupy_tempdir()
+    except PermissionError as exc:
+        pytest.skip(f"Local CuPy temp-directory permission issue: {exc}")
+    yield
+    if prev_tmp is None:
+        os.environ.pop("TMP", None)
+    else:
+        os.environ["TMP"] = prev_tmp
+    if prev_temp is None:
+        os.environ.pop("TEMP", None)
+    else:
+        os.environ["TEMP"] = prev_temp
+    tempfile.tempdir = prev_tempdir
 
 
 def _sample_prepared():
