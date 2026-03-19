@@ -10,6 +10,7 @@ import numpy as np
 
 from pyceles._dtypes import resolve_compute_accum_dtypes
 from pyceles.core.angular import uniform_periodic_azimuth_grid, uniform_polar_grid
+from pyceles.core.operators.mlfmm import MLFMMOptions
 from pyceles.core.sources import Source
 
 
@@ -131,7 +132,9 @@ class SimulationConfig:
     solver_preconditioner_cubic_bbox: bool = True
     solver_preconditioner_max_block_unknowns: int | None = None
     operator_backend: Literal["numpy", "cupy"] = "numpy"
+    coupling_backend: Literal["pairwise", "mlfmm"] = "pairwise"
     postprocessing_backend: Literal["inherit", "numpy", "cupy"] = "inherit"
+    mlfmm_options: MLFMMOptions | None = None
     compute_dtype: Literal["complex64", "complex128"] = "complex128"
     accum_dtype: Literal["complex64", "complex128"] = "complex128"
     cache_translation_blocks: bool = False
@@ -232,6 +235,12 @@ class SimulationConfig:
                 "`operator_backend` must be one of {'numpy', 'cupy'}. "
                 f"Got {self.operator_backend!r}."
             )
+        coupling_backend = str(self.coupling_backend).lower()
+        if coupling_backend not in {"pairwise", "mlfmm"}:
+            raise ValueError(
+                "`coupling_backend` must be one of {'pairwise', 'mlfmm'}. "
+                f"Got {self.coupling_backend!r}."
+            )
         post_backend = str(self.postprocessing_backend).lower()
         if post_backend not in {"inherit", "numpy", "cupy"}:
             raise ValueError(
@@ -242,6 +251,10 @@ class SimulationConfig:
             raise ValueError(
                 "`cache_translation_blocks=True` is not supported with `operator_backend='cupy'`. "
                 "The CuPy backend currently uses only the direct raw-kernel coupling path."
+            )
+        if backend == "cupy" and coupling_backend == "mlfmm":
+            raise ValueError(
+                "`coupling_backend='mlfmm'` is not supported yet with `operator_backend='cupy'`."
             )
 
         _, az_shared = validate_angular_grid_pair(

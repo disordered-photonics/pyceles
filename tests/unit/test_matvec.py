@@ -11,6 +11,7 @@ from pyceles.core.operators import (
     CompositeParticleTOperator,
     DenseTGroup,
     DiagonalTGroup,
+    PairwiseCouplingOperator,
     ParticleTGroupFactories,
     PreparedOperator,
     apply_A_numpy,
@@ -35,6 +36,7 @@ from pyceles.core.particles import (
 )
 from pyceles.core.tmatrix import particle_T_diagonal, sphere_T_diagonal
 from pyceles.core.translation import RadialLUT, translation_ab5_table
+from pyceles.linear.preconditioner import make_grid_block_preconditioner
 
 
 @dataclass(frozen=True)
@@ -117,6 +119,52 @@ def _sample_problem():
     x = rng.standard_normal(Ns * Nm) + 1j * rng.standard_normal(Ns * Nm)
     b = rng.standard_normal(Ns * Nm) + 1j * rng.standard_normal(Ns * Nm)
     return lmax, k, positions, radii, n_particle, particles, n_medium, x, b
+
+
+def _mlfmm_single_level_problem():
+    lmax = 2
+    k = 2 * np.pi / 550.0
+    positions = np.array(
+        [
+            [-90.0, -90.0, -90.0],
+            [-72.0, -74.0, -88.0],
+            [-90.0, -90.0, 90.0],
+            [-72.0, -88.0, 74.0],
+            [90.0, 90.0, -90.0],
+            [72.0, 88.0, -74.0],
+            [90.0, 90.0, 90.0],
+            [88.0, 72.0, 74.0],
+        ],
+        dtype=float,
+    )
+    radii = np.full((positions.shape[0],), 11.0, dtype=float)
+    n_particle = np.full((positions.shape[0],), 1.59 + 0.0j, dtype=np.complex128)
+    particles = spheres_from_arrays(
+        positions=positions,
+        radii=radii,
+        refractive_indices=n_particle,
+    )
+    return lmax, k, positions, particles
+
+
+def _mlfmm_direct_fallback_problem():
+    lmax = 2
+    k = 2 * np.pi / 550.0
+    positions = np.array(
+        [
+            [-220.0, 0.0, 0.0],
+            [220.0, 0.0, 0.0],
+        ],
+        dtype=float,
+    )
+    radii = np.full((positions.shape[0],), 80.0, dtype=float)
+    n_particle = np.full((positions.shape[0],), 1.59 + 0.0j, dtype=np.complex128)
+    particles = spheres_from_arrays(
+        positions=positions,
+        radii=radii,
+        refractive_indices=n_particle,
+    )
+    return lmax, k, positions, particles
 
 
 def test_prepare_matvec_matches_explicit_operator_kernels():
@@ -814,3 +862,39 @@ def test_assemble_dense_A_matches_apply_A():
     y_dense = A @ x
     y_mv = prepared.apply_A(x)
     np.testing.assert_allclose(y_dense, y_mv, rtol=1e-12, atol=1e-12)
+
+
+def test_prepare_matvec_mlfmm_direct_stage_returns_pairwise_coupling() -> None:
+    lmax, k, _, particles = _mlfmm_direct_fallback_problem()
+    prepared = prepare_matvec(
+        lmax=lmax,
+        k=k,
+        particles=particles,
+        n_medium=1.0 + 0j,
+        radial_lut_dr=0.5,
+        cache_translation_blocks=False,
+        coupling_backend="mlfmm",
+    )
+
+    assert isinstance(prepared.coupling, PairwiseCouplingOperator)
+
+
+def test_grid_block_preconditioner_still_works_for_mlfmm_direct_fallback() -> None:
+    lmax, k, _, particles = _mlfmm_direct_fallback_problem()
+    prepared = prepare_matvec(
+        lmax=lmax,
+        k=k,
+        particles=particles,
+        n_medium=1.0 + 0j,
+        radial_lut_dr=0.5,
+        cache_translation_blocks=False,
+        coupling_backend="mlfmm",
+    )
+
+    precond = make_grid_block_preconditioner(
+        prepared,
+        subdivisions=1,
+        cubic_bbox=True,
+        show_progress=False,
+    )
+    assert precond.n_blocks == 1

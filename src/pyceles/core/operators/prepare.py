@@ -27,6 +27,7 @@ from .groups import (
     PreparedParticleTGroup,
     plan_particle_t_groups,
 )
+from .mlfmm import MLFMMOptions, prepare_mlfmm_coupling
 from .single_body import CompositeParticleTOperator, ParticleTOperator
 from .single_body_cupy import wrap_particle_t_groups_cupy
 
@@ -211,13 +212,20 @@ def prepare_matvec(
     cache_translation_blocks: bool = False,
     operator_dtype: npt.DTypeLike = np.complex128,
     particle_t_group_factories: ParticleTGroupFactories | None = None,
+    coupling_backend: Literal["pairwise", "mlfmm"] = "pairwise",
+    mlfmm_options: MLFMMOptions | None = None,
     backend: Literal["numpy", "cupy"] = "numpy",
+    show_progress: bool = False,
 ) -> PreparedOperator:
     """Prepare reusable `A = I - T W` data from explicit particle descriptors."""
     part = list(particles)
     positions = np.asarray(
         [np.asarray(p.position, dtype=float) for p in part], dtype=float
     ).reshape(-1, 3)
+    circumscribing_radii = np.asarray(
+        [float(p.circumscribing_radius()) for p in part],
+        dtype=float,
+    ).reshape(-1)
     op_dtype = np.dtype(operator_dtype)
     k_f = float(k)
     ab5 = translation_ab5_table(int(lmax), dtype=op_dtype)
@@ -232,6 +240,7 @@ def prepare_matvec(
     lut = RadialLUT(lmax=int(lmax), k=k_f, r_max=_infer_rmax(positions), dr=dr, dtype=op_dtype)
 
     backend_name = backend
+    coupling_name = str(coupling_backend).lower()
     particle_t: ParticleTOperator
     coupling: CouplingOperator
     if backend_name == "numpy":
@@ -243,17 +252,39 @@ def prepare_matvec(
             dtype=op_dtype,
             group_factories=particle_t_group_factories,
         )
-        coupling = PairwiseCouplingOperator(
-            lmax=int(lmax),
-            k=k_f,
-            positions=positions,
-            ab5=ab5,
-            radial_lut=lut,
-            dtype=op_dtype,
-            cache_translation_blocks=bool(cache_translation_blocks),
-        )
+        if coupling_name == "pairwise":
+            coupling = PairwiseCouplingOperator(
+                lmax=int(lmax),
+                k=k_f,
+                positions=positions,
+                ab5=ab5,
+                radial_lut=lut,
+                dtype=op_dtype,
+                cache_translation_blocks=bool(cache_translation_blocks),
+            )
+        elif coupling_name == "mlfmm":
+            coupling = prepare_mlfmm_coupling(
+                lmax=int(lmax),
+                k=k_f,
+                positions=positions,
+                particle_circumscribing_radii=circumscribing_radii,
+                radial_lut=lut,
+                ab5=ab5,
+                options=mlfmm_options,
+                dtype=op_dtype,
+                cache_translation_blocks=bool(cache_translation_blocks),
+                show_progress=bool(show_progress),
+            )
+        else:
+            raise ValueError(
+                f"Unknown coupling backend '{coupling_backend}'. Use 'pairwise' or 'mlfmm'."
+            )
     elif backend_name == "cupy":
         import_cupy()
+        if coupling_name != "pairwise":
+            raise NotImplementedError(
+                "The CuPy operator backend currently supports only `coupling_backend='pairwise'`."
+            )
         if cache_translation_blocks:
             raise NotImplementedError(
                 "The CuPy operator backend exposes only the direct raw-kernel coupling path. "

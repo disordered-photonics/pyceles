@@ -332,13 +332,18 @@ def box_outgoing_to_directional(
     nscl = transforms.Fth.shape[1]
     if coeffs.size != 2 * nscl:
         raise ValueError(f"box_state must have length {2 * nscl}, got {coeffs.size}.")
-    sampled = np.asarray(transforms.sampled_matrix @ coeffs, dtype=np.complex128)
-    ndir = int(transforms.grid.directions.shape[0])
-    return (
-        np.asarray(sampled[:ndir], dtype=np.complex128, copy=False),
-        np.asarray(sampled[ndir : 2 * ndir], dtype=np.complex128, copy=False),
-        np.asarray(sampled[2 * ndir : 3 * ndir], dtype=np.complex128, copy=False),
-        np.asarray(sampled[3 * ndir :], dtype=np.complex128, copy=False),
+    a_box = coeffs[:nscl]
+    b_box = coeffs[nscl:]
+    a_theta = transforms.Fth @ a_box
+    a_phi = transforms.Fph @ a_box
+    b_theta = transforms.Fth @ b_box
+    b_phi = transforms.Fph @ b_box
+    return apply_directional_reflection(
+        transforms.grid.reflection_permutation,
+        np.asarray(a_theta, dtype=np.complex128, copy=False),
+        np.asarray(a_phi, dtype=np.complex128, copy=False),
+        np.asarray(b_theta, dtype=np.complex128, copy=False),
+        np.asarray(b_phi, dtype=np.complex128, copy=False),
     )
 
 
@@ -351,15 +356,26 @@ def directional_to_box_regular(
 ) -> Array:
     """Map sampled physical directional channels to one regular box SVWF state."""
 
-    stacked = np.concatenate(
-        [
-            np.asarray(a_theta, dtype=np.complex128).reshape(-1),
-            np.asarray(a_phi, dtype=np.complex128).reshape(-1),
-            np.asarray(b_theta, dtype=np.complex128).reshape(-1),
-            np.asarray(b_phi, dtype=np.complex128).reshape(-1),
-        ]
+    a_theta_arr, a_phi_arr, b_theta_arr, b_phi_arr = apply_directional_reflection(
+        transforms.grid.reflection_permutation,
+        np.asarray(a_theta, dtype=np.complex128).reshape(-1),
+        np.asarray(a_phi, dtype=np.complex128).reshape(-1),
+        np.asarray(b_theta, dtype=np.complex128).reshape(-1),
+        np.asarray(b_phi, dtype=np.complex128).reshape(-1),
     )
-    return np.asarray(transforms.sampled_pinv @ stacked, dtype=np.complex128)
+    top = (
+        transforms.Fth_adj @ a_theta_arr
+        + transforms.Fph_adj @ a_phi_arr
+        + transforms.Gth_adj @ b_theta_arr
+        + transforms.Gph_adj @ b_phi_arr
+    )
+    bottom = (
+        transforms.Fth_adj @ b_theta_arr
+        + transforms.Fph_adj @ b_phi_arr
+        + transforms.Gth_adj @ a_theta_arr
+        + transforms.Gph_adj @ a_phi_arr
+    )
+    return np.concatenate((top, bottom)).astype(np.complex128, copy=False)
 
 
 def _periodic_linear_interpolation_matrix(source_alpha: Array, target_alpha: Array) -> Array:

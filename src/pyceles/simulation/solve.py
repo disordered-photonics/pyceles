@@ -9,7 +9,12 @@ from tqdm.auto import tqdm
 
 from pyceles._dtypes import resolve_compute_accum_dtypes
 from pyceles.core.indexing import n_modes
-from pyceles.core.operators import PreparedOperator, assemble_dense_A_numpy, prepare_matvec
+from pyceles.core.operators import (
+    PairwiseCouplingOperator,
+    PreparedOperator,
+    assemble_dense_A_numpy,
+    prepare_matvec,
+)
 from pyceles.core.projection import project_source_to_svwf
 from pyceles.core.sources import DipoleCollection, DipoleSource, Source
 from pyceles.linear.preconditioner import make_grid_block_preconditioner
@@ -195,7 +200,10 @@ def solve_sources_core(
                 radial_lut_dr=cfg.radial_lut_dr,
                 cache_translation_blocks=cfg.cache_translation_blocks,
                 operator_dtype=compute_dtype,
+                coupling_backend=cfg.coupling_backend,
+                mlfmm_options=cfg.mlfmm_options,
                 backend=operator_backend,
+                show_progress=bool(cfg.verbose),
             )
             sim._prepared_operator_cache = prepared
             sim._prepared_operator_dtype = np.dtype(compute_dtype)
@@ -211,6 +219,13 @@ def solve_sources_core(
         for label in labels:
             rhs_flat[label] = prepared.rhs_Tb(initial_coeffs[label].reshape(Ns * Nm))
         if will_use_direct:
+            if operator_backend == "numpy" and not isinstance(
+                prepared.coupling, PairwiseCouplingOperator
+            ):
+                raise NotImplementedError(
+                    "Dense/direct NumPy solves currently require the pairwise coupling backend. "
+                    "The resolved MLFMM coupling stages remain matrix-free only."
+                )
             need_dense = (
                 sim._dense_operator_cache is None
                 or sim._dense_operator_dtype is None

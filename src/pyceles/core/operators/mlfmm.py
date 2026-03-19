@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from time import perf_counter
 from typing import Literal
 
 import numpy as np
+from scipy.special import spherical_jn, spherical_yn
+from tqdm.auto import tqdm
 
 from pyceles.core.indexing import n_modes
 from pyceles.core.translation import (
@@ -16,6 +19,8 @@ from pyceles.core.translation import (
     translation_block_rect,
 )
 
+from .base import CouplingOperator
+from .coupling_pairwise import PairwiseCouplingOperator
 from .mlfmm_directional import (
     MLFMMDirectionalInterpolation,
     MLFMMDirectionalTransforms,
@@ -129,6 +134,89 @@ class MLFMMMultilevelOperators:
     leaf_level: int
     aggregation: tuple[np.ndarray, ...]
     receive: tuple[np.ndarray, ...]
+
+
+@dataclass
+class MLFMMCouplingOperator:
+    """Prepared NumPy MLFMM coupling operator with structured stage metadata.
+
+    The near part stays exact on the resolved leaf partition. The far part is
+    applied through either a single occupied-leaf sampled level or a multilevel
+    occupied-box hierarchy, depending on the resolved stage.
+    """
+
+    lmax: int
+    k: float
+    positions: np.ndarray
+    radial_lut: RadialLUT
+    resolved_plan: MLFMMResolvedPlan
+    dtype: np.dtype = np.dtype(np.complex128)
+    cache_translation_blocks: bool = False
+    single_level: MLFMMSingleLevelOperators | None = None
+    multilevel: MLFMMMultilevelOperators | None = None
+    _exact_block_cache: dict[tuple[int, int], np.ndarray] | None = None
+
+    def __post_init__(self) -> None:
+        if self.resolved_plan.stage == "single_level" and self.single_level is None:
+            raise ValueError("single_level operators are required for single-level MLFMM coupling.")
+        if self.resolved_plan.stage == "multilevel" and self.multilevel is None:
+            raise ValueError("multilevel operators are required for multilevel MLFMM coupling.")
+        if self.resolved_plan.stage == "direct":
+            raise ValueError("MLFMMCouplingOperator is not used for the direct stage.")
+        if self.cache_translation_blocks and self._exact_block_cache is None:
+            self._exact_block_cache = {}
+
+    def apply(self, x: np.ndarray) -> np.ndarray:
+        """Apply the prepared MLFMM coupling operator `W`."""
+
+        if self.resolved_plan.stage == "single_level":
+            if self.single_level is None:
+                raise RuntimeError("Internal error: single-level operators are missing.")
+            y_near, y_far = apply_single_level_mlfmm(
+                lmax=int(self.lmax),
+                k=float(self.k),
+                positions=self.positions,
+                x=x,
+                operators=self.single_level,
+                radial_lut=self.radial_lut,
+                dtype=self.dtype,
+                block_cache=self._exact_block_cache,
+            )
+            return np.asarray(y_near + y_far, dtype=self.dtype)
+        if self.resolved_plan.stage == "multilevel":
+            if self.multilevel is None:
+                raise RuntimeError("Internal error: multilevel operators are missing.")
+            y_near, y_far = apply_multilevel_mlfmm(
+                lmax=int(self.lmax),
+                k=float(self.k),
+                positions=self.positions,
+                x=x,
+                operators=self.multilevel,
+                radial_lut=self.radial_lut,
+                dtype=self.dtype,
+                block_cache=self._exact_block_cache,
+            )
+            return np.asarray(y_near + y_far, dtype=self.dtype)
+        raise RuntimeError(f"Unsupported MLFMM stage {self.resolved_plan.stage!r}.")
+
+    def populate(self, *, show_progress: bool = False) -> None:
+        """Optionally precompute exact near blocks used by the current partition."""
+
+        del show_progress
+        if not self.cache_translation_blocks:
+            return
+        if self._exact_block_cache is None:
+            self._exact_block_cache = {}
+        _exact_leaf_near_apply(
+            lmax=int(self.lmax),
+            k=float(self.k),
+            positions=self.positions,
+            x=np.zeros((self.positions.shape[0] * n_modes(int(self.lmax)),), dtype=self.dtype),
+            partition=self.resolved_plan.partition,
+            radial_lut=self.radial_lut,
+            dtype=np.dtype(self.dtype),
+            block_cache=self._exact_block_cache,
+        )
 
 
 def _validate_positions_and_radii(
@@ -397,6 +485,56 @@ def _offset_delta_from_half_size(half_size: float, offset: tuple[int, int, int])
     return 2.0 * float(half_size) * np.asarray(offset, dtype=float)
 
 
+def _spherical_hankel_all(nmax: int, z: complex) -> np.ndarray:
+    """Return spherical Hankel values `h_n^(1)(z)` for `n=0..nmax`."""
+
+    orders = np.arange(int(nmax) + 1, dtype=int)
+    return np.asarray(spherical_jn(orders, z) + 1j * spherical_yn(orders, z), dtype=np.complex128)
+
+
+def _rokhlin_transfer_values(
+    cosines: np.ndarray,
+    *,
+    k: complex,
+    radius: float,
+    truncation_order: int,
+) -> np.ndarray:
+    """Return the unweighted sampled Rokhlin transfer values for one offset."""
+
+    hankel = _spherical_hankel_all(int(truncation_order), complex(k) * float(radius))
+    legendre = np.polynomial.legendre.legvander(
+        np.asarray(cosines, dtype=float), int(truncation_order)
+    )
+    orders = np.arange(int(truncation_order) + 1, dtype=int)
+    coeffs = (2.0 * orders + 1.0) * (1j**orders) * hankel
+    return np.asarray(legendre @ coeffs, dtype=np.complex128)
+
+
+def _sampled_rokhlin_translator(
+    delta: np.ndarray,
+    *,
+    k: complex,
+    truncation_order: int,
+    directions: np.ndarray,
+    weights: np.ndarray,
+    dtype: np.dtype,
+) -> np.ndarray:
+    """Return the weighted sampled Rokhlin translator for one box offset."""
+
+    tr = np.asarray(delta, dtype=float).reshape(3)
+    radius = float(np.linalg.norm(tr))
+    if radius == 0.0:
+        return np.asarray(weights, dtype=dtype)
+    cosines = np.asarray(directions, dtype=float) @ (tr / radius)
+    transfer = _rokhlin_transfer_values(
+        cosines,
+        k=complex(k),
+        radius=radius,
+        truncation_order=int(truncation_order),
+    )
+    return np.asarray(transfer * np.asarray(weights, dtype=float), dtype=dtype)
+
+
 def _build_leaf_box_maps(
     *,
     lmax: int,
@@ -583,9 +721,12 @@ def build_single_level_mlfmm_operators(
     )
     for offset in far_offset_batches:
         delta = _offset_delta_from_half_size(leaf_half_size, offset)
-        offset_diagonals[offset] = np.asarray(
-            np.exp(1j * complex(k) * (directional.grid.directions @ delta))
-            * np.asarray(directional.grid.weights, dtype=float),
+        offset_diagonals[offset] = _sampled_rokhlin_translator(
+            delta,
+            k=complex(k),
+            truncation_order=int(shared_translator_order),
+            directions=directional.grid.directions,
+            weights=directional.grid.weights,
             dtype=out_dtype,
         )
         if exact_box_blocks is not None:
@@ -804,16 +945,12 @@ def build_multilevel_mlfmm_operators(
         directional = directional_transforms(int(level_box_order), grid_order=int(level_box_order))
         far_offset_batches = {} if level == 0 else _coords_far_offset_batches(coords)
         offset_diagonals = {
-            offset: np.asarray(
-                np.exp(
-                    1j
-                    * complex(k)
-                    * (
-                        directional.grid.directions
-                        @ _offset_delta_from_half_size(half_size, offset)
-                    )
-                )
-                * np.asarray(directional.grid.weights, dtype=float),
+            offset: _sampled_rokhlin_translator(
+                _offset_delta_from_half_size(half_size, offset),
+                k=complex(k),
+                truncation_order=int(level_box_order),
+                directions=directional.grid.directions,
+                weights=directional.grid.weights,
                 dtype=out_dtype,
             )
             for offset in far_offset_batches
@@ -1023,7 +1160,124 @@ def apply_multilevel_mlfmm(
     return y_near.reshape(-1), y_far.reshape(-1)
 
 
+def prepare_mlfmm_coupling(
+    *,
+    lmax: int,
+    k: float,
+    positions: np.ndarray,
+    particle_circumscribing_radii: np.ndarray,
+    radial_lut: RadialLUT,
+    ab5: np.ndarray,
+    options: MLFMMOptions | None = None,
+    dtype: np.dtype | type[np.complexfloating] | type[np.complex128] = np.complex128,
+    cache_translation_blocks: bool = False,
+    show_progress: bool = False,
+) -> CouplingOperator:
+    """Prepare the native NumPy MLFMM coupling operator or direct fallback.
+
+    The resolved stage is determined from the uniform-depth occupied-box plan.
+    If the geometry resolves to the direct stage, this helper returns the
+    canonical pairwise coupling backend directly instead of wrapping it in an
+    MLFMM object.
+    """
+
+    t_prepare_start = perf_counter()
+    out_dtype = np.dtype(dtype)
+    pts = np.asarray(positions, dtype=float)
+    radii = np.asarray(particle_circumscribing_radii, dtype=float)
+    resolved = resolve_mlfmm_plan(
+        pts,
+        particle_circumscribing_radii=radii,
+        options=options,
+    )
+    if show_progress:
+        occupancies = np.asarray(
+            [leaf.particle_indices.size for leaf in resolved.partition.leaves],
+            dtype=np.int64,
+        )
+        occ_min = int(np.min(occupancies)) if occupancies.size else 0
+        occ_med = int(np.median(occupancies)) if occupancies.size else 0
+        occ_max = int(np.max(occupancies)) if occupancies.size else 0
+        tqdm.write(
+            "[MLFMM] plan "
+            f"stage={resolved.stage} depth={resolved.selected_depth} "
+            f"leaves={len(resolved.partition.leaves)} "
+            f"leaf_occ_min/med/max={occ_min}/{occ_med}/{occ_max} "
+            f"elapsed_s={perf_counter() - t_prepare_start:.2f}"
+        )
+    out: CouplingOperator
+    if resolved.stage == "direct":
+        t_stage_start = perf_counter()
+        out = PairwiseCouplingOperator(
+            lmax=int(lmax),
+            k=float(k),
+            positions=pts,
+            ab5=np.asarray(ab5, dtype=out_dtype),
+            radial_lut=radial_lut,
+            dtype=out_dtype,
+            cache_translation_blocks=bool(cache_translation_blocks),
+        )
+        if show_progress:
+            tqdm.write(
+                f"[MLFMM] prepare stage=direct elapsed_s={perf_counter() - t_stage_start:.2f}"
+            )
+            tqdm.write(f"[MLFMM] prepare total elapsed_s={perf_counter() - t_prepare_start:.2f}")
+        return out
+    if resolved.stage == "single_level":
+        t_stage_start = perf_counter()
+        single_level = build_single_level_mlfmm_operators(
+            lmax=int(lmax),
+            k=float(k),
+            positions=pts,
+            partition=resolved.partition,
+            radial_lut=radial_lut,
+            dtype=out_dtype,
+        )
+        out = MLFMMCouplingOperator(
+            lmax=int(lmax),
+            k=float(k),
+            positions=pts,
+            radial_lut=radial_lut,
+            resolved_plan=resolved,
+            dtype=out_dtype,
+            cache_translation_blocks=bool(cache_translation_blocks),
+            single_level=single_level,
+        )
+        if show_progress:
+            tqdm.write(
+                f"[MLFMM] prepare stage=single_level elapsed_s={perf_counter() - t_stage_start:.2f}"
+            )
+            tqdm.write(f"[MLFMM] prepare total elapsed_s={perf_counter() - t_prepare_start:.2f}")
+        return out
+    t_stage_start = perf_counter()
+    multilevel = build_multilevel_mlfmm_operators(
+        lmax=int(lmax),
+        k=float(k),
+        positions=pts,
+        partition=resolved.partition,
+        radial_lut=radial_lut,
+        dtype=out_dtype,
+    )
+    out = MLFMMCouplingOperator(
+        lmax=int(lmax),
+        k=float(k),
+        positions=pts,
+        radial_lut=radial_lut,
+        resolved_plan=resolved,
+        dtype=out_dtype,
+        cache_translation_blocks=bool(cache_translation_blocks),
+        multilevel=multilevel,
+    )
+    if show_progress:
+        tqdm.write(
+            f"[MLFMM] prepare stage=multilevel elapsed_s={perf_counter() - t_stage_start:.2f}"
+        )
+        tqdm.write(f"[MLFMM] prepare total elapsed_s={perf_counter() - t_prepare_start:.2f}")
+    return out
+
+
 __all__ = [
+    "MLFMMCouplingOperator",
     "MLFMMLevelOperators",
     "MLFMMMultilevelOperators",
     "MLFMMOptions",
@@ -1038,6 +1292,7 @@ __all__ = [
     "build_multilevel_mlfmm_operators",
     "build_single_level_mlfmm_operators",
     "estimate_rokhlin_order",
+    "prepare_mlfmm_coupling",
     "resolve_mlfmm_plan",
     "select_mlfmm_stage",
 ]

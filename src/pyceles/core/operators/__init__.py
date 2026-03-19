@@ -36,6 +36,7 @@ from .groups import (
     plan_particle_t_groups,
 )
 from .mlfmm import (
+    MLFMMCouplingOperator,
     MLFMMLevelOperators,
     MLFMMMultilevelOperators,
     MLFMMOptions,
@@ -49,6 +50,7 @@ from .mlfmm import (
     build_multilevel_mlfmm_operators,
     build_single_level_mlfmm_operators,
     estimate_rokhlin_order,
+    prepare_mlfmm_coupling,
     resolve_mlfmm_plan,
     select_mlfmm_stage,
 )
@@ -82,6 +84,7 @@ __all__ = [
     "MLFMMDirectionalInterpolation",
     "MLFMMDirectionalTransforms",
     "MLFMMBox",
+    "MLFMMCouplingOperator",
     "MLFMMLevelOperators",
     "MLFMMMultilevelOperators",
     "MLFMMOptions",
@@ -120,6 +123,7 @@ __all__ = [
     "make_axisymmetric_group_factory",
     "make_dense_group_factory",
     "make_prepared_A_and_rhs",
+    "prepare_mlfmm_coupling",
     "plan_particle_t_groups",
     "precompute_T_diagonal",
     "prepare_matvec",

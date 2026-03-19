@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from pyceles.core.operators import MLFMMOptions
 from pyceles.simulation import SimulationConfig
 
 
@@ -34,3 +35,28 @@ def test_simulation_config_rejects_unknown_postprocessing_backend() -> None:
 def test_simulation_config_rejects_cupy_translation_block_cache() -> None:
     with pytest.raises(ValueError, match="cache_translation_blocks=True"):
         SimulationConfig(operator_backend="cupy", cache_translation_blocks=True, verbose=False)
+
+
+def test_simulation_config_accepts_mlfmm_coupling_backend_and_options() -> None:
+    options = MLFMMOptions(max_leaf_particles=4, max_depth=6)
+    cfg = SimulationConfig(
+        coupling_backend="mlfmm",
+        mlfmm_options=options,
+        verbose=False,
+    )
+    assert cfg.coupling_backend == "mlfmm"
+    assert cfg.mlfmm_options == options
+
+
+def test_simulation_config_rejects_unknown_coupling_backend() -> None:
+    with pytest.raises(ValueError, match="coupling_backend"):
+        SimulationConfig(coupling_backend="fmm", verbose=False)  # type: ignore[arg-type]
+
+
+def test_simulation_config_rejects_cupy_mlfmm_combination() -> None:
+    with pytest.raises(ValueError, match="coupling_backend='mlfmm'"):
+        SimulationConfig(
+            operator_backend="cupy",
+            coupling_backend="mlfmm",
+            verbose=False,
+        )
