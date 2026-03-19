@@ -40,8 +40,18 @@ def spherical_bessel_jy(lmax: int, z: np.ndarray) -> tuple[np.ndarray, np.ndarra
     return j, y
 
 
+def spherical_bessel_j(lmax: int, z: np.ndarray) -> np.ndarray:
+    """Return `j_l(z)` for `l=0..lmax`."""
+
+    z = np.asarray(z)
+    j = np.zeros((lmax + 1,) + z.shape, dtype=np.complex128)
+    for l in range(0, lmax + 1):
+        j[l] = spherical_jn(l, z)
+    return j
+
+
 class RadialLUT:
-    """Lookup table for spherical Hankel h_p^(1)(k r), p=0..2*lmax.
+    """Lookup table for radial spherical families up to `p=2*lmax`.
 
     Parameters
     ----------
@@ -86,6 +96,9 @@ class RadialLUT:
             z[0] = z[1]
         j, y = spherical_bessel_jy(2 * self.lmax, z)
         self.h = (j + 1j * y).astype(self.dtype, copy=False)  # (p, Nr)
+        self.j = spherical_bessel_j(2 * self.lmax, self.k * self.r_grid).astype(
+            self.dtype, copy=False
+        )
 
     def hankel_all_p(self, r: float) -> np.ndarray:
         """Return interpolated `h_p^(1)(k r)` for all `p=0..2*lmax` at radius `r`."""
@@ -101,6 +114,33 @@ class RadialLUT:
         frac = t - i0
         i0 = max(0, min(i0, self._last_index - 1))
         return (1.0 - frac) * self.h[:, i0] + frac * self.h[:, i0 + 1]
+
+    def bessel_j_all_p(self, r: float) -> np.ndarray:
+        """Return interpolated `j_p(k r)` for all `p=0..2*lmax` at radius `r`."""
+
+        r = float(r)
+        if r <= 0.0:
+            return self.j[:, 0]
+        t = r * self._inv_dr
+        if self.interpolation == "nearest":
+            i = int(np.round(t))
+            i = max(0, min(i, self._last_index))
+            return self.j[:, i]
+        i0 = int(np.floor(t))
+        frac = t - i0
+        i0 = max(0, min(i0, self._last_index - 1))
+        return (1.0 - frac) * self.j[:, i0] + frac * self.j[:, i0 + 1]
+
+
+@cache
+def _mode_indices_within_larger_lmax(small_lmax: int, large_lmax: int) -> tuple[int, ...]:
+    """Return CELES-order mode indices for `small_lmax` embedded in `large_lmax`."""
+
+    small = int(small_lmax)
+    large = int(large_lmax)
+    if small > large:
+        raise ValueError(f"small_lmax={small} cannot exceed large_lmax={large}.")
+    return tuple(index_vswf(l, m, tau, large) for tau, l, m, _ in iter_modes(small))
 
 
 @cache
@@ -242,6 +282,99 @@ def _translation_ab5_compact_tables(lmax: int, dtype=np.complex64) -> tuple[np.n
     return _translation_ab5_compact_tables_cached(int(lmax), np.dtype(dtype).str)
 
 
+def _rectangular_radial_lut_from_base(
+    lmax: int,
+    k: float,
+    r_max: float,
+    dr: float,
+    dtype_str: str,
+) -> RadialLUT:
+    """Return a higher-order radial LUT compatible with a base LUT."""
+
+    return RadialLUT(
+        lmax=int(lmax),
+        k=float(k),
+        r_max=float(r_max),
+        dr=float(dr),
+        dtype=np.dtype(dtype_str),
+    )
+
+
+def _translation_radial_values(
+    lmax: int,
+    k: float,
+    r: float,
+    *,
+    out_dtype: np.dtype,
+    family: str,
+    radial_lut: Optional[RadialLUT],
+) -> np.ndarray:
+    """Return the radial sequence for one SVWF translation family."""
+
+    fam = str(family).strip().lower()
+    if fam == "outgoing_to_regular":
+        if radial_lut is None:
+            j, y = spherical_bessel_jy(2 * lmax, np.asarray(k * r, dtype=np.complex128))
+            return np.asarray(j + 1j * y, dtype=out_dtype).reshape((2 * lmax + 1,))
+        return np.asarray(radial_lut.hankel_all_p(r), dtype=out_dtype)[: 2 * lmax + 1]
+    if fam in {"interior", "regular_to_regular"}:
+        if radial_lut is None:
+            return np.asarray(
+                spherical_bessel_j(2 * lmax, np.asarray(k * r, dtype=np.complex128)),
+                dtype=out_dtype,
+            ).reshape((2 * lmax + 1,))
+        return np.asarray(radial_lut.bessel_j_all_p(r), dtype=out_dtype)[: 2 * lmax + 1]
+    raise ValueError(
+        f"Unsupported translation family {family!r}. "
+        "Expected 'outgoing_to_regular', 'interior', or 'regular_to_regular'."
+    )
+
+
+def _translation_block_family(
+    lmax: int,
+    k: float,
+    rvec: np.ndarray,
+    *,
+    ab5: np.ndarray,
+    radial_lut: Optional[RadialLUT],
+    family: str,
+) -> np.ndarray:
+    """Shared SVWF translation-block assembly for one radial family."""
+
+    lmax = int(lmax)
+    out_dtype = np.asarray(ab5).dtype
+    rvec = np.asarray(rvec, dtype=float).reshape(3)
+    nmodes = n_modes(lmax)
+
+    r = float(np.linalg.norm(rvec))
+    if r == 0.0:
+        if str(family).strip().lower() in {"interior", "regular_to_regular"}:
+            return np.eye(nmodes, dtype=out_dtype)
+        return np.zeros((nmodes, nmodes), dtype=out_dtype)
+
+    ct = rvec[2] / r
+    st = np.sqrt(max(0.0, 1.0 - ct * ct))
+    phi = np.arctan2(rvec[1], rvec[0])
+    radial = _translation_radial_values(
+        lmax,
+        k,
+        r,
+        out_dtype=out_dtype,
+        family=family,
+        radial_lut=radial_lut,
+    )
+
+    plm = legendre_normalized_trigon_scalar(ct, st, 2 * lmax)
+    dm, absdm, dm_lookup = _translation_mode_pair_tables(lmax)
+    g_mp = (plm * radial[:, None]).T.astype(out_dtype, copy=False)
+    gp = g_mp[absdm]
+    acc = np.sum(ab5 * gp, axis=2)
+    m_phase = np.arange(-2 * lmax, 2 * lmax + 1, dtype=np.int32)
+    phase_lut = np.exp(1j * phi * m_phase).astype(out_dtype, copy=False)
+    phase = phase_lut[dm_lookup]
+    return (acc * phase).astype(out_dtype, copy=False)
+
+
 @cache
 def _translation_plm_coeff_table_cached(lmax: int, dtype_str: str) -> np.ndarray:
     """Return CELES-style trigonometric Legendre coefficient table up to degree `2*lmax`."""
@@ -303,44 +436,83 @@ def translation_block(
     radial_lut: Optional[RadialLUT] = None,
 ) -> np.ndarray:
     """Dense translation block W_{ij} for two centers separated by rvec=r_i-r_j."""
-    lmax = int(lmax)
-    out_dtype = np.asarray(ab5).dtype
-    rvec = np.asarray(rvec, dtype=float).reshape(3)
-    Nm = n_modes(lmax)
+    return _translation_block_family(
+        lmax,
+        k,
+        rvec,
+        ab5=ab5,
+        radial_lut=radial_lut,
+        family="outgoing_to_regular",
+    )
 
-    r = float(np.linalg.norm(rvec))
-    if r == 0.0:
-        return np.zeros((Nm, Nm), dtype=out_dtype)
 
-    ct = rvec[2] / r
-    st = np.sqrt(max(0.0, 1.0 - ct * ct))
-    phi = np.arctan2(rvec[1], rvec[0])
+def translation_block_regular(
+    lmax: int,
+    k: float,
+    rvec: np.ndarray,
+    *,
+    ab5: np.ndarray,
+) -> np.ndarray:
+    """Dense regular-to-regular center-shift block for two SVWF centers."""
 
-    if radial_lut is None:
-        j, y = spherical_bessel_jy(2 * lmax, np.asarray(k * r, dtype=np.complex128))
-        h = np.asarray(j + 1j * y, dtype=out_dtype).reshape((2 * lmax + 1,))
-    else:
-        h = np.asarray(radial_lut.hankel_all_p(r), dtype=out_dtype)
+    return translation_block_interior(lmax, k, rvec, ab5=ab5)
 
-    # Scalar recurrence is materially faster here than generic vectorized variants
-    # for the tiny per-pair angular workload in matrix-free solver matvec loops.
-    plm = legendre_normalized_trigon_scalar(ct, st, 2 * lmax)
-    dm, absdm, dm_lookup = _translation_mode_pair_tables(lmax)  # (dst,src)
 
-    # g[m,p] = P_p^m(cos theta) * h_p(kr)
-    g_mp = (plm * h[:, None]).T.astype(out_dtype, copy=False)  # (m,p)
+def translation_block_interior(
+    lmax: int,
+    k: float,
+    rvec: np.ndarray,
+    *,
+    ab5: np.ndarray,
+) -> np.ndarray:
+    """Dense interior `j_l` center-shift block for two SVWF centers."""
 
-    # Gather the m-dependent angular-radial factors for each mode pair.
-    # gp[dst,src,p] = g_mp[absdm[dst,src], p]
-    gp = g_mp[absdm]
+    return _translation_block_family(
+        lmax,
+        k,
+        rvec,
+        ab5=ab5,
+        radial_lut=None,
+        family="interior",
+    )
 
-    # `ab5` and angular-radial terms are already aligned for (dst, src, p)
-    # contraction in the CELES/SMUTHI convention.
-    acc = np.sum(ab5 * gp, axis=2)  # (dst,src)
-    # Compute only the small set of phase factors for m=-2*lmax..2*lmax,
-    # then gather to (dst,src) by precomputed lookup indices.
-    m_phase = np.arange(-2 * lmax, 2 * lmax + 1, dtype=np.int32)
-    phase_lut = np.exp(1j * phi * m_phase).astype(out_dtype, copy=False)
-    phase = phase_lut[dm_lookup]
-    W = acc * phase
-    return W.astype(out_dtype, copy=False)
+
+def translation_block_rect(
+    lmax_out: int,
+    lmax_in: int,
+    k: float,
+    rvec: np.ndarray,
+    *,
+    ab5: np.ndarray | None = None,
+    radial_lut: Optional[RadialLUT] = None,
+    family: str = "outgoing_to_regular",
+) -> np.ndarray:
+    """Return a rectangular SVWF translation block between different truncation orders."""
+
+    out_order = int(lmax_out)
+    in_order = int(lmax_in)
+    full_order = max(out_order, in_order)
+    lut = radial_lut
+    if radial_lut is not None and radial_lut.lmax < full_order:
+        lut = _rectangular_radial_lut_from_base(
+            full_order,
+            radial_lut.k,
+            float(radial_lut.r_grid[-1]),
+            radial_lut.dr,
+            radial_lut.dtype.str,
+        )
+    full_block = _translation_block_family(
+        full_order,
+        float(k),
+        np.asarray(rvec, dtype=float),
+        ab5=(
+            np.asarray(ab5, dtype=np.complex128)
+            if ab5 is not None
+            else translation_ab5_table(full_order, dtype=np.complex128)
+        ),
+        radial_lut=lut,
+        family=family,
+    )
+    row_idx = np.asarray(_mode_indices_within_larger_lmax(out_order, full_order), dtype=np.int64)
+    col_idx = np.asarray(_mode_indices_within_larger_lmax(in_order, full_order), dtype=np.int64)
+    return np.asarray(full_block[np.ix_(row_idx, col_idx)], dtype=full_block.dtype, copy=False)
