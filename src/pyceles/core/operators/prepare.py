@@ -226,7 +226,13 @@ def prepare_matvec(
         [float(p.circumscribing_radius()) for p in part],
         dtype=float,
     ).reshape(-1)
+    coupling_name = str(coupling_backend).lower()
     op_dtype = np.dtype(operator_dtype)
+    if backend == "numpy" and coupling_name == "mlfmm" and op_dtype == np.dtype(np.complex64):
+        raise ValueError(
+            "`coupling_backend='mlfmm'` currently requires `operator_dtype=complex128` "
+            "for numerical stability on the NumPy backend."
+        )
     k_f = float(k)
     ab5 = translation_ab5_table(int(lmax), dtype=op_dtype)
 
@@ -240,7 +246,6 @@ def prepare_matvec(
     lut = RadialLUT(lmax=int(lmax), k=k_f, r_max=_infer_rmax(positions), dr=dr, dtype=op_dtype)
 
     backend_name = backend
-    coupling_name = str(coupling_backend).lower()
     particle_t: ParticleTOperator
     coupling: CouplingOperator
     if backend_name == "numpy":

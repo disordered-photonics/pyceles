@@ -60,3 +60,13 @@ def test_simulation_config_rejects_cupy_mlfmm_combination() -> None:
             coupling_backend="mlfmm",
             verbose=False,
         )
+
+
+def test_simulation_config_rejects_numpy_mlfmm_complex64() -> None:
+    with pytest.raises(ValueError, match="compute_dtype='complex128'"):
+        SimulationConfig(
+            operator_backend="numpy",
+            coupling_backend="mlfmm",
+            compute_dtype="complex64",
+            verbose=False,
+        )

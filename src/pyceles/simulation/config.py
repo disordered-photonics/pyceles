@@ -256,6 +256,11 @@ class SimulationConfig:
             raise ValueError(
                 "`coupling_backend='mlfmm'` is not supported yet with `operator_backend='cupy'`."
             )
+        if backend == "numpy" and coupling_backend == "mlfmm" and self.compute_dtype == "complex64":
+            raise ValueError(
+                "`coupling_backend='mlfmm'` currently requires `compute_dtype='complex128'` "
+                "on the NumPy backend for numerical stability."
+            )
 
         _, az_shared = validate_angular_grid_pair(
             polar_name="polar_angles",

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from functools import cache
 
 import numpy as np
+import scipy.sparse
 
 from pyceles.core.indexing import n_scalar, scalar_index
 
@@ -46,8 +47,6 @@ class MLFMMDirectionalTransforms:
     Fph_adj: Array
     Gth_adj: Array
     Gph_adj: Array
-    sampled_matrix: Array
-    sampled_pinv: Array
 
 
 @dataclass(frozen=True)
@@ -56,7 +55,7 @@ class MLFMMDirectionalInterpolation:
 
     source_order: int
     target_order: int
-    matrix: Array
+    matrix: scipy.sparse.csr_matrix
 
 
 def _cache_key_factor(value: float) -> int:
@@ -274,20 +273,6 @@ def _cached_directional_transforms(
                 gth[idir, idx] = -cc * c_theta
                 gph[idir, idx] = -cc * c_phi
 
-    reflection = np.asarray(grid.reflection_permutation, dtype=np.int64)
-    fth_phys = np.asarray(fth[reflection], dtype=np.complex128)
-    fph_phys = np.asarray(fph[reflection], dtype=np.complex128)
-    zero = np.zeros_like(fth_phys)
-    sampled_matrix = np.block(
-        [
-            [fth_phys, zero],
-            [fph_phys, zero],
-            [zero, fth_phys],
-            [zero, fph_phys],
-        ]
-    )
-    sampled_pinv = np.linalg.pinv(sampled_matrix, rcond=1.0e-12)
-
     return MLFMMDirectionalTransforms(
         box_order=int(box_order),
         grid=grid,
@@ -299,8 +284,6 @@ def _cached_directional_transforms(
         Fph_adj=np.conjugate(fph.T),
         Gth_adj=np.conjugate(gth.T),
         Gph_adj=np.conjugate(gph.T),
-        sampled_matrix=np.asarray(sampled_matrix, dtype=np.complex128),
-        sampled_pinv=np.asarray(sampled_pinv, dtype=np.complex128),
     )
 
 
@@ -378,47 +361,155 @@ def directional_to_box_regular(
     return np.concatenate((top, bottom)).astype(np.complex128, copy=False)
 
 
-def _periodic_linear_interpolation_matrix(source_alpha: Array, target_alpha: Array) -> Array:
-    """Return a periodic linear interpolation matrix for the uniform azimuth grid."""
+def _grid_key_bytes(values: Array) -> bytes:
+    """Return a stable cache key payload for one sampled angular grid."""
 
-    source = np.asarray(source_alpha, dtype=float).reshape(-1)
-    target = np.asarray(target_alpha, dtype=float).reshape(-1)
-    n_source = int(source.size)
-    step = 2.0 * np.pi / float(n_source)
-    base = float(source[0])
-    matrix = np.zeros((target.size, n_source), dtype=np.float64)
-
-    for i, value in enumerate(target):
-        scaled = ((float(value) - base) / step) % n_source
-        left = int(np.floor(scaled)) % n_source
-        frac = float(scaled - np.floor(scaled))
-        matrix[i, left] += 1.0 - frac
-        matrix[i, (left + 1) % n_source] += frac
-    return matrix
+    return np.ascontiguousarray(np.asarray(values, dtype=np.float64).reshape(-1)).tobytes()
 
 
-def _linear_interpolation_matrix(source_nodes: Array, target_nodes: Array) -> Array:
-    """Return a piecewise-linear interpolation matrix on a monotone node set."""
+def _build_sparse_directional_interpolation(
+    *,
+    source_alpha: Array,
+    source_beta: Array,
+    target_alpha: Array,
+    target_beta: Array,
+    stencil_half_width: int = 2,
+) -> scipy.sparse.csr_matrix:
+    """Build the validated sparse theta/phi interpolation used in multilevel HF transfers."""
 
-    source = np.asarray(source_nodes, dtype=float).reshape(-1)
-    target = np.asarray(target_nodes, dtype=float).reshape(-1)
-    matrix = np.zeros((target.size, source.size), dtype=np.float64)
+    alpha_src = np.asarray(source_alpha, dtype=float).reshape(-1)
+    beta_src = np.asarray(source_beta, dtype=float).reshape(-1)
+    alpha_dst = np.asarray(target_alpha, dtype=float).reshape(-1)
+    beta_dst = np.asarray(target_beta, dtype=float).reshape(-1)
+    n_alpha_src = int(alpha_src.size)
+    n_beta_src = int(beta_src.size)
+    n_alpha_dst = int(alpha_dst.size)
+    n_beta_dst = int(beta_dst.size)
+    source_size = n_alpha_src * n_beta_src
+    target_size = n_alpha_dst * n_beta_dst
 
-    for i, value in enumerate(target):
-        x = float(value)
-        if x <= float(source[0]):
-            matrix[i, 0] = 1.0
-            continue
-        if x >= float(source[-1]):
-            matrix[i, -1] = 1.0
-            continue
-        right = int(np.searchsorted(source, x, side="right"))
-        left = right - 1
-        x0 = float(source[left])
-        x1 = float(source[right])
-        frac = (x - x0) / (x1 - x0)
-        matrix[i, left] = 1.0 - frac
-        matrix[i, right] = frac
+    if (
+        n_alpha_src == n_alpha_dst
+        and n_beta_src == n_beta_dst
+        and np.allclose(alpha_src, alpha_dst)
+        and np.allclose(beta_src, beta_dst)
+    ):
+        rows = np.arange(target_size, dtype=np.int64)
+        return scipy.sparse.csr_matrix(
+            (np.ones((target_size,), dtype=np.float64), (rows, rows)),
+            shape=(target_size, source_size),
+        )
+
+    p = max(1, int(stencil_half_width))
+    half_turn = n_alpha_src // 2
+    if 2 * half_turn != n_alpha_src:
+        raise ValueError("Directional alpha grid size must be even for FaSTMM2-style shifts.")
+
+    theta_ext = np.concatenate((beta_src + np.pi, beta_src, beta_src - np.pi), dtype=float)
+    phi_ext = np.concatenate(
+        (alpha_src - 2.0 * np.pi, alpha_src, alpha_src + 2.0 * np.pi), dtype=float
+    )
+
+    theta_rows: list[int] = []
+    theta_cols: list[int] = []
+    theta_data: list[float] = []
+    for ia_src in range(n_alpha_src):
+        phi_1b = ia_src + 1
+        for ib_tgt in range(n_beta_dst):
+            theta_target = float(beta_dst[ib_tgt])
+            tt = n_beta_src + 1
+            for t in range(1, n_beta_src + 1):
+                if theta_target > float(beta_src[t - 1]):
+                    tt = t
+                    break
+            t = tt - 1
+            row = ia_src * n_beta_dst + ib_tgt
+            i_min = t - p + 1
+            i_max = t + p
+            for i1 in range(i_min, i_max + 1):
+                weight = 1.0
+                x_i1 = float(theta_ext[(i1 + n_beta_src) - 1])
+                for i2 in range(i_min, i_max + 1):
+                    if i2 == i1:
+                        continue
+                    x_i2 = float(theta_ext[(i2 + n_beta_src) - 1])
+                    weight *= (theta_target - x_i2) / (x_i1 - x_i2)
+                theta_index = i1
+                phi_index = phi_1b
+                sign = 1.0
+                if theta_index > n_beta_src:
+                    theta_index = 2 * n_beta_src - theta_index + 1
+                    phi_index += half_turn
+                    if phi_index > n_alpha_src:
+                        phi_index -= n_alpha_src
+                    sign = -1.0
+                if theta_index < 1:
+                    theta_index = 1 - theta_index
+                    phi_index += half_turn
+                    if phi_index > n_alpha_src:
+                        phi_index -= n_alpha_src
+                    sign = -1.0
+                col = (phi_index - 1) * n_beta_src + (theta_index - 1)
+                theta_rows.append(int(row))
+                theta_cols.append(int(col))
+                theta_data.append(float(sign * weight))
+
+    theta_matrix = scipy.sparse.coo_matrix(
+        (
+            np.asarray(theta_data, dtype=np.float64),
+            (np.asarray(theta_rows, dtype=np.int64), np.asarray(theta_cols, dtype=np.int64)),
+        ),
+        shape=(n_alpha_src * n_beta_dst, n_alpha_src * n_beta_src),
+    ).tocsr()
+    theta_matrix.sum_duplicates()
+
+    phi_rows: list[int] = []
+    phi_cols: list[int] = []
+    phi_data: list[float] = []
+    for ia_tgt in range(n_alpha_dst):
+        phi_target = float(alpha_dst[ia_tgt])
+        ss = n_alpha_src + 1
+        for s in range(1, n_alpha_src + 1):
+            if phi_target < float(alpha_src[s - 1]):
+                ss = s
+                break
+        s = ss - 1
+        i_min = s - p + 1
+        i_max = s + p
+        weights: list[tuple[int, float]] = []
+        for i1 in range(i_min, i_max + 1):
+            weight = 1.0
+            x_i1 = float(phi_ext[(i1 + n_alpha_src) - 1])
+            for i2 in range(i_min, i_max + 1):
+                if i2 == i1:
+                    continue
+                x_i2 = float(phi_ext[(i2 + n_alpha_src) - 1])
+                weight *= (phi_target - x_i2) / (x_i1 - x_i2)
+            phi_index = i1
+            if phi_index > n_alpha_src:
+                phi_index -= n_alpha_src
+            if phi_index < 1:
+                phi_index += n_alpha_src
+            weights.append((int(phi_index - 1), float(weight)))
+        for ib_tgt in range(n_beta_dst):
+            row = ia_tgt * n_beta_dst + ib_tgt
+            for ia_src, weight in weights:
+                col = ia_src * n_beta_dst + ib_tgt
+                phi_rows.append(int(row))
+                phi_cols.append(int(col))
+                phi_data.append(float(weight))
+
+    phi_matrix = scipy.sparse.coo_matrix(
+        (
+            np.asarray(phi_data, dtype=np.float64),
+            (np.asarray(phi_rows, dtype=np.int64), np.asarray(phi_cols, dtype=np.int64)),
+        ),
+        shape=(n_alpha_dst * n_beta_dst, n_alpha_src * n_beta_dst),
+    ).tocsr()
+    phi_matrix.sum_duplicates()
+
+    matrix = (phi_matrix @ theta_matrix).tocsr()
+    matrix.sum_duplicates()
     return matrix
 
 
@@ -439,13 +530,16 @@ def _cached_directional_interpolation(
         alpha_factor=_from_cache_key_factor(alpha_factor_key),
         beta_factor=_from_cache_key_factor(beta_factor_key),
     )
-    alpha_matrix = _periodic_linear_interpolation_matrix(source_grid.alpha, target_grid.alpha)
-    beta_matrix = _linear_interpolation_matrix(source_grid.beta, target_grid.beta)
-    matrix = np.kron(alpha_matrix, beta_matrix).astype(np.complex128, copy=False)
+    matrix = _build_sparse_directional_interpolation(
+        source_alpha=source_grid.alpha,
+        source_beta=source_grid.beta,
+        target_alpha=target_grid.alpha,
+        target_beta=target_grid.beta,
+    )
     return MLFMMDirectionalInterpolation(
         source_order=int(source_order),
         target_order=int(target_order),
-        matrix=matrix,
+        matrix=matrix.astype(np.complex128),
     )
 
 
@@ -484,7 +578,7 @@ def directional_anterpolation(
     return MLFMMDirectionalInterpolation(
         source_order=int(target_order),
         target_order=int(source_order),
-        matrix=np.asarray(interpolation.matrix.T, dtype=np.complex128),
+        matrix=interpolation.matrix.T.tocsr().astype(np.complex128),
     )
 
 

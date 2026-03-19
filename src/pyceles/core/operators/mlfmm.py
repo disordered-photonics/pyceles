@@ -132,8 +132,22 @@ class MLFMMMultilevelOperators:
     levels: tuple[MLFMMLevelOperators, ...]
     transfers: tuple[MLFMMTransferOperators, ...]
     leaf_level: int
+    hf_start_level: int
+    hf_end_level: int
     aggregation: tuple[np.ndarray, ...]
     receive: tuple[np.ndarray, ...]
+
+
+@dataclass(frozen=True)
+class MLFMMTransferScaffold:
+    """Focused multilevel transfer fixture for parent/child oracle checks."""
+
+    partition: MLFMMPartition
+    levels: tuple[MLFMMLevelOperators, ...]
+    transfer: MLFMMTransferOperators
+    child_level: int
+    parent_level: int
+    leaf_level: int
 
 
 @dataclass
@@ -545,12 +559,11 @@ def _build_leaf_box_maps(
     radial_lut: RadialLUT | None,
     dtype: np.dtype,
 ) -> tuple[tuple[np.ndarray, ...], tuple[np.ndarray, ...]]:
-    """Build particle-to-box aggregation maps and box-to-particle receive maps."""
+    """Build particle-to-box aggregation maps and adjoint box-to-particle receive maps."""
 
     full_order = max(int(lmax), int(box_order))
     ab5 = translation_ab5_table(full_order, dtype=np.complex128)
     aggregation: list[np.ndarray] = []
-    receive: list[np.ndarray] = []
     for leaf in partition.leaves:
         agg_blocks = [
             translation_block_rect(
@@ -565,20 +578,23 @@ def _build_leaf_box_maps(
             for pidx in leaf.particle_indices
         ]
         aggregation.append(np.hstack(agg_blocks).astype(dtype, copy=False))
-        recv_blocks = [
-            translation_block_rect(
-                int(lmax),
-                int(box_order),
-                float(k),
-                np.asarray(positions[int(pidx)] - leaf.center, dtype=float),
-                ab5=ab5,
-                radial_lut=radial_lut,
-                family="interior",
-            )
-            for pidx in leaf.particle_indices
-        ]
-        receive.append(np.vstack(recv_blocks).astype(dtype, copy=False))
+    receive = [np.asarray(np.conjugate(agg).T, dtype=dtype) for agg in aggregation]
     return tuple(aggregation), tuple(receive)
+
+
+def _apply_reflection_to_channel_batches(
+    channel_batches: np.ndarray,
+    permutation: np.ndarray,
+) -> np.ndarray:
+    """Apply the sampled physical reflection permutation to batched directional channels."""
+
+    perm = np.asarray(permutation, dtype=np.int64).reshape(-1)
+    arr = np.asarray(channel_batches)
+    if arr.shape[-1] != perm.size:
+        raise ValueError(
+            f"directional channel size {arr.shape[-1]} does not match permutation {perm.size}."
+        )
+    return np.asarray(np.take(arr, perm, axis=-1), dtype=arr.dtype)
 
 
 def _leaf_box_states(
@@ -887,6 +903,8 @@ def build_multilevel_mlfmm_operators(
         raise ValueError("multilevel MLFMM requires at least one occupied leaf.")
     out_dtype = np.dtype(dtype)
     leaf_level = int(partition.depth)
+    hf_end_level = int(leaf_level)
+    hf_start_level = 2 if int(leaf_level) >= 2 else int(leaf_level)
     leaf_coords = _leaf_cell_coords(partition)
     coords_by_level: list[np.ndarray] = [
         np.zeros((0, 3), dtype=np.int64) for _ in range(leaf_level + 1)
@@ -902,6 +920,7 @@ def build_multilevel_mlfmm_operators(
         ).reshape(-1, 3)
 
     levels: list[MLFMMLevelOperators] = []
+    dummy_directional = directional_transforms(1, grid_order=1)
     for level in range(leaf_level + 1):
         coords = coords_by_level[level]
         if level == 0:
@@ -942,19 +961,28 @@ def build_multilevel_mlfmm_operators(
             if box_order is None
             else int(box_order)
         )
-        directional = directional_transforms(int(level_box_order), grid_order=int(level_box_order))
-        far_offset_batches = {} if level == 0 else _coords_far_offset_batches(coords)
-        offset_diagonals = {
-            offset: _sampled_rokhlin_translator(
-                _offset_delta_from_half_size(half_size, offset),
-                k=complex(k),
-                truncation_order=int(level_box_order),
-                directions=directional.grid.directions,
-                weights=directional.grid.weights,
-                dtype=out_dtype,
+        if level < hf_start_level or level > hf_end_level:
+            directional = dummy_directional
+        else:
+            directional = directional_transforms(
+                int(level_box_order), grid_order=int(level_box_order)
             )
-            for offset in far_offset_batches
-        }
+        far_offset_batches = {} if level == 0 else _coords_far_offset_batches(coords)
+        offset_diagonals = (
+            {
+                offset: _sampled_rokhlin_translator(
+                    _offset_delta_from_half_size(half_size, offset),
+                    k=complex(k),
+                    truncation_order=int(level_box_order),
+                    directions=directional.grid.directions,
+                    weights=directional.grid.weights,
+                    dtype=out_dtype,
+                )
+                for offset in far_offset_batches
+            }
+            if hf_start_level <= level <= hf_end_level
+            else {}
+        )
         levels.append(
             MLFMMLevelOperators(
                 level=level,
@@ -971,13 +999,15 @@ def build_multilevel_mlfmm_operators(
                 translator_order=int(level_box_order),
                 grid_order=int(level_box_order),
                 directional=directional,
-                far_offset_batches=far_offset_batches,
+                far_offset_batches=far_offset_batches
+                if hf_start_level <= level <= hf_end_level
+                else {},
                 offset_diagonals=offset_diagonals,
             )
         )
 
     transfers: list[MLFMMTransferOperators] = []
-    for child_level in range(1, leaf_level + 1):
+    for child_level in range(max(1, hf_start_level + 1), hf_end_level + 1):
         parent_level = child_level - 1
         child = levels[child_level]
         parent = levels[parent_level]
@@ -1039,6 +1069,8 @@ def build_multilevel_mlfmm_operators(
         levels=tuple(levels),
         transfers=tuple(transfers),
         leaf_level=leaf_level,
+        hf_start_level=hf_start_level,
+        hf_end_level=hf_end_level,
         aggregation=aggregation,
         receive=receive,
     )
@@ -1046,15 +1078,118 @@ def build_multilevel_mlfmm_operators(
 
 def _apply_linear_map_to_channel_batches(
     channel_batches: np.ndarray,
-    matrix: np.ndarray,
+    interpolation: MLFMMDirectionalInterpolation,
 ) -> np.ndarray:
-    """Apply one directional interpolation matrix to a batch of 4-channel samples."""
+    """Apply one sparse directional interpolation operator to batched channel samples."""
 
-    return np.einsum(
-        "bcn,tn->bct",
-        np.asarray(channel_batches),
-        np.asarray(matrix),
-        optimize=True,
+    source_size = int(interpolation.source_order)
+    target_size = int(interpolation.target_order)
+    del source_size, target_size
+    arr = np.asarray(channel_batches)
+    flat = arr.reshape(-1, arr.shape[-1])
+    mapped = flat @ interpolation.matrix.T
+    return np.asarray(mapped, dtype=arr.dtype).reshape(
+        *arr.shape[:-1], interpolation.matrix.shape[0]
+    )
+
+
+def build_multilevel_transfer_scaffold(
+    *,
+    lmax: int,
+    k: float,
+    positions: np.ndarray,
+    partition: MLFMMPartition,
+    radial_lut: RadialLUT | None = None,
+    box_order: int | None = None,
+    dtype: np.dtype | type[np.complexfloating] | type[np.complex128] = np.complex128,
+    child_level: int | None = None,
+) -> MLFMMTransferScaffold:
+    """Build one parent/child transfer fixture for focused multilevel oracle tests."""
+
+    operators = build_multilevel_mlfmm_operators(
+        lmax=int(lmax),
+        k=float(k),
+        positions=np.asarray(positions, dtype=float),
+        partition=partition,
+        radial_lut=radial_lut,
+        box_order=box_order,
+        dtype=dtype,
+    )
+    selected_child_level = int(operators.leaf_level) if child_level is None else int(child_level)
+    if selected_child_level < 1 or selected_child_level > int(operators.leaf_level):
+        raise ValueError(
+            f"child_level must be in [1, {operators.leaf_level}] for the current hierarchy."
+        )
+    selected_parent_level = int(selected_child_level - 1)
+    levels = list(operators.levels)
+    for level_idx in (selected_parent_level, selected_child_level):
+        level = levels[level_idx]
+        active_directional = directional_transforms(
+            int(level.box_order), grid_order=int(level.grid_order)
+        )
+        levels[level_idx] = MLFMMLevelOperators(
+            level=int(level.level),
+            coords=level.coords,
+            centers=level.centers,
+            parent_indices=level.parent_indices,
+            children=level.children,
+            box_order=int(level.box_order),
+            translator_order=int(level.translator_order),
+            grid_order=int(level.grid_order),
+            directional=active_directional,
+            far_offset_batches=level.far_offset_batches,
+            offset_diagonals=level.offset_diagonals,
+        )
+    child_data = levels[selected_child_level]
+    parent_data = levels[selected_parent_level]
+    interpolation = directional_interpolation(child_data.grid_order, parent_data.grid_order)
+    anterpolation = directional_anterpolation(child_data.grid_order, parent_data.grid_order)
+    grouped: dict[tuple[int, int, int], list[tuple[int, int]]] = {}
+    for child_idx, parent_idx in enumerate(child_data.parent_indices):
+        shift = (
+            int(child_data.coords[child_idx, 0] - 2 * parent_data.coords[int(parent_idx), 0]),
+            int(child_data.coords[child_idx, 1] - 2 * parent_data.coords[int(parent_idx), 1]),
+            int(child_data.coords[child_idx, 2] - 2 * parent_data.coords[int(parent_idx), 2]),
+        )
+        grouped.setdefault(shift, []).append((int(child_idx), int(parent_idx)))
+    batches = {
+        shift: (
+            np.asarray([pair[0] for pair in pairs], dtype=np.int64),
+            np.asarray([pair[1] for pair in pairs], dtype=np.int64),
+        )
+        for shift, pairs in grouped.items()
+    }
+    phase_up: dict[tuple[int, int, int], np.ndarray] = {}
+    phase_down: dict[tuple[int, int, int], np.ndarray] = {}
+    for shift, (child_indices, parent_indices) in batches.items():
+        up_delta = np.asarray(
+            parent_data.centers[int(parent_indices[0])] - child_data.centers[int(child_indices[0])],
+            dtype=float,
+        )
+        phase_up[shift] = np.asarray(
+            np.exp(1j * complex(k) * (parent_data.directional.grid.directions @ up_delta)),
+            dtype=np.dtype(dtype),
+        )
+        phase_down[shift] = np.asarray(
+            np.exp(1j * complex(k) * (parent_data.directional.grid.directions @ (-up_delta))),
+            dtype=np.dtype(dtype),
+        )
+    selected = MLFMMTransferOperators(
+        child_level=selected_child_level,
+        parent_level=selected_parent_level,
+        interpolation=interpolation,
+        anterpolation=anterpolation,
+        batches_by_shift=batches,
+        phase_up_by_shift=phase_up,
+        phase_down_by_shift=phase_down,
+    )
+    return MLFMMTransferScaffold(
+        partition=operators.partition,
+        levels=tuple(levels),
+        transfer=selected,
+        child_level=int(selected_child_level),
+        parent_level=int(selected_parent_level),
+        leaf_level=int(operators.leaf_level),
     )
 
 
@@ -1108,24 +1243,37 @@ def apply_multilevel_mlfmm(
     for transfer in reversed(operators.transfers):
         child_values = outgoing[int(transfer.child_level)]
         parent_values = outgoing[int(transfer.parent_level)]
+        child_level = operators.levels[int(transfer.child_level)]
+        parent_level = operators.levels[int(transfer.parent_level)]
         for shift, (child_idx, parent_idx) in transfer.batches_by_shift.items():
-            mapped = _apply_linear_map_to_channel_batches(
+            child_reindexed = _apply_reflection_to_channel_batches(
                 child_values[child_idx],
-                np.asarray(transfer.interpolation.matrix, dtype=out_dtype),
+                child_level.directional.grid.reflection_permutation,
+            )
+            mapped_reindexed = _apply_linear_map_to_channel_batches(
+                child_reindexed,
+                transfer.interpolation,
+            )
+            mapped = _apply_reflection_to_channel_batches(
+                mapped_reindexed,
+                parent_level.directional.grid.reflection_permutation,
             )
             mapped *= np.asarray(transfer.phase_up_by_shift[shift], dtype=out_dtype)[None, None, :]
             np.add.at(parent_values, parent_idx, mapped)
 
-    for level in operators.levels[1:]:
+    for level_idx in range(int(operators.hf_start_level), int(operators.hf_end_level) + 1):
+        level = operators.levels[level_idx]
         for offset, (src_idx, dst_idx) in level.far_offset_batches.items():
             translated = (
-                outgoing[int(level.level)][src_idx] * level.offset_diagonals[offset][None, None, :]
+                outgoing[level_idx][src_idx] * level.offset_diagonals[offset][None, None, :]
             )
-            np.add.at(incoming[int(level.level)], dst_idx, translated)
+            np.add.at(incoming[level_idx], dst_idx, translated)
 
     for transfer in operators.transfers:
         parent_values = incoming[int(transfer.parent_level)]
         child_values = incoming[int(transfer.child_level)]
+        child_level = operators.levels[int(transfer.child_level)]
+        parent_level = operators.levels[int(transfer.parent_level)]
         for shift, (child_idx, parent_idx) in transfer.batches_by_shift.items():
             shifted = (
                 parent_values[parent_idx]
@@ -1134,9 +1282,17 @@ def apply_multilevel_mlfmm(
                     dtype=out_dtype,
                 )[None, None, :]
             )
-            mapped = _apply_linear_map_to_channel_batches(
+            shifted_reindexed = _apply_reflection_to_channel_batches(
                 shifted,
-                np.asarray(transfer.anterpolation.matrix, dtype=out_dtype),
+                parent_level.directional.grid.reflection_permutation,
+            )
+            mapped_reindexed = _apply_linear_map_to_channel_batches(
+                shifted_reindexed,
+                transfer.anterpolation,
+            )
+            mapped = _apply_reflection_to_channel_batches(
+                mapped_reindexed,
+                child_level.directional.grid.reflection_permutation,
             )
             np.add.at(child_values, child_idx, mapped)
 
@@ -1289,9 +1445,11 @@ __all__ = [
     "apply_single_level_mlfmm",
     "apply_single_level_mlfmm_exact_box_reference",
     "box_order_rokhlin_like",
+    "build_multilevel_transfer_scaffold",
     "build_multilevel_mlfmm_operators",
     "build_single_level_mlfmm_operators",
     "estimate_rokhlin_order",
+    "MLFMMTransferScaffold",
     "prepare_mlfmm_coupling",
     "resolve_mlfmm_plan",
     "select_mlfmm_stage",

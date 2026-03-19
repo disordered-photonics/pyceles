@@ -8,11 +8,21 @@ from pyceles.core.operators.mlfmm import (
     apply_multilevel_mlfmm,
     apply_single_level_mlfmm,
     build_multilevel_mlfmm_operators,
+    build_multilevel_transfer_scaffold,
     build_single_level_mlfmm_operators,
     resolve_mlfmm_plan,
 )
+from pyceles.core.operators.mlfmm_directional import (
+    box_outgoing_to_directional,
+    directional_to_box_regular,
+)
 from pyceles.core.operators.mlfmm_partition import MLFMMBox, build_uniform_mlfmm_partition
-from pyceles.core.translation import RadialLUT, translation_ab5_table, translation_block
+from pyceles.core.translation import (
+    RadialLUT,
+    translation_ab5_table,
+    translation_block,
+    translation_block_rect,
+)
 
 
 def _single_level_fixture() -> tuple[np.ndarray, np.ndarray, int, float]:
@@ -49,6 +59,24 @@ def _multilevel_fixture() -> tuple[np.ndarray, np.ndarray, int, float]:
     )
     radii = np.full((positions.shape[0],), 60.0, dtype=float)
     return positions, radii, 2, 2.0 * np.pi / 550.0
+
+
+def _transfer_fixture() -> tuple[np.ndarray, np.ndarray, int, float]:
+    positions = np.array(
+        [
+            [-980.0, -860.0, -920.0],
+            [-940.0, -820.0, 900.0],
+            [-900.0, 840.0, -880.0],
+            [-960.0, 900.0, 940.0],
+            [920.0, -840.0, -900.0],
+            [980.0, -900.0, 920.0],
+            [880.0, 820.0, -940.0],
+            [940.0, 900.0, 960.0],
+        ],
+        dtype=float,
+    )
+    radii = np.full((positions.shape[0],), 100.0, dtype=float)
+    return positions, radii, 3, 2.0 * np.pi / 550.0
 
 
 def _full_exact_apply(
@@ -237,8 +265,10 @@ def test_multilevel_build_produces_sensible_levels_and_offset_batches() -> None:
     )
 
     assert operators.leaf_level == 3
+    assert operators.hf_start_level == 2
+    assert operators.hf_end_level == 3
     assert [level.coords.shape[0] for level in operators.levels] == [1, 8, 8, 8]
-    assert len(operators.transfers) == 3
+    assert len(operators.transfers) == 1
     assert any(len(level.far_offset_batches) > 0 for level in operators.levels[1:])
 
 
@@ -320,3 +350,154 @@ def test_multilevel_apply_runs_and_produces_finite_output() -> None:
     assert y_far.shape == x.shape
     assert np.all(np.isfinite(y_near))
     assert np.all(np.isfinite(y_far))
+
+
+def test_multilevel_transfer_anterpolation_is_interpolation_transpose() -> None:
+    positions, radii, lmax, k = _transfer_fixture()
+    partition = build_uniform_mlfmm_partition(
+        positions,
+        particle_circumscribing_radii=radii,
+        depth=2,
+    )
+    scaffold = build_multilevel_transfer_scaffold(
+        lmax=lmax,
+        k=k,
+        positions=positions,
+        partition=partition,
+        box_order=14,
+    )
+    matrix = scaffold.transfer.interpolation.matrix
+    rng = np.random.default_rng(15)
+    u = rng.standard_normal(matrix.shape[1]) + 1j * rng.standard_normal(matrix.shape[1])
+    v = rng.standard_normal(matrix.shape[0]) + 1j * rng.standard_normal(matrix.shape[0])
+    lhs = np.vdot(matrix @ u, v)
+    rhs = np.vdot(u, scaffold.transfer.anterpolation.matrix @ v)
+    np.testing.assert_allclose(lhs, rhs, rtol=1.0e-12, atol=1.0e-12)
+
+
+def test_multilevel_upward_transfer_matches_exact_recenter_oracle() -> None:
+    positions, radii, lmax, k = _transfer_fixture()
+    partition = build_uniform_mlfmm_partition(
+        positions,
+        particle_circumscribing_radii=radii,
+        depth=2,
+    )
+    scaffold = build_multilevel_transfer_scaffold(
+        lmax=lmax,
+        k=k,
+        positions=positions,
+        partition=partition,
+        box_order=14,
+        child_level=2,
+    )
+    transfer = scaffold.transfer
+    shift = sorted(transfer.batches_by_shift)[0]
+    child_idx_batch, parent_idx_batch = transfer.batches_by_shift[shift]
+    child_idx = int(child_idx_batch[0])
+    parent_idx = int(parent_idx_batch[0])
+    child_level = scaffold.levels[scaffold.child_level]
+    parent_level = scaffold.levels[scaffold.parent_level]
+
+    rng = np.random.default_rng(123)
+    child_box_state = rng.standard_normal(
+        n_modes(child_level.box_order)
+    ) + 1j * rng.standard_normal(n_modes(child_level.box_order))
+    child_channels = np.vstack(
+        box_outgoing_to_directional(child_level.directional, child_box_state)
+    )
+    child_reindexed = child_channels[:, child_level.directional.grid.reflection_permutation]
+    parent_reindexed = child_reindexed @ transfer.interpolation.matrix.T
+    parent_channels = parent_reindexed[:, parent_level.directional.grid.reflection_permutation]
+    sampled_parent_channels = (
+        parent_channels
+        * np.asarray(transfer.phase_up_by_shift[shift], dtype=np.complex128)[None, :]
+    )
+
+    delta = np.asarray(
+        parent_level.centers[parent_idx] - child_level.centers[child_idx], dtype=float
+    )
+    exact_parent_state = translation_block_rect(
+        parent_level.box_order,
+        child_level.box_order,
+        k,
+        delta,
+        ab5=translation_ab5_table(
+            max(parent_level.box_order, child_level.box_order), dtype=np.complex128
+        ),
+        family="interior",
+    ) @ np.asarray(child_box_state, dtype=np.complex128)
+    exact_parent_channels = np.vstack(
+        box_outgoing_to_directional(parent_level.directional, exact_parent_state)
+    )
+    rel = np.linalg.norm(sampled_parent_channels - exact_parent_channels) / np.linalg.norm(
+        exact_parent_channels
+    )
+    assert rel < 0.70
+
+
+def test_multilevel_downward_transfer_matches_exact_recenter_oracle() -> None:
+    positions, radii, lmax, k = _transfer_fixture()
+    partition = build_uniform_mlfmm_partition(
+        positions,
+        particle_circumscribing_radii=radii,
+        depth=2,
+    )
+    scaffold = build_multilevel_transfer_scaffold(
+        lmax=lmax,
+        k=k,
+        positions=positions,
+        partition=partition,
+        box_order=14,
+        child_level=2,
+    )
+    transfer = scaffold.transfer
+    shift = sorted(transfer.batches_by_shift)[0]
+    child_idx_batch, parent_idx_batch = transfer.batches_by_shift[shift]
+    child_idx = int(child_idx_batch[0])
+    parent_idx = int(parent_idx_batch[0])
+    child_level = scaffold.levels[scaffold.child_level]
+    parent_level = scaffold.levels[scaffold.parent_level]
+
+    rng = np.random.default_rng(321)
+    parent_channels = rng.standard_normal(
+        (4, parent_level.directional.grid.directions.shape[0])
+    ) + 1j * rng.standard_normal((4, parent_level.directional.grid.directions.shape[0]))
+    shifted = (
+        parent_channels
+        * np.asarray(transfer.phase_down_by_shift[shift], dtype=np.complex128)[None, :]
+    )
+    shifted_reindexed = shifted[:, parent_level.directional.grid.reflection_permutation]
+    child_reindexed = shifted_reindexed @ transfer.anterpolation.matrix.T
+    child_channels = child_reindexed[:, child_level.directional.grid.reflection_permutation]
+    sampled_child_state = directional_to_box_regular(
+        child_level.directional,
+        child_channels[0],
+        child_channels[1],
+        child_channels[2],
+        child_channels[3],
+    )
+
+    delta = np.asarray(
+        child_level.centers[child_idx] - parent_level.centers[parent_idx], dtype=float
+    )
+    parent_state = directional_to_box_regular(
+        parent_level.directional,
+        parent_channels[0],
+        parent_channels[1],
+        parent_channels[2],
+        parent_channels[3],
+    )
+    exact_child_state = translation_block_rect(
+        child_level.box_order,
+        parent_level.box_order,
+        k,
+        delta,
+        ab5=translation_ab5_table(
+            max(child_level.box_order, parent_level.box_order), dtype=np.complex128
+        ),
+        family="interior",
+    ) @ np.asarray(parent_state, dtype=np.complex128)
+    rel = np.linalg.norm(sampled_child_state - exact_child_state) / np.linalg.norm(
+        exact_child_state
+    )
+    assert rel < 0.50

@@ -128,3 +128,19 @@ def test_simulation_direct_solve_rejects_true_mlfmm_coupling() -> None:
 
     with pytest.raises(NotImplementedError, match="pairwise coupling backend"):
         sim.run(include_farfield=False)
+
+
+def test_prepare_matvec_rejects_numpy_mlfmm_complex64_operator_dtype() -> None:
+    lmax, k, particles = _mlfmm_single_level_problem()
+    with pytest.raises(ValueError, match="operator_dtype=complex128"):
+        prepare_matvec(
+            lmax=lmax,
+            k=k,
+            particles=particles,
+            n_medium=1.0 + 0j,
+            radial_lut_dr=1.0,
+            cache_translation_blocks=False,
+            coupling_backend="mlfmm",
+            mlfmm_options=MLFMMOptions(max_leaf_particles=1, max_depth=2),
+            operator_dtype=np.complex64,
+        )
