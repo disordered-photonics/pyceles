@@ -35,6 +35,20 @@ from .groups import (
     make_dense_group_factory,
     plan_particle_t_groups,
 )
+from .mlfmm import MLFMMOptions, MLFMMResolvedPlan, resolve_mlfmm_plan, select_mlfmm_stage
+from .mlfmm_directional import (
+    MLFMMDirectionalGrid,
+    MLFMMDirectionalInterpolation,
+    MLFMMDirectionalTransforms,
+    apply_directional_reflection,
+    box_outgoing_to_directional,
+    directional_anterpolation,
+    directional_grid,
+    directional_interpolation,
+    directional_to_box_regular,
+    directional_transforms,
+)
+from .mlfmm_partition import MLFMMBox, MLFMMPartition, validate_leaf_size_floor
 from .prepare import build_T_mode_diagonal, precompute_T_diagonal, prepare_matvec, rhs_Tb_numpy
 from .single_body import CompositeParticleTOperator, ParticleTOperator
 from .single_body_cupy import CuPyDiagonalParticleTOperator
@@ -48,6 +62,13 @@ __all__ = [
     "CuPyPairwiseCouplingOperator",
     "DenseTGroup",
     "DiagonalTGroup",
+    "MLFMMDirectionalGrid",
+    "MLFMMDirectionalInterpolation",
+    "MLFMMDirectionalTransforms",
+    "MLFMMBox",
+    "MLFMMOptions",
+    "MLFMMPartition",
+    "MLFMMResolvedPlan",
     "PairwiseCouplingOperator",
     "ParticleTOperator",
     "ParticleTGroupFactories",
@@ -59,7 +80,14 @@ __all__ = [
     "apply_A_numpy",
     "apply_W_numpy",
     "assemble_dense_A_numpy",
+    "apply_directional_reflection",
     "build_T_mode_diagonal",
+    "box_outgoing_to_directional",
+    "directional_anterpolation",
+    "directional_grid",
+    "directional_interpolation",
+    "directional_to_box_regular",
+    "directional_transforms",
     "estimate_translation_cache_bytes",
     "make_axisymmetric_block_group_factory",
     "make_axisymmetric_group_factory",
@@ -68,6 +96,9 @@ __all__ = [
     "plan_particle_t_groups",
     "precompute_T_diagonal",
     "prepare_matvec",
+    "resolve_mlfmm_plan",
     "require_pairwise_coupling",
     "rhs_Tb_numpy",
+    "select_mlfmm_stage",
+    "validate_leaf_size_floor",
 ]
