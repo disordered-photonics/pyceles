@@ -11,6 +11,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added a CuPy dense direct-solve path using cuSOLVER-backed LU factorization,
   with repeated-RHS reuse through cached GPU LU payloads on the `Simulation`
   instance, mirroring the existing NumPy direct-solve cache pattern.
+- Added a native NumPy high-frequency MLFMM coupling backend for sphere-cluster
+  workflows:
+  - `SimulationConfig(coupling_backend="mlfmm")`
+  - exact leaf-near interactions with direct pairwise fallback for shallow
+    hierarchies
+  - single-level and multilevel directional far coupling with relative-offset
+    batching and shared interpolation/transform caches
+  - structured resolved-plan metadata on the prepared coupling operator
+
+### Changed
+- Dense/direct NumPy solves now reject true MLFMM coupling stages explicitly
+  instead of silently assuming the pairwise backend.
+
+### Fixed
+- NumPy MLFMM preparation now enforces `complex128` operator dtype and keeps
+  the prepared directional/translation arrays on that precision path.
+- Multilevel MLFMM directional interpolation now follows the validated angular
+  ordering and transfer conventions, avoiding severe GMRES stagnation on
+  benchmark-scale multilevel runs.
+- Rectangular interior translation LUT reuse is now cached correctly, removing
+  repeated rebuilds during MLFMM preparation.
 
 ## [0.3.0] - 2026-03-12
 

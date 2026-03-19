@@ -82,3 +82,9 @@ def test_directional_grid_cache_reuse() -> None:
     grid_a = directional_grid(4, alpha_factor=1.0, beta_factor=1.0)
     grid_b = directional_grid(4, alpha_factor=1.0, beta_factor=1.0)
     assert grid_a is grid_b
+
+
+def test_directional_grid_beta_order_matches_validated_multilevel_convention() -> None:
+    grid = directional_grid(5)
+    beta = np.asarray(grid.beta, dtype=float)
+    assert beta[0] > beta[-1]

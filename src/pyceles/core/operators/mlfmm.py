@@ -51,7 +51,13 @@ validated reference implementation used during pyceles MLFMM development.
 
 @dataclass(frozen=True)
 class MLFMMOptions:
-    """Expert tuning knobs for pyceles MLFMM depth and leaf-size policy."""
+    """Expert tuning knobs for pyceles MLFMM partition resolution.
+
+    These options control only the hierarchy policy: how many particles are
+    allowed in one leaf, how deep the occupied tree may grow, and how large a
+    leaf box must remain relative to the largest circumscribing radius it
+    contains.
+    """
 
     max_leaf_particles: int = 8
     max_depth: int = 12
@@ -60,7 +66,7 @@ class MLFMMOptions:
 
 @dataclass(frozen=True)
 class MLFMMResolvedPlan:
-    """Structured MLFMM stage/depth decision metadata for diagnostics."""
+    """Structured runtime metadata for the resolved MLFMM stage and partition."""
 
     stage: MLFMMStage
     selected_depth: int
@@ -79,7 +85,7 @@ class MLFMMResolvedPlan:
 
 @dataclass(frozen=True)
 class MLFMMSingleLevelOperators:
-    """Prepared single-level HF operators over one uniform occupied leaf level."""
+    """Prepared single-level HF far operators over one occupied leaf level."""
 
     partition: MLFMMPartition
     box_order: int
@@ -96,7 +102,7 @@ class MLFMMSingleLevelOperators:
 
 @dataclass(frozen=True)
 class MLFMMLevelOperators:
-    """Prepared sampled HF data for one occupied hierarchy level."""
+    """Prepared sampled HF data for one occupied multilevel hierarchy level."""
 
     level: int
     coords: np.ndarray
@@ -113,7 +119,7 @@ class MLFMMLevelOperators:
 
 @dataclass(frozen=True)
 class MLFMMTransferOperators:
-    """Parent/child sampled transfer operators between adjacent occupied levels."""
+    """Sampled parent/child transfer operators between adjacent occupied levels."""
 
     child_level: int
     parent_level: int
@@ -140,7 +146,7 @@ class MLFMMMultilevelOperators:
 
 @dataclass(frozen=True)
 class MLFMMTransferScaffold:
-    """Focused multilevel transfer fixture for parent/child oracle checks."""
+    """Focused parent/child transfer scaffold used by transfer-oracle checks."""
 
     partition: MLFMMPartition
     levels: tuple[MLFMMLevelOperators, ...]
@@ -252,7 +258,12 @@ def _validate_positions_and_radii(
 
 
 def select_mlfmm_stage(depth: int) -> MLFMMStage:
-    """Map uniform hierarchy depth to direct, single-level, or multilevel MLFMM."""
+    """Map resolved depth to direct, single-level, or multilevel MLFMM.
+
+    Depth 0-1 stays on the exact pairwise path, depth 2 activates one occupied
+    leaf level, and deeper trees activate the multilevel high-frequency
+    hierarchy.
+    """
 
     depth_i = int(depth)
     if depth_i <= 1:
@@ -308,7 +319,12 @@ def resolve_mlfmm_plan(
     particle_circumscribing_radii: np.ndarray,
     options: MLFMMOptions | None = None,
 ) -> MLFMMResolvedPlan:
-    """Resolve the uniform-depth MLFMM plan and build the occupied-box hierarchy."""
+    """Resolve the MLFMM stage/depth policy and build the occupied-box hierarchy.
+
+    The selected depth is the shallower of the occupancy-driven depth and the
+    circumscribing-radius leaf-size floor, so exact-near and sampled-far work
+    on the same valid partition.
+    """
 
     pts, radii = _validate_positions_and_radii(positions, particle_circumscribing_radii)
     resolved_options = MLFMMOptions() if options is None else options
@@ -405,7 +421,8 @@ def box_order_rokhlin_like(
     """Return a grouped box order from the level side length.
 
     This keeps one shared order per occupied level and starts from the neutral
-    Rokhlin-style estimate used by the NumPy MLFMM path.
+    Rokhlin-style estimate used by the NumPy MLFMM path, while never dropping
+    below the particle multipole order already present in that box.
     """
 
     side_length = 2.0 * float(box_half_size)
@@ -490,6 +507,71 @@ def _coords_far_offset_batches(
             np.asarray([pair[1] for pair in pairs], dtype=np.int64),
         )
         for offset, pairs in grouped.items()
+    }
+
+
+def _coords_near_neighbors(coords: np.ndarray) -> tuple[np.ndarray, ...]:
+    """Return same-level occupied-box neighbors within one Chebyshev cell."""
+
+    coords_arr = np.asarray(coords, dtype=np.int64).reshape(-1, 3)
+    neighbors: list[np.ndarray] = []
+    for dst in range(coords_arr.shape[0]):
+        row: list[int] = []
+        for src in range(coords_arr.shape[0]):
+            if int(np.max(np.abs(coords_arr[src] - coords_arr[dst]))) <= 1:
+                row.append(int(src))
+        neighbors.append(np.asarray(row, dtype=np.int64))
+    return tuple(neighbors)
+
+
+def _build_multilevel_far_offset_batches(
+    *,
+    coords: np.ndarray,
+    parent_indices: np.ndarray,
+    near_neighbors: tuple[np.ndarray, ...],
+    parent_near_neighbors: tuple[np.ndarray, ...],
+    children_by_parent: tuple[np.ndarray, ...],
+) -> dict[tuple[int, int, int], tuple[np.ndarray, np.ndarray]]:
+    """Group multilevel far pairs owned by this level only.
+
+    Ownership follows the validated high-frequency hierarchy policy: a same-level
+    interaction is handled at this level only when the source and target boxes
+    are not near neighbors themselves, but their parents are near neighbors.
+    This avoids double-counting the far field across multiple hierarchy levels.
+    """
+
+    coords_arr = np.asarray(coords, dtype=np.int64).reshape(-1, 3)
+    if coords_arr.shape[0] == 0:
+        return {}
+
+    near_sets = [set(int(v) for v in row.tolist()) for row in near_neighbors]
+    grouped: dict[tuple[int, int, int], list[list[int]]] = {}
+    for dst in range(coords_arr.shape[0]):
+        parent = int(parent_indices[dst])
+        if parent < 0:
+            continue
+        candidates: set[int] = set()
+        for near_parent in parent_near_neighbors[parent]:
+            for src in children_by_parent[int(near_parent)]:
+                src_i = int(src)
+                if src_i == dst or src_i in near_sets[dst]:
+                    continue
+                candidates.add(src_i)
+        for src in sorted(candidates):
+            offset = (
+                int(coords_arr[dst, 0] - coords_arr[src, 0]),
+                int(coords_arr[dst, 1] - coords_arr[src, 1]),
+                int(coords_arr[dst, 2] - coords_arr[src, 2]),
+            )
+            batch = grouped.setdefault(offset, [[], []])
+            batch[0].append(int(src))
+            batch[1].append(int(dst))
+    return {
+        offset: (
+            np.asarray(src, dtype=np.int64),
+            np.asarray(dst, dtype=np.int64),
+        )
+        for offset, (src, dst) in grouped.items()
     }
 
 
@@ -700,7 +782,12 @@ def build_single_level_mlfmm_operators(
     dtype: np.dtype | type[np.complexfloating] | type[np.complex128] = np.complex128,
     build_exact_box_blocks: bool = False,
 ) -> MLFMMSingleLevelOperators:
-    """Build the sampled single-level HF far operator over one occupied leaf level."""
+    """Build the sampled single-level HF far operator over one occupied leaf level.
+
+    This prepares exact particle-to-leaf aggregation/receive maps plus
+    relative-offset-keyed sampled translators for all occupied leaves at the
+    resolved depth.
+    """
 
     if not partition.leaves:
         raise ValueError("single-level MLFMM requires at least one occupied leaf.")
@@ -783,7 +870,12 @@ def apply_single_level_mlfmm(
     dtype: np.dtype | type[np.complexfloating] | type[np.complex128] = np.complex128,
     block_cache: dict[tuple[int, int], np.ndarray] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Apply exact leaf-near interactions and sampled single-level far interactions."""
+    """Apply exact leaf-near interactions and sampled single-level far interactions.
+
+    The return value keeps the exact near contribution separate from the
+    sampled far contribution so diagnostics can compare each piece directly
+    against pairwise references.
+    """
 
     out_dtype = np.dtype(dtype)
     y_near = _exact_leaf_near_apply(
@@ -897,7 +989,12 @@ def build_multilevel_mlfmm_operators(
     box_order: int | None = None,
     dtype: np.dtype | type[np.complexfloating] | type[np.complex128] = np.complex128,
 ) -> MLFMMMultilevelOperators:
-    """Build multilevel sampled HF operators over occupied boxes only."""
+    """Build multilevel sampled HF operators over occupied boxes only.
+
+    The hierarchy stores only occupied boxes, together with same-level far
+    batches and parent/child transfer operators for the upward and downward
+    sampled passes.
+    """
 
     if not partition.leaves:
         raise ValueError("multilevel MLFMM requires at least one occupied leaf.")
@@ -918,6 +1015,10 @@ def build_multilevel_mlfmm_operators(
             sorted({tuple((coord // 2).tolist()) for coord in coords_by_level[level + 1]}),
             dtype=np.int64,
         ).reshape(-1, 3)
+
+    near_neighbors_by_level: list[tuple[np.ndarray, ...]] = []
+    for coords in coords_by_level:
+        near_neighbors_by_level.append(_coords_near_neighbors(coords))
 
     levels: list[MLFMMLevelOperators] = []
     dummy_directional = directional_transforms(1, grid_order=1)
@@ -951,6 +1052,18 @@ def build_multilevel_mlfmm_operators(
         else:
             children = tuple(np.zeros((0,), dtype=np.int64) for _ in range(coords.shape[0]))
 
+        if level == 0:
+            children_by_parent_current = tuple(np.zeros((0,), dtype=np.int64) for _ in range(1))
+        else:
+            parent_count = int(coords_by_level[level - 1].shape[0])
+            current_children_lists: list[list[int]] = [[] for _ in range(parent_count)]
+            for child_idx, parent_idx_raw in enumerate(parent_indices):
+                parent_idx = int(parent_idx_raw)
+                current_children_lists[parent_idx].append(int(child_idx))
+            children_by_parent_current = tuple(
+                np.asarray(items, dtype=np.int64) for items in current_children_lists
+            )
+
         half_size = float(partition.root_half_size) / float(1 << level)
         level_box_order = (
             box_order_rokhlin_like(
@@ -967,7 +1080,16 @@ def build_multilevel_mlfmm_operators(
             directional = directional_transforms(
                 int(level_box_order), grid_order=int(level_box_order)
             )
-        far_offset_batches = {} if level == 0 else _coords_far_offset_batches(coords)
+        if level == 0:
+            far_offset_batches = {}
+        else:
+            far_offset_batches = _build_multilevel_far_offset_batches(
+                coords=coords,
+                parent_indices=parent_indices,
+                near_neighbors=near_neighbors_by_level[level],
+                parent_near_neighbors=near_neighbors_by_level[level - 1],
+                children_by_parent=children_by_parent_current,
+            )
         offset_diagonals = (
             {
                 offset: _sampled_rokhlin_translator(
@@ -1104,7 +1226,12 @@ def build_multilevel_transfer_scaffold(
     dtype: np.dtype | type[np.complexfloating] | type[np.complex128] = np.complex128,
     child_level: int | None = None,
 ) -> MLFMMTransferScaffold:
-    """Build one parent/child transfer fixture for focused multilevel oracle tests."""
+    """Build one parent/child transfer fixture for focused multilevel oracle tests.
+
+    This intentionally omits the full far operator so tests can isolate
+    interpolation and transfer-phase conventions without paying for a complete
+    multilevel build.
+    """
 
     operators = build_multilevel_mlfmm_operators(
         lmax=int(lmax),
@@ -1204,7 +1331,12 @@ def apply_multilevel_mlfmm(
     dtype: np.dtype | type[np.complexfloating] | type[np.complex128] = np.complex128,
     block_cache: dict[tuple[int, int], np.ndarray] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Apply exact leaf-near interactions and multilevel sampled far interactions."""
+    """Apply exact leaf-near interactions and multilevel sampled far interactions.
+
+    The far field is assembled by upward transfer, same-level directional
+    translation, downward transfer, and leaf-local receive maps, while the
+    near field remains an exact leaf-partition correction.
+    """
 
     out_dtype = np.dtype(dtype)
     y_near = _exact_leaf_near_apply(

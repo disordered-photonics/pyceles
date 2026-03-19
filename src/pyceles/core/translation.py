@@ -217,6 +217,7 @@ def clear_caches() -> None:
     _translation_ab5_compact_tables_cached.cache_clear()
     _translation_plm_coeff_table_cached.cache_clear()
     _translation_mode_pair_tables.cache_clear()
+    _rectangular_radial_lut_from_base.cache_clear()
 
 
 @cache
@@ -282,6 +283,7 @@ def _translation_ab5_compact_tables(lmax: int, dtype=np.complex64) -> tuple[np.n
     return _translation_ab5_compact_tables_cached(int(lmax), np.dtype(dtype).str)
 
 
+@cache
 def _rectangular_radial_lut_from_base(
     lmax: int,
     k: float,
@@ -435,7 +437,12 @@ def translation_block(
     ab5: np.ndarray,
     radial_lut: Optional[RadialLUT] = None,
 ) -> np.ndarray:
-    """Dense translation block W_{ij} for two centers separated by rvec=r_i-r_j."""
+    """Return the outgoing-to-regular SVWF coupling block `W_ij`.
+
+    This is the canonical free-space pair block used in the direct many-body
+    operator, mapping outgoing coefficients at source center `j` to regular
+    coefficients at destination center `i`.
+    """
     return _translation_block_family(
         lmax,
         k,
@@ -453,7 +460,11 @@ def translation_block_regular(
     *,
     ab5: np.ndarray,
 ) -> np.ndarray:
-    """Dense regular-to-regular center-shift block for two SVWF centers."""
+    """Return a regular-to-regular SVWF recentering block.
+
+    This interior shift is used when one box expansion is re-expanded about a
+    different center without switching from regular to outgoing families.
+    """
 
     return translation_block_interior(lmax, k, rvec, ab5=ab5)
 
@@ -465,7 +476,7 @@ def translation_block_interior(
     *,
     ab5: np.ndarray,
 ) -> np.ndarray:
-    """Dense interior `j_l` center-shift block for two SVWF centers."""
+    """Return the dense interior `j_l` recentering block for two SVWF centers."""
 
     return _translation_block_family(
         lmax,
@@ -487,7 +498,12 @@ def translation_block_rect(
     radial_lut: Optional[RadialLUT] = None,
     family: str = "outgoing_to_regular",
 ) -> np.ndarray:
-    """Return a rectangular SVWF translation block between different truncation orders."""
+    """Return a rectangular SVWF translation block between different orders.
+
+    This is the helper used when parent and child boxes, or particles and
+    boxes, do not share the same truncation order but still need one exact
+    CELES-order translation block.
+    """
 
     out_order = int(lmax_out)
     in_order = int(lmax_in)

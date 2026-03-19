@@ -166,8 +166,8 @@ def _cached_directional_grid(
         n_alpha += 1
 
     cos_beta, w_beta = np.polynomial.legendre.leggauss(n_beta)
-    beta = np.arccos(np.clip(cos_beta[::-1], -1.0, 1.0)).astype(float, copy=False)
-    beta_weights = np.asarray(w_beta[::-1], dtype=float)
+    beta = np.arccos(np.clip(cos_beta, -1.0, 1.0)).astype(float, copy=False)
+    beta_weights = np.asarray(w_beta, dtype=float)
     alpha = ((2.0 * np.pi * np.arange(n_alpha, dtype=float) / n_alpha) + (np.pi / n_alpha)).astype(
         float, copy=False
     )

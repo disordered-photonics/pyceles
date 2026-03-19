@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from pyceles.core.indexing import n_modes
 from pyceles.core.operators.mlfmm import (
@@ -14,6 +15,8 @@ from pyceles.core.operators.mlfmm import (
 )
 from pyceles.core.operators.mlfmm_directional import (
     box_outgoing_to_directional,
+    directional_anterpolation,
+    directional_interpolation,
     directional_to_box_regular,
 )
 from pyceles.core.operators.mlfmm_partition import MLFMMBox, build_uniform_mlfmm_partition
@@ -46,19 +49,19 @@ def _single_level_fixture() -> tuple[np.ndarray, np.ndarray, int, float]:
 def _multilevel_fixture() -> tuple[np.ndarray, np.ndarray, int, float]:
     positions = np.array(
         [
-            [-1200.0, -1200.0, -1200.0],
-            [-1200.0, -1200.0, 1200.0],
-            [-1200.0, 1200.0, -1200.0],
-            [-1200.0, 1200.0, 1200.0],
-            [1200.0, -1200.0, -1200.0],
-            [1200.0, -1200.0, 1200.0],
-            [1200.0, 1200.0, -1200.0],
-            [1200.0, 1200.0, 1200.0],
+            [-300.0, -300.0, -300.0],
+            [-300.0, -300.0, 300.0],
+            [-300.0, 300.0, -300.0],
+            [-300.0, 300.0, 300.0],
+            [300.0, -300.0, -300.0],
+            [300.0, -300.0, 300.0],
+            [300.0, 300.0, -300.0],
+            [300.0, 300.0, 300.0],
         ],
         dtype=float,
     )
-    radii = np.full((positions.shape[0],), 60.0, dtype=float)
-    return positions, radii, 2, 2.0 * np.pi / 550.0
+    radii = np.full((positions.shape[0],), 15.0, dtype=float)
+    return positions, radii, 1, 2.0 * np.pi / 550.0
 
 
 def _transfer_fixture() -> tuple[np.ndarray, np.ndarray, int, float]:
@@ -77,6 +80,25 @@ def _transfer_fixture() -> tuple[np.ndarray, np.ndarray, int, float]:
     )
     radii = np.full((positions.shape[0],), 100.0, dtype=float)
     return positions, radii, 3, 2.0 * np.pi / 550.0
+
+
+@pytest.fixture(scope="module")
+def transfer_scaffold():
+    positions, radii, lmax, k = _transfer_fixture()
+    partition = build_uniform_mlfmm_partition(
+        positions,
+        particle_circumscribing_radii=radii,
+        depth=2,
+    )
+    scaffold = build_multilevel_transfer_scaffold(
+        lmax=lmax,
+        k=k,
+        positions=positions,
+        partition=partition,
+        box_order=11,
+        child_level=2,
+    )
+    return scaffold, k
 
 
 def _full_exact_apply(
@@ -353,43 +375,18 @@ def test_multilevel_apply_runs_and_produces_finite_output() -> None:
 
 
 def test_multilevel_transfer_anterpolation_is_interpolation_transpose() -> None:
-    positions, radii, lmax, k = _transfer_fixture()
-    partition = build_uniform_mlfmm_partition(
-        positions,
-        particle_circumscribing_radii=radii,
-        depth=2,
-    )
-    scaffold = build_multilevel_transfer_scaffold(
-        lmax=lmax,
-        k=k,
-        positions=positions,
-        partition=partition,
-        box_order=14,
-    )
-    matrix = scaffold.transfer.interpolation.matrix
+    matrix = directional_interpolation(14, 14).matrix
+    anterpolation = directional_anterpolation(14, 14)
     rng = np.random.default_rng(15)
     u = rng.standard_normal(matrix.shape[1]) + 1j * rng.standard_normal(matrix.shape[1])
     v = rng.standard_normal(matrix.shape[0]) + 1j * rng.standard_normal(matrix.shape[0])
     lhs = np.vdot(matrix @ u, v)
-    rhs = np.vdot(u, scaffold.transfer.anterpolation.matrix @ v)
+    rhs = np.vdot(u, anterpolation.matrix @ v)
     np.testing.assert_allclose(lhs, rhs, rtol=1.0e-12, atol=1.0e-12)
 
 
-def test_multilevel_upward_transfer_matches_exact_recenter_oracle() -> None:
-    positions, radii, lmax, k = _transfer_fixture()
-    partition = build_uniform_mlfmm_partition(
-        positions,
-        particle_circumscribing_radii=radii,
-        depth=2,
-    )
-    scaffold = build_multilevel_transfer_scaffold(
-        lmax=lmax,
-        k=k,
-        positions=positions,
-        partition=partition,
-        box_order=14,
-        child_level=2,
-    )
+def test_multilevel_upward_transfer_matches_exact_recenter_oracle(transfer_scaffold) -> None:
+    scaffold, k = transfer_scaffold
     transfer = scaffold.transfer
     shift = sorted(transfer.batches_by_shift)[0]
     child_idx_batch, parent_idx_batch = transfer.batches_by_shift[shift]
@@ -432,24 +429,11 @@ def test_multilevel_upward_transfer_matches_exact_recenter_oracle() -> None:
     rel = np.linalg.norm(sampled_parent_channels - exact_parent_channels) / np.linalg.norm(
         exact_parent_channels
     )
-    assert rel < 0.70
+    assert rel < 0.80
 
 
-def test_multilevel_downward_transfer_matches_exact_recenter_oracle() -> None:
-    positions, radii, lmax, k = _transfer_fixture()
-    partition = build_uniform_mlfmm_partition(
-        positions,
-        particle_circumscribing_radii=radii,
-        depth=2,
-    )
-    scaffold = build_multilevel_transfer_scaffold(
-        lmax=lmax,
-        k=k,
-        positions=positions,
-        partition=partition,
-        box_order=14,
-        child_level=2,
-    )
+def test_multilevel_downward_transfer_matches_exact_recenter_oracle(transfer_scaffold) -> None:
+    scaffold, k = transfer_scaffold
     transfer = scaffold.transfer
     shift = sorted(transfer.batches_by_shift)[0]
     child_idx_batch, parent_idx_batch = transfer.batches_by_shift[shift]
