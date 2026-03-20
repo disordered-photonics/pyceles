@@ -43,7 +43,7 @@ def _cached_pwp_conversion_tables(
     The non-MLFMM code paths call the same conversions repeatedly on fixed
     angular grids. Caching the expensive transformation-coefficient tables here
     keeps the generic helpers readable while avoiding redundant setup work in
-    both the prototype and the shipped conversion paths.
+    the shipped conversion paths.
     """
 
     alpha = _array_from_cache_key(alpha_key).astype(float, copy=False).reshape(-1)

@@ -91,7 +91,7 @@ Users of pyceles are referred to the publications listed in the CELES and SMUTHI
   - regression coverage against isolated-particle SMUTHI and ScatterPy references
   - current limitation: near-field evaluation remains unreliable for points
     outside a spheroid but inside its circumscribing sphere, because the main
-    branch still uses the outgoing spherical SVWF expansion there
+    implementation still uses the outgoing spherical SVWF expansion there
   - exploratory surface-integral, arbitrary-precision, and first spheroidal-shell
     postprocessing variants were investigated, but none is ready to replace the
     default path yet
@@ -345,15 +345,7 @@ Current performance milestones after that direct GPU backend are:
 - add an accelerated `O(N log N)` coupling backend for regimes where brute-force `O(N^2)` is no longer viable.
 A previous CELES experiment with rotation-translation-rotation (RTR) coupling idea
 was explored as a possible alternative translation backend. After matching the RTR
-block formulas to the shipped CELES-compatible translation conventions, the prototype
-reproduced translation blocks accurately but remained much slower than the current
-reference block builder on the public `500`-particle benchmark (`~26x` slower at `lmax=3`,
-`~38x` slower at `lmax=4`). RTR therefore remains an interesting mathematical
-direction, but not competitive against pyceles' low-`lmax` brute-force path.
-
-A previous CELES experiment with rotation-translation-rotation (RTR) coupling idea
-was explored as a possible alternative translation backend. After matching the RTR
-block formulas to the shipped CELES-compatible translation conventions, the prototype
+block formulas to the shipped CELES-compatible translation conventions, the experimental implementation
 reproduced translation blocks accurately but remained much slower than the current
 reference block builder on the public `500`-particle benchmark (`~26x` slower at `lmax=3`,
 `~38x` slower at `lmax=4`). RTR therefore remains an interesting mathematical
@@ -789,7 +781,7 @@ Related references for validation of present and future features:
 - Mun et al., *Multipole decomposition for interactions between structured optical fields and meta-atoms*, OE 28 (2020) 36756-36770. https://doi.org/10.1364/OE.409775
 - Gumerov and Duraiswami, *Computation of scattering from clusters of spheres using the fast multipole method* JASA 117 (2005) 1744-1761. https://doi.org/10.1121/1.1853017
 - Theobald et al., *Simulation of light scattering in large, disordered nanostructures using a periodic T-matrix method*, JQSRT 272 (2021) 107802. https://doi.org/10.1016/j.jqsrt.2021.107802
-- Nečada and Törmä, *Multiple-Scattering $T$-Matrix Simulations for Nanophotonics: Symmetries and Periodic Lattices*. 30.2 (2021) 357-395. https://doi.org/10.4208/cicp.OA-2020-0136
+- Nečada and Törmä, *Multiple-Scattering T-matrix Simulations for Nanophotonics: Symmetries and Periodic Lattices*. 30.2 (2021) 357-395. https://doi.org/10.4208/cicp.OA-2020-0136
 - Mackowski and Kolokolova, *Application of the multiple sphere superposition solution to large-scale systems of spheres via an accelerated algorithm*, JQSRT 287 (2022) 108221. https://doi.org/10.1016/j.jqsrt.2022.108221
 - Mackowski, *Extension of the Multiple Sphere T-Matrix code to include multiple plane boundaries and 2-D periodic systems*, JQSRT 290 (2022) 108292. https://doi.org/10.1016/j.jqsrt.2022.108292
 - Markkanen and Yuffa, *Fast superposition T-matrix solution for clusters with arbitrarily shaped constituent particles*, JQSRT 189 (2017) 181-188. https://doi.org/10.1016/j.jqsrt.2016.11.004
