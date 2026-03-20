@@ -1,7 +1,10 @@
 import numpy as np
+import pytest
+from scipy.special import sph_harm_y
 
 from pyceles.core.indexing import index_vswf, iter_modes, n_modes
 from pyceles.core.spherical import legendre_normalized_trigon
+from pyceles.core.svwf_rotation import svwf_rotation_matrix
 from pyceles.core.translation import (
     RadialLUT,
     _translation_ab5_compact_tables,
@@ -10,6 +13,7 @@ from pyceles.core.translation import (
     translation_ab5_table,
     translation_block,
 )
+from pyceles.core.wigner import wigner_3j
 
 
 def test_translation_z_axis_preserves_m():
@@ -168,3 +172,209 @@ def test_translation_block_lookup_vs_direct_coupling_agree():
         W_lut = translation_block(lmax, k, rvec, ab5=ab5, radial_lut=lut)
         W_direct = translation_block(lmax, k, rvec, ab5=ab5, radial_lut=None)
         np.testing.assert_allclose(W_lut, W_direct, rtol=1e-6, atol=1e-9)
+
+
+def _scalar_out_to_in_coeff(
+    l_src: int,
+    m_src: int,
+    l_dst: int,
+    m_dst: int,
+    *,
+    rvec: np.ndarray,
+    k: float,
+    hankel: np.ndarray,
+    theta: float,
+    phi: float,
+) -> complex:
+    """Scalar out-to-in coefficient via vector-addition-theorem scalar kernel.
+
+    Reference:
+    Dufva et al., Progress In Electromagnetics Research B 4 (2008) 79-99,
+    Sec. 4, Eq. (49).
+    """
+    total = 0j
+    for q in range(abs(l_src - l_dst), l_src + l_dst + 1):
+        if (l_src + l_dst + q) % 2 != 0:
+            continue
+        dm = m_src - m_dst
+        if abs(dm) > q:
+            continue
+        pref = np.sqrt((2 * l_src + 1) * (2 * l_dst + 1) * (2 * q + 1) / (4.0 * np.pi))
+        gaunt_star = (
+            ((-1) ** m_src)
+            * pref
+            * wigner_3j(l_src, l_dst, q, 0, 0, 0)
+            * wigner_3j(l_src, l_dst, q, m_src, -m_dst, m_dst - m_src)
+        )
+        psi_q = hankel[q] * sph_harm_y(q, dm, theta, phi)
+        total += ((-1j) ** (l_src - l_dst - q)) * psi_q * gaunt_star
+    return 4.0 * np.pi * total
+
+
+def _scalar_translation_table(
+    lmax: int, k: float, rvec: np.ndarray
+) -> dict[tuple[int, int, int, int], complex]:
+    max_order = lmax + 1
+    r = float(np.linalg.norm(rvec))
+    theta = float(np.arccos(np.clip(rvec[2] / r, -1.0, 1.0)))
+    phi = float(np.arctan2(rvec[1], rvec[0]))
+    if phi < 0.0:
+        phi += 2.0 * np.pi
+
+    j, y = spherical_bessel_jy(2 * max_order, np.asarray(k * r, dtype=np.complex128))
+    hankel = np.asarray(j + 1j * y, dtype=np.complex128).reshape((2 * max_order + 1,))
+
+    table: dict[tuple[int, int, int, int], complex] = {}
+    for l_src in range(0, max_order + 1):
+        for m_src in range(-l_src, l_src + 1):
+            for l_dst in range(0, max_order + 1):
+                for m_dst in range(-l_dst, l_dst + 1):
+                    table[(l_src, m_src, l_dst, m_dst)] = _scalar_out_to_in_coeff(
+                        l_src,
+                        m_src,
+                        l_dst,
+                        m_dst,
+                        rvec=rvec,
+                        k=k,
+                        hankel=hankel,
+                        theta=theta,
+                        phi=phi,
+                    )
+    return table
+
+
+def _scalar_lookup(
+    table: dict[tuple[int, int, int, int], complex],
+    l_src: int,
+    m_src: int,
+    l_dst: int,
+    m_dst: int,
+) -> complex:
+    return table.get((l_src, m_src, l_dst, m_dst), 0j)
+
+
+def _vector_A_from_scalar_coeffs(
+    table: dict[tuple[int, int, int, int], complex],
+    l_src: int,
+    m_src: int,
+    l_dst: int,
+    m_dst: int,
+) -> complex:
+    """Vector-coupling A reconstructed from scalar coefficients.
+
+    Reference:
+    Dufva et al., PIER B 4 (2008) 79-99, Sec. 5, Eq. (67).
+    """
+    return (
+        0.5
+        * np.sqrt((l_src - m_src) * (l_src + m_src + 1) * (l_dst - m_dst) * (l_dst + m_dst + 1))
+        * _scalar_lookup(table, l_src, m_src + 1, l_dst, m_dst + 1)
+        + 0.5
+        * np.sqrt((l_src + m_src) * (l_src - m_src + 1) * (l_dst + m_dst) * (l_dst - m_dst + 1))
+        * _scalar_lookup(table, l_src, m_src - 1, l_dst, m_dst - 1)
+        + m_src * m_dst * _scalar_lookup(table, l_src, m_src, l_dst, m_dst)
+    ) / (l_dst * (l_dst + 1))
+
+
+def _vector_B_from_scalar_coeffs(
+    table: dict[tuple[int, int, int, int], complex],
+    l_src: int,
+    m_src: int,
+    l_dst: int,
+    m_dst: int,
+) -> complex:
+    """Vector-coupling B reconstructed from scalar coefficients.
+
+    Reference:
+    Dufva et al., PIER B 4 (2008) 79-99, Sec. 5, Eq. (68).
+    """
+    term_a = (
+        -0.5
+        * np.sqrt((l_src - m_src) * (l_src + m_src + 1))
+        * (
+            np.sqrt((l_dst + m_dst + 1) * (l_dst + m_dst + 2) / ((2 * l_dst + 1) * (2 * l_dst + 3)))
+            / (l_dst + 1)
+            * _scalar_lookup(table, l_src, m_src + 1, l_dst + 1, m_dst + 1)
+            + np.sqrt((l_dst - m_dst - 1) * (l_dst - m_dst) / ((2 * l_dst - 1) * (2 * l_dst + 1)))
+            / l_dst
+            * _scalar_lookup(table, l_src, m_src + 1, l_dst - 1, m_dst + 1)
+        )
+    )
+    term_b = (
+        0.5
+        * np.sqrt((l_src + m_src) * (l_src - m_src + 1))
+        * (
+            np.sqrt((l_dst - m_dst + 1) * (l_dst - m_dst + 2) / ((2 * l_dst + 1) * (2 * l_dst + 3)))
+            / (l_dst + 1)
+            * _scalar_lookup(table, l_src, m_src - 1, l_dst + 1, m_dst - 1)
+            + np.sqrt((l_dst + m_dst - 1) * (l_dst + m_dst) / ((2 * l_dst - 1) * (2 * l_dst + 1)))
+            / l_dst
+            * _scalar_lookup(table, l_src, m_src - 1, l_dst - 1, m_dst - 1)
+        )
+    )
+    term_c = m_src * (
+        np.sqrt((l_dst + m_dst + 1) * (l_dst - m_dst + 1) / ((2 * l_dst + 1) * (2 * l_dst + 3)))
+        / (l_dst + 1)
+        * _scalar_lookup(table, l_src, m_src, l_dst + 1, m_dst)
+        - np.sqrt((l_dst + m_dst) * (l_dst - m_dst) / ((2 * l_dst - 1) * (2 * l_dst + 1)))
+        / l_dst
+        * _scalar_lookup(table, l_src, m_src, l_dst - 1, m_dst)
+    )
+    return term_a + term_b + term_c
+
+
+@pytest.mark.parametrize("lmax", [1, 2, 3])
+def test_scalar_to_vector_oracle_matches_axial_translation_block(lmax: int) -> None:
+    """Low-order oracle from scalar translation to vector A/B couplings.
+
+    References:
+    Dufva et al., PIER B 4 (2008) 79-99.
+    Scalar out-to-in coefficient: Sec. 4, Eq. (49).
+    Vector reconstruction A/B: Sec. 5, Eqs. (67)-(68).
+    """
+    k = 2.0 * np.pi / 550.0
+    rvec = np.array([0.0, 0.0, 100.0 + 20.0 * lmax], dtype=float)
+    table = _scalar_translation_table(lmax, k, rvec)
+    W = translation_block(lmax, k, rvec, ab5=translation_ab5_table(lmax))
+
+    W_oracle = np.zeros_like(W)
+    for tau_dst, l_dst, m_dst, idx_dst in iter_modes(lmax):
+        for tau_src, l_src, m_src, idx_src in iter_modes(lmax):
+            scale = np.sqrt((l_dst * (l_dst + 1)) / (l_src * (l_src + 1)))
+            A_from_scalar = _vector_A_from_scalar_coeffs(table, l_src, m_src, l_dst, m_dst)
+            B_from_scalar = _vector_B_from_scalar_coeffs(table, l_src, m_src, l_dst, m_dst)
+
+            if tau_dst == tau_src:
+                # CELES-compatible normalization factor for same-polarization coupling.
+                W_oracle[idx_dst, idx_src] = scale * A_from_scalar
+            else:
+                # CELES-compatible normalization factor for cross-polarization coupling.
+                W_oracle[idx_dst, idx_src] = 1j * (2 * l_dst + 1) * scale * B_from_scalar
+
+    np.testing.assert_allclose(W, W_oracle, rtol=2e-11, atol=2e-11)
+
+
+@pytest.mark.parametrize("lmax", [1, 2, 3])
+def test_rotation_through_z_reproduces_general_translation_block(lmax: int) -> None:
+    """Rotate-to-z translation oracle against direct off-axis translation.
+
+    Reference:
+    Dufva et al., PIER B 4 (2008) 79-99, Sec. 6
+    (rotation-through-z translation construction).
+    """
+    k = 2.0 * np.pi / 550.0
+    rvec = np.array([120.0, 35.0, -60.0], dtype=float)
+    r = float(np.linalg.norm(rvec))
+    theta = float(np.arccos(np.clip(rvec[2] / r, -1.0, 1.0)))
+    phi = float(np.arctan2(rvec[1], rvec[0]))
+    if phi < 0.0:
+        phi += 2.0 * np.pi
+
+    ab5 = translation_ab5_table(lmax)
+    W_direct = translation_block(lmax, k, rvec, ab5=ab5)
+    W_axial = translation_block(lmax, k, np.array([0.0, 0.0, r], dtype=float), ab5=ab5)
+    D = svwf_rotation_matrix(lmax, phi, theta, 0.0)
+
+    # Convention-compatible form in this codebase: W(r) = D* @ Wz(|r|) @ D^T.
+    W_rot = np.asarray(D.conjugate() @ W_axial @ D.T, dtype=np.complex128)
+    np.testing.assert_allclose(W_direct, W_rot, rtol=1e-12, atol=1e-12)
