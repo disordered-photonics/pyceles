@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 import pytest
 
 from pyceles.core.indexing import n_modes
 from pyceles.core.operators.mlfmm import (
+    MLFMMLevelOperators,
     MLFMMOptions,
+    MLFMMTransferOperators,
     apply_multilevel_mlfmm,
     apply_single_level_mlfmm,
     build_multilevel_mlfmm_operators,
-    build_multilevel_transfer_scaffold,
     build_single_level_mlfmm_operators,
     resolve_mlfmm_plan,
 )
@@ -18,6 +21,7 @@ from pyceles.core.operators.mlfmm_directional import (
     directional_anterpolation,
     directional_interpolation,
     directional_to_box_regular,
+    directional_transforms,
 )
 from pyceles.core.operators.mlfmm_partition import MLFMMBox, build_uniform_mlfmm_partition
 from pyceles.core.translation import (
@@ -26,6 +30,15 @@ from pyceles.core.translation import (
     translation_block,
     translation_block_rect,
 )
+
+
+@dataclass(frozen=True)
+class _TransferScaffold:
+    levels: tuple[MLFMMLevelOperators, ...]
+    transfer: MLFMMTransferOperators
+    child_level: int
+    parent_level: int
+    leaf_level: int
 
 
 def _single_level_fixture() -> tuple[np.ndarray, np.ndarray, int, float]:
@@ -90,13 +103,82 @@ def transfer_scaffold():
         particle_circumscribing_radii=radii,
         depth=2,
     )
-    scaffold = build_multilevel_transfer_scaffold(
+    operators = build_multilevel_mlfmm_operators(
         lmax=lmax,
         k=k,
         positions=positions,
         partition=partition,
         box_order=11,
-        child_level=2,
+    )
+    child_level = int(operators.leaf_level)
+    parent_level = int(child_level - 1)
+    levels = list(operators.levels)
+    for level_idx in (parent_level, child_level):
+        level = levels[level_idx]
+        levels[level_idx] = MLFMMLevelOperators(
+            level=int(level.level),
+            coords=level.coords,
+            centers=level.centers,
+            parent_indices=level.parent_indices,
+            children=level.children,
+            box_order=int(level.box_order),
+            translator_order=int(level.translator_order),
+            grid_order=int(level.grid_order),
+            directional=directional_transforms(
+                int(level.box_order), grid_order=int(level.grid_order)
+            ),
+            far_offset_batches=level.far_offset_batches,
+            offset_diagonals=level.offset_diagonals,
+        )
+    child = levels[child_level]
+    parent = levels[parent_level]
+    interpolation = directional_interpolation(child.grid_order, parent.grid_order)
+    anterpolation = directional_anterpolation(child.grid_order, parent.grid_order)
+    grouped: dict[tuple[int, int, int], list[tuple[int, int]]] = {}
+    for child_idx, parent_idx_raw in enumerate(child.parent_indices):
+        parent_idx = int(parent_idx_raw)
+        shift = (
+            int(child.coords[child_idx, 0] - 2 * parent.coords[parent_idx, 0]),
+            int(child.coords[child_idx, 1] - 2 * parent.coords[parent_idx, 1]),
+            int(child.coords[child_idx, 2] - 2 * parent.coords[parent_idx, 2]),
+        )
+        grouped.setdefault(shift, []).append((int(child_idx), parent_idx))
+    batches = {
+        shift: (
+            np.asarray([pair[0] for pair in pairs], dtype=np.int64),
+            np.asarray([pair[1] for pair in pairs], dtype=np.int64),
+        )
+        for shift, pairs in grouped.items()
+    }
+    phase_up: dict[tuple[int, int, int], np.ndarray] = {}
+    phase_down: dict[tuple[int, int, int], np.ndarray] = {}
+    for shift, (child_indices, parent_indices) in batches.items():
+        delta = np.asarray(
+            parent.centers[int(parent_indices[0])] - child.centers[int(child_indices[0])],
+            dtype=float,
+        )
+        phase_up[shift] = np.asarray(
+            np.exp(1j * complex(k) * (parent.directional.grid.directions @ delta)),
+            dtype=np.complex128,
+        )
+        phase_down[shift] = np.asarray(
+            np.exp(1j * complex(k) * (parent.directional.grid.directions @ (-delta))),
+            dtype=np.complex128,
+        )
+    scaffold = _TransferScaffold(
+        levels=tuple(levels),
+        transfer=MLFMMTransferOperators(
+            child_level=child_level,
+            parent_level=parent_level,
+            interpolation=interpolation,
+            anterpolation=anterpolation,
+            batches_by_shift=batches,
+            phase_up_by_shift=phase_up,
+            phase_down_by_shift=phase_down,
+        ),
+        child_level=child_level,
+        parent_level=parent_level,
+        leaf_level=int(operators.leaf_level),
     )
     return scaffold, k
 
@@ -372,6 +454,32 @@ def test_multilevel_apply_runs_and_produces_finite_output() -> None:
     assert y_far.shape == x.shape
     assert np.all(np.isfinite(y_near))
     assert np.all(np.isfinite(y_far))
+
+
+def test_mlfmm_options_expose_box_order_policy_controls() -> None:
+    positions, radii, lmax, k = _single_level_fixture()
+    partition = build_uniform_mlfmm_partition(
+        positions,
+        particle_circumscribing_radii=radii,
+        depth=2,
+    )
+    baseline = build_single_level_mlfmm_operators(
+        lmax=lmax,
+        k=k,
+        positions=positions,
+        partition=partition,
+    )
+    stricter = build_single_level_mlfmm_operators(
+        lmax=lmax,
+        k=k,
+        positions=positions,
+        partition=partition,
+        accuracy_level=4,
+        order_additive=4,
+    )
+
+    assert stricter.box_order > baseline.box_order
+    assert stricter.translator_order >= stricter.box_order
 
 
 def test_multilevel_transfer_anterpolation_is_interpolation_transpose() -> None:

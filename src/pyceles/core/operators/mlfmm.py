@@ -53,15 +53,18 @@ validated reference implementation used during pyceles MLFMM development.
 class MLFMMOptions:
     """Expert tuning knobs for pyceles MLFMM partition resolution.
 
-    These options control only the hierarchy policy: how many particles are
-    allowed in one leaf, how deep the occupied tree may grow, and how large a
-    leaf box must remain relative to the largest circumscribing radius it
-    contains.
+    These options cover the current public MLFMM policy surface: how many
+    particles are allowed in one leaf, how deep the occupied tree may grow,
+    how large a leaf box must remain relative to the largest circumscribing
+    radius it contains, and how aggressively the Rokhlin-style box-order
+    estimate is padded.
     """
 
     max_leaf_particles: int = 8
     max_depth: int = 12
     leaf_size_radius_factor: float = 4.0
+    accuracy_level: int = 3
+    order_additive: int = 2
 
 
 @dataclass(frozen=True)
@@ -97,7 +100,6 @@ class MLFMMSingleLevelOperators:
     leaf_cell_coords: dict[int, tuple[int, int, int]]
     far_offset_batches: dict[tuple[int, int, int], tuple[np.ndarray, np.ndarray]]
     offset_diagonals: dict[tuple[int, int, int], np.ndarray]
-    exact_box_blocks: dict[tuple[int, int, int], np.ndarray] | None
 
 
 @dataclass(frozen=True)
@@ -142,18 +144,6 @@ class MLFMMMultilevelOperators:
     hf_end_level: int
     aggregation: tuple[np.ndarray, ...]
     receive: tuple[np.ndarray, ...]
-
-
-@dataclass(frozen=True)
-class MLFMMTransferScaffold:
-    """Focused parent/child transfer scaffold used by transfer-oracle checks."""
-
-    partition: MLFMMPartition
-    levels: tuple[MLFMMLevelOperators, ...]
-    transfer: MLFMMTransferOperators
-    child_level: int
-    parent_level: int
-    leaf_level: int
 
 
 @dataclass
@@ -335,6 +325,8 @@ def resolve_mlfmm_plan(
         raise ValueError("MLFMMOptions.max_depth must be >= 0.")
     if float(resolved_options.leaf_size_radius_factor) <= 0.0:
         raise ValueError("MLFMMOptions.leaf_size_radius_factor must be > 0.")
+    if int(resolved_options.accuracy_level) < 1:
+        raise ValueError("MLFMMOptions.accuracy_level must be >= 1.")
 
     root_center, root_half_size = root_cube(pts)
     root_side_length = 2.0 * float(root_half_size)
@@ -779,8 +771,9 @@ def build_single_level_mlfmm_operators(
     radial_lut: RadialLUT | None = None,
     box_order: int | None = None,
     translator_order: int | None = None,
+    accuracy_level: int = 3,
+    order_additive: int = 2,
     dtype: np.dtype | type[np.complexfloating] | type[np.complex128] = np.complex128,
-    build_exact_box_blocks: bool = False,
 ) -> MLFMMSingleLevelOperators:
     """Build the sampled single-level HF far operator over one occupied leaf level.
 
@@ -797,6 +790,8 @@ def build_single_level_mlfmm_operators(
             particle_lmax=int(lmax),
             k=float(k),
             box_half_size=leaf_half_size,
+            accuracy=int(accuracy_level),
+            additive=int(order_additive),
         )
         if box_order is None
         else int(box_order)
@@ -819,9 +814,6 @@ def build_single_level_mlfmm_operators(
     leaf_cell_coords = _leaf_cell_coords(partition)
     far_offset_batches = _leaf_offset_batches(partition, leaf_cell_coords)
     offset_diagonals: dict[tuple[int, int, int], np.ndarray] = {}
-    exact_box_blocks: dict[tuple[int, int, int], np.ndarray] | None = (
-        {} if build_exact_box_blocks else None
-    )
     for offset in far_offset_batches:
         delta = _offset_delta_from_half_size(leaf_half_size, offset)
         offset_diagonals[offset] = _sampled_rokhlin_translator(
@@ -832,18 +824,6 @@ def build_single_level_mlfmm_operators(
             weights=directional.grid.weights,
             dtype=out_dtype,
         )
-        if exact_box_blocks is not None:
-            exact_box_blocks[offset] = np.asarray(
-                translation_block_rect(
-                    int(shared_box_order),
-                    int(shared_box_order),
-                    float(k),
-                    np.asarray(delta, dtype=float),
-                    ab5=translation_ab5_table(int(shared_box_order), dtype=np.complex128),
-                    radial_lut=radial_lut,
-                ),
-                dtype=out_dtype,
-            )
     return MLFMMSingleLevelOperators(
         partition=partition,
         box_order=int(shared_box_order),
@@ -855,7 +835,6 @@ def build_single_level_mlfmm_operators(
         leaf_cell_coords=leaf_cell_coords,
         far_offset_batches=far_offset_batches,
         offset_diagonals=offset_diagonals,
-        exact_box_blocks=exact_box_blocks,
     )
 
 
@@ -928,57 +907,6 @@ def apply_single_level_mlfmm(
     return y_near.reshape(-1), y_far.reshape(-1)
 
 
-def apply_single_level_mlfmm_exact_box_reference(
-    *,
-    lmax: int,
-    k: float,
-    positions: np.ndarray,
-    x: np.ndarray,
-    operators: MLFMMSingleLevelOperators,
-    radial_lut: RadialLUT | None = None,
-    dtype: np.dtype | type[np.complexfloating] | type[np.complex128] = np.complex128,
-    block_cache: dict[tuple[int, int], np.ndarray] | None = None,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Apply exact leaf-near interactions and exact grouped-box far interactions."""
-
-    if operators.exact_box_blocks is None:
-        raise ValueError("single-level exact box blocks were not built.")
-    out_dtype = np.dtype(dtype)
-    y_near = _exact_leaf_near_apply(
-        lmax=int(lmax),
-        k=float(k),
-        positions=np.asarray(positions, dtype=float),
-        x=np.asarray(x),
-        partition=operators.partition,
-        radial_lut=radial_lut,
-        dtype=out_dtype,
-        block_cache=block_cache,
-    )
-    leaf_states = _leaf_box_states(
-        lmax=int(lmax),
-        positions=np.asarray(positions, dtype=float),
-        x=np.asarray(x),
-        partition=operators.partition,
-        aggregation=operators.aggregation,
-        dtype=out_dtype,
-    )
-    incoming_box = np.zeros_like(leaf_states, dtype=out_dtype)
-    for offset, (src_idx, dst_idx) in operators.far_offset_batches.items():
-        block = np.asarray(operators.exact_box_blocks[offset], dtype=out_dtype)
-        translated = (block[None, :, :] @ leaf_states[src_idx, :, None]).reshape(
-            src_idx.size, block.shape[0]
-        )
-        np.add.at(incoming_box, dst_idx, translated)
-
-    nm = n_modes(int(lmax))
-    ns = np.asarray(positions).shape[0]
-    y_far = np.zeros((ns, nm), dtype=out_dtype)
-    for leaf in operators.partition.leaves:
-        contribution = operators.receive[int(leaf.id)] @ incoming_box[int(leaf.id)]
-        y_far[leaf.particle_indices] += contribution.reshape(leaf.particle_indices.size, nm)
-    return y_near.reshape(-1), y_far.reshape(-1)
-
-
 def build_multilevel_mlfmm_operators(
     *,
     lmax: int,
@@ -987,6 +915,8 @@ def build_multilevel_mlfmm_operators(
     partition: MLFMMPartition,
     radial_lut: RadialLUT | None = None,
     box_order: int | None = None,
+    accuracy_level: int = 3,
+    order_additive: int = 2,
     dtype: np.dtype | type[np.complexfloating] | type[np.complex128] = np.complex128,
 ) -> MLFMMMultilevelOperators:
     """Build multilevel sampled HF operators over occupied boxes only.
@@ -1070,6 +1000,8 @@ def build_multilevel_mlfmm_operators(
                 particle_lmax=int(lmax),
                 k=float(k),
                 box_half_size=half_size,
+                accuracy=int(accuracy_level),
+                additive=int(order_additive),
             )
             if box_order is None
             else int(box_order)
@@ -1212,111 +1144,6 @@ def _apply_linear_map_to_channel_batches(
     mapped = flat @ interpolation.matrix.T
     return np.asarray(mapped, dtype=arr.dtype).reshape(
         *arr.shape[:-1], interpolation.matrix.shape[0]
-    )
-
-
-def build_multilevel_transfer_scaffold(
-    *,
-    lmax: int,
-    k: float,
-    positions: np.ndarray,
-    partition: MLFMMPartition,
-    radial_lut: RadialLUT | None = None,
-    box_order: int | None = None,
-    dtype: np.dtype | type[np.complexfloating] | type[np.complex128] = np.complex128,
-    child_level: int | None = None,
-) -> MLFMMTransferScaffold:
-    """Build one parent/child transfer fixture for focused multilevel oracle tests.
-
-    This intentionally omits the full far operator so tests can isolate
-    interpolation and transfer-phase conventions without paying for a complete
-    multilevel build.
-    """
-
-    operators = build_multilevel_mlfmm_operators(
-        lmax=int(lmax),
-        k=float(k),
-        positions=np.asarray(positions, dtype=float),
-        partition=partition,
-        radial_lut=radial_lut,
-        box_order=box_order,
-        dtype=dtype,
-    )
-    selected_child_level = int(operators.leaf_level) if child_level is None else int(child_level)
-    if selected_child_level < 1 or selected_child_level > int(operators.leaf_level):
-        raise ValueError(
-            f"child_level must be in [1, {operators.leaf_level}] for the current hierarchy."
-        )
-    selected_parent_level = int(selected_child_level - 1)
-    levels = list(operators.levels)
-    for level_idx in (selected_parent_level, selected_child_level):
-        level = levels[level_idx]
-        active_directional = directional_transforms(
-            int(level.box_order), grid_order=int(level.grid_order)
-        )
-        levels[level_idx] = MLFMMLevelOperators(
-            level=int(level.level),
-            coords=level.coords,
-            centers=level.centers,
-            parent_indices=level.parent_indices,
-            children=level.children,
-            box_order=int(level.box_order),
-            translator_order=int(level.translator_order),
-            grid_order=int(level.grid_order),
-            directional=active_directional,
-            far_offset_batches=level.far_offset_batches,
-            offset_diagonals=level.offset_diagonals,
-        )
-    child_data = levels[selected_child_level]
-    parent_data = levels[selected_parent_level]
-    interpolation = directional_interpolation(child_data.grid_order, parent_data.grid_order)
-    anterpolation = directional_anterpolation(child_data.grid_order, parent_data.grid_order)
-    grouped: dict[tuple[int, int, int], list[tuple[int, int]]] = {}
-    for child_idx, parent_idx in enumerate(child_data.parent_indices):
-        shift = (
-            int(child_data.coords[child_idx, 0] - 2 * parent_data.coords[int(parent_idx), 0]),
-            int(child_data.coords[child_idx, 1] - 2 * parent_data.coords[int(parent_idx), 1]),
-            int(child_data.coords[child_idx, 2] - 2 * parent_data.coords[int(parent_idx), 2]),
-        )
-        grouped.setdefault(shift, []).append((int(child_idx), int(parent_idx)))
-    batches = {
-        shift: (
-            np.asarray([pair[0] for pair in pairs], dtype=np.int64),
-            np.asarray([pair[1] for pair in pairs], dtype=np.int64),
-        )
-        for shift, pairs in grouped.items()
-    }
-    phase_up: dict[tuple[int, int, int], np.ndarray] = {}
-    phase_down: dict[tuple[int, int, int], np.ndarray] = {}
-    for shift, (child_indices, parent_indices) in batches.items():
-        up_delta = np.asarray(
-            parent_data.centers[int(parent_indices[0])] - child_data.centers[int(child_indices[0])],
-            dtype=float,
-        )
-        phase_up[shift] = np.asarray(
-            np.exp(1j * complex(k) * (parent_data.directional.grid.directions @ up_delta)),
-            dtype=np.dtype(dtype),
-        )
-        phase_down[shift] = np.asarray(
-            np.exp(1j * complex(k) * (parent_data.directional.grid.directions @ (-up_delta))),
-            dtype=np.dtype(dtype),
-        )
-    selected = MLFMMTransferOperators(
-        child_level=selected_child_level,
-        parent_level=selected_parent_level,
-        interpolation=interpolation,
-        anterpolation=anterpolation,
-        batches_by_shift=batches,
-        phase_up_by_shift=phase_up,
-        phase_down_by_shift=phase_down,
-    )
-    return MLFMMTransferScaffold(
-        partition=operators.partition,
-        levels=tuple(levels),
-        transfer=selected,
-        child_level=int(selected_child_level),
-        parent_level=int(selected_parent_level),
-        leaf_level=int(operators.leaf_level),
     )
 
 
@@ -1473,10 +1300,11 @@ def prepare_mlfmm_coupling(
     out_dtype = np.dtype(dtype)
     pts = np.asarray(positions, dtype=float)
     radii = np.asarray(particle_circumscribing_radii, dtype=float)
+    resolved_options = MLFMMOptions() if options is None else options
     resolved = resolve_mlfmm_plan(
         pts,
         particle_circumscribing_radii=radii,
-        options=options,
+        options=resolved_options,
     )
     if show_progress:
         occupancies = np.asarray(
@@ -1519,6 +1347,8 @@ def prepare_mlfmm_coupling(
             positions=pts,
             partition=resolved.partition,
             radial_lut=radial_lut,
+            accuracy_level=int(resolved_options.accuracy_level),
+            order_additive=int(resolved_options.order_additive),
             dtype=out_dtype,
         )
         out = MLFMMCouplingOperator(
@@ -1544,6 +1374,8 @@ def prepare_mlfmm_coupling(
         positions=pts,
         partition=resolved.partition,
         radial_lut=radial_lut,
+        accuracy_level=int(resolved_options.accuracy_level),
+        order_additive=int(resolved_options.order_additive),
         dtype=out_dtype,
     )
     out = MLFMMCouplingOperator(
@@ -1575,13 +1407,10 @@ __all__ = [
     "MLFMMTransferOperators",
     "apply_multilevel_mlfmm",
     "apply_single_level_mlfmm",
-    "apply_single_level_mlfmm_exact_box_reference",
     "box_order_rokhlin_like",
-    "build_multilevel_transfer_scaffold",
     "build_multilevel_mlfmm_operators",
     "build_single_level_mlfmm_operators",
     "estimate_rokhlin_order",
-    "MLFMMTransferScaffold",
     "prepare_mlfmm_coupling",
     "resolve_mlfmm_plan",
     "select_mlfmm_stage",
