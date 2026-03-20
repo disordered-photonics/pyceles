@@ -217,14 +217,12 @@ class MLFMMCouplingOperator:
             return
         if self._exact_block_cache is None:
             self._exact_block_cache = {}
-        _exact_leaf_near_apply(
+        _populate_exact_leaf_near_cache(
             lmax=int(self.lmax),
             k=float(self.k),
             positions=self.positions,
-            x=np.zeros((self.positions.shape[0] * n_modes(int(self.lmax)),), dtype=self.dtype),
             partition=self.resolved_plan.partition,
             radial_lut=self.radial_lut,
-            dtype=np.dtype(self.dtype),
             block_cache=self._exact_block_cache,
         )
 
@@ -760,6 +758,61 @@ def _exact_leaf_near_apply(
                 y[int(i)] += np.asarray(wij, dtype=dtype) @ arr[int(j)]
                 y[int(j)] += np.asarray(wji, dtype=dtype) @ arr[int(i)]
     return y.reshape(-1)
+
+
+def _populate_exact_leaf_near_cache(
+    *,
+    lmax: int,
+    k: float,
+    positions: np.ndarray,
+    partition: MLFMMPartition,
+    radial_lut: RadialLUT | None,
+    block_cache: dict[tuple[int, int], np.ndarray] | None,
+) -> None:
+    """Populate cached exact leaf-near translation blocks without a matvec pass."""
+
+    if block_cache is None:
+        return
+    ab5 = translation_ab5_table(int(lmax), dtype=np.complex128)
+    positions_arr = np.asarray(positions, dtype=float)
+    for a, b in partition.leaf_near_pairs:
+        leaf_a = partition.leaves[a]
+        leaf_b = partition.leaves[b]
+        if a == b:
+            for i in leaf_a.particle_indices:
+                for j in leaf_a.particle_indices:
+                    if int(i) == int(j):
+                        continue
+                    key_ij = (int(i), int(j))
+                    if key_ij not in block_cache:
+                        block_cache[key_ij] = translation_block(
+                            int(lmax),
+                            float(k),
+                            np.asarray(positions_arr[int(i)] - positions_arr[int(j)], dtype=float),
+                            ab5=ab5,
+                            radial_lut=radial_lut,
+                        )
+            continue
+        for i in leaf_a.particle_indices:
+            for j in leaf_b.particle_indices:
+                key_ij = (int(i), int(j))
+                if key_ij not in block_cache:
+                    block_cache[key_ij] = translation_block(
+                        int(lmax),
+                        float(k),
+                        np.asarray(positions_arr[int(i)] - positions_arr[int(j)], dtype=float),
+                        ab5=ab5,
+                        radial_lut=radial_lut,
+                    )
+                key_ji = (int(j), int(i))
+                if key_ji not in block_cache:
+                    block_cache[key_ji] = translation_block(
+                        int(lmax),
+                        float(k),
+                        np.asarray(positions_arr[int(j)] - positions_arr[int(i)], dtype=float),
+                        ab5=ab5,
+                        radial_lut=radial_lut,
+                    )
 
 
 def build_single_level_mlfmm_operators(

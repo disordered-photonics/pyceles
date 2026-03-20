@@ -7,6 +7,7 @@ import pytest
 
 from pyceles.core.indexing import n_modes
 from pyceles.core.operators.mlfmm import (
+    MLFMMCouplingOperator,
     MLFMMLevelOperators,
     MLFMMOptions,
     MLFMMTransferOperators,
@@ -14,6 +15,7 @@ from pyceles.core.operators.mlfmm import (
     apply_single_level_mlfmm,
     build_multilevel_mlfmm_operators,
     build_single_level_mlfmm_operators,
+    prepare_mlfmm_coupling,
     resolve_mlfmm_plan,
 )
 from pyceles.core.operators.mlfmm_directional import (
@@ -454,6 +456,34 @@ def test_multilevel_apply_runs_and_produces_finite_output() -> None:
     assert y_far.shape == x.shape
     assert np.all(np.isfinite(y_near))
     assert np.all(np.isfinite(y_far))
+
+
+def test_mlfmm_populate_warms_exact_leaf_near_cache_directly() -> None:
+    positions, radii, lmax, k = _single_level_fixture()
+    radial_lut = RadialLUT(
+        lmax=12,
+        k=k,
+        r_max=float(np.max(np.linalg.norm(positions[:, None, :] - positions[None, :, :], axis=2))),
+        dr=5.0,
+    )
+    coupling = prepare_mlfmm_coupling(
+        lmax=lmax,
+        k=k,
+        positions=positions,
+        particle_circumscribing_radii=radii,
+        radial_lut=radial_lut,
+        ab5=translation_ab5_table(lmax, dtype=np.complex128),
+        options=MLFMMOptions(max_leaf_particles=1, max_depth=2),
+        dtype=np.complex128,
+        cache_translation_blocks=True,
+    )
+
+    assert isinstance(coupling, MLFMMCouplingOperator)
+    assert coupling._exact_block_cache == {}
+    coupling.populate()
+
+    assert coupling._exact_block_cache is not None
+    assert len(coupling._exact_block_cache) > 0
 
 
 def test_mlfmm_options_expose_box_order_policy_controls() -> None:
