@@ -1252,6 +1252,14 @@ def apply_multilevel_mlfmm(
         for chan_idx, channel in enumerate(channels):
             outgoing[leaf_level][leaf_id, chan_idx] = np.asarray(channel, dtype=out_dtype)
 
+    # Upward transfer uses the reflection-indexed directional ordering expected
+    # by the sparse interpolation tables. We therefore:
+    # 1. reindex child samples from the physical directional ordering into the
+    #    interpolation ordering,
+    # 2. interpolate onto the parent directional grid in that reflected basis,
+    # 3. reindex back to the parent physical ordering,
+    # 4. attach the parent-center translation phase, because the interpolated
+    #    samples still represent the child-centered outgoing field.
     for transfer in reversed(operators.transfers):
         child_values = outgoing[int(transfer.child_level)]
         parent_values = outgoing[int(transfer.parent_level)]
@@ -1281,6 +1289,11 @@ def apply_multilevel_mlfmm(
             )
             np.add.at(incoming[level_idx], dst_idx, translated)
 
+    # Downward transfer mirrors the same convention change in the opposite
+    # direction. The parent local samples first receive the child-center phase
+    # shift, then move into the reflection-indexed interpolation basis, then
+    # anterpolate onto the child grid, and finally return to the child physical
+    # directional ordering before accumulating into the child local field.
     for transfer in operators.transfers:
         parent_values = incoming[int(transfer.parent_level)]
         child_values = incoming[int(transfer.child_level)]

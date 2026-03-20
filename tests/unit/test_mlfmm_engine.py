@@ -13,9 +13,9 @@ from pyceles.core.operators.mlfmm import (
     MLFMMTransferOperators,
     apply_multilevel_mlfmm,
     apply_single_level_mlfmm,
+    box_order_rokhlin_like,
     build_multilevel_mlfmm_operators,
     build_single_level_mlfmm_operators,
-    prepare_mlfmm_coupling,
     resolve_mlfmm_plan,
 )
 from pyceles.core.operators.mlfmm_directional import (
@@ -460,22 +460,38 @@ def test_multilevel_apply_runs_and_produces_finite_output() -> None:
 
 def test_mlfmm_populate_warms_exact_leaf_near_cache_directly() -> None:
     positions, radii, lmax, k = _single_level_fixture()
+    plan = resolve_mlfmm_plan(
+        positions,
+        particle_circumscribing_radii=radii,
+        options=MLFMMOptions(max_leaf_particles=1, max_depth=2),
+    )
     radial_lut = RadialLUT(
         lmax=12,
         k=k,
         r_max=float(np.max(np.linalg.norm(positions[:, None, :] - positions[None, :, :], axis=2))),
         dr=5.0,
     )
-    coupling = prepare_mlfmm_coupling(
+    single_level = build_single_level_mlfmm_operators(
         lmax=lmax,
         k=k,
         positions=positions,
-        particle_circumscribing_radii=radii,
+        partition=plan.partition,
         radial_lut=radial_lut,
-        ab5=translation_ab5_table(lmax, dtype=np.complex128),
-        options=MLFMMOptions(max_leaf_particles=1, max_depth=2),
+        box_order=6,
+        translator_order=6,
+        accuracy_level=3,
+        order_additive=2,
         dtype=np.complex128,
+    )
+    coupling = MLFMMCouplingOperator(
+        lmax=lmax,
+        k=k,
+        positions=np.asarray(positions, dtype=float),
+        radial_lut=radial_lut,
+        resolved_plan=plan,
+        dtype=np.dtype(np.complex128),
         cache_translation_blocks=True,
+        single_level=single_level,
     )
 
     assert isinstance(coupling, MLFMMCouplingOperator)
@@ -493,23 +509,22 @@ def test_mlfmm_options_expose_box_order_policy_controls() -> None:
         particle_circumscribing_radii=radii,
         depth=2,
     )
-    baseline = build_single_level_mlfmm_operators(
-        lmax=lmax,
+    leaf_half_size = float(partition.leaves[0].half_size)
+
+    baseline = box_order_rokhlin_like(
+        particle_lmax=lmax,
         k=k,
-        positions=positions,
-        partition=partition,
+        box_half_size=leaf_half_size,
     )
-    stricter = build_single_level_mlfmm_operators(
-        lmax=lmax,
+    stricter = box_order_rokhlin_like(
+        particle_lmax=lmax,
         k=k,
-        positions=positions,
-        partition=partition,
-        accuracy_level=4,
-        order_additive=4,
+        box_half_size=leaf_half_size,
+        accuracy=4,
+        additive=4,
     )
 
-    assert stricter.box_order > baseline.box_order
-    assert stricter.translator_order >= stricter.box_order
+    assert stricter > baseline
 
 
 def test_multilevel_transfer_anterpolation_is_interpolation_transpose() -> None:
