@@ -423,6 +423,12 @@ def gmres_cupy(
     cycle and checks convergence at the same cadence. To keep pyceles progress
     reporting and residual semantics honest, this wrapper drives one restart
     cycle at a time and evaluates the true residual between cycles.
+
+    Practical tuning note:
+    For dense/non-normal systems with left preconditioning, convergence can be
+    strongly restart-sensitive on the CuPy path. If residuals plateau with small
+    restart, increasing `restart` is often more effective than assuming the
+    preconditioner itself is broken.
     """
 
     cupy, cupyx_sparse_linalg = import_cupy()

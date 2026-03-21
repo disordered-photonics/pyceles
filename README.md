@@ -324,6 +324,19 @@ case-dependent option rather than a default speed win. On the tested low-volume-
 fraction sphere clouds, restarted CuPy GMRES often benefited more from choosing
 an adequate restart dimension than from enabling the grid-block preconditioner.
 
+Practical CuPy notes for dense systems:
+- Check your GPU's `singleToDoublePrecisionPerfRatio` before assuming
+  `complex128` is close to a `2x` cost over `complex64`. On many consumer/laptop
+  parts the ratio is very high, and end-to-end `complex128` slowdowns can be
+  an order of magnitude larger than `2x` for transcendental-heavy kernels.
+- Use `examples/benchmark_cupy_precision_ratio.py` to measure machine-local
+  FP64/FP32 penalty quickly before choosing production dtypes.
+- On dense/non-normal systems, left-preconditioned restarted GMRES can be very
+  restart-sensitive. Small restart values may stagnate even with a reasonable
+  block preconditioner; larger restart values can recover convergence.
+- Treat the CuPy grid-block preconditioner as a tuning knob, not an always-on
+  accelerator. Validate both residual trend and wall time for your geometry.
+
 Postprocessing follows the solve backend by default through
 `postprocessing_backend="inherit"`. The current CuPy postprocessing slices are:
 - scattered far-field SVWF-to-PWP assembly,
