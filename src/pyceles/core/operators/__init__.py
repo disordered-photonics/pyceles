@@ -42,6 +42,7 @@ from .mlfmm import (
     prepare_mlfmm_coupling,
     resolve_mlfmm_plan,
 )
+from .mlfmm_cupy import CuPyMLFMMPreparedData, prepare_mlfmm_cupy_data
 from .prepare import build_T_mode_diagonal, precompute_T_diagonal, prepare_matvec, rhs_Tb_numpy
 from .single_body import CompositeParticleTOperator, ParticleTOperator
 from .single_body_cupy import CuPyDiagonalParticleTOperator
@@ -52,6 +53,7 @@ __all__ = [
     "CompositeParticleTOperator",
     "CouplingOperator",
     "CuPyDiagonalParticleTOperator",
+    "CuPyMLFMMPreparedData",
     "CuPyPairwiseCouplingOperator",
     "DenseTGroup",
     "DiagonalTGroup",
@@ -79,6 +81,7 @@ __all__ = [
     "plan_particle_t_groups",
     "precompute_T_diagonal",
     "prepare_matvec",
+    "prepare_mlfmm_cupy_data",
     "resolve_mlfmm_plan",
     "require_pairwise_coupling",
     "rhs_Tb_numpy",
