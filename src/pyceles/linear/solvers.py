@@ -25,7 +25,7 @@ from tqdm.auto import tqdm
 
 from pyceles._optional import asnumpy, import_cupy
 
-from .krylov_cupy import fgmres_cupy_native, gmres_cupy_native
+from .krylov_cupy import fgmres_cupy_native, gmres_cupy_native, lgmres_cupy_native
 
 
 @dataclass(frozen=True)
@@ -662,6 +662,132 @@ def fgmres_cupy(
     )
 
 
+def lgmres_cupy(
+    A_mv: Callable[[np.ndarray], np.ndarray],
+    b: np.ndarray,
+    *,
+    x0: Optional[np.ndarray] = None,
+    preconditioner: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+    rtol: float = 1e-6,
+    atol: float = 0.0,
+    restart: int = 30,
+    maxiter: Optional[int] = None,
+    outer_k: int = 3,
+    store_outer_av: bool = True,
+    callback: Optional[Callable[[float], None]] = None,
+    callback_true: Optional[Callable[[float], None]] = None,
+    monitor: Literal["preconditioned", "true", "both"] = "preconditioned",
+    progress_residual: Literal["preconditioned", "true"] = "preconditioned",
+    orthogonalization: Literal["mgs", "cgs"] = "mgs",
+    cgs_refinement: Literal["never", "ifneeded", "always"] = "ifneeded",
+    happy_breakdown_tol: float = 0.0,
+    show_progress: bool = True,
+    compute_final_residual: bool = True,
+) -> GmresResult:
+    """Solve Ax=b via native CuPy restarted LGMRES.
+
+    LGMRES reuses a small set of correction vectors across restart cycles,
+    reducing restart-stagnation risk compared with plain restarted GMRES.
+    Monitor/callback semantics mirror ``gmres_cupy``.
+    """
+
+    cupy, _ = import_cupy()
+    b_arr = np.asarray(b)
+    n = int(b_arr.size)
+    op_dtype = np.dtype(np.result_type(b_arr.dtype, np.complex64))
+    maxiter_total = int(maxiter) if maxiter is not None else n * 10
+
+    monitor_mode = str(monitor).lower()
+    if monitor_mode not in {"preconditioned", "true", "both"}:
+        raise ValueError("`monitor` must be 'preconditioned', 'true', or 'both'.")
+    progress_mode = str(progress_residual).lower()
+    if progress_mode not in {"preconditioned", "true"}:
+        raise ValueError("`progress_residual` must be 'preconditioned' or 'true'.")
+
+    progress_update, progress_close, _ = _make_progress_tracker(
+        "lgmres[cupy]",
+        show_progress=show_progress,
+        target_rel=float(rtol),
+        residual_label="pr_rel_res" if progress_mode == "preconditioned" else "true_rel_res",
+        max_iters=maxiter_total,
+    )
+
+    def _inner_callback(pr_rel: float) -> None:
+        if progress_mode == "preconditioned":
+            progress_update(pr_rel)
+        if callback is not None:
+            callback(pr_rel)
+
+    def _restart_callback(true_rel: float) -> None:
+        if progress_mode == "true":
+            progress_update(true_rel)
+        if callback_true is not None:
+            callback_true(true_rel)
+
+    native_callback = (
+        _inner_callback
+        if (callback is not None or (show_progress and progress_mode == "preconditioned"))
+        else None
+    )
+    native_restart_callback = (
+        _restart_callback
+        if (callback_true is not None or (show_progress and progress_mode == "true"))
+        else None
+    )
+    native = lgmres_cupy_native(
+        A_mv,
+        b,
+        cupy=cupy,
+        x0=x0,
+        preconditioner=preconditioner,
+        rtol=rtol,
+        atol=atol,
+        restart=restart,
+        maxiter=maxiter_total,
+        outer_k=int(outer_k),
+        store_outer_av=bool(store_outer_av),
+        operator_dtype=op_dtype,
+        callback=native_callback,
+        restart_callback=native_restart_callback,
+        record_preconditioned_history=monitor_mode in {"preconditioned", "both"},
+        orthogonalization=orthogonalization,
+        cgs_refinement=cgs_refinement,
+        happy_breakdown_tol=float(happy_breakdown_tol),
+    )
+    progress_close()
+
+    x_np = asnumpy(native.x)
+    if compute_final_residual:
+        residual_norm = float(native.residual_norm)
+        relative_residual = float(native.relative_residual)
+    else:
+        residual_norm = float("nan")
+        relative_residual = float("nan")
+
+    pre_hist = np.asarray(native.preconditioned_history, dtype=float)
+    true_hist = np.asarray(native.true_history, dtype=float)
+    if monitor_mode == "preconditioned":
+        residual_history: np.ndarray | None = pre_hist
+    elif monitor_mode == "true":
+        residual_history = true_hist
+    else:
+        residual_history = pre_hist
+
+    return LinearSolveResult(
+        x=x_np,
+        info=int(native.info),
+        residual_norm=residual_norm,
+        relative_residual=relative_residual,
+        iterations=int(native.iterations),
+        method="lgmres[cupy]",
+        residual_history=residual_history,
+        rhs_count=1,
+        preconditioned_residual_history=pre_hist,
+        true_residual_history=true_hist,
+        converged_reason=str(native.converged_reason),
+    )
+
+
 def bicgstab_scipy(
     A_mv: Callable[[np.ndarray], np.ndarray],
     b: np.ndarray,
@@ -1053,7 +1179,7 @@ def solve_linear_system(
     A_dense: Optional[np.ndarray] = None,
     A_factorized: DenseLUFactorization | None = None,
     x0: Optional[np.ndarray] = None,
-    preconditioner: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+    preconditioner: Optional[Callable[..., np.ndarray]] = None,
     rtol: float = 1e-6,
     atol: float = 0.0,
     restart: int = 50,
@@ -1063,6 +1189,8 @@ def solve_linear_system(
     gmres_orthogonalization: Literal["mgs", "cgs"] = "mgs",
     gmres_cgs_refinement: Literal["never", "ifneeded", "always"] = "ifneeded",
     gmres_happy_breakdown_tol: float = 0.0,
+    lgmres_outer_k: int = 3,
+    lgmres_store_outer_av: bool = True,
     direct_max_n: int = 15000,
     dtype: npt.DTypeLike = np.complex128,
     backend: Literal["numpy", "cupy"] = "numpy",
@@ -1086,6 +1214,8 @@ def solve_linear_system(
     preconditioner:
         Optional callable approximating `M^{-1}` for iterative methods.
         It can accept vectors and may optionally accept batched `(n, nrhs)` inputs.
+        For native CuPy FGMRES, a two-argument form ``preconditioner(v, state)``
+        is also accepted, where ``state`` carries iteration indices.
     gmres_monitor, gmres_progress_residual:
         CuPy-native GMRES monitor channels. `gmres_monitor` controls which
         residual history is retained in the result, while
@@ -1094,6 +1224,10 @@ def solve_linear_system(
         CuPy-native GMRES Arnoldi controls. Orthogonalization can be modified
         Gram-Schmidt (`mgs`) or classical Gram-Schmidt (`cgs`) with optional
         iterative refinement policy.
+    lgmres_outer_k, lgmres_store_outer_av:
+        CuPy-native LGMRES recycle controls. ``lgmres_outer_k`` is the number
+        of correction directions retained across restart cycles; enabling
+        ``lgmres_store_outer_av`` caches ``A @ v`` for those recycled vectors.
     compute_final_residual:
         If `True`, compute and store final true residual diagnostics
         `||Ax-b||/||b||` after the solve.
@@ -1115,9 +1249,9 @@ def solve_linear_system(
     backend_name = backend
     if m == "auto":
         m = "direct" if n <= int(direct_max_n) else "gmres"
-    if backend_name == "cupy" and m not in {"gmres", "fgmres", "direct"}:
+    if backend_name == "cupy" and m not in {"gmres", "fgmres", "lgmres", "direct"}:
         raise ValueError(
-            "The CuPy linear-solver backend currently supports only GMRES, FGMRES, or direct solves."
+            "The CuPy linear-solver backend currently supports only GMRES, FGMRES, LGMRES, or direct solves."
         )
 
     x0_mat: np.ndarray | None = None
@@ -1174,6 +1308,8 @@ def solve_linear_system(
                 gmres_orthogonalization=gmres_orthogonalization,
                 gmres_cgs_refinement=gmres_cgs_refinement,
                 gmres_happy_breakdown_tol=gmres_happy_breakdown_tol,
+                lgmres_outer_k=lgmres_outer_k,
+                lgmres_store_outer_av=lgmres_store_outer_av,
                 direct_max_n=direct_max_n,
                 dtype=dtype,
                 backend=backend_name,
@@ -1265,6 +1401,26 @@ def solve_linear_system(
             compute_final_residual=compute_final_residual,
         )
     if m == "lgmres":
+        if backend_name == "cupy":
+            return lgmres_cupy(
+                A_mv,
+                b_vec,
+                x0=x0_vec,
+                preconditioner=preconditioner,
+                rtol=rtol,
+                atol=atol,
+                restart=restart,
+                maxiter=maxiter,
+                outer_k=lgmres_outer_k,
+                store_outer_av=lgmres_store_outer_av,
+                monitor=gmres_monitor,
+                progress_residual=gmres_progress_residual,
+                orthogonalization=gmres_orthogonalization,
+                cgs_refinement=gmres_cgs_refinement,
+                happy_breakdown_tol=gmres_happy_breakdown_tol,
+                show_progress=show_progress,
+                compute_final_residual=compute_final_residual,
+            )
         return lgmres_scipy(
             A_mv,
             b_vec,

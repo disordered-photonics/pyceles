@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added a native CuPy restarted GMRES implementation that keeps Arnoldi/Givens
   work on device and exposes inner-iteration progress callbacks while preserving
   true-residual checks at restart boundaries.
+- Added native CuPy FGMRES and LGMRES iterative solver paths, including
+  `solve_linear_system(..., backend="cupy", method="fgmres"|"lgmres")`, with
+  monitor-channel reporting aligned to the native GMRES result contract.
 - Added a native NumPy high-frequency MLFMM coupling backend for sphere-cluster
   workflows:
   - `SimulationConfig(coupling_backend="mlfmm")`

@@ -259,7 +259,7 @@ def test_solve_linear_system_direct_can_skip_final_residual_with_lu_only():
 
 def test_solve_linear_system_cupy_backend_rejects_bicgstab():
     b = np.array([1.0 + 0j, 2.0 + 0j])
-    with pytest.raises(ValueError, match="supports only GMRES, FGMRES, or direct"):
+    with pytest.raises(ValueError, match="supports only GMRES, FGMRES, LGMRES, or direct"):
         solve_linear_system(
             lambda x: x,
             b,
@@ -323,6 +323,16 @@ def test_fgmres_cupy_reports_clear_import_failure(monkeypatch):
     b = np.array([1.0 + 0j, 2.0 + 0j], dtype=np.complex128)
     with pytest.raises(RuntimeError, match="broken cuda path"):
         solvers.fgmres_cupy(lambda x: x, b, show_progress=False)
+
+
+def test_lgmres_cupy_reports_clear_import_failure(monkeypatch):
+    def fail_import():
+        raise RuntimeError("broken cuda path")
+
+    monkeypatch.setattr(solvers, "import_cupy", fail_import)
+    b = np.array([1.0 + 0j, 2.0 + 0j], dtype=np.complex128)
+    with pytest.raises(RuntimeError, match="broken cuda path"):
+        solvers.lgmres_cupy(lambda x: x, b, show_progress=False)
 
 
 def test_gmres_cupy_native_reports_inner_iteration_progress(monkeypatch):
@@ -409,6 +419,38 @@ def test_fgmres_cupy_matches_gmres_on_toy_system(monkeypatch):
     assert int(out_g.info) == 0
     assert int(out_f.info) == 0
     np.testing.assert_allclose(np.asarray(out_f.x), np.asarray(out_g.x), atol=1e-8, rtol=1e-8)
+
+
+def test_lgmres_cupy_matches_gmres_on_toy_system(monkeypatch):
+    monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
+    rng = np.random.default_rng(22)
+    n = 10
+    M = rng.standard_normal((n, n)) + 1j * rng.standard_normal((n, n))
+    A = M.conj().T @ M + (0.5 + 0j) * np.eye(n)
+    b = rng.standard_normal(n) + 1j * rng.standard_normal(n)
+
+    out_g = solvers.gmres_cupy(
+        lambda x: A @ np.asarray(x),
+        b,
+        rtol=1e-10,
+        atol=0.0,
+        restart=10,
+        maxiter=60,
+        show_progress=False,
+    )
+    out_l = solvers.lgmres_cupy(
+        lambda x: A @ np.asarray(x),
+        b,
+        rtol=1e-10,
+        atol=0.0,
+        restart=10,
+        maxiter=60,
+        outer_k=2,
+        show_progress=False,
+    )
+    assert int(out_g.info) == 0
+    assert int(out_l.info) == 0
+    np.testing.assert_allclose(np.asarray(out_l.x), np.asarray(out_g.x), atol=1e-8, rtol=1e-8)
 
 
 def test_gmres_cupy_native_breakdown_path_returns_failure_without_crash(monkeypatch):
@@ -641,6 +683,26 @@ def test_solve_linear_system_fgmres_cupy_smoke(monkeypatch):
     )
     assert int(out.info) == 0
     assert str(out.method) == "fgmres[cupy]"
+    np.testing.assert_allclose(np.asarray(out.x), b, atol=1e-10, rtol=1e-10)
+
+
+def test_solve_linear_system_lgmres_cupy_smoke(monkeypatch):
+    monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
+    b = np.array([1.0 + 0j, -1.5 + 0j], dtype=np.complex128)
+    out = solve_linear_system(
+        lambda x: np.asarray(x),
+        b,
+        method="lgmres",
+        backend="cupy",
+        restart=4,
+        maxiter=10,
+        lgmres_outer_k=2,
+        rtol=1e-12,
+        atol=0.0,
+        show_progress=False,
+    )
+    assert int(out.info) == 0
+    assert str(out.method) == "lgmres[cupy]"
     np.testing.assert_allclose(np.asarray(out.x), b, atol=1e-10, rtol=1e-10)
 
 

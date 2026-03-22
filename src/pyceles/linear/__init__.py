@@ -1,4 +1,9 @@
-from .krylov_cupy import CuPyGMRESNativeResult, fgmres_cupy_native, gmres_cupy_native
+from .krylov_cupy import (
+    CuPyGMRESNativeResult,
+    fgmres_cupy_native,
+    gmres_cupy_native,
+    lgmres_cupy_native,
+)
 from .preconditioner import (
     CuPyGridBlockPreconditioner,
     GridBlockPreconditioner,
@@ -17,6 +22,7 @@ from .solvers import (
     gcrotmk_scipy,
     gmres_cupy,
     gmres_scipy,
+    lgmres_cupy,
     lgmres_scipy,
     solve_linear_system,
 )
@@ -33,6 +39,7 @@ __all__ = [
     "fgmres_cupy",
     "gmres_cupy",
     "gmres_scipy",
+    "lgmres_cupy",
     "lgmres_scipy",
     "solve_linear_system",
     "CuPyGridBlockPreconditioner",
@@ -42,4 +49,5 @@ __all__ = [
     "CuPyGMRESNativeResult",
     "fgmres_cupy_native",
     "gmres_cupy_native",
+    "lgmres_cupy_native",
 ]
