@@ -40,7 +40,11 @@ class CuPyDiagonalTGroup:
 
     def apply_subset(self, x_subset: Array | object) -> object:
         arr = coerce_array(x_subset, dtype=self.dtype, prefer_cupy=True)
-        return self._diag_gpu() * arr
+        if int(arr.ndim) == 2:
+            return self._diag_gpu() * arr
+        if int(arr.ndim) == 3:
+            return self._diag_gpu()[:, :, None] * arr
+        raise ValueError(f"Diagonal T-group subset must be 2D or 3D. Got ndim={int(arr.ndim)}.")
 
     def rhs_subset(self, b_subset: Array | object) -> object:
         return self.apply_subset(b_subset)
@@ -78,7 +82,11 @@ class CuPyDenseTGroup:
     def apply_subset(self, x_subset: Array | object) -> object:
         cupy, _ = import_cupy()
         arr = coerce_array(x_subset, dtype=self.dtype, prefer_cupy=True)
-        return cupy.einsum("gij,gj->gi", self._blocks_gpu(), arr, optimize=True)
+        if int(arr.ndim) == 2:
+            return cupy.einsum("gij,gj->gi", self._blocks_gpu(), arr, optimize=True)
+        if int(arr.ndim) == 3:
+            return cupy.einsum("gij,gjr->gir", self._blocks_gpu(), arr, optimize=True)
+        raise ValueError(f"Dense T-group subset must be 2D or 3D. Got ndim={int(arr.ndim)}.")
 
     def rhs_subset(self, b_subset: Array | object) -> object:
         return self.apply_subset(b_subset)
@@ -131,10 +139,42 @@ class CuPyCompositeParticleTOperator:
 
     def _apply_impl(self, x: Array | object) -> object:
         cupy, _ = import_cupy()
-        arr = coerce_array(x, dtype=self.dtype, prefer_cupy=True).reshape(
-            self.n_particles, self.n_modes
-        )
-        out = cupy.zeros((self.n_particles, self.n_modes), dtype=self.dtype)
+        arr_raw = coerce_array(x, dtype=self.dtype, prefer_cupy=True)
+        if int(arr_raw.ndim) == 1:
+            if int(arr_raw.size) != self.n_particles * self.n_modes:
+                raise ValueError(
+                    "Input length must match n_particles * n_modes. "
+                    f"Got {int(arr_raw.size)} for {self.n_particles * self.n_modes}."
+                )
+            arr = arr_raw.reshape(self.n_particles, self.n_modes)
+            out = cupy.zeros((self.n_particles, self.n_modes), dtype=self.dtype)
+            for group in self.groups:
+                ids = np.asarray(group.particle_indices, dtype=np.int64)
+                if ids.size == 0:
+                    continue
+                if np.all(np.diff(ids) == 1):
+                    start = int(ids[0])
+                    stop = int(ids[-1]) + 1
+                    subset = arr[start:stop]
+                    subset_out = cupy.asarray(group.apply_subset(subset), dtype=self.dtype)
+                    out[start:stop] = subset_out
+                    continue
+                subset = arr[ids]
+                subset_out = cupy.asarray(group.apply_subset(subset), dtype=self.dtype)
+                for local, particle_index in enumerate(ids):
+                    out[int(particle_index)] = subset_out[int(local)]
+            return out.reshape(self.n_particles * self.n_modes)
+        elif int(arr_raw.ndim) == 2:
+            if int(arr_raw.shape[0]) != self.n_particles * self.n_modes:
+                raise ValueError(
+                    "Input first dimension must match n_particles * n_modes. "
+                    f"Got {int(arr_raw.shape[0])} for {self.n_particles * self.n_modes}."
+                )
+            arr = arr_raw.reshape(self.n_particles, self.n_modes, int(arr_raw.shape[1]))
+        else:
+            raise ValueError(f"Input must be 1D or 2D. Got shape {tuple(arr_raw.shape)}.")
+
+        out = cupy.zeros((self.n_particles, self.n_modes, int(arr.shape[2])), dtype=self.dtype)
         for group in self.groups:
             ids = np.asarray(group.particle_indices, dtype=np.int64)
             # Large sphere-only CuPy runs usually prepare one diagonal group
@@ -174,7 +214,8 @@ class CuPyCompositeParticleTOperator:
             subset_out = cupy.asarray(group.apply_subset(subset), dtype=self.dtype)
             for local, particle_index in enumerate(ids):
                 out[int(particle_index)] = subset_out[int(local)]
-        return out.reshape(self.n_particles * self.n_modes)
+        out2 = out.reshape(self.n_particles * self.n_modes, int(arr.shape[2]))
+        return out2
 
     def apply(self, x: Array | object) -> Array | object:
         out = self._apply_impl(x)

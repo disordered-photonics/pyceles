@@ -5,6 +5,7 @@ only practical for small systems. This module therefore provides:
 
 - Krylov methods (`gmres`, `bicgstab`, `lgmres`, `gcrotmk`)
 - optional dense direct solve for small systems
+- native CuPy block-GMRES for multi-RHS iterative solves
 - a dispatcher (`solve_linear_system`) with `method='auto'`
 
 Key requirements for development/debugging:
@@ -17,7 +18,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Callable, Literal, Optional
+from typing import Any, Callable, Literal, Optional
 
 import numpy as np
 import numpy.typing as npt
@@ -25,7 +26,12 @@ from tqdm.auto import tqdm
 
 from pyceles._optional import asnumpy, import_cupy
 
-from .krylov_cupy import fgmres_cupy_native, gmres_cupy_native, lgmres_cupy_native
+from .krylov_cupy import (
+    block_gmres_cupy_native,
+    fgmres_cupy_native,
+    gmres_cupy_native,
+    lgmres_cupy_native,
+)
 
 
 @dataclass(frozen=True)
@@ -43,6 +49,9 @@ class LinearSolveResult:
     preconditioned_residual_history: np.ndarray | None = None
     true_residual_history: np.ndarray | None = None
     converged_reason: str | np.ndarray | None = None
+    block_residual_history: np.ndarray | list[np.ndarray] | None = None
+    stopping_rule: str | None = None
+    block_metadata: dict[str, Any] | None = None
 
 
 GmresResult = LinearSolveResult
@@ -203,12 +212,8 @@ def _finalize_multi_result(
         residual = np.asarray(_apply_operator(A_mv, x_ref), dtype=np.complex128) - b_ref
         residual_norm = np.linalg.norm(residual, axis=0)
         b_norm = np.linalg.norm(b_ref, axis=0)
-        relative_residual = np.divide(
-            residual_norm,
-            b_norm,
-            out=np.asarray(residual_norm, dtype=float),
-            where=b_norm > 0,
-        )
+        relative_residual = np.asarray(residual_norm, dtype=float).copy()
+        np.divide(residual_norm, b_norm, out=relative_residual, where=b_norm > 0)
     else:
         nrhs = int(np.asarray(x).shape[1])
         residual_norm = np.full((nrhs,), np.nan, dtype=float)
@@ -325,6 +330,353 @@ def _make_progress_tracker(
         pbar.close()
 
     return update, close, history
+
+
+@dataclass(frozen=True)
+class BlockKrylovCallbackPayload:
+    """Progress payload for block Krylov callbacks."""
+
+    stage: Literal["inner", "restart"]
+    iteration: int
+    batch_index: int
+    batch_count: int
+    block_relative_residual: float
+    per_rhs_relative_residual: np.ndarray | None = None
+
+
+def _deflate_rhs_block_cupy(
+    b_batch_gpu: Any,
+    *,
+    cupy: Any,
+    accum_dtype: np.dtype,
+    deflation_tol: float | None,
+) -> tuple[Any, Any | None, dict[str, Any]]:
+    b_mat = cupy.asarray(b_batch_gpu, dtype=accum_dtype)
+    p = int(b_mat.shape[1])
+    if p <= 1 or deflation_tol is None or float(deflation_tol) <= 0.0:
+        return (
+            b_mat,
+            None,
+            {
+                "enabled": bool(deflation_tol is not None and float(deflation_tol) > 0.0),
+                "applied": False,
+                "original_rhs": int(p),
+                "effective_rhs": int(p),
+                "deflation_tol": None if deflation_tol is None else float(deflation_tol),
+            },
+        )
+    gram = b_mat.conj().T @ b_mat
+    evals, evecs = cupy.linalg.eigh(gram)
+    order = cupy.argsort(evals)[::-1]
+    evals = evals[order]
+    evecs = evecs[:, order]
+    max_eval = float(cupy.abs(evals[0])) if p > 0 else 0.0
+    cutoff = (float(deflation_tol) ** 2) * max_eval if max_eval > 0 else float("inf")
+    keep = cupy.abs(evals) > cutoff
+    rank = int(cupy.count_nonzero(keep))
+    if rank <= 0:
+        basis = cupy.asarray(evecs[:, :0], dtype=accum_dtype)
+        compressed = b_mat[:, :0]
+    else:
+        basis = cupy.asarray(evecs[:, :rank], dtype=accum_dtype)
+        compressed = b_mat @ basis
+    return (
+        compressed,
+        basis,
+        {
+            "enabled": True,
+            "applied": rank < p,
+            "original_rhs": int(p),
+            "effective_rhs": int(rank),
+            "deflation_tol": float(deflation_tol),
+        },
+    )
+
+
+def gmres_cupy_block(
+    A_mv: Callable[[np.ndarray], np.ndarray],
+    b: np.ndarray,
+    *,
+    x0: Optional[np.ndarray] = None,
+    preconditioner: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+    rtol: float = 1e-6,
+    atol: float = 0.0,
+    restart: int = 30,
+    maxiter: Optional[int] = None,
+    block_batch_size: int | None = None,
+    deflation_tol: float | None = None,
+    callback: Optional[Callable[[BlockKrylovCallbackPayload], None]] = None,
+    monitor: Literal["preconditioned", "true", "both"] = "preconditioned",
+    progress_residual: Literal["preconditioned", "true"] = "true",
+    reorthogonalize: bool = True,
+    show_progress: bool = True,
+    compute_final_residual: bool = True,
+) -> LinearSolveResult:
+    """Solve ``A X = B`` with native CuPy block-GMRES.
+
+    This path is active for CuPy GMRES when ``B`` is 2D. Convergence requires
+    every RHS column to satisfy ``||r_j|| <= max(atol, rtol * ||b_j||)``,
+    while block Frobenius residuals remain available as aggregate diagnostics.
+
+    Operator and preconditioner callables may expose either 2D `(n, nrhs)` or
+    legacy 1D `(n,)` interfaces. Legacy callables are adapted column-wise.
+    """
+    cupy, _ = import_cupy()
+    b_mat = np.asarray(b)
+    if b_mat.ndim != 2:
+        raise ValueError(f"`b` must be 2D for block-GMRES. Got shape {b_mat.shape}.")
+    n, nrhs = int(b_mat.shape[0]), int(b_mat.shape[1])
+    if nrhs < 1:
+        raise ValueError("`b` must contain at least one RHS column for block-GMRES.")
+    op_dtype = np.dtype(np.result_type(b_mat.dtype, np.complex64))
+    x0_mat = None if x0 is None else np.asarray(x0, dtype=op_dtype)
+    if x0_mat is not None and x0_mat.shape != b_mat.shape:
+        raise ValueError(f"`x0` must match `b` shape {b_mat.shape}. Got {x0_mat.shape}.")
+    monitor_mode = str(monitor).lower()
+    if monitor_mode not in {"preconditioned", "true", "both"}:
+        raise ValueError("`monitor` must be 'preconditioned', 'true', or 'both'.")
+    progress_mode = str(progress_residual).lower()
+    if progress_mode not in {"preconditioned", "true"}:
+        raise ValueError("`progress_residual` must be 'preconditioned' or 'true'.")
+    if block_batch_size is None:
+        batch_size = int(nrhs)
+    else:
+        batch_size = max(1, min(int(block_batch_size), int(nrhs)))
+
+    batch_ranges = [
+        (start, min(start + batch_size, nrhs)) for start in range(0, int(nrhs), int(batch_size))
+    ]
+    maxiter_total = int(maxiter) if maxiter is not None else n * 10
+    progress_update, progress_close, _ = _make_progress_tracker(
+        "gmres[cupy-block]",
+        show_progress=show_progress,
+        target_rel=float(rtol),
+        residual_label="pr_block_rel_res"
+        if progress_mode == "preconditioned"
+        else "true_block_rel_res",
+        max_iters=maxiter_total * max(1, len(batch_ranges)),
+    )
+
+    x_out = np.zeros((n, nrhs), dtype=op_dtype)
+    rhs_iterations = np.zeros((nrhs,), dtype=int)
+    rhs_info = np.zeros((nrhs,), dtype=int)
+    rhs_reason = np.full((nrhs,), "", dtype=object)
+    batch_meta: list[dict[str, Any]] = []
+    precond_hist_all: list[np.ndarray] = []
+    true_hist_all: list[np.ndarray] = []
+
+    for bidx, (start, stop) in enumerate(batch_ranges):
+        b_slice = np.asarray(b_mat[:, start:stop], dtype=op_dtype)
+        x0_slice = None if x0_mat is None else np.asarray(x0_mat[:, start:stop], dtype=op_dtype)
+        b_gpu = cupy.asarray(b_slice, dtype=op_dtype)
+        b_comp_gpu, basis_gpu, dmeta = _deflate_rhs_block_cupy(
+            b_gpu,
+            cupy=cupy,
+            accum_dtype=np.dtype(np.result_type(op_dtype, np.complex128)),
+            deflation_tol=deflation_tol,
+        )
+        eff_rhs = int(b_comp_gpu.shape[1])
+        if eff_rhs == 0:
+            x_slice = np.zeros_like(b_slice, dtype=op_dtype)
+            rhs_info[start:stop] = 0
+            rhs_iterations[start:stop] = 0
+            rhs_reason[start:stop] = "converged"
+            batch_meta.append(
+                {
+                    "batch_index": int(bidx),
+                    "batch_start": int(start),
+                    "batch_stop": int(stop),
+                    **dmeta,
+                }
+            )
+            continue
+        x0_comp = None
+        if x0_slice is not None:
+            x0_gpu = cupy.asarray(x0_slice, dtype=op_dtype)
+            x0_comp = x0_gpu if basis_gpu is None else x0_gpu @ basis_gpu
+
+        batch_index = int(bidx)
+        batch_count = int(len(batch_ranges))
+
+        def _inner_cb(
+            payload: dict[str, Any],
+            *,
+            _batch_index: int = batch_index,
+            _batch_count: int = batch_count,
+        ) -> None:
+            r = float(payload["block_relative_residual"])
+            if progress_mode == "preconditioned":
+                progress_update(r)
+            if callback is not None:
+                callback(
+                    BlockKrylovCallbackPayload(
+                        stage="inner",
+                        iteration=int(payload["iteration"]),
+                        batch_index=_batch_index,
+                        batch_count=_batch_count,
+                        block_relative_residual=r,
+                        per_rhs_relative_residual=None,
+                    )
+                )
+
+        def _restart_cb(
+            payload: dict[str, Any],
+            *,
+            _batch_index: int = batch_index,
+            _batch_count: int = batch_count,
+        ) -> None:
+            r = float(payload["block_relative_residual"])
+            if progress_mode == "true":
+                progress_update(r)
+            if callback is not None:
+                per_rhs = payload.get("per_rhs_relative_residual", None)
+                callback(
+                    BlockKrylovCallbackPayload(
+                        stage="restart",
+                        iteration=int(payload["iteration"]),
+                        batch_index=_batch_index,
+                        batch_count=_batch_count,
+                        block_relative_residual=r,
+                        per_rhs_relative_residual=None
+                        if per_rhs is None
+                        else np.asarray(per_rhs, dtype=float),
+                    )
+                )
+
+        native = block_gmres_cupy_native(
+            A_mv,
+            b_comp_gpu,
+            cupy=cupy,
+            x0=x0_comp,
+            preconditioner=preconditioner,
+            rtol=rtol,
+            atol=atol,
+            restart=restart,
+            maxiter=maxiter_total,
+            operator_dtype=op_dtype,
+            callback=_inner_cb
+            if (show_progress and progress_mode == "preconditioned") or callback
+            else None,
+            restart_callback=_restart_cb
+            if (show_progress and progress_mode == "true") or callback
+            else None,
+            record_preconditioned_history=monitor_mode in {"preconditioned", "both"},
+            reorthogonalize=bool(reorthogonalize),
+        )
+        precond_hist_all.append(np.asarray(native.preconditioned_history, dtype=float))
+        true_hist_all.append(np.asarray(native.true_history, dtype=float))
+        x_comp_gpu = cupy.asarray(native.x, dtype=op_dtype)
+        x_batch_gpu = (
+            x_comp_gpu
+            if basis_gpu is None
+            else x_comp_gpu @ cupy.asarray(basis_gpu, dtype=op_dtype).conj().T
+        )
+        x_slice = np.asarray(asnumpy(x_batch_gpu), dtype=op_dtype)
+        x_out[:, start:stop] = x_slice
+        rhs_iterations[start:stop] = int(native.iterations)
+        rhs_info[start:stop] = int(native.info)
+        rhs_reason[start:stop] = str(native.converged_reason)
+        batch_meta.append(
+            {
+                "batch_index": int(bidx),
+                "batch_start": int(start),
+                "batch_stop": int(stop),
+                "iterations": int(native.iterations),
+                "info": int(native.info),
+                "converged_reason": str(native.converged_reason),
+                "operator_supports_block": bool(native.operator_supports_block),
+                "preconditioner_supports_block": bool(native.preconditioner_supports_block),
+                **dmeta,
+            }
+        )
+
+    progress_close()
+
+    if compute_final_residual:
+        residual = np.asarray(_apply_operator(A_mv, x_out), dtype=np.complex128) - np.asarray(
+            b_mat, dtype=np.complex128
+        )
+        residual_norm = np.linalg.norm(residual, axis=0)
+        b_norm = np.linalg.norm(np.asarray(b_mat, dtype=np.complex128), axis=0)
+        relative_residual = np.asarray(residual_norm, dtype=float).copy()
+        np.divide(residual_norm, b_norm, out=relative_residual, where=b_norm > 0)
+        block_residual = float(np.linalg.norm(residual))
+        b_frob = float(np.linalg.norm(np.asarray(b_mat, dtype=np.complex128)))
+        block_relative = block_residual / b_frob if b_frob > 0 else block_residual
+        rhs_target_abs = np.maximum(float(atol), float(rtol) * b_norm)
+        rhs_converged = np.asarray(residual_norm <= rhs_target_abs, dtype=bool)
+        rhs_info = np.where(
+            rhs_converged,
+            0,
+            np.where(
+                np.asarray(rhs_info, dtype=int) == 0,
+                int(maxiter_total),
+                np.asarray(rhs_info, dtype=int),
+            ),
+        )
+        rhs_reason = np.where(
+            rhs_converged,
+            "converged",
+            np.where(
+                np.asarray(rhs_reason, dtype=object) == "converged",
+                "tolerance_not_met",
+                np.asarray(rhs_reason, dtype=object),
+            ),
+        )
+    else:
+        residual_norm = np.full((nrhs,), np.nan, dtype=float)
+        relative_residual = np.full((nrhs,), np.nan, dtype=float)
+        block_residual = float("nan")
+        block_relative = float("nan")
+        rhs_target_abs = np.full((nrhs,), np.nan, dtype=float)
+
+    pre_hist = (
+        np.concatenate([h for h in precond_hist_all if h.size > 0])
+        if any(h.size > 0 for h in precond_hist_all)
+        else np.asarray([], dtype=float)
+    )
+    true_hist = (
+        np.concatenate([h for h in true_hist_all if h.size > 0])
+        if any(h.size > 0 for h in true_hist_all)
+        else np.asarray([], dtype=float)
+    )
+    if monitor_mode == "preconditioned":
+        residual_history: np.ndarray | None = pre_hist
+    elif monitor_mode == "true":
+        residual_history = true_hist
+    else:
+        residual_history = pre_hist
+
+    return LinearSolveResult(
+        x=np.asarray(x_out),
+        info=np.asarray(rhs_info, dtype=int),
+        residual_norm=np.asarray(residual_norm, dtype=float),
+        relative_residual=np.asarray(relative_residual, dtype=float),
+        iterations=np.asarray(rhs_iterations, dtype=int),
+        method="gmres[cupy-block]",
+        residual_history=residual_history,
+        rhs_count=int(nrhs),
+        preconditioned_residual_history=pre_hist,
+        true_residual_history=true_hist,
+        converged_reason=np.asarray(rhs_reason, dtype=object),
+        block_residual_history=true_hist if monitor_mode == "true" else pre_hist,
+        stopping_rule="per_rhs_true_residual_at_restart",
+        block_metadata={
+            "batch_size": int(batch_size),
+            "batch_count": int(len(batch_ranges)),
+            "deflation_tol": None if deflation_tol is None else float(deflation_tol),
+            "batches": batch_meta,
+            "block_residual_norm": float(block_residual),
+            "block_relative_residual": float(block_relative),
+            "per_rhs_target_abs": np.asarray(rhs_target_abs, dtype=float).tolist(),
+            "operator_block_adapter_used": any(
+                not bool(batch.get("operator_supports_block", False)) for batch in batch_meta
+            ),
+            "preconditioner_block_adapter_used": any(
+                not bool(batch.get("preconditioner_supports_block", True)) for batch in batch_meta
+            ),
+        },
+    )
 
 
 def gmres_scipy(
@@ -445,6 +797,11 @@ def gmres_cupy(
 
     cupy, _ = import_cupy()
     b_arr = np.asarray(b)
+    if b_arr.ndim != 1:
+        raise ValueError(
+            "`gmres_cupy` expects a 1D RHS. For block solves use "
+            "`solve_linear_system(..., method='gmres', backend='cupy')` with a 2D RHS."
+        )
     n = int(b_arr.size)
     op_dtype = np.dtype(np.result_type(b_arr.dtype, np.complex64))
     maxiter_total = int(maxiter) if maxiter is not None else n * 10
@@ -1189,6 +1546,9 @@ def solve_linear_system(
     gmres_orthogonalization: Literal["mgs", "cgs"] = "mgs",
     gmres_cgs_refinement: Literal["never", "ifneeded", "always"] = "ifneeded",
     gmres_happy_breakdown_tol: float = 0.0,
+    gmres_block_batch_size: int | None = None,
+    gmres_block_deflation_tol: float | None = None,
+    gmres_block_reorthogonalize: bool = True,
     lgmres_outer_k: int = 3,
     lgmres_store_outer_av: bool = True,
     direct_max_n: int = 15000,
@@ -1224,6 +1584,9 @@ def solve_linear_system(
         CuPy-native GMRES Arnoldi controls. Orthogonalization can be modified
         Gram-Schmidt (`mgs`) or classical Gram-Schmidt (`cgs`) with optional
         iterative refinement policy.
+    gmres_block_batch_size, gmres_block_deflation_tol, gmres_block_reorthogonalize:
+        CuPy-native block GMRES controls used when `backend='cupy'`,
+        `method='gmres'`, and `b` is 2D.
     lgmres_outer_k, lgmres_store_outer_av:
         CuPy-native LGMRES recycle controls. ``lgmres_outer_k`` is the number
         of correction directions retained across restart cycles; enabling
@@ -1231,6 +1594,10 @@ def solve_linear_system(
     compute_final_residual:
         If `True`, compute and store final true residual diagnostics
         `||Ax-b||/||b||` after the solve.
+
+    Multi-RHS policy:
+    - `backend='cupy', method='gmres', b.ndim==2` uses the native block-GMRES path.
+    - other iterative paths currently process RHS columns independently.
     """
 
     b_arr = np.asarray(b, dtype=np.dtype(dtype))
@@ -1282,6 +1649,25 @@ def solve_linear_system(
             return out
         return out
 
+    if nrhs > 1 and m == "gmres" and backend_name == "cupy":
+        return gmres_cupy_block(
+            A_mv,
+            b_mat,
+            x0=x0_mat,
+            preconditioner=preconditioner,
+            rtol=rtol,
+            atol=atol,
+            restart=restart,
+            maxiter=maxiter,
+            block_batch_size=gmres_block_batch_size,
+            deflation_tol=gmres_block_deflation_tol,
+            monitor=gmres_monitor,
+            progress_residual=gmres_progress_residual,
+            reorthogonalize=bool(gmres_block_reorthogonalize),
+            show_progress=show_progress,
+            compute_final_residual=compute_final_residual,
+        )
+
     if nrhs > 1:
         xs: list[np.ndarray] = []
         infos: list[int] = []
@@ -1308,6 +1694,9 @@ def solve_linear_system(
                 gmres_orthogonalization=gmres_orthogonalization,
                 gmres_cgs_refinement=gmres_cgs_refinement,
                 gmres_happy_breakdown_tol=gmres_happy_breakdown_tol,
+                gmres_block_batch_size=gmres_block_batch_size,
+                gmres_block_deflation_tol=gmres_block_deflation_tol,
+                gmres_block_reorthogonalize=gmres_block_reorthogonalize,
                 lgmres_outer_k=lgmres_outer_k,
                 lgmres_store_outer_av=lgmres_store_outer_av,
                 direct_max_n=direct_max_n,

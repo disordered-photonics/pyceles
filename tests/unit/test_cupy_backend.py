@@ -222,6 +222,67 @@ def test_cupy_prepared_operator_matches_numpy_for_diagonal_spheres(
 
 
 @pytest.mark.parametrize(
+    ("operator_dtype", "rtol", "atol"),
+    [
+        (np.complex64, 2e-5, 2e-6),
+        (np.complex128, 1e-12, 1e-12),
+    ],
+)
+def test_cupy_prepared_operator_block_rhs_matches_columnwise(
+    operator_dtype: np.dtype, rtol: float, atol: float
+) -> None:
+    lmax = 3
+    wavelength = 550.0
+    n_medium = 1.0 + 0j
+    k = 2.0 * np.pi / wavelength
+    positions = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [220.0, 25.0, -60.0],
+            [-180.0, 90.0, 70.0],
+        ],
+        dtype=float,
+    )
+    radii = np.array([80.0, 82.0, 79.0], dtype=float)
+    n_particle = np.array([1.59 + 0.0j, 1.61 + 0.0j, 1.58 + 0.0j], dtype=np.complex128)
+    particles = spheres_from_arrays(
+        positions=positions,
+        radii=radii,
+        refractive_indices=n_particle,
+    )
+    nm = n_modes(lmax)
+    rng = np.random.default_rng(17)
+    n_unknowns = positions.shape[0] * nm
+    x_block = np.asarray(
+        rng.standard_normal((n_unknowns, 3)) + 1j * rng.standard_normal((n_unknowns, 3)),
+        dtype=operator_dtype,
+    )
+    b_block = np.asarray(
+        rng.standard_normal((n_unknowns, 3)) + 1j * rng.standard_normal((n_unknowns, 3)),
+        dtype=operator_dtype,
+    )
+
+    prepared_cupy = prepare_matvec(
+        lmax=lmax,
+        k=k,
+        particles=particles,
+        n_medium=n_medium,
+        radial_lut_dr=0.5,
+        cache_translation_blocks=False,
+        operator_dtype=operator_dtype,
+        backend="cupy",
+    )
+
+    y_block = np.asarray(prepared_cupy.apply_A(x_block))
+    y_cols = np.column_stack([np.asarray(prepared_cupy.apply_A(x_block[:, j])) for j in range(3)])
+    np.testing.assert_allclose(y_block, y_cols, rtol=rtol, atol=atol)
+
+    rhs_block = np.asarray(prepared_cupy.rhs_Tb(b_block))
+    rhs_cols = np.column_stack([np.asarray(prepared_cupy.rhs_Tb(b_block[:, j])) for j in range(3)])
+    np.testing.assert_allclose(rhs_block, rhs_cols, rtol=rtol, atol=atol)
+
+
+@pytest.mark.parametrize(
     (
         "operator_dtype",
         "coeff_rtol",

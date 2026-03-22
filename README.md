@@ -311,6 +311,11 @@ direct dense solve with cached LU reuse for repeated RHS workflows (for example
 multi-source sweeps or local LDOS probes). On the CuPy path this uses
 CuPy/cuSOLVER rather than a custom fused solve kernel.
 
+For matrix-free iterative solves, CuPy GMRES also supports true multi-RHS
+inputs: `solve_linear_system(..., backend="cupy", method="gmres", b.shape==(n, nrhs))`
+routes to a native block-GMRES path, and `Simulation.solve_sources(...)` uses
+that path automatically on labeled multi-channel runs.
+
 Current MLFMM scope/limits:
 - NumPy operator backend only (`operator_backend="numpy"`)
 - matrix-free iterative solves for true MLFMM stages
@@ -327,6 +332,10 @@ an adequate restart dimension than from enabling the grid-block preconditioner.
 Practical CuPy notes for dense systems:
 - CuPy GMRES in pyceles now uses a native implementation by default for
   `solve_linear_system(..., backend="cupy", method="gmres")`.
+- CuPy GMRES multi-RHS runs (`nrhs > 1`) use a native block-GMRES path and
+  report per-RHS final true residuals in `LinearSolveResult`.
+- Block-GMRES convergence requires every RHS column to satisfy the requested
+  tolerance; a low aggregate/block residual alone is not accepted as converged.
 - Motivation for this native path:
   - built-in CuPy GMRES callback/convergence visibility is restart-cycle based,
     so convergence behavior between restarts is opaque
@@ -338,6 +347,10 @@ Practical CuPy notes for dense systems:
     boundaries
 - pyceles does not expose a public runtime toggle to swap back to built-in
   CuPy GMRES in the simulation API
+- Block-GMRES speedup is currently case-dependent. On measured dense/dilute
+  benchmarks where the operator/preconditioner are adapted from legacy 1D
+  callables, convergence parity is good but wall-time speedups are not yet
+  guaranteed; profile on your workload before assuming gains.
 - Check your GPU's `singleToDoublePrecisionPerfRatio` before assuming
   `complex128` is close to a `2x` cost over `complex64`. On many consumer/laptop
   parts the ratio is very high, and end-to-end `complex128` slowdowns can be
@@ -628,6 +641,7 @@ multi = sim.postprocess_sources(solved)
 run_te = multi["te"]
 run_tm = multi["tm"]
 print(solved.solver_result.rhs_count)  # 2
+print(solved.solver_result.method)     # "gmres[cupy-block]" on CuPy iterative multi-RHS
 ```
 
 ## Mixed Particle Descriptors

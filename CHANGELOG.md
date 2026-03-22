@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added native CuPy FGMRES and LGMRES iterative solver paths, including
   `solve_linear_system(..., backend="cupy", method="fgmres"|"lgmres")`, with
   monitor-channel reporting aligned to the native GMRES result contract.
+- Added native CuPy block-GMRES support for iterative multi-RHS solves
+  (`B.shape == (n, nrhs)`) with:
+  - block-aware operator/preconditioner adapters,
+  - optional RHS batching and Gram-matrix deflation controls,
+  - explicit block/per-RHS residual diagnostics in `LinearSolveResult`.
 - Added a native NumPy high-frequency MLFMM coupling backend for sphere-cluster
   workflows:
   - `SimulationConfig(coupling_backend="mlfmm")`
@@ -32,8 +37,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `solve_linear_system(..., backend="cupy", method="gmres")` now routes through
   pyceles' native CuPy GMRES path (instead of delegating to CuPy built-in
   GMRES), improving convergence observability between restart boundaries.
+- CuPy GMRES now routes 2D RHS inputs to the native block-GMRES iterative path
+  (single-RHS behavior remains on the existing native GMRES path).
 
 ### Fixed
+- Native CuPy block-GMRES now enforces per-RHS true-residual tolerance checks
+  at restart boundaries (instead of allowing aggregate/block-only convergence)
+  and reports consistent per-RHS relative-residual diagnostics.
 - NumPy MLFMM preparation now enforces `complex128` operator dtype and keeps
   the prepared directional/translation arrays on that precision path.
 - Multilevel MLFMM directional interpolation now follows the validated angular

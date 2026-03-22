@@ -31,6 +31,10 @@ def _fake_cupy_numpy_backend():
             return np.asarray(x, dtype=dtype)
 
         @staticmethod
+        def asnumpy(x):
+            return np.asarray(x)
+
+        @staticmethod
         def array(x, dtype=None):
             return np.array(x, dtype=dtype)
 
@@ -41,6 +45,10 @@ def _fake_cupy_numpy_backend():
         @staticmethod
         def zeros(shape, dtype=None):
             return np.zeros(shape, dtype=dtype)
+
+        @staticmethod
+        def concatenate(xs, axis=0):
+            return np.concatenate(xs, axis=axis)
 
         @staticmethod
         def abs(x):
@@ -58,9 +66,24 @@ def _fake_cupy_numpy_backend():
         def vdot(x, y):
             return np.vdot(x, y)
 
+        @staticmethod
+        def max(x):
+            return np.max(x)
+
+        @staticmethod
+        def argsort(x):
+            return np.argsort(x)
+
+        @staticmethod
+        def count_nonzero(x):
+            return np.count_nonzero(x)
+
         class linalg:
             norm = staticmethod(np.linalg.norm)
             solve = staticmethod(np.linalg.solve)
+            qr = staticmethod(np.linalg.qr)
+            lstsq = staticmethod(np.linalg.lstsq)
+            eigh = staticmethod(np.linalg.eigh)
 
     return _FakeCuPy()
 
@@ -653,6 +676,251 @@ def test_gmres_cupy_reports_nonconverged_reason(monkeypatch):
     )
     assert int(out.info) > 0
     assert str(out.converged_reason) in {"maxiter_reached", "breakdown", "happy_breakdown"}
+
+
+def test_gmres_cupy_rejects_block_rhs_at_single_rhs_entrypoint(monkeypatch):
+    monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
+    b = np.eye(3, dtype=np.complex128)
+    with pytest.raises(ValueError, match="expects a 1D RHS"):
+        solvers.gmres_cupy(lambda x: np.asarray(x), b, show_progress=False)
+
+
+def test_solve_linear_system_cupy_block_gmres_identity_shape_and_metadata(monkeypatch):
+    monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
+    n, p = 7, 3
+    rng = np.random.default_rng(1234)
+    B = (rng.standard_normal((n, p)) + 1j * rng.standard_normal((n, p))).astype(np.complex128)
+
+    out = solve_linear_system(
+        lambda x: np.asarray(x),
+        B,
+        method="gmres",
+        backend="cupy",
+        rtol=1e-12,
+        atol=0.0,
+        restart=4,
+        maxiter=30,
+        show_progress=False,
+    )
+    assert out.rhs_count == p
+    assert str(out.method) == "gmres[cupy-block]"
+    np.testing.assert_allclose(np.asarray(out.x), B, atol=1e-9, rtol=1e-9)
+    np.testing.assert_array_equal(np.asarray(out.info, dtype=int), np.zeros((p,), dtype=int))
+    assert out.block_metadata is not None
+    assert int(out.block_metadata["batch_count"]) == 1
+    assert not bool(out.block_metadata["operator_block_adapter_used"])
+    assert not bool(out.block_metadata["preconditioner_block_adapter_used"])
+
+    b_vec = B[:, 0]
+    out_vec = solve_linear_system(
+        lambda x: np.asarray(x),
+        b_vec,
+        method="gmres",
+        backend="cupy",
+        rtol=1e-12,
+        atol=0.0,
+        restart=4,
+        maxiter=30,
+        show_progress=False,
+    )
+    assert str(out_vec.method) == "gmres[cupy]"
+    np.testing.assert_allclose(np.asarray(out_vec.x), b_vec, atol=1e-9, rtol=1e-9)
+
+
+def test_solve_linear_system_cupy_block_gmres_matches_direct_on_dense_system(monkeypatch):
+    monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
+    rng = np.random.default_rng(4321)
+    n, p = 10, 4
+    M = rng.standard_normal((n, n)) + 1j * rng.standard_normal((n, n))
+    A = M.conj().T @ M + (0.75 + 0j) * np.eye(n, dtype=np.complex128)
+    B = rng.standard_normal((n, p)) + 1j * rng.standard_normal((n, p))
+
+    out = solve_linear_system(
+        lambda x: A @ np.asarray(x),
+        B,
+        method="gmres",
+        backend="cupy",
+        rtol=1e-10,
+        atol=0.0,
+        restart=6,
+        maxiter=60,
+        show_progress=False,
+    )
+    x_ref = np.linalg.solve(A, B)
+    np.testing.assert_allclose(np.asarray(out.x), x_ref, atol=1e-8, rtol=1e-8)
+    assert np.all(np.asarray(out.info, dtype=int) == 0)
+
+
+def test_solve_linear_system_cupy_block_gmres_vector_only_operator_fallback(monkeypatch):
+    monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
+    rng = np.random.default_rng(99)
+    n, p = 8, 3
+    diag = (1.0 + rng.random(n)) + 0j
+    A = np.diag(diag.astype(np.complex128))
+    B = (rng.standard_normal((n, p)) + 1j * rng.standard_normal((n, p))).astype(np.complex128)
+
+    def _a_vec_only(x: np.ndarray) -> np.ndarray:
+        arr = np.asarray(x)
+        if arr.ndim != 1:
+            raise ValueError("vector-only operator")
+        return A @ arr
+
+    def _m_vec_only(x: np.ndarray) -> np.ndarray:
+        arr = np.asarray(x)
+        if arr.ndim != 1:
+            raise ValueError("vector-only preconditioner")
+        return arr / diag
+
+    out_block = solve_linear_system(
+        _a_vec_only,
+        B,
+        method="gmres",
+        backend="cupy",
+        preconditioner=_m_vec_only,
+        rtol=1e-10,
+        atol=0.0,
+        restart=4,
+        maxiter=40,
+        show_progress=False,
+    )
+    cols = []
+    for j in range(p):
+        col = solve_linear_system(
+            _a_vec_only,
+            B[:, j],
+            method="gmres",
+            backend="cupy",
+            preconditioner=_m_vec_only,
+            rtol=1e-10,
+            atol=0.0,
+            restart=4,
+            maxiter=40,
+            show_progress=False,
+        )
+        cols.append(np.asarray(col.x).reshape(-1))
+    x_cols = np.column_stack(cols)
+    np.testing.assert_allclose(np.asarray(out_block.x), x_cols, atol=1e-8, rtol=1e-8)
+    assert out_block.block_metadata is not None
+    assert bool(out_block.block_metadata["operator_block_adapter_used"])
+    assert bool(out_block.block_metadata["preconditioner_block_adapter_used"])
+
+
+def test_solve_linear_system_cupy_block_gmres_deflation_and_batching(monkeypatch):
+    monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
+    rng = np.random.default_rng(777)
+    n = 9
+    u = rng.standard_normal(n) + 1j * rng.standard_normal(n)
+    v = rng.standard_normal(n) + 1j * rng.standard_normal(n)
+    B = np.column_stack([u, u, 2.0 * u, v, v + 1e-10 * u]).astype(np.complex128)
+
+    out_full = solve_linear_system(
+        lambda x: np.asarray(x),
+        B,
+        method="gmres",
+        backend="cupy",
+        rtol=1e-12,
+        atol=0.0,
+        restart=5,
+        maxiter=30,
+        gmres_block_deflation_tol=1e-8,
+        show_progress=False,
+    )
+    out_batched = solve_linear_system(
+        lambda x: np.asarray(x),
+        B,
+        method="gmres",
+        backend="cupy",
+        rtol=1e-12,
+        atol=0.0,
+        restart=5,
+        maxiter=30,
+        gmres_block_deflation_tol=1e-8,
+        gmres_block_batch_size=2,
+        show_progress=False,
+    )
+
+    np.testing.assert_allclose(np.asarray(out_full.x), B, atol=1e-9, rtol=1e-9)
+    np.testing.assert_allclose(
+        np.asarray(out_batched.x), np.asarray(out_full.x), atol=1e-9, rtol=1e-9
+    )
+    assert out_full.block_metadata is not None
+    assert any(bool(m["applied"]) for m in out_full.block_metadata["batches"])
+    assert out_batched.block_metadata is not None
+    assert int(out_batched.block_metadata["batch_count"]) == 3
+
+
+def test_solve_linear_system_cupy_block_gmres_enforces_per_rhs_tolerance(monkeypatch):
+    monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
+
+    def _fake_native(*args, **kwargs):
+        b_comp = np.asarray(args[1])
+        p = int(b_comp.shape[1])
+        return types.SimpleNamespace(
+            x=np.zeros_like(b_comp),
+            info=0,
+            iterations=1,
+            block_residual_norm=float(np.linalg.norm(b_comp)),
+            block_relative_residual=1.0,
+            residual_norms=np.linalg.norm(b_comp, axis=0),
+            relative_residuals=np.ones((p,), dtype=float),
+            converged_reason="converged",
+            preconditioned_history=np.asarray([1.0], dtype=float),
+            true_history=np.asarray([1.0], dtype=float),
+            per_rhs_true_history=np.asarray([np.ones((p,), dtype=float)], dtype=float),
+            operator_supports_block=False,
+            preconditioner_supports_block=True,
+        )
+
+    monkeypatch.setattr(solvers, "block_gmres_cupy_native", _fake_native)
+    b = np.asarray(
+        [
+            [1.0 + 0.0j, 0.5 + 0.0j],
+            [0.25 + 0.0j, -0.75 + 0.0j],
+            [-0.2 + 0.0j, 0.1 + 0.0j],
+        ],
+        dtype=np.complex128,
+    )
+    out = solvers.gmres_cupy_block(
+        lambda x: np.asarray(x),
+        b,
+        rtol=1e-6,
+        atol=0.0,
+        show_progress=False,
+        compute_final_residual=True,
+    )
+    assert np.all(np.asarray(out.info, dtype=int) > 0)
+    np.testing.assert_allclose(np.asarray(out.relative_residual, dtype=float), 1.0, atol=1e-12)
+    assert np.all(np.asarray(out.converged_reason, dtype=object) == "tolerance_not_met")
+    assert out.block_metadata is not None
+    assert bool(out.block_metadata["operator_block_adapter_used"])
+
+
+def test_solve_linear_system_cupy_block_gmres_callback_payload(monkeypatch):
+    monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
+    rng = np.random.default_rng(222)
+    n, p = 8, 2
+    A = np.diag((1.0 + rng.random(n)).astype(np.complex128))
+    B = rng.standard_normal((n, p)).astype(np.complex128)
+    seen: list[solvers.BlockKrylovCallbackPayload] = []
+
+    out = solvers.gmres_cupy_block(
+        lambda x: A @ np.asarray(x),
+        B,
+        rtol=1e-12,
+        atol=0.0,
+        restart=4,
+        maxiter=30,
+        callback=seen.append,
+        show_progress=False,
+    )
+    assert np.all(np.asarray(out.info, dtype=int) == 0)
+    assert len(seen) >= 2
+    assert any(p.stage == "inner" for p in seen)
+    assert any(p.stage == "restart" for p in seen)
+    for payload in seen:
+        assert payload.batch_count >= 1
+        assert payload.batch_index >= 0
+        assert payload.iteration >= 0
 
 
 def test_solve_linear_system_fgmres_backend_guard():

@@ -335,6 +335,43 @@ def test_cupy_grid_block_preconditioner_matches_numpy_apply() -> None:
     np.testing.assert_allclose(cupy_out, precond_numpy(x), rtol=1e-10, atol=1e-10)
 
 
+@cupy_available
+def test_cupy_grid_block_preconditioner_block_rhs_matches_columnwise() -> None:
+    _configure_cupy_tempdir()
+    prepared_numpy = _sample_prepared()
+    prepared_cupy = prepare_matvec(
+        lmax=prepared_numpy.lmax,
+        k=prepared_numpy.k,
+        particles=spheres_from_arrays(
+            positions=prepared_numpy.positions,
+            radii=np.array([80.0, 82.0, 79.0], dtype=float),
+            refractive_indices=np.array(
+                [1.59 + 0.0j, 1.61 + 0.0j, 1.58 + 0.0j], dtype=np.complex128
+            ),
+        ),
+        n_medium=1.0 + 0j,
+        radial_lut_dr=1.0,
+        cache_translation_blocks=False,
+        operator_dtype=np.complex64,
+        backend="cupy",
+    )
+    precond_cupy = make_grid_block_preconditioner(
+        prepared_cupy,
+        backend="cupy",
+        subdivisions=2,
+        cubic_bbox=True,
+        show_progress=False,
+    )
+
+    n = prepared_numpy.positions.shape[0] * n_modes(prepared_numpy.lmax)
+    rng = np.random.default_rng(146)
+    x = (rng.standard_normal((n, 3)) + 1j * rng.standard_normal((n, 3))).astype(np.complex64)
+
+    y_block = np.asarray(precond_cupy(x))
+    y_cols = np.column_stack([np.asarray(precond_cupy(x[:, j])) for j in range(3)])
+    np.testing.assert_allclose(y_block, y_cols, rtol=2e-5, atol=2e-6)
+
+
 def test_simulation_supports_builtin_grid_block_preconditioner():
     source = PlaneWave(
         wavelength=550.0,

@@ -121,6 +121,7 @@ def _translation_matvec_raw_kernel(lmax: int, dtype_str: str):
     extern "C" __global__ void {kernel_name}(
         const int ns,
         const int nmodes,
+        const int nrhs,
         const {real_type}* positions,
         const {real_type}* re_h,
         const {real_type}* im_h,
@@ -157,94 +158,99 @@ def _translation_matvec_raw_kernel(lmax: int, dtype_str: str):
         const int tau1 = mode_tau[n1];
         const int l1 = mode_l[n1];
         const int m1 = mode_m[n1];
+        const int rhs_stride = ns * nmodes;
 
-        for (int s1 = blockIdx.y; s1 < ns; s1 += gridDim.y) {{
-            {real_type} re_incr = ({real_type})0;
-            {real_type} im_incr = ({real_type})0;
+        for (int rhs = blockIdx.z; rhs < nrhs; rhs += gridDim.z) {{
+            const int rhs_offset = rhs * rhs_stride;
 
-            for (int s2 = 0; s2 < ns; ++s2) {{
-                if (s2 == s1) {{
-                    continue;
-                }}
+            for (int s1 = blockIdx.y; s1 < ns; s1 += gridDim.y) {{
+                {real_type} re_incr = ({real_type})0;
+                {real_type} im_incr = ({real_type})0;
 
-                if (threadIdx.x == 0) {{
-                    // Geometry and angular factors depend only on the particle pair
-                    // (s1, s2), not on the output mode. Compute them once per block
-                    // and let all mode threads reuse them. The heavier table
-                    // fills below are then distributed cooperatively.
-                    const {real_type} x21 = positions[3 * s1] - positions[3 * s2];
-                    const {real_type} y21 = positions[3 * s1 + 1] - positions[3 * s2 + 1];
-                    const {real_type} z21 = positions[3 * s1 + 2] - positions[3 * s2 + 2];
-                    r_shared = {math["sqrt"]}(x21 * x21 + y21 * y21 + z21 * z21);
-                    ct_shared = z21 / r_shared;
-                    st_shared = {math["sqrt"]}(
-                        {math["max"]}(({real_type})0, ({real_type})1 - ct_shared * ct_shared)
-                    );
-                    phi_shared = {math["atan2"]}(y21, x21);
-                }}
-                __syncthreads();
-
-                for (int p = threadIdx.x; p < {n_orders}; p += blockDim.x) {{
-                    re_h_shared[p] = hankel_lookup_linear(p, r_shared, re_h, inv_dr, last_index);
-                    im_h_shared[p] = hankel_lookup_linear(p, r_shared, im_h, inv_dr, last_index);
-                    for (int absdm = 0; absdm <= p; ++absdm) {{
-                        p_pdm_shared[p * (p + 1) / 2 + absdm] =
-                            assoc_legendre_function(p, absdm, ct_shared, st_shared, plm_coeffs);
+                for (int s2 = 0; s2 < ns; ++s2) {{
+                    if (s2 == s1) {{
+                        continue;
                     }}
-                }}
-                if (threadIdx.x == 0) {{
-                    // We keep the direct trig form here for readability.
-                    // A recurrence-based phase-table fill was tested on the
-                    // 5k-particle c64 benchmark and did not produce a material
-                    // end-to-end improvement.
-                    for (int dm = -2 * {lmax}; dm <= 2 * {lmax}; ++dm) {{
-                        const int idx = dm + 2 * {lmax};
-                        cos_mphi_shared[idx] = {math["cos"]}(({real_type})dm * phi_shared);
-                        sin_mphi_shared[idx] = {math["sin"]}(({real_type})dm * phi_shared);
-                    }}
-                }}
-                __syncthreads();
 
-                for (int n2 = 0; n2 < nmodes; ++n2) {{
-                    // We intentionally read x[s2, n2] directly from global memory.
-                    // Profiling on the 5k-particle c64 benchmark showed that
-                    // staging this small mode vector in shared memory did not
-                    // produce a material end-to-end speedup, while it made the
-                    // kernel more verbose and stateful.
-                    const {real_type} re_x_tmp = re_x[s2 * nmodes + n2];
-                    const {real_type} im_x_tmp = im_x[s2 * nmodes + n2];
-                    const int delta_m = mode_m[n2] - m1;
-                    const int phase_idx = delta_m + 2 * {lmax};
-                    const int pair_idx = n1 * nmodes + n2;
-                    const int base = pair_offset[pair_idx];
-                    const int p_min = pair_pmin[pair_idx];
-                    const int p_count = pair_pcount[pair_idx];
-                    // `pair_*` turns the CELES/SMUTHI triangular p-range for each
-                    // (n1, n2) pair into a simple flat interval in the compact ab5
-                    // arrays. That keeps the kernel inner loop branch-light.
-                    for (int ip = 0; ip < p_count; ++ip) {{
-                        const int p = p_min + ip;
-                        const int ab_idx = base + ip;
-                        const {real_type} plm = p_pdm_shared[p * (p + 1) / 2 + abs(delta_m)];
-                        const {real_type} re_abp = re_ab[ab_idx] * plm;
-                        const {real_type} im_abp = im_ab[ab_idx] * plm;
-                        const {real_type} re_abph =
-                            re_abp * re_h_shared[p] - im_abp * im_h_shared[p];
-                        const {real_type} im_abph =
-                            re_abp * im_h_shared[p] + im_abp * re_h_shared[p];
-                        const {real_type} re_phase =
-                            re_abph * cos_mphi_shared[phase_idx] - im_abph * sin_mphi_shared[phase_idx];
-                        const {real_type} im_phase =
-                            re_abph * sin_mphi_shared[phase_idx] + im_abph * cos_mphi_shared[phase_idx];
-                        re_incr += re_phase * re_x_tmp - im_phase * im_x_tmp;
-                        im_incr += re_phase * im_x_tmp + im_phase * re_x_tmp;
+                    if (threadIdx.x == 0) {{
+                        // Geometry and angular factors depend only on the particle pair
+                        // (s1, s2), not on the output mode. Compute them once per block
+                        // and let all mode threads reuse them. The heavier table
+                        // fills below are then distributed cooperatively.
+                        const {real_type} x21 = positions[3 * s1] - positions[3 * s2];
+                        const {real_type} y21 = positions[3 * s1 + 1] - positions[3 * s2 + 1];
+                        const {real_type} z21 = positions[3 * s1 + 2] - positions[3 * s2 + 2];
+                        r_shared = {math["sqrt"]}(x21 * x21 + y21 * y21 + z21 * z21);
+                        ct_shared = z21 / r_shared;
+                        st_shared = {math["sqrt"]}(
+                            {math["max"]}(({real_type})0, ({real_type})1 - ct_shared * ct_shared)
+                        );
+                        phi_shared = {math["atan2"]}(y21, x21);
                     }}
+                    __syncthreads();
+
+                    for (int p = threadIdx.x; p < {n_orders}; p += blockDim.x) {{
+                        re_h_shared[p] = hankel_lookup_linear(p, r_shared, re_h, inv_dr, last_index);
+                        im_h_shared[p] = hankel_lookup_linear(p, r_shared, im_h, inv_dr, last_index);
+                        for (int absdm = 0; absdm <= p; ++absdm) {{
+                            p_pdm_shared[p * (p + 1) / 2 + absdm] =
+                                assoc_legendre_function(p, absdm, ct_shared, st_shared, plm_coeffs);
+                        }}
+                    }}
+                    if (threadIdx.x == 0) {{
+                        // We keep the direct trig form here for readability.
+                        // A recurrence-based phase-table fill was tested on the
+                        // 5k-particle c64 benchmark and did not produce a material
+                        // end-to-end improvement.
+                        for (int dm = -2 * {lmax}; dm <= 2 * {lmax}; ++dm) {{
+                            const int idx = dm + 2 * {lmax};
+                            cos_mphi_shared[idx] = {math["cos"]}(({real_type})dm * phi_shared);
+                            sin_mphi_shared[idx] = {math["sin"]}(({real_type})dm * phi_shared);
+                        }}
+                    }}
+                    __syncthreads();
+
+                    for (int n2 = 0; n2 < nmodes; ++n2) {{
+                        // We intentionally read x[s2, n2] directly from global memory.
+                        // Profiling on the 5k-particle c64 benchmark showed that
+                        // staging this small mode vector in shared memory did not
+                        // produce a material end-to-end speedup, while it made the
+                        // kernel more verbose and stateful.
+                        const {real_type} re_x_tmp = re_x[rhs_offset + s2 * nmodes + n2];
+                        const {real_type} im_x_tmp = im_x[rhs_offset + s2 * nmodes + n2];
+                        const int delta_m = mode_m[n2] - m1;
+                        const int phase_idx = delta_m + 2 * {lmax};
+                        const int pair_idx = n1 * nmodes + n2;
+                        const int base = pair_offset[pair_idx];
+                        const int p_min = pair_pmin[pair_idx];
+                        const int p_count = pair_pcount[pair_idx];
+                        // `pair_*` turns the CELES/SMUTHI triangular p-range for each
+                        // (n1, n2) pair into a simple flat interval in the compact ab5
+                        // arrays. That keeps the kernel inner loop branch-light.
+                        for (int ip = 0; ip < p_count; ++ip) {{
+                            const int p = p_min + ip;
+                            const int ab_idx = base + ip;
+                            const {real_type} plm = p_pdm_shared[p * (p + 1) / 2 + abs(delta_m)];
+                            const {real_type} re_abp = re_ab[ab_idx] * plm;
+                            const {real_type} im_abp = im_ab[ab_idx] * plm;
+                            const {real_type} re_abph =
+                                re_abp * re_h_shared[p] - im_abp * im_h_shared[p];
+                            const {real_type} im_abph =
+                                re_abp * im_h_shared[p] + im_abp * re_h_shared[p];
+                            const {real_type} re_phase =
+                                re_abph * cos_mphi_shared[phase_idx] - im_abph * sin_mphi_shared[phase_idx];
+                            const {real_type} im_phase =
+                                re_abph * sin_mphi_shared[phase_idx] + im_abph * cos_mphi_shared[phase_idx];
+                            re_incr += re_phase * re_x_tmp - im_phase * im_x_tmp;
+                            im_incr += re_phase * im_x_tmp + im_phase * re_x_tmp;
+                        }}
+                    }}
+                    __syncthreads();
                 }}
-                __syncthreads();
+
+                re_wx[rhs_offset + s1 * nmodes + n1] = re_incr;
+                im_wx[rhs_offset + s1 * nmodes + n1] = im_incr;
             }}
-
-            re_wx[s1 * nmodes + n1] = re_incr;
-            im_wx[s1 * nmodes + n1] = im_incr;
         }}
     }}
     """
@@ -408,7 +414,7 @@ class CuPyPairwiseCouplingOperator:
             self._pair_pcount_gpu,
         )
 
-    def _launch_config(self) -> tuple[int, int, int]:
+    def _launch_config(self, *, nrhs: int = 1) -> tuple[int, int, int, int]:
         cupy, _ = import_cupy()
         props = cupy.cuda.runtime.getDeviceProperties(cupy.cuda.runtime.getDevice())
         max_threads = int(props["maxThreadsPerBlock"])
@@ -443,8 +449,10 @@ class CuPyPairwiseCouplingOperator:
         threads_per_block = max(warp_size, min(max_threads, target_threads, nmodes_total))
         blocks_x = (nmodes_total + threads_per_block - 1) // threads_per_block
         max_grid_y = int(props["maxGridSize"][1])
+        max_grid_z = int(props["maxGridSize"][2])
         grid_y = min(self.n_particles, max_grid_y)
-        return int(blocks_x), int(threads_per_block), int(grid_y)
+        grid_z = min(max(1, int(nrhs)), max_grid_z)
+        return int(blocks_x), int(threads_per_block), int(grid_y), int(grid_z)
 
     def _apply_gpu(self, x: np.ndarray | object):
         cupy, _ = import_cupy()
@@ -465,22 +473,78 @@ class CuPyPairwiseCouplingOperator:
             pair_pcount_gpu,
         ) = self._raw_kernel_resources()
 
-        arr = coerce_array(x, dtype=self.dtype, prefer_cupy=True).reshape(
-            self.n_particles, self.n_modes
-        )
-        x_re = cupy.ascontiguousarray(arr.real.reshape(-1).astype(real_dtype, copy=False))
-        x_im = cupy.ascontiguousarray(arr.imag.reshape(-1).astype(real_dtype, copy=False))
-        y_re = cupy.zeros((self.n_particles * self.n_modes,), dtype=real_dtype)
-        y_im = cupy.zeros((self.n_particles * self.n_modes,), dtype=real_dtype)
+        arr_raw = coerce_array(x, dtype=self.dtype, prefer_cupy=True)
+        if int(arr_raw.ndim) == 1:
+            if int(arr_raw.size) != self.n_particles * self.n_modes:
+                raise ValueError(
+                    "Input length must match n_particles * n_modes. "
+                    f"Got {int(arr_raw.size)} for {self.n_particles * self.n_modes}."
+                )
+            arr = arr_raw.reshape(self.n_particles, self.n_modes)
+            x_re = cupy.ascontiguousarray(arr.real.reshape(-1).astype(real_dtype, copy=False))
+            x_im = cupy.ascontiguousarray(arr.imag.reshape(-1).astype(real_dtype, copy=False))
+            y_re = cupy.zeros((self.n_particles * self.n_modes,), dtype=real_dtype)
+            y_im = cupy.zeros((self.n_particles * self.n_modes,), dtype=real_dtype)
+            blocks_x, threads_per_block, grid_y, _ = self._launch_config(nrhs=1)
+            inv_dr = self.real_dtype.type(self.radial_lut._inv_dr)
+            kernel(
+                (blocks_x, grid_y, 1),
+                (threads_per_block,),
+                (
+                    np.int32(self.n_particles),
+                    np.int32(self.n_modes),
+                    np.int32(1),
+                    positions_gpu,
+                    lut_re_gpu,
+                    lut_im_gpu,
+                    inv_dr,
+                    np.int32(self.radial_lut._last_index),
+                    plm_coeff_gpu,
+                    compact_re_ab_gpu,
+                    compact_im_ab_gpu,
+                    mode_tau_gpu,
+                    mode_l_gpu,
+                    mode_m_gpu,
+                    pair_offset_gpu,
+                    pair_pmin_gpu,
+                    pair_pcount_gpu,
+                    x_re,
+                    x_im,
+                    y_re,
+                    y_im,
+                ),
+            )
+            return (
+                (y_re + 1j * y_im)
+                .astype(self.dtype, copy=False)
+                .reshape(self.n_particles * self.n_modes)
+            )
+        elif int(arr_raw.ndim) == 2:
+            if int(arr_raw.shape[0]) != self.n_particles * self.n_modes:
+                raise ValueError(
+                    "Input first dimension must match n_particles * n_modes. "
+                    f"Got {int(arr_raw.shape[0])} for {self.n_particles * self.n_modes}."
+                )
+            arr = arr_raw.reshape(self.n_particles, self.n_modes, int(arr_raw.shape[1]))
+        else:
+            raise ValueError(f"Input must be 1D or 2D. Got shape {tuple(arr_raw.shape)}.")
 
-        blocks_x, threads_per_block, grid_y = self._launch_config()
+        nrhs = int(arr.shape[2])
+        x_rhs_major = cupy.transpose(arr, (2, 0, 1))
+        x_re = cupy.ascontiguousarray(x_rhs_major.real.reshape(-1).astype(real_dtype, copy=False))
+        x_im = cupy.ascontiguousarray(x_rhs_major.imag.reshape(-1).astype(real_dtype, copy=False))
+        y_re = cupy.zeros((nrhs * self.n_particles * self.n_modes,), dtype=real_dtype)
+        y_im = cupy.zeros((nrhs * self.n_particles * self.n_modes,), dtype=real_dtype)
+
+        blocks_x, threads_per_block, grid_y, grid_z = self._launch_config(nrhs=nrhs)
         inv_dr = self.real_dtype.type(self.radial_lut._inv_dr)
         kernel(
-            (blocks_x, grid_y),
+            (blocks_x, grid_y, grid_z),
             (threads_per_block,),
             (
                 np.int32(self.n_particles),
                 np.int32(self.n_modes),
+                np.int32(nrhs),
                 positions_gpu,
                 lut_re_gpu,
                 lut_im_gpu,
@@ -501,8 +565,15 @@ class CuPyPairwiseCouplingOperator:
                 y_im,
             ),
         )
-        out = (y_re + 1j * y_im).astype(self.dtype, copy=False)
-        return out.reshape(self.n_particles * self.n_modes)
+        out_rhs_major = (
+            (y_re + 1j * y_im)
+            .astype(self.dtype, copy=False)
+            .reshape(nrhs, self.n_particles, self.n_modes)
+        )
+        out = cupy.transpose(out_rhs_major, (1, 2, 0)).reshape(
+            self.n_particles * self.n_modes, nrhs
+        )
+        return out
 
     def apply(self, x: np.ndarray | object) -> np.ndarray | object:
         out = self._apply_gpu(x)
