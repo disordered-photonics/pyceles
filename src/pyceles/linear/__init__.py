@@ -1,4 +1,4 @@
-from .krylov_cupy import CuPyGMRESNativeResult, gmres_cupy_native
+from .krylov_cupy import CuPyGMRESNativeResult, fgmres_cupy_native, gmres_cupy_native
 from .preconditioner import (
     CuPyGridBlockPreconditioner,
     GridBlockPreconditioner,
@@ -13,6 +13,7 @@ from .solvers import (
     direct_dense_scipy,
     estimate_dense_matrix_bytes,
     factorize_dense_matrix,
+    fgmres_cupy,
     gcrotmk_scipy,
     gmres_cupy,
     gmres_scipy,
@@ -29,6 +30,7 @@ __all__ = [
     "estimate_dense_matrix_bytes",
     "factorize_dense_matrix",
     "gcrotmk_scipy",
+    "fgmres_cupy",
     "gmres_cupy",
     "gmres_scipy",
     "lgmres_scipy",
@@ -38,5 +40,6 @@ __all__ = [
     "make_grid_block_preconditioner",
     "regular_grid_partition",
     "CuPyGMRESNativeResult",
+    "fgmres_cupy_native",
     "gmres_cupy_native",
 ]
