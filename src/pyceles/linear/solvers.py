@@ -40,6 +40,9 @@ class LinearSolveResult:
     method: str
     residual_history: np.ndarray | list[np.ndarray | None] | None = None
     rhs_count: int = 1
+    preconditioned_residual_history: np.ndarray | None = None
+    true_residual_history: np.ndarray | None = None
+    converged_reason: str | np.ndarray | None = None
 
 
 GmresResult = LinearSolveResult
@@ -149,6 +152,7 @@ def _finalize_result(
     method: str,
     residual_history: Optional[list[float]] = None,
     compute_final_residual: bool = True,
+    converged_reason: str | None = None,
 ) -> LinearSolveResult:
     """Finalize single-RHS diagnostics using true residual `||Ax-b||/||b||`."""
     if compute_final_residual:
@@ -174,6 +178,9 @@ def _finalize_result(
         if residual_history is None
         else np.asarray(residual_history, dtype=float),
         rhs_count=1,
+        converged_reason=str(converged_reason)
+        if converged_reason is not None
+        else ("converged" if int(info) == 0 else "maxiter_reached"),
     )
 
 
@@ -187,6 +194,7 @@ def _finalize_multi_result(
     method: str,
     residual_history: list[np.ndarray | None] | None = None,
     compute_final_residual: bool = True,
+    converged_reason: np.ndarray | None = None,
 ) -> LinearSolveResult:
     """Finalize multi-RHS diagnostics with per-column true residuals."""
     if compute_final_residual:
@@ -214,6 +222,9 @@ def _finalize_multi_result(
         method=str(method),
         residual_history=residual_history,
         rhs_count=int(x.shape[1]),
+        converged_reason=np.asarray(converged_reason, dtype=object)
+        if converged_reason is not None
+        else np.where(np.asarray(info, dtype=int) == 0, "converged", "maxiter_reached"),
     )
 
 
@@ -416,15 +427,20 @@ def gmres_cupy(
     restart: int = 50,
     maxiter: Optional[int] = None,
     callback: Optional[Callable[[float], None]] = None,
+    callback_true: Optional[Callable[[float], None]] = None,
+    monitor: Literal["preconditioned", "true", "both"] = "preconditioned",
+    progress_residual: Literal["preconditioned", "true"] = "preconditioned",
+    orthogonalization: Literal["mgs", "cgs"] = "mgs",
+    cgs_refinement: Literal["never", "ifneeded", "always"] = "ifneeded",
+    happy_breakdown_tol: float = 0.0,
     show_progress: bool = True,
     compute_final_residual: bool = True,
 ) -> GmresResult:
     """Solve Ax=b via native CuPy restarted GMRES.
 
     The Arnoldi basis, Hessenberg system, and Givens updates stay device-side.
-    Inner-iteration callbacks/reporting follow GMRES preconditioned residual
-    recurrence, while convergence is decided on true residual checks at restart
-    boundaries.
+    `callback` receives inner preconditioned residual updates. `callback_true`
+    receives true residual updates at restart boundaries.
     """
 
     cupy, _ = import_cupy()
@@ -433,20 +449,43 @@ def gmres_cupy(
     op_dtype = np.dtype(np.result_type(b_arr.dtype, np.complex64))
     maxiter_total = int(maxiter) if maxiter is not None else n * 10
 
-    progress_update, progress_close, history = _make_progress_tracker(
+    monitor_mode = str(monitor).lower()
+    if monitor_mode not in {"preconditioned", "true", "both"}:
+        raise ValueError("`monitor` must be 'preconditioned', 'true', or 'both'.")
+    progress_mode = str(progress_residual).lower()
+    if progress_mode not in {"preconditioned", "true"}:
+        raise ValueError("`progress_residual` must be 'preconditioned' or 'true'.")
+
+    progress_update, progress_close, _ = _make_progress_tracker(
         "gmres[cupy]",
         show_progress=show_progress,
         target_rel=float(rtol),
-        residual_label="pr_rel_res",
+        residual_label="pr_rel_res" if progress_mode == "preconditioned" else "true_rel_res",
         max_iters=maxiter_total,
     )
 
     def _inner_callback(pr_rel: float) -> None:
-        progress_update(pr_rel)
+        if progress_mode == "preconditioned":
+            progress_update(pr_rel)
         if callback is not None:
             callback(pr_rel)
 
-    native_callback = _inner_callback if (show_progress or callback is not None) else None
+    def _restart_callback(true_rel: float) -> None:
+        if progress_mode == "true":
+            progress_update(true_rel)
+        if callback_true is not None:
+            callback_true(true_rel)
+
+    native_callback = (
+        _inner_callback
+        if (callback is not None or (show_progress and progress_mode == "preconditioned"))
+        else None
+    )
+    native_restart_callback = (
+        _restart_callback
+        if (callback_true is not None or (show_progress and progress_mode == "true"))
+        else None
+    )
     native = gmres_cupy_native(
         A_mv,
         b,
@@ -459,7 +498,11 @@ def gmres_cupy(
         maxiter=maxiter_total,
         operator_dtype=op_dtype,
         callback=native_callback,
-        record_preconditioned_history=False,
+        restart_callback=native_restart_callback,
+        record_preconditioned_history=monitor_mode in {"preconditioned", "both"},
+        orthogonalization=orthogonalization,
+        cgs_refinement=cgs_refinement,
+        happy_breakdown_tol=float(happy_breakdown_tol),
     )
     progress_close()
 
@@ -471,6 +514,17 @@ def gmres_cupy(
         residual_norm = float("nan")
         relative_residual = float("nan")
 
+    pre_hist = np.asarray(native.preconditioned_history, dtype=float)
+    true_hist = np.asarray(native.true_history, dtype=float)
+    if monitor_mode == "preconditioned":
+        residual_history: np.ndarray | None = pre_hist
+    elif monitor_mode == "true":
+        residual_history = true_hist
+    else:
+        # Keep backward-compatible single-channel field for code that still
+        # reads `residual_history`; primary channel remains preconditioned.
+        residual_history = pre_hist
+
     return LinearSolveResult(
         x=x_np,
         info=int(native.info),
@@ -478,8 +532,11 @@ def gmres_cupy(
         relative_residual=relative_residual,
         iterations=int(native.iterations),
         method="gmres[cupy]",
-        residual_history=np.asarray(history, dtype=float),
+        residual_history=residual_history,
         rhs_count=1,
+        preconditioned_residual_history=pre_hist,
+        true_residual_history=true_hist,
+        converged_reason=str(native.converged_reason),
     )
 
 
@@ -879,6 +936,11 @@ def solve_linear_system(
     atol: float = 0.0,
     restart: int = 50,
     maxiter: Optional[int] = None,
+    gmres_monitor: Literal["preconditioned", "true", "both"] = "preconditioned",
+    gmres_progress_residual: Literal["preconditioned", "true"] = "preconditioned",
+    gmres_orthogonalization: Literal["mgs", "cgs"] = "mgs",
+    gmres_cgs_refinement: Literal["never", "ifneeded", "always"] = "ifneeded",
+    gmres_happy_breakdown_tol: float = 0.0,
     direct_max_n: int = 15000,
     dtype: npt.DTypeLike = np.complex128,
     backend: Literal["numpy", "cupy"] = "numpy",
@@ -902,6 +964,14 @@ def solve_linear_system(
     preconditioner:
         Optional callable approximating `M^{-1}` for iterative methods.
         It can accept vectors and may optionally accept batched `(n, nrhs)` inputs.
+    gmres_monitor, gmres_progress_residual:
+        CuPy-native GMRES monitor channels. `gmres_monitor` controls which
+        residual history is retained in the result, while
+        `gmres_progress_residual` controls tqdm reporting when enabled.
+    gmres_orthogonalization, gmres_cgs_refinement, gmres_happy_breakdown_tol:
+        CuPy-native GMRES Arnoldi controls. Orthogonalization can be modified
+        Gram-Schmidt (`mgs`) or classical Gram-Schmidt (`cgs`) with optional
+        iterative refinement policy.
     compute_final_residual:
         If `True`, compute and store final true residual diagnostics
         `||Ax-b||/||b||` after the solve.
@@ -977,6 +1047,11 @@ def solve_linear_system(
                 atol=atol,
                 restart=restart,
                 maxiter=maxiter,
+                gmres_monitor=gmres_monitor,
+                gmres_progress_residual=gmres_progress_residual,
+                gmres_orthogonalization=gmres_orthogonalization,
+                gmres_cgs_refinement=gmres_cgs_refinement,
+                gmres_happy_breakdown_tol=gmres_happy_breakdown_tol,
                 direct_max_n=direct_max_n,
                 dtype=dtype,
                 backend=backend_name,
@@ -1015,6 +1090,11 @@ def solve_linear_system(
                 atol=atol,
                 restart=restart,
                 maxiter=maxiter,
+                monitor=gmres_monitor,
+                progress_residual=gmres_progress_residual,
+                orthogonalization=gmres_orthogonalization,
+                cgs_refinement=gmres_cgs_refinement,
+                happy_breakdown_tol=gmres_happy_breakdown_tol,
                 show_progress=show_progress,
                 compute_final_residual=compute_final_residual,
             )

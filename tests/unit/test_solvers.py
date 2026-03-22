@@ -3,6 +3,7 @@ import sys
 import tempfile
 import types
 from pathlib import Path
+from typing import Literal, cast
 
 import numpy as np
 import pytest
@@ -450,6 +451,97 @@ def test_gmres_cupy_native_tracks_scipy_solution_quality_on_toy_system(monkeypat
     assert int(out_cupy.info) == 0
     assert float(out_cupy.relative_residual) <= 1e-10
     np.testing.assert_allclose(np.asarray(out_cupy.x), np.asarray(x_ref), atol=1e-8, rtol=1e-8)
+
+
+@pytest.mark.parametrize("refine_policy", ["never", "ifneeded", "always"])
+def test_gmres_cupy_native_supports_cgs_refinement_policies(monkeypatch, refine_policy: str):
+    monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
+    A = np.array([[3.0 + 0j, 1.0 + 0j], [0.0 + 0j, 2.0 + 0j]], dtype=np.complex128)
+    x_true = np.array([1.0 + 0j, -2.0 + 0j], dtype=np.complex128)
+    b = A @ x_true
+
+    out = solvers.gmres_cupy(
+        lambda x: A @ np.asarray(x),
+        b,
+        rtol=1e-10,
+        atol=0.0,
+        restart=2,
+        maxiter=8,
+        orthogonalization="cgs",
+        cgs_refinement=cast(Literal["never", "ifneeded", "always"], refine_policy),
+        show_progress=False,
+    )
+
+    assert int(out.info) == 0
+    assert str(out.converged_reason) == "converged"
+    np.testing.assert_allclose(np.asarray(out.x), x_true, atol=1e-9, rtol=1e-9)
+
+
+def test_gmres_cupy_monitor_channels_and_callbacks(monkeypatch):
+    monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
+    A = np.array([[2.0 + 0j, 1.0 + 0j], [1.0 + 0j, 3.0 + 0j]], dtype=np.complex128)
+    b = np.array([1.0 + 0j, -2.0 + 0j], dtype=np.complex128)
+    inner_hist: list[float] = []
+    true_hist: list[float] = []
+
+    out = solvers.gmres_cupy(
+        lambda x: A @ np.asarray(x),
+        b,
+        rtol=1e-12,
+        atol=0.0,
+        restart=2,
+        maxiter=8,
+        callback=inner_hist.append,
+        callback_true=true_hist.append,
+        monitor="both",
+        show_progress=False,
+    )
+
+    assert int(out.iterations) == len(inner_hist)
+    assert out.preconditioned_residual_history is not None
+    assert out.true_residual_history is not None
+    assert len(out.preconditioned_residual_history) == int(out.iterations)
+    assert len(out.true_residual_history) >= 1
+    # Backward-compatible primary history channel stays preconditioned.
+    assert out.residual_history is not None
+    np.testing.assert_allclose(
+        np.asarray(out.residual_history, dtype=float),
+        np.asarray(out.preconditioned_residual_history, dtype=float),
+    )
+    assert len(true_hist) == len(out.true_residual_history)
+
+    out_true = solvers.gmres_cupy(
+        lambda x: A @ np.asarray(x),
+        b,
+        rtol=1e-12,
+        atol=0.0,
+        restart=2,
+        maxiter=8,
+        monitor="true",
+        show_progress=False,
+    )
+    np.testing.assert_allclose(
+        np.asarray(out_true.residual_history, dtype=float),
+        np.asarray(out_true.true_residual_history, dtype=float),
+    )
+
+
+def test_gmres_cupy_reports_nonconverged_reason(monkeypatch):
+    monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
+    A = np.array([[2.0 + 0j, 1.0 + 0j], [1.0 + 0j, 3.0 + 0j]], dtype=np.complex128)
+    b = np.array([1.0 + 0j, -2.0 + 0j], dtype=np.complex128)
+
+    out = solvers.gmres_cupy(
+        lambda x: A @ np.asarray(x),
+        b,
+        rtol=1e-14,
+        atol=0.0,
+        restart=1,
+        maxiter=1,
+        show_progress=False,
+    )
+    assert int(out.info) > 0
+    assert str(out.converged_reason) in {"maxiter_reached", "breakdown", "happy_breakdown"}
 
 
 @pytest.mark.skipif(not _cupy_available(), reason="CuPy runtime unavailable")

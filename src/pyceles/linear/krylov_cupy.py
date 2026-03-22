@@ -7,7 +7,7 @@ inner-iteration linear-algebra work to host-side SciPy/NumPy routines.
 """
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 import numpy as np
 import numpy.typing as npt
@@ -22,6 +22,7 @@ class CuPyGMRESNativeResult:
     iterations: int
     residual_norm: float
     relative_residual: float
+    converged_reason: str
     preconditioned_history: np.ndarray
     true_history: np.ndarray
 
@@ -92,8 +93,11 @@ def gmres_cupy_native(
     callback: Callable[[float], None] | None = None,
     restart_callback: Callable[[float], None] | None = None,
     record_preconditioned_history: bool = False,
+    orthogonalization: Literal["mgs", "cgs"] = "mgs",
+    cgs_refinement: Literal["never", "ifneeded", "always"] = "ifneeded",
     reorthogonalize: bool = True,
     breakdown_tol: float = 1e-30,
+    happy_breakdown_tol: float = 0.0,
 ) -> CuPyGMRESNativeResult:
     """Run restarted left-preconditioned GMRES fully on CuPy arrays.
 
@@ -104,6 +108,14 @@ def gmres_cupy_native(
     """
     b_dtype_obj = getattr(b, "dtype", None)
     b_dtype = np.dtype(np.asarray(b).dtype if b_dtype_obj is None else b_dtype_obj)
+    orth_mode = str(orthogonalization).lower()
+    if orth_mode not in {"mgs", "cgs"}:
+        raise ValueError("`orthogonalization` must be 'mgs' or 'cgs'.")
+    cgs_refine_mode = str(cgs_refinement).lower()
+    if cgs_refine_mode not in {"never", "ifneeded", "always"}:
+        raise ValueError("`cgs_refinement` must be 'never', 'ifneeded', or 'always'.")
+    if float(happy_breakdown_tol) < 0.0:
+        raise ValueError("`happy_breakdown_tol` must be >= 0.")
     op_dtype = _dtype_complex(
         operator_dtype if operator_dtype is not None else np.result_type(b_dtype, np.complex64),
         name="operator_dtype",
@@ -163,6 +175,7 @@ def gmres_cupy_native(
     true_hist: list[float] = []
     iterations = 0
     info = maxiter_total
+    converged_reason = "maxiter_reached"
     residual_norm = float("nan")
     relative_residual = float("nan")
     r_true = None
@@ -182,6 +195,7 @@ def gmres_cupy_native(
                 restart_callback(relative_residual)
         if residual_norm <= target_abs:
             info = 0
+            converged_reason = "converged"
             break
 
         r0 = r_true
@@ -189,6 +203,7 @@ def gmres_cupy_native(
         beta = _norm(z0, cupy=cupy, accum_dtype=acc_dtype)
         if beta <= breakdown_tol_f:
             info = iterations if iterations > 0 else maxiter_total
+            converged_reason = "breakdown"
             break
 
         cycle_steps = min(restart_n, maxiter_total - iterations)
@@ -201,28 +216,54 @@ def gmres_cupy_native(
         g[0] = beta
         k_used = 0
         cycle_breakdown = False
+        cycle_breakdown_reason = "breakdown"
         cycle_presid = float("nan")
 
         for col in range(cycle_steps):
             w = _apply_minv(_apply(A_mv, V[col, :]))
             h0 = _norm(w, cupy=cupy, accum_dtype=acc_dtype)
-            for k in range(col + 1):
-                hik = _dot(V[k, :], w, cupy=cupy, accum_dtype=acc_dtype)
-                H[col, k] = hik
-                w = w - cupy.asarray(hik, dtype=op_dtype) * V[k, :]
-            if reorthogonalize:
+            if orth_mode == "mgs":
                 for k in range(col + 1):
-                    hik2 = _dot(V[k, :], w, cupy=cupy, accum_dtype=acc_dtype)
-                    H[col, k] = H[col, k] + hik2
-                    w = w - cupy.asarray(hik2, dtype=op_dtype) * V[k, :]
+                    hik = _dot(V[k, :], w, cupy=cupy, accum_dtype=acc_dtype)
+                    H[col, k] = hik
+                    w = w - cupy.asarray(hik, dtype=op_dtype) * V[k, :]
+                if reorthogonalize:
+                    for k in range(col + 1):
+                        hik2 = _dot(V[k, :], w, cupy=cupy, accum_dtype=acc_dtype)
+                        H[col, k] = H[col, k] + hik2
+                        w = w - cupy.asarray(hik2, dtype=op_dtype) * V[k, :]
+            else:
+                h_row = cupy.zeros((col + 1,), dtype=acc_dtype)
+                for k in range(col + 1):
+                    h_row[k] = _dot(V[k, :], w, cupy=cupy, accum_dtype=acc_dtype)
+                H[col, : col + 1] = h_row
+                w = w - cupy.asarray(h_row @ V[: col + 1, :], dtype=op_dtype)
+                run_cgs_refine = False
+                if cgs_refine_mode == "always":
+                    run_cgs_refine = True
+                elif cgs_refine_mode == "ifneeded":
+                    h1 = _norm(w, cupy=cupy, accum_dtype=acc_dtype)
+                    run_cgs_refine = h1 <= 0.5 * h0
+                if run_cgs_refine:
+                    h_row2 = cupy.zeros((col + 1,), dtype=acc_dtype)
+                    for k in range(col + 1):
+                        h_row2[k] = _dot(V[k, :], w, cupy=cupy, accum_dtype=acc_dtype)
+                    H[col, : col + 1] = H[col, : col + 1] + h_row2
+                    w = w - cupy.asarray(h_row2 @ V[: col + 1, :], dtype=op_dtype)
 
             h_next = _norm(w, cupy=cupy, accum_dtype=acc_dtype)
             H[col, col + 1] = h_next
-            if h_next > breakdown_tol_f:
+            happy_tol = max(breakdown_tol_f, float(happy_breakdown_tol) * max(h0, eps))
+            if h_next > happy_tol:
                 V[col + 1, :] = w / h_next
             if h_next <= eps * max(h0, eps):
                 H[col, col + 1] = cupy.asarray(0.0 + 0.0j, dtype=acc_dtype)
                 cycle_breakdown = True
+                cycle_breakdown_reason = "breakdown"
+            elif h_next <= happy_tol:
+                H[col, col + 1] = cupy.asarray(0.0 + 0.0j, dtype=acc_dtype)
+                cycle_breakdown = True
+                cycle_breakdown_reason = "happy_breakdown"
 
             for k in range(col):
                 c = cs[k].copy()
@@ -260,6 +301,7 @@ def gmres_cupy_native(
 
         if k_used <= 0:
             info = iterations if iterations > 0 else maxiter_total
+            converged_reason = "breakdown"
             break
 
         y = cupy.array(g[:k_used], dtype=acc_dtype)
@@ -283,9 +325,11 @@ def gmres_cupy_native(
             restart_callback(relative_residual)
         if residual_norm <= target_abs:
             info = 0
+            converged_reason = "converged"
             break
         if cycle_breakdown:
             info = iterations if iterations > 0 else maxiter_total
+            converged_reason = cycle_breakdown_reason
             break
         if cycle_presid <= ptol:
             ptol_max_factor = max(eps, 0.25 * ptol_max_factor)
@@ -295,6 +339,7 @@ def gmres_cupy_native(
             ptol = cycle_presid * min(ptol_max_factor, target_abs / residual_norm)
         if iterations >= maxiter_total:
             info = iterations
+            converged_reason = "maxiter_reached"
             break
 
     return CuPyGMRESNativeResult(
@@ -303,6 +348,7 @@ def gmres_cupy_native(
         iterations=int(iterations),
         residual_norm=float(residual_norm),
         relative_residual=float(relative_residual),
+        converged_reason=str(converged_reason),
         preconditioned_history=np.asarray(precond_hist, dtype=float),
         true_history=np.asarray(true_hist, dtype=float),
     )
