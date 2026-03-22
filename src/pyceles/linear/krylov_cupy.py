@@ -128,6 +128,12 @@ def _solve_block_least_squares(
         return cupy.linalg.solve(hth + ridge * eye, htg)
 
 
+def _pack_block_basis(v_blocks: Any, *, cupy: Any, dtype: np.dtype) -> Any:
+    """Pack block basis tensor `(nb, n, p)` into matrix `(n, nb*p)`."""
+    v = cupy.asarray(v_blocks, dtype=dtype)
+    return v.transpose(1, 0, 2).reshape(int(v.shape[1]), int(v.shape[0] * v.shape[2]))
+
+
 def _apply_block_op(
     op: Callable[[Any], Any],
     x: Any,
@@ -1127,9 +1133,12 @@ def block_gmres_cupy_native(
 ) -> CuPyBlockGMRESNativeResult:
     """Run native CuPy block-GMRES on a right-hand-side matrix ``B``.
 
-    The solver keeps block Arnoldi state on device and uses Frobenius-norm
-    residual control internally, while still exposing per-column true residual
-    diagnostics in the returned result payload.
+    The solver keeps block Arnoldi state on device and uses a block residual
+    proxy for inexpensive inner monitoring. True convergence is accepted only
+    when all RHS columns satisfy their per-column true-residual tolerances.
+    When the proxy first drops below the target, the solver performs an
+    immediate in-cycle true-residual gate so large restart values can still
+    stop promptly without waiting for the restart boundary.
     """
     b_dtype_obj = getattr(b, "dtype", None)
     b_dtype = np.dtype(np.asarray(b).dtype if b_dtype_obj is None else b_dtype_obj)
@@ -1274,24 +1283,21 @@ def block_gmres_cupy_native(
         cycle_breakdown = False
         cycle_presid = float("nan")
         y_last = None
+        y_last_k_used = -1
+        cycle_converged = False
+        inner_proxy_interval = 1 if (record_preconditioned_history or callback is not None) else 4
 
         for col in range(cycle_steps):
             w_acc = cupy.asarray(_apply_minv(_apply(V[col])), dtype=acc_dtype)
-            for k in range(col + 1):
-                v_acc = cupy.asarray(V[k], dtype=acc_dtype)
-                h_block = _dot_block(v_acc, w_acc, cupy=cupy, accum_dtype=acc_dtype)
-                rs = slice(k * p, (k + 1) * p)
-                cs = slice(col * p, (col + 1) * p)
-                H[rs, cs] = h_block
-                w_acc = w_acc - v_acc @ h_block
+            v_prev = _pack_block_basis(V[: col + 1], cupy=cupy, dtype=acc_dtype)
+            cs = slice(col * p, (col + 1) * p)
+            h_block = v_prev.conj().T @ w_acc
+            H[: (col + 1) * p, cs] = h_block
+            w_acc = w_acc - v_prev @ h_block
             if reorthogonalize:
-                for k in range(col + 1):
-                    v_acc = cupy.asarray(V[k], dtype=acc_dtype)
-                    h_block2 = _dot_block(v_acc, w_acc, cupy=cupy, accum_dtype=acc_dtype)
-                    rs = slice(k * p, (k + 1) * p)
-                    cs = slice(col * p, (col + 1) * p)
-                    H[rs, cs] = H[rs, cs] + h_block2
-                    w_acc = w_acc - v_acc @ h_block2
+                h_block2 = v_prev.conj().T @ w_acc
+                H[: (col + 1) * p, cs] = H[: (col + 1) * p, cs] + h_block2
+                w_acc = w_acc - v_prev @ h_block2
 
             q_next, r_next = cupy.linalg.qr(w_acc, mode="reduced")
             if float(cupy.linalg.norm(r_next)) <= max(breakdown_tol_f, eps):
@@ -1318,42 +1324,92 @@ def block_gmres_cupy_native(
 
             k_used = col + 1
             iterations += 1
-            h_curr = H[: (col + 2) * p, : (col + 1) * p]
-            g_curr = G[: (col + 2) * p, :]
-            y_curr = _solve_block_least_squares(h_curr, g_curr, cupy=cupy, accum_dtype=acc_dtype)
-            y_last = cupy.asarray(y_curr, dtype=acc_dtype)
-            proj = g_curr - h_curr @ y_last
-            pr_abs = float(cupy.linalg.norm(proj))
-            pr_rel = pr_abs / b_norm_frob if b_norm_frob > 0 else pr_abs
-            cycle_presid = pr_abs
-            if record_preconditioned_history:
-                precond_hist.append(pr_rel)
-            if callback is not None:
-                callback(
-                    {
-                        "stage": "inner",
-                        "iteration": int(iterations),
-                        "block_relative_residual": float(pr_rel),
-                    }
+            should_update_proxy = (
+                (col + 1) % inner_proxy_interval == 0
+                or (col + 1) == cycle_steps
+                or iterations >= maxiter_total
+            )
+            if should_update_proxy:
+                h_curr = H[: (col + 2) * p, : (col + 1) * p]
+                g_curr = G[: (col + 2) * p, :]
+                y_curr = _solve_block_least_squares(
+                    h_curr, g_curr, cupy=cupy, accum_dtype=acc_dtype
                 )
-            if pr_abs <= ptol or iterations >= maxiter_total:
+                y_last = cupy.asarray(y_curr, dtype=acc_dtype)
+                y_last_k_used = k_used
+                proj = g_curr - h_curr @ y_last
+                pr_abs = float(cupy.linalg.norm(proj))
+                pr_rel = pr_abs / b_norm_frob if b_norm_frob > 0 else pr_abs
+                cycle_presid = pr_abs
+                if record_preconditioned_history:
+                    precond_hist.append(pr_rel)
+                if callback is not None:
+                    callback(
+                        {
+                            "stage": "inner",
+                            "iteration": int(iterations),
+                            "block_relative_residual": float(pr_rel),
+                        }
+                    )
+                # Cheap proxy check every inner step; run the expensive
+                # per-RHS true-residual gate only when the block proxy is at or
+                # below the requested target.
+                if pr_abs <= target_abs_block:
+                    v_trial = _pack_block_basis(V[:k_used], cupy=cupy, dtype=op_dtype)
+                    y_trial = cupy.asarray(y_last[: k_used * p, :], dtype=op_dtype)
+                    x_trial = x_mat + v_trial @ y_trial
+                    (
+                        block_trial_abs,
+                        block_trial_rel,
+                        rhs_trial_abs,
+                        rhs_trial_rel,
+                        r_true_trial,
+                    ) = _true_residual_stats(x_trial)
+                    if _all_rhs_converged(rhs_trial_abs):
+                        x_mat = x_trial
+                        block_residual_norm = float(block_trial_abs)
+                        block_relative_residual = float(block_trial_rel)
+                        residual_norms = np.asarray(rhs_trial_abs, dtype=float)
+                        relative_residuals = np.asarray(rhs_trial_rel, dtype=float)
+                        r_true = r_true_trial
+                        true_hist.append(float(block_relative_residual))
+                        per_rhs_true_hist.append(np.asarray(relative_residuals, dtype=float))
+                        if restart_callback is not None:
+                            restart_callback(
+                                {
+                                    "stage": "restart",
+                                    "iteration": int(iterations),
+                                    "block_relative_residual": float(block_relative_residual),
+                                    "per_rhs_relative_residual": np.asarray(
+                                        relative_residuals, dtype=float
+                                    ),
+                                }
+                            )
+                        info = 0
+                        converged_reason = "converged"
+                        cycle_converged = True
+                        break
+            if iterations >= maxiter_total:
                 break
+
+        if cycle_converged:
+            break
 
         if k_used <= 0:
             info = iterations if iterations > 0 else maxiter_total
             converged_reason = "breakdown"
             break
 
-        if y_last is None:
+        if y_last is None or y_last_k_used != k_used:
             h_curr = H[: (k_used + 1) * p, : k_used * p]
             g_curr = G[: (k_used + 1) * p, :]
             y_curr = _solve_block_least_squares(h_curr, g_curr, cupy=cupy, accum_dtype=acc_dtype)
             y_last = cupy.asarray(y_curr, dtype=acc_dtype)
+            y_last_k_used = k_used
 
-        dx = cupy.zeros((n, p), dtype=op_dtype)
-        for k in range(k_used):
-            coeff = cupy.asarray(y_last[k * p : (k + 1) * p, :], dtype=op_dtype)
-            dx = dx + V[k] @ coeff
+        v_used = _pack_block_basis(V[:k_used], cupy=cupy, dtype=op_dtype)
+        y_used = cupy.asarray(y_last[: k_used * p, :], dtype=op_dtype)
+        dx = v_used @ y_used
         x_mat = x_mat + dx
 
         (
@@ -1382,12 +1438,13 @@ def block_gmres_cupy_native(
             info = iterations if iterations > 0 else maxiter_total
             converged_reason = "breakdown"
             break
-        if cycle_presid <= ptol:
-            ptol_max_factor = max(eps, 0.25 * ptol_max_factor)
-        else:
-            ptol_max_factor = min(1.0, 1.5 * ptol_max_factor)
-        if block_residual_norm > 0:
-            ptol = cycle_presid * min(ptol_max_factor, target_abs_block / block_residual_norm)
+        if np.isfinite(cycle_presid):
+            if cycle_presid <= ptol:
+                ptol_max_factor = max(eps, 0.25 * ptol_max_factor)
+            else:
+                ptol_max_factor = min(1.0, 1.5 * ptol_max_factor)
+            if block_residual_norm > 0:
+                ptol = cycle_presid * min(ptol_max_factor, target_abs_block / block_residual_norm)
         if iterations >= maxiter_total:
             info = iterations
             converged_reason = "maxiter_reached"

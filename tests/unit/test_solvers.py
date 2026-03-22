@@ -923,6 +923,35 @@ def test_solve_linear_system_cupy_block_gmres_callback_payload(monkeypatch):
         assert payload.iteration >= 0
 
 
+def test_solve_linear_system_cupy_block_gmres_uses_incycle_true_gate(monkeypatch):
+    monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
+    rng = np.random.default_rng(1)
+    n, p = 8, 2
+    m = rng.standard_normal((n, n)) + 1j * rng.standard_normal((n, n))
+    A = m.conj().T @ m + (0.5 + 0j) * np.eye(n, dtype=np.complex128)
+    B = (rng.standard_normal((n, p)) + 1j * rng.standard_normal((n, p))).astype(np.complex128)
+    seen: list[solvers.BlockKrylovCallbackPayload] = []
+
+    out = solvers.gmres_cupy_block(
+        lambda x: A @ np.asarray(x),
+        B,
+        preconditioner=lambda x: 1e-12 * np.asarray(x),
+        rtol=1e-8,
+        atol=0.0,
+        restart=50,
+        maxiter=100,
+        callback=seen.append,
+        show_progress=False,
+    )
+    assert np.all(np.asarray(out.info, dtype=int) == 0)
+    rhs_target = 1e-8 * np.linalg.norm(B, axis=0)
+    assert np.all(np.asarray(out.residual_norm, dtype=float) <= rhs_target)
+    restart_events = [payload for payload in seen if payload.stage == "restart"]
+    # With in-cycle true gating enabled, this setup should converge without
+    # repeated restart-boundary checks caused by an over-optimistic proxy.
+    assert len(restart_events) <= 2
+
+
 def test_solve_linear_system_fgmres_backend_guard():
     b = np.array([1.0 + 0j, 2.0 + 0j], dtype=np.complex128)
     with pytest.raises(ValueError, match="available only with backend='cupy'"):

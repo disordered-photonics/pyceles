@@ -420,6 +420,8 @@ def gmres_cupy_block(
 
     Operator and preconditioner callables may expose either 2D `(n, nrhs)` or
     legacy 1D `(n,)` interfaces. Legacy callables are adapted column-wise.
+    The returned ``LinearSolveResult.block_metadata`` includes
+    ``operator_block_adapter_used`` and ``preconditioner_block_adapter_used``.
     """
     cupy, _ = import_cupy()
     b_mat = np.asarray(b)

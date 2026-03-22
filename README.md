@@ -336,6 +336,10 @@ Practical CuPy notes for dense systems:
   report per-RHS final true residuals in `LinearSolveResult`.
 - Block-GMRES convergence requires every RHS column to satisfy the requested
   tolerance; a low aggregate/block residual alone is not accepted as converged.
+- Inner block iterations still use a cheap aggregate residual proxy for
+  monitoring, but pyceles now runs an immediate per-RHS true-residual gate when
+  that proxy reaches target (plus restart-boundary checks), so large restart
+  values can still stop promptly without waiting for cycle end.
 - Motivation for this native path:
   - built-in CuPy GMRES callback/convergence visibility is restart-cycle based,
     so convergence behavior between restarts is opaque
@@ -347,10 +351,15 @@ Practical CuPy notes for dense systems:
     boundaries
 - pyceles does not expose a public runtime toggle to swap back to built-in
   CuPy GMRES in the simulation API
-- Block-GMRES speedup is currently case-dependent. On measured dense/dilute
-  benchmarks where the operator/preconditioner are adapted from legacy 1D
-  callables, convergence parity is good but wall-time speedups are not yet
-  guaranteed; profile on your workload before assuming gains.
+- CuPy block-GMRES now runs with native 2D operator/preconditioner applies on
+  prepared CuPy paths, with per-column fallback only when user callables expose
+  legacy 1D interfaces.
+- Block-GMRES speedup remains workload-dependent. Dense multi-RHS cases can now
+  outperform sequential solves, while small or weakly coupled RHS sets may stay
+  near parity or slightly slower; profile on your workload before assuming gains.
+- `LinearSolveResult.block_metadata` reports whether block adapters were used
+  (`operator_block_adapter_used`, `preconditioner_block_adapter_used`) so users
+  can verify the active execution path.
 - Check your GPU's `singleToDoublePrecisionPerfRatio` before assuming
   `complex128` is close to a `2x` cost over `complex64`. On many consumer/laptop
   parts the ratio is very high, and end-to-end `complex128` slowdowns can be

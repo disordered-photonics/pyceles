@@ -39,6 +39,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   GMRES), improving convergence observability between restart boundaries.
 - CuPy GMRES now routes 2D RHS inputs to the native block-GMRES iterative path
   (single-RHS behavior remains on the existing native GMRES path).
+- Prepared CuPy direct-operator/preconditioner paths now accept true 2D RHS
+  inputs directly (`(n, nrhs)`) and expose adapter-use diagnostics in block
+  solve metadata when legacy 1D callables are wrapped column-wise.
+- Native CuPy block-GMRES now batches block-Arnoldi orthogonalization and
+  correction assembly through packed GEMM-style updates, substantially reducing
+  dense-kernel overhead on measured dense multi-RHS workloads.
 
 ### Fixed
 - Native CuPy block-GMRES now enforces per-RHS true-residual tolerance checks
