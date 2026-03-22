@@ -45,7 +45,7 @@ Users of pyceles are referred to the publications listed in the CELES and SMUTHI
 - CuPy direct backend for the same `A = I - T W` operator:
   - fused RawKernel pairwise coupling `W·x` for `complex64` and `complex128`
   - GPU single-body `T` support for diagonal groups and explicit dense spherical-basis blocks
-  - CuPy GMRES solve path
+  - native CuPy GMRES solve path (`gmres[cupy]`)
   - inherited CuPy far-field scattered-PWP postprocessing path
   - inherited CuPy near-field postprocessing path for:
     - scattered field
@@ -325,6 +325,19 @@ fraction sphere clouds, restarted CuPy GMRES often benefited more from choosing
 an adequate restart dimension than from enabling the grid-block preconditioner.
 
 Practical CuPy notes for dense systems:
+- CuPy GMRES in pyceles now uses a native implementation by default for
+  `solve_linear_system(..., backend="cupy", method="gmres")`.
+- Motivation for this native path:
+  - built-in CuPy GMRES callback/convergence visibility is restart-cycle based,
+    so convergence behavior between restarts is opaque
+  - this can force awkward restart trade-offs: large restart may hide early
+    convergence and overshoot iterations; very small restart can degrade
+    convergence quality
+  - native GMRES keeps the Krylov work on device while exposing per-inner-step
+    progress (`pr_rel_res`) and preserving true-residual checks at restart
+    boundaries
+- pyceles does not expose a public runtime toggle to swap back to built-in
+  CuPy GMRES in the simulation API
 - Check your GPU's `singleToDoublePrecisionPerfRatio` before assuming
   `complex128` is close to a `2x` cost over `complex64`. On many consumer/laptop
   parts the ratio is very high, and end-to-end `complex128` slowdowns can be
@@ -382,14 +395,14 @@ Common benchmark parameters:
 
 Reproduce:
 ```bash
-python examples/profile_pyceles_phases.py --n-particles 500 --lmax 3 --dx 40 --operator-backend numpy --compute-dtype complex128 --accum-dtype complex128 --cache-mode off --preconditioner-mode none --out-dir outputs/profile_matrix_cpu_c128_none --quiet
-python examples/profile_pyceles_phases.py --n-particles 500 --lmax 3 --dx 40 --operator-backend numpy --compute-dtype complex128 --accum-dtype complex128 --cache-mode off --preconditioner-mode grid_block --preconditioner-subdivisions 3 --out-dir outputs/profile_matrix_cpu_c128_grid3 --quiet
-python examples/profile_pyceles_phases.py --n-particles 500 --lmax 3 --dx 40 --operator-backend numpy --compute-dtype complex64 --accum-dtype complex128 --cache-mode off --preconditioner-mode none --out-dir outputs/profile_matrix_cpu_c64_none --quiet
-python examples/profile_pyceles_phases.py --n-particles 500 --lmax 3 --dx 40 --operator-backend numpy --compute-dtype complex64 --accum-dtype complex128 --cache-mode off --preconditioner-mode grid_block --preconditioner-subdivisions 3 --out-dir outputs/profile_matrix_cpu_c64_grid3 --quiet
-python examples/profile_pyceles_phases.py --n-particles 500 --lmax 3 --dx 40 --operator-backend cupy --postprocessing-backend inherit --compute-dtype complex128 --accum-dtype complex128 --cache-mode off --preconditioner-mode none --out-dir outputs/profile_matrix_cupy_c128_none --quiet
-python examples/profile_pyceles_phases.py --n-particles 500 --lmax 3 --dx 40 --operator-backend cupy --postprocessing-backend inherit --compute-dtype complex128 --accum-dtype complex128 --cache-mode off --preconditioner-mode grid_block --preconditioner-subdivisions 3 --out-dir outputs/profile_matrix_cupy_c128_grid3 --quiet
-python examples/profile_pyceles_phases.py --n-particles 500 --lmax 3 --dx 40 --operator-backend cupy --postprocessing-backend inherit --compute-dtype complex64 --accum-dtype complex128 --cache-mode off --preconditioner-mode none --out-dir outputs/profile_matrix_cupy_c64_none --quiet
-python examples/profile_pyceles_phases.py --n-particles 500 --lmax 3 --dx 40 --operator-backend cupy --postprocessing-backend inherit --compute-dtype complex64 --accum-dtype complex128 --cache-mode off --preconditioner-mode grid_block --preconditioner-subdivisions 3 --out-dir outputs/profile_matrix_cupy_c64_grid3 --quiet
+python examples/profile_pyceles_phases.py --n-particles 500 --lmax 3 --dx 40 --operator-backend numpy --compute-dtype complex128 --accum-dtype complex128 --cache-mode off --preconditioner-mode none --solver-restart 25 --solver-maxiter 100 --out-dir outputs/profile_matrix_cpu_c128_none --quiet
+python examples/profile_pyceles_phases.py --n-particles 500 --lmax 3 --dx 40 --operator-backend numpy --compute-dtype complex128 --accum-dtype complex128 --cache-mode off --preconditioner-mode grid_block --preconditioner-subdivisions 3 --solver-restart 25 --solver-maxiter 100 --out-dir outputs/profile_matrix_cpu_c128_grid3 --quiet
+python examples/profile_pyceles_phases.py --n-particles 500 --lmax 3 --dx 40 --operator-backend numpy --compute-dtype complex64 --accum-dtype complex128 --cache-mode off --preconditioner-mode none --solver-restart 25 --solver-maxiter 100 --out-dir outputs/profile_matrix_cpu_c64_none --quiet
+python examples/profile_pyceles_phases.py --n-particles 500 --lmax 3 --dx 40 --operator-backend numpy --compute-dtype complex64 --accum-dtype complex128 --cache-mode off --preconditioner-mode grid_block --preconditioner-subdivisions 3 --solver-restart 25 --solver-maxiter 100 --out-dir outputs/profile_matrix_cpu_c64_grid3 --quiet
+python examples/profile_pyceles_phases.py --n-particles 500 --lmax 3 --dx 40 --operator-backend cupy --postprocessing-backend inherit --compute-dtype complex128 --accum-dtype complex128 --cache-mode off --preconditioner-mode none --solver-restart 25 --solver-maxiter 100 --out-dir outputs/profile_matrix_cupy_c128_none --quiet
+python examples/profile_pyceles_phases.py --n-particles 500 --lmax 3 --dx 40 --operator-backend cupy --postprocessing-backend inherit --compute-dtype complex128 --accum-dtype complex128 --cache-mode off --preconditioner-mode grid_block --preconditioner-subdivisions 3 --solver-restart 25 --solver-maxiter 100 --out-dir outputs/profile_matrix_cupy_c128_grid3 --quiet
+python examples/profile_pyceles_phases.py --n-particles 500 --lmax 3 --dx 40 --operator-backend cupy --postprocessing-backend inherit --compute-dtype complex64 --accum-dtype complex128 --cache-mode off --preconditioner-mode none --solver-restart 25 --solver-maxiter 100 --out-dir outputs/profile_matrix_cupy_c64_none --quiet
+python examples/profile_pyceles_phases.py --n-particles 500 --lmax 3 --dx 40 --operator-backend cupy --postprocessing-backend inherit --compute-dtype complex64 --accum-dtype complex128 --cache-mode off --preconditioner-mode grid_block --preconditioner-subdivisions 3 --solver-restart 25 --solver-maxiter 100 --out-dir outputs/profile_matrix_cupy_c64_grid3 --quiet
 ```
 
 Phase wall times:
@@ -410,21 +423,26 @@ Phase wall times:
   - Far-field: `19.3 s`
   - Near-field: `146.0 s`
 - CuPy, `complex128/complex128`, no preconditioner:
-  - Solver: `13.6 s`
-  - Far-field: `2.6 s`
-  - Near-field: `18.2 s`
+  - Solver: `11.4 s`
+  - Far-field: `1.9 s`
+  - Near-field: `14.6 s`
 - CuPy, `complex128/complex128`, `grid_block`, subdivisions=`3`:
   - Solver: `14.0 s`
   - Far-field: `1.9 s`
   - Near-field: `14.3 s`
 - CuPy, `complex64/complex128`, no preconditioner:
-  - Solver: `0.63 s`
-  - Far-field: `0.68 s`
-  - Near-field: `3.31 s`
+  - Solver: `1.16 s`
+  - Far-field: `0.89 s`
+  - Near-field: `4.53 s`
 - CuPy, `complex64/complex128`, `grid_block`, subdivisions=`3`:
   - Solver: `0.89 s`
   - Far-field: `0.70 s`
   - Near-field: `3.30 s`
+
+On this benchmark, native CuPy GMRES reduced restart overshoot on the
+no-preconditioner runs (from `40` to `22` iterations at `rtol=1e-4`,
+`restart=25`), which is where the largest runtime gain appears for
+`complex128`.
 
 On this public `500`-particle benchmark, the updated `3x3x3` grid-block
 preconditioner remains useful on the NumPy reference path, but it is not a

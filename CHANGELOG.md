@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added a CuPy dense direct-solve path using cuSOLVER-backed LU factorization,
   with repeated-RHS reuse through cached GPU LU payloads on the `Simulation`
   instance, mirroring the existing NumPy direct-solve cache pattern.
+- Added a native CuPy restarted GMRES implementation that keeps Arnoldi/Givens
+  work on device and exposes inner-iteration progress callbacks while preserving
+  true-residual checks at restart boundaries.
 - Added a native NumPy high-frequency MLFMM coupling backend for sphere-cluster
   workflows:
   - `SimulationConfig(coupling_backend="mlfmm")`
@@ -23,6 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Dense/direct NumPy solves now reject true MLFMM coupling stages explicitly
   instead of silently assuming the pairwise backend.
+- `solve_linear_system(..., backend="cupy", method="gmres")` now routes through
+  pyceles' native CuPy GMRES path (instead of delegating to CuPy built-in
+  GMRES), improving convergence observability between restart boundaries.
 
 ### Fixed
 - NumPy MLFMM preparation now enforces `complex128` operator dtype and keeps

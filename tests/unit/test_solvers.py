@@ -1,9 +1,15 @@
+import os
 import sys
+import tempfile
 import types
+from pathlib import Path
 
 import numpy as np
 import pytest
+from scipy.sparse.linalg import LinearOperator
+from scipy.sparse.linalg import gmres as scipy_gmres
 
+from pyceles._optional import import_cupy
 from pyceles.io.hdf5 import load_solution_h5, save_solution_h5
 from pyceles.linear import solvers
 from pyceles.linear.solvers import (
@@ -15,6 +21,68 @@ from pyceles.linear.solvers import (
     lgmres_scipy,
     solve_linear_system,
 )
+
+
+def _fake_cupy_numpy_backend():
+    class _FakeCuPy:
+        @staticmethod
+        def asarray(x, dtype=None):
+            return np.asarray(x, dtype=dtype)
+
+        @staticmethod
+        def array(x, dtype=None):
+            return np.array(x, dtype=dtype)
+
+        @staticmethod
+        def zeros_like(x, dtype=None):
+            return np.zeros_like(np.asarray(x), dtype=dtype)
+
+        @staticmethod
+        def zeros(shape, dtype=None):
+            return np.zeros(shape, dtype=dtype)
+
+        @staticmethod
+        def abs(x):
+            return np.abs(x)
+
+        @staticmethod
+        def sqrt(x):
+            return np.sqrt(x)
+
+        @staticmethod
+        def conj(x):
+            return np.conj(x)
+
+        @staticmethod
+        def vdot(x, y):
+            return np.vdot(x, y)
+
+        class linalg:
+            norm = staticmethod(np.linalg.norm)
+            solve = staticmethod(np.linalg.solve)
+
+    return _FakeCuPy()
+
+
+def _cupy_available() -> bool:
+    try:
+        cupy, _ = import_cupy()
+    except RuntimeError:
+        return False
+    try:
+        x = cupy.arange(1, dtype=cupy.float32)
+        cupy.cuda.Stream.null.synchronize()
+        return int(cupy.asnumpy(x)[0]) == 0
+    except Exception:
+        return False
+
+
+def _configure_cupy_tempdir() -> None:
+    tmp_root = Path.cwd() / "outputs" / "test_cupy_tmp"
+    tmp_root.mkdir(parents=True, exist_ok=True)
+    os.environ["TMP"] = str(tmp_root)
+    os.environ["TEMP"] = str(tmp_root)
+    tempfile.tempdir = str(tmp_root)
 
 
 def test_gmres_result_reports_true_residual():
@@ -246,77 +314,240 @@ def test_gmres_cupy_reports_clear_import_failure(monkeypatch):
         solvers.gmres_cupy(lambda x: x, b, show_progress=False)
 
 
-def test_gmres_cupy_drives_restart_cycles_with_true_residual_progress(monkeypatch):
-    class _FakeLinearOperator:
-        def __init__(self, shape, matvec, dtype):
-            self.shape = shape
-            self.matvec = matvec
-            self.dtype = dtype
-
-    class _FakeSparseLinalg:
-        LinearOperator = _FakeLinearOperator
-
-        def __init__(self):
-            self.calls: list[tuple[int, int]] = []
-
-        def gmres(
-            self,
-            A,
-            b,
-            x0=None,
-            *,
-            M=None,
-            rtol=1e-5,
-            atol=0.0,
-            restart=None,
-            maxiter=None,
-            callback=None,
-            callback_type=None,
-        ):
-            self.calls.append((int(restart), int(maxiter)))
-            x_prev = np.zeros_like(b) if x0 is None else np.asarray(x0)
-            # One restart cycle halves the remaining error.
-            x_next = x_prev + 0.5 * (np.asarray(b) - x_prev)
-            return x_next, int(restart)
-
-    class _FakeCuPy:
-        def __init__(self):
-            self.linalg = type("_Linalg", (), {"norm": staticmethod(np.linalg.norm)})()
-
-        @staticmethod
-        def asarray(x, dtype=None):
-            return np.asarray(x, dtype=dtype)
-
-        @staticmethod
-        def array(x, dtype=None):
-            return np.array(x, dtype=dtype)
-
-        @staticmethod
-        def zeros_like(x, dtype=None):
-            return np.zeros_like(np.asarray(x), dtype=dtype)
-
-    fake_sparse = _FakeSparseLinalg()
-    fake_cupy = _FakeCuPy()
-    monkeypatch.setattr(solvers, "import_cupy", lambda: (fake_cupy, fake_sparse))
+def test_gmres_cupy_native_reports_inner_iteration_progress(monkeypatch):
+    monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
     progress: list[float] = []
-    b = np.array([1.0 + 0j, -2.0 + 0j], dtype=np.complex128)
+    A = np.array([[3.0 + 0j, 1.0 + 0j], [0.0 + 0j, 2.0 + 0j]], dtype=np.complex128)
+    x_true = np.array([1.0 + 0j, -2.0 + 0j], dtype=np.complex128)
+    b = A @ x_true
 
     out = solvers.gmres_cupy(
-        lambda x: np.asarray(x),
+        lambda x: A @ np.asarray(x),
         b,
-        rtol=0.2,
+        rtol=1e-10,
+        atol=0.0,
         restart=2,
-        maxiter=6,
+        maxiter=8,
         callback=progress.append,
         show_progress=False,
     )
 
-    assert fake_sparse.calls == [(2, 2), (2, 2), (2, 2)]
-    assert int(out.iterations) == 6
+    assert out.info == 0
+    assert int(out.iterations) >= 1
     assert out.residual_history is not None
-    assert np.asarray(progress).shape == (3,)
-    assert progress[0] > progress[-1]
-    assert float(out.relative_residual) <= 0.2
+    assert np.asarray(progress).shape == (int(out.iterations),)
+    assert progress[0] >= progress[-1]
+    np.testing.assert_allclose(np.asarray(out.x), x_true, atol=1e-9, rtol=1e-9)
+    assert float(out.relative_residual) <= 1e-10
+
+
+def test_gmres_cupy_native_breakdown_path_returns_failure_without_crash(monkeypatch):
+    monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
+    b = np.array([1.0 + 0j, -2.0 + 0j], dtype=np.complex128)
+
+    out = solvers.gmres_cupy(
+        lambda x: np.zeros_like(np.asarray(x)),
+        b,
+        rtol=1e-12,
+        atol=0.0,
+        restart=4,
+        maxiter=6,
+        show_progress=False,
+    )
+
+    assert int(out.info) > 0
+    assert int(out.iterations) >= 1
+    assert np.isfinite(float(out.relative_residual))
+
+
+def test_gmres_cupy_native_zero_initial_guess_skips_extra_initial_matvec(monkeypatch):
+    monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
+    b = np.array([1.0 + 0j, -2.0 + 0j, 0.5 + 0j], dtype=np.complex128)
+    matvec_calls = 0
+
+    def _a_mv(x: np.ndarray) -> np.ndarray:
+        nonlocal matvec_calls
+        matvec_calls += 1
+        return np.asarray(x)
+
+    out = solvers.gmres_cupy(
+        _a_mv,
+        b,
+        x0=None,
+        rtol=0.0,
+        atol=0.0,
+        restart=2,
+        maxiter=1,
+        show_progress=False,
+    )
+    assert int(out.info) == 0
+    assert int(out.iterations) == 1
+    # One A@v inside Arnoldi + one final true-residual check.
+    assert matvec_calls == 2
+
+
+def test_gmres_cupy_native_clamps_restart_to_system_size(monkeypatch):
+    cupy = _fake_cupy_numpy_backend()
+    zero_shapes: list[tuple[int, ...]] = []
+    orig_zeros = cupy.zeros
+
+    def _zeros(shape, dtype=None):
+        if isinstance(shape, tuple):
+            zero_shapes.append(tuple(int(v) for v in shape))
+        return orig_zeros(shape, dtype=dtype)
+
+    cupy.zeros = _zeros  # type: ignore[method-assign]
+    monkeypatch.setattr(solvers, "import_cupy", lambda: (cupy, None))
+    n = 4
+    b = np.arange(1, n + 1, dtype=np.float64).astype(np.complex128)
+
+    solvers.gmres_cupy(
+        lambda x: np.asarray(x),
+        b,
+        rtol=1e-12,
+        atol=0.0,
+        restart=50,
+        maxiter=9,
+        show_progress=False,
+    )
+    # V has shape (cycle_steps + 1, n); with restart clamp and n=4 we expect (5, 4),
+    # not an oversized (10, 4) allocation from restart=50/maxiter=9.
+    assert (5, 4) in zero_shapes
+    assert (10, 4) not in zero_shapes
+
+
+def test_gmres_cupy_native_tracks_scipy_solution_quality_on_toy_system(monkeypatch):
+    monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
+    rng = np.random.default_rng(9)
+    n = 8
+    M = rng.standard_normal((n, n)) + 1j * rng.standard_normal((n, n))
+    H = 0.5 * (M + M.conj().T)
+    A = (1.5 + 0.0j) * np.eye(n, dtype=np.complex128) + 0.05 * H
+    b = rng.standard_normal(n) + 1j * rng.standard_normal(n)
+
+    Aop = LinearOperator((n, n), matvec=lambda x: A @ np.asarray(x), dtype=np.complex128)
+    x_ref, info_ref = scipy_gmres(
+        Aop,
+        b,
+        rtol=1e-10,
+        atol=0.0,
+        restart=8,
+        maxiter=40,
+        callback=None,
+        callback_type="legacy",
+    )
+    out_cupy = solvers.gmres_cupy(
+        lambda x: A @ np.asarray(x),
+        b,
+        rtol=1e-10,
+        atol=0.0,
+        restart=8,
+        maxiter=40,
+        show_progress=False,
+    )
+
+    assert int(info_ref) == 0
+    assert int(out_cupy.info) == 0
+    assert float(out_cupy.relative_residual) <= 1e-10
+    np.testing.assert_allclose(np.asarray(out_cupy.x), np.asarray(x_ref), atol=1e-8, rtol=1e-8)
+
+
+@pytest.mark.skipif(not _cupy_available(), reason="CuPy runtime unavailable")
+@pytest.mark.parametrize(
+    ("dtype",),
+    [
+        (np.complex64,),
+        (np.complex128,),
+    ],
+)
+def test_gmres_cupy_native_matches_builtin_cupy_on_real_device(
+    dtype: np.dtype,
+) -> None:
+    prev_tmp = os.environ.get("TMP")
+    prev_temp = os.environ.get("TEMP")
+    prev_tempdir = tempfile.tempdir
+    _configure_cupy_tempdir()
+    try:
+        cupy, cupyx_sparse_linalg = import_cupy()
+        rng = np.random.default_rng(41)
+        n = 80
+        M = (rng.standard_normal((n, n)) + 1j * rng.standard_normal((n, n))).astype(dtype)
+        A = M.conj().T @ M + (0.5 + 0.0j) * np.eye(n, dtype=dtype)
+        b = (rng.standard_normal(n) + 1j * rng.standard_normal(n)).astype(dtype)
+        A_gpu = cupy.asarray(A)
+        b_gpu = cupy.asarray(b)
+        Aop_cpu = LinearOperator(
+            (n, n), matvec=lambda v: A @ np.asarray(v, dtype=dtype), dtype=dtype
+        )
+        scipy_hist: list[float] = []
+
+        def _scipy_cb(v: float) -> None:
+            scipy_hist.append(float(v))
+
+        x_scipy, info_scipy = scipy_gmres(
+            Aop_cpu,
+            b,
+            rtol=0.0,
+            atol=0.0,
+            restart=20,
+            maxiter=40,
+            callback=_scipy_cb,
+            callback_type="legacy",
+        )
+        native_hist: list[float] = []
+
+        out_native = solvers.gmres_cupy(
+            lambda x: A_gpu @ cupy.asarray(x),
+            b,
+            rtol=0.0,
+            atol=0.0,
+            restart=20,
+            maxiter=40,
+            callback=native_hist.append,
+            show_progress=False,
+        )
+
+        Aop_gpu = cupyx_sparse_linalg.LinearOperator(
+            (n, n),
+            matvec=lambda v: A_gpu @ v,
+            dtype=dtype,
+        )
+        x_builtin, info_builtin = cupyx_sparse_linalg.gmres(
+            Aop_gpu,
+            b_gpu,
+            x0=cupy.zeros_like(b_gpu),
+            M=None,
+            rtol=0.0,
+            atol=0.0,
+            restart=20,
+            maxiter=40,
+            callback=None,
+            callback_type=None,
+        )
+        cupy.cuda.Stream.null.synchronize()
+        rel_scipy = float(np.linalg.norm(A @ np.asarray(x_scipy) - b) / np.linalg.norm(b))
+        rel_builtin = float(cupy.linalg.norm(A_gpu @ x_builtin - b_gpu) / cupy.linalg.norm(b_gpu))
+        rel_native = float(out_native.relative_residual)
+        rel_diff_native_builtin = abs(rel_native - rel_builtin) / max(abs(rel_builtin), 1e-30)
+        rel_diff_scipy_builtin = abs(rel_scipy - rel_builtin) / max(abs(rel_builtin), 1e-30)
+
+        assert int(out_native.info) == int(info_builtin)
+        assert int(info_scipy) == int(info_builtin)
+        assert int(out_native.iterations) == len(native_hist)
+        assert len(scipy_hist) == 40
+        # Native GMRES should match built-in CuPy at least at the same residual
+        # agreement level observed between SciPy legacy-inner and built-in CuPy.
+        assert rel_diff_native_builtin <= 1.1 * rel_diff_scipy_builtin + 1e-12
+    finally:
+        if prev_tmp is None:
+            os.environ.pop("TMP", None)
+        else:
+            os.environ["TMP"] = prev_tmp
+        if prev_temp is None:
+            os.environ.pop("TEMP", None)
+        else:
+            os.environ["TEMP"] = prev_temp
+        tempfile.tempdir = prev_tempdir
 
 
 def test_solve_linear_system_preconditioner_hook_identity():

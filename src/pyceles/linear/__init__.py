@@ -1,3 +1,4 @@
+from .krylov_cupy import CuPyGMRESNativeResult, gmres_cupy_native
 from .preconditioner import (
     CuPyGridBlockPreconditioner,
     GridBlockPreconditioner,
@@ -36,4 +37,6 @@ __all__ = [
     "GridBlockPreconditioner",
     "make_grid_block_preconditioner",
     "regular_grid_partition",
+    "CuPyGMRESNativeResult",
+    "gmres_cupy_native",
 ]

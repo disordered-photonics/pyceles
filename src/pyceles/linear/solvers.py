@@ -25,6 +25,8 @@ from tqdm.auto import tqdm
 
 from pyceles._optional import asnumpy, import_cupy
 
+from .krylov_cupy import gmres_cupy_native
+
 
 @dataclass(frozen=True)
 class LinearSolveResult:
@@ -417,113 +419,64 @@ def gmres_cupy(
     show_progress: bool = True,
     compute_final_residual: bool = True,
 ) -> GmresResult:
-    """Solve Ax=b via CuPy GMRES using a GPU-resident matvec callable.
+    """Solve Ax=b via native CuPy restarted GMRES.
 
-    CuPy's built-in GMRES only reports callback information once per restart
-    cycle and checks convergence at the same cadence. To keep pyceles progress
-    reporting and residual semantics honest, this wrapper drives one restart
-    cycle at a time and evaluates the true residual between cycles.
-
-    Practical tuning note:
-    For dense/non-normal systems with left preconditioning, convergence can be
-    strongly restart-sensitive on the CuPy path. If residuals plateau with small
-    restart, increasing `restart` is often more effective than assuming the
-    preconditioner itself is broken.
+    The Arnoldi basis, Hessenberg system, and Givens updates stay device-side.
+    Inner-iteration callbacks/reporting follow GMRES preconditioned residual
+    recurrence, while convergence is decided on true residual checks at restart
+    boundaries.
     """
 
-    cupy, cupyx_sparse_linalg = import_cupy()
-
-    b_gpu = cupy.asarray(b)
-    n = int(b_gpu.size)
-    op_dtype = np.dtype(np.result_type(np.asarray(b).dtype, np.complex64))
-    restart = max(1, int(restart))
+    cupy, _ = import_cupy()
+    b_arr = np.asarray(b)
+    n = int(b_arr.size)
+    op_dtype = np.dtype(np.result_type(b_arr.dtype, np.complex64))
     maxiter_total = int(maxiter) if maxiter is not None else n * 10
-
-    def _apply_gpu(op: Callable[[np.ndarray], np.ndarray], x_gpu):
-        x_arr = cupy.asarray(x_gpu, dtype=op_dtype)
-        y = op(x_arr)
-        return cupy.asarray(y, dtype=op_dtype)
-
-    Aop = cupyx_sparse_linalg.LinearOperator(
-        (n, n),
-        matvec=lambda v: _apply_gpu(A_mv, v).copy(),
-        dtype=op_dtype,
-    )
-    Mop = None
-    if preconditioner is not None:
-        Mop = cupyx_sparse_linalg.LinearOperator(
-            (n, n),
-            matvec=lambda v: _apply_gpu(preconditioner, v).copy(),
-            dtype=op_dtype,
-        )
 
     progress_update, progress_close, history = _make_progress_tracker(
         "gmres[cupy]",
         show_progress=show_progress,
         target_rel=float(rtol),
-        residual_label="true_rel_res",
+        residual_label="pr_rel_res",
         max_iters=maxiter_total,
     )
-    x0_gpu = None if x0 is None else cupy.asarray(x0, dtype=op_dtype)
-    x_gpu = cupy.zeros_like(b_gpu, dtype=op_dtype) if x0_gpu is None else x0_gpu.copy()
-    b_norm = float(cupy.linalg.norm(b_gpu))
-    target_abs = max(float(atol), float(rtol) * b_norm)
-    iterations = 0
-    info = 0
-    residual_norm = float("nan")
-    relative_residual = float("nan")
 
-    while True:
-        residual_gpu = _apply_gpu(A_mv, x_gpu) - b_gpu
-        residual_norm = float(cupy.linalg.norm(residual_gpu))
-        relative_residual = residual_norm / b_norm if b_norm > 0 else residual_norm
+    def _inner_callback(pr_rel: float) -> None:
+        progress_update(pr_rel)
         if callback is not None:
-            callback(relative_residual)
-        progress_update(relative_residual)
-        if residual_norm <= target_abs:
-            info = 0
-            break
-        if iterations >= maxiter_total:
-            info = iterations if iterations > 0 else maxiter_total
-            break
+            callback(pr_rel)
 
-        cycle_steps = min(restart, maxiter_total - iterations)
-        x_gpu, cycle_info = cupyx_sparse_linalg.gmres(
-            Aop,
-            b_gpu,
-            x0=x_gpu,
-            M=Mop,
-            rtol=rtol,
-            atol=atol,
-            restart=cycle_steps,
-            maxiter=cycle_steps,
-            callback=None,
-            callback_type=None,
-        )
-        iterations += cycle_steps
-        if int(cycle_info) == 0 and iterations >= maxiter_total:
-            info = 0
-            break
-        if iterations >= maxiter_total and int(cycle_info) != 0:
-            info = iterations
-            break
-
+    native_callback = _inner_callback if (show_progress or callback is not None) else None
+    native = gmres_cupy_native(
+        A_mv,
+        b,
+        cupy=cupy,
+        x0=x0,
+        preconditioner=preconditioner,
+        rtol=rtol,
+        atol=atol,
+        restart=restart,
+        maxiter=maxiter_total,
+        operator_dtype=op_dtype,
+        callback=native_callback,
+        record_preconditioned_history=False,
+    )
     progress_close()
 
-    x_np = asnumpy(x_gpu)
+    x_np = asnumpy(native.x)
     if compute_final_residual:
-        residual_gpu = _apply_gpu(A_mv, x_gpu) - b_gpu
-        residual_norm = float(cupy.linalg.norm(residual_gpu))
-        relative_residual = residual_norm / b_norm if b_norm > 0 else residual_norm
+        residual_norm = float(native.residual_norm)
+        relative_residual = float(native.relative_residual)
     else:
         residual_norm = float("nan")
         relative_residual = float("nan")
+
     return LinearSolveResult(
         x=x_np,
-        info=int(info),
+        info=int(native.info),
         residual_norm=residual_norm,
         relative_residual=relative_residual,
-        iterations=int(iterations),
+        iterations=int(native.iterations),
         method="gmres[cupy]",
         residual_history=np.asarray(history, dtype=float),
         rhs_count=1,

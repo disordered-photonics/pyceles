@@ -277,8 +277,9 @@ def main() -> None:
         raise ValueError("The CuPy operator backend does not support direct solves.")
     if operator_backend == "cupy" and int(args.solver_restart) >= 100 and not args.quiet:
         print(
-            "Note: CuPy GMRES checks convergence once per restart cycle. "
-            "Large restart values can make the first progress update very late."
+            "Note: CuPy native GMRES now reports per-inner-iteration "
+            "preconditioned residuals (`pr_rel_res`). Large restart values can "
+            "still change convergence behavior and memory footprint."
         )
     if operator_backend == "cupy" and args.preconditioner_mode != "none" and not args.quiet:
         print(
