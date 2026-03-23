@@ -289,7 +289,8 @@ def prepare_matvec(
         import_cupy()
         if cache_translation_blocks:
             raise NotImplementedError(
-                "`cache_translation_blocks=True` is not supported with `operator_backend='cupy'`."
+                "`cache_translation_blocks=True` is not supported with `operator_backend='cupy'` "
+                "(direct raw-kernel coupling path)."
             )
         # The CuPy backend accepts mixed diagonal/dense groups, including
         # axisymmetric particles such as spheroids, by uploading explicit
