@@ -317,9 +317,12 @@ routes to a native block-GMRES path, and `Simulation.solve_sources(...)` uses
 that path automatically on labeled multi-channel runs.
 
 Current MLFMM scope/limits:
-- NumPy operator backend only (`operator_backend="numpy"`)
+- matrix-free MLFMM stages are available on both NumPy and CuPy operator
+  backends in `complex128`
+- on the CuPy path, one-time hierarchy/build preparation stays on the validated
+  CPU reference implementation, while repeated MLFMM applies run on device
 - matrix-free iterative solves for true MLFMM stages
-- dense/direct NumPy solves remain pairwise-only
+- dense/direct solves remain pairwise-only (MLFMM stages are matrix-free)
 - the current implementation targets the high-frequency regime only
 - the octree policy is uniform-depth rather than adaptive
 

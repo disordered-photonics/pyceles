@@ -53,19 +53,31 @@ def test_simulation_config_rejects_unknown_coupling_backend() -> None:
         SimulationConfig(coupling_backend="fmm", verbose=False)  # type: ignore[arg-type]
 
 
-def test_simulation_config_rejects_cupy_mlfmm_combination() -> None:
-    with pytest.raises(ValueError, match="coupling_backend='mlfmm'"):
-        SimulationConfig(
-            operator_backend="cupy",
-            coupling_backend="mlfmm",
-            verbose=False,
-        )
+def test_simulation_config_accepts_cupy_mlfmm_combination() -> None:
+    cfg = SimulationConfig(
+        operator_backend="cupy",
+        coupling_backend="mlfmm",
+        compute_dtype="complex128",
+        verbose=False,
+    )
+    assert cfg.operator_backend == "cupy"
+    assert cfg.coupling_backend == "mlfmm"
 
 
 def test_simulation_config_rejects_numpy_mlfmm_complex64() -> None:
     with pytest.raises(ValueError, match="compute_dtype='complex128'"):
         SimulationConfig(
             operator_backend="numpy",
+            coupling_backend="mlfmm",
+            compute_dtype="complex64",
+            verbose=False,
+        )
+
+
+def test_simulation_config_rejects_cupy_mlfmm_complex64() -> None:
+    with pytest.raises(ValueError, match="compute_dtype='complex128'"):
+        SimulationConfig(
+            operator_backend="cupy",
             coupling_backend="mlfmm",
             compute_dtype="complex64",
             verbose=False,

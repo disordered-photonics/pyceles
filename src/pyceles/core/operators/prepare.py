@@ -27,7 +27,8 @@ from .groups import (
     PreparedParticleTGroup,
     plan_particle_t_groups,
 )
-from .mlfmm import MLFMMOptions, prepare_mlfmm_coupling
+from .mlfmm import MLFMMCouplingOperator, MLFMMOptions, prepare_mlfmm_coupling
+from .mlfmm_cupy import prepare_mlfmm_cupy_coupling
 from .single_body import CompositeParticleTOperator, ParticleTOperator
 from .single_body_cupy import wrap_particle_t_groups_cupy
 
@@ -286,14 +287,9 @@ def prepare_matvec(
             )
     elif backend_name == "cupy":
         import_cupy()
-        if coupling_name != "pairwise":
-            raise NotImplementedError(
-                "The CuPy operator backend currently supports only `coupling_backend='pairwise'`."
-            )
         if cache_translation_blocks:
             raise NotImplementedError(
-                "The CuPy operator backend exposes only the direct raw-kernel coupling path. "
-                "Translation-block caching is not supported."
+                "`cache_translation_blocks=True` is not supported with `operator_backend='cupy'`."
             )
         # The CuPy backend accepts mixed diagonal/dense groups, including
         # axisymmetric particles such as spheroids, by uploading explicit
@@ -321,17 +317,57 @@ def prepare_matvec(
                 dtype=op_dtype,
             ),
         )
-        coupling = cast(
-            CouplingOperator,
-            CuPyPairwiseCouplingOperator(
+        if coupling_name == "pairwise":
+            coupling = cast(
+                CouplingOperator,
+                CuPyPairwiseCouplingOperator(
+                    lmax=int(lmax),
+                    k=k_f,
+                    positions=positions,
+                    ab5=ab5,
+                    radial_lut=lut,
+                    dtype=op_dtype,
+                ),
+            )
+        elif coupling_name == "mlfmm":
+            if op_dtype != np.dtype(np.complex128):
+                raise ValueError(
+                    "`coupling_backend='mlfmm'` currently requires `operator_dtype=complex128` "
+                    "on the CuPy backend."
+                )
+            cpu_mlfmm = prepare_mlfmm_coupling(
                 lmax=int(lmax),
                 k=k_f,
                 positions=positions,
-                ab5=ab5,
+                particle_circumscribing_radii=circumscribing_radii,
                 radial_lut=lut,
+                ab5=ab5,
+                options=mlfmm_options,
                 dtype=op_dtype,
-            ),
-        )
+                cache_translation_blocks=False,
+                show_progress=bool(show_progress),
+            )
+            if isinstance(cpu_mlfmm, PairwiseCouplingOperator):
+                coupling = cast(
+                    CouplingOperator,
+                    CuPyPairwiseCouplingOperator(
+                        lmax=int(lmax),
+                        k=k_f,
+                        positions=positions,
+                        ab5=ab5,
+                        radial_lut=lut,
+                        dtype=op_dtype,
+                    ),
+                )
+            else:
+                coupling = cast(
+                    CouplingOperator,
+                    prepare_mlfmm_cupy_coupling(cast(MLFMMCouplingOperator, cpu_mlfmm)),
+                )
+        else:
+            raise ValueError(
+                f"Unknown coupling backend '{coupling_backend}'. Use 'pairwise' or 'mlfmm'."
+            )
     else:
         raise ValueError(f"Unknown operator backend '{backend}'. Use 'numpy' or 'cupy'.")
 

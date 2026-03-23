@@ -7,13 +7,16 @@ This module validates and uploads repeated-apply structures to device memory.
 """
 
 from dataclasses import dataclass
+from functools import cache
 from importlib import import_module
 from typing import Any
 
 import numpy as np
 import numpy.typing as npt
 
-from pyceles._optional import import_cupy
+from pyceles._optional import coerce_array, import_cupy
+from pyceles.core.indexing import n_modes
+from pyceles.core.translation import translation_ab5_table, translation_block
 
 from .mlfmm import (
     MLFMMCouplingOperator,
@@ -133,6 +136,15 @@ class CuPyMLFMMSingleLevelData:
 
 
 @dataclass(frozen=True)
+class CuPyMLFMMNearPairData:
+    """Device-ready directed exact-near particle-pair blocks."""
+
+    dst_particle_indices: Any
+    src_particle_indices: Any
+    blocks: Any
+
+
+@dataclass(frozen=True)
 class CuPyMLFMMMultilevelData:
     """Device-ready container for multilevel repeated-apply structures."""
 
@@ -155,6 +167,7 @@ class CuPyMLFMMPreparedData:
     positions: Any
     partition: CuPyMLFMMPartitionData
     resolved_plan: MLFMMResolvedPlan
+    near_pairs: CuPyMLFMMNearPairData
     single_level: CuPyMLFMMSingleLevelData | None = None
     multilevel: CuPyMLFMMMultilevelData | None = None
 
@@ -507,6 +520,539 @@ def _upload_multilevel(
     )
 
 
+def _build_exact_near_pair_blocks(coupling: MLFMMCouplingOperator) -> CuPyMLFMMNearPairData:
+    """Build directed exact-near pair blocks on CPU and return NumPy arrays."""
+
+    partition = coupling.resolved_plan.partition
+    positions = np.asarray(coupling.positions, dtype=float)
+    nm = n_modes(int(coupling.lmax))
+    ab5 = translation_ab5_table(int(coupling.lmax), dtype=np.complex128)
+    dst_indices: list[int] = []
+    src_indices: list[int] = []
+    blocks: list[np.ndarray] = []
+    cache = coupling._exact_block_cache
+
+    def _block_for_pair(i: int, j: int) -> np.ndarray:
+        key = (int(i), int(j))
+        if cache is not None and key in cache:
+            return np.asarray(cache[key], dtype=np.complex128)
+        wij = translation_block(
+            int(coupling.lmax),
+            float(coupling.k),
+            np.asarray(positions[int(i)] - positions[int(j)], dtype=float),
+            ab5=ab5,
+            radial_lut=coupling.radial_lut,
+        )
+        wij_arr = np.asarray(wij, dtype=np.complex128)
+        if cache is not None:
+            cache[key] = wij_arr
+        return wij_arr
+
+    for a, b in partition.leaf_near_pairs:
+        leaf_a = partition.leaves[int(a)]
+        leaf_b = partition.leaves[int(b)]
+        if int(a) == int(b):
+            for i in np.asarray(leaf_a.particle_indices, dtype=np.int64):
+                for j in np.asarray(leaf_a.particle_indices, dtype=np.int64):
+                    if int(i) == int(j):
+                        continue
+                    dst_indices.append(int(i))
+                    src_indices.append(int(j))
+                    blocks.append(_block_for_pair(int(i), int(j)))
+            continue
+        for i in np.asarray(leaf_a.particle_indices, dtype=np.int64):
+            for j in np.asarray(leaf_b.particle_indices, dtype=np.int64):
+                dst_indices.append(int(i))
+                src_indices.append(int(j))
+                blocks.append(_block_for_pair(int(i), int(j)))
+                dst_indices.append(int(j))
+                src_indices.append(int(i))
+                blocks.append(_block_for_pair(int(j), int(i)))
+
+    if blocks:
+        blocks_arr = np.ascontiguousarray(np.stack(blocks, axis=0), dtype=np.complex128)
+    else:
+        blocks_arr = np.zeros((0, nm, nm), dtype=np.complex128)
+    if blocks_arr.ndim != 3 or blocks_arr.shape[1:] != (nm, nm):
+        raise ValueError(f"Exact-near pair block tensor must have shape (P, {nm}, {nm}).")
+    return CuPyMLFMMNearPairData(
+        dst_particle_indices=np.asarray(dst_indices, dtype=np.int64),
+        src_particle_indices=np.asarray(src_indices, dtype=np.int64),
+        blocks=blocks_arr,
+    )
+
+
+def _upload_exact_near_pair_blocks(
+    coupling: MLFMMCouplingOperator, *, cupy: Any
+) -> CuPyMLFMMNearPairData:
+    """Upload directed exact-near pair blocks to device memory.
+
+    The near-pair tensor can be large for dense clusters; use blocking host->device
+    copies to avoid large transient pinned-memory allocations in CuPy.
+    """
+
+    built = _build_exact_near_pair_blocks(coupling)
+    return CuPyMLFMMNearPairData(
+        dst_particle_indices=cupy.asarray(
+            _as_numpy_1d(
+                np.asarray(built.dst_particle_indices),
+                dtype=np.int64,
+                name="exact_near.dst_particle_indices",
+            ),
+            dtype=cupy.int64,
+            blocking=True,
+        ),
+        src_particle_indices=cupy.asarray(
+            _as_numpy_1d(
+                np.asarray(built.src_particle_indices),
+                dtype=np.int64,
+                name="exact_near.src_particle_indices",
+            ),
+            dtype=cupy.int64,
+            blocking=True,
+        ),
+        blocks=cupy.asarray(
+            np.asarray(built.blocks, dtype=np.complex128),
+            dtype=cupy.complex128,
+            blocking=True,
+        ),
+    )
+
+
+def _reshape_unknowns_to_particle_modes(
+    x: Any, *, n_particles: int, nm: int, cupy: Any
+) -> tuple[Any, bool]:
+    """Reshape `(n*nm,)` or `(n*nm, nrhs)` unknowns to `(n, nm, nrhs)`."""
+
+    arr = coerce_array(x, dtype=np.dtype(np.complex128), prefer_cupy=True)
+    if arr.ndim == 1:
+        if int(arr.size) != int(n_particles * nm):
+            raise ValueError(
+                f"MLFMM CuPy apply expected vector size {n_particles * nm}, got {int(arr.size)}."
+            )
+        return cupy.asarray(arr, dtype=cupy.complex128).reshape(n_particles, nm, 1), True
+    if arr.ndim == 2:
+        if int(arr.shape[0]) != int(n_particles * nm):
+            raise ValueError(
+                "MLFMM CuPy apply expected 2D unknowns with first dimension "
+                f"{n_particles * nm}, got {tuple(int(v) for v in arr.shape)}."
+            )
+        return cupy.asarray(arr, dtype=cupy.complex128).reshape(
+            n_particles, nm, int(arr.shape[1])
+        ), False
+    raise ValueError(f"MLFMM CuPy apply expects 1D or 2D unknowns, got ndim={arr.ndim}.")
+
+
+def _restore_unknown_shape(y: Any, *, squeezed: bool) -> Any:
+    """Restore `(n, nm, nrhs)` output to original linear-system shape."""
+
+    if squeezed:
+        return y.reshape(-1)
+    n_particles, nm, nrhs = (int(v) for v in y.shape)
+    return y.reshape(n_particles * nm, nrhs)
+
+
+def _apply_reflection_to_direction_axis(values: Any, permutation: Any, *, cupy: Any) -> Any:
+    """Apply one directional reflection permutation on axis 2."""
+
+    return cupy.take(values, permutation, axis=2)
+
+
+@cache
+def _add_at_complex128_raw_kernel() -> Any:
+    cupy, _ = import_cupy()
+    source = r"""
+    #include <cupy/complex.cuh>
+    extern "C" __global__ void add_at_complex128(
+        const long long n_pairs,
+        const long long width,
+        const long long* dst,
+        const complex<double>* values,
+        complex<double>* out
+    ) {
+        const long long tid = (long long)blockIdx.x * (long long)blockDim.x + (long long)threadIdx.x;
+        const long long total = n_pairs * width;
+        for (long long i = tid; i < total; i += (long long)blockDim.x * (long long)gridDim.x) {
+            const long long pair_idx = i / width;
+            const long long lane = i - pair_idx * width;
+            const long long out_row = dst[pair_idx];
+            const long long out_idx = out_row * width + lane;
+            const complex<double> v = values[i];
+            double* out_ptr = reinterpret_cast<double*>(&out[out_idx]);
+            atomicAdd(out_ptr + 0, v.real());
+            atomicAdd(out_ptr + 1, v.imag());
+        }
+    }
+    """
+    return cupy.RawKernel(source, "add_at_complex128")
+
+
+def _add_at_complex128(target: Any, indices: Any, values: Any, *, cupy: Any) -> None:
+    """Apply `add.at`-style indexed accumulation for complex128 batches on device.
+
+    We use a specialized kernel because, as of CuPy 14.0.1, `cupy.add.at`
+    does not accept complex dtypes. The custom kernel also avoids splitting
+    real/imag updates in the hot loop.
+    """
+
+    idx = cupy.asarray(indices, dtype=cupy.int64).reshape(-1)
+    if int(idx.size) == 0:
+        return
+    tgt = cupy.asarray(target, dtype=cupy.complex128)
+    values_arr = cupy.asarray(values, dtype=cupy.complex128)
+    if int(values_arr.shape[0]) != int(idx.size):
+        raise ValueError(
+            "Scatter-add value batch count must match index count. "
+            f"Got values={int(values_arr.shape[0])}, indices={int(idx.size)}."
+        )
+    width = int(np.prod(values_arr.shape[1:], dtype=np.int64))
+    if width <= 0:
+        raise ValueError("Scatter-add trailing width must be positive.")
+    values_flat = cupy.ascontiguousarray(values_arr.reshape(int(idx.size), width))
+    out_flat = tgt.reshape(int(tgt.shape[0]), width)
+    if not bool(out_flat.flags.c_contiguous):
+        raise ValueError("Scatter-add target view must be C-contiguous.")
+    if int(cupy.max(idx)) >= int(tgt.shape[0]) or int(cupy.min(idx)) < 0:
+        raise ValueError("Scatter-add index out of bounds for target tensor.")
+
+    kernel = _add_at_complex128_raw_kernel()
+    threads = 256
+    total = int(idx.size) * width
+    blocks = max(1, (total + threads - 1) // threads)
+    kernel(
+        (int(blocks),),
+        (threads,),
+        (
+            np.int64(int(idx.size)),
+            np.int64(width),
+            idx,
+            values_flat,
+            out_flat,
+        ),
+    )
+
+
+def _apply_sparse_directional_map(values: Any, matrix: Any, *, cupy: Any) -> Any:
+    """Apply one sparse directional map on channel batches.
+
+    Parameters
+    ----------
+    values:
+        Shape `(nbatch, 4, n_source, nrhs)`.
+    matrix:
+        CSR-like sparse matrix with shape `(n_target, n_source)`.
+    """
+
+    arr = cupy.asarray(values, dtype=cupy.complex128)
+    n_batch = int(arr.shape[0])
+    n_chan = int(arr.shape[1])
+    n_rhs = int(arr.shape[3])
+    flat = arr.transpose(0, 1, 3, 2).reshape(-1, int(arr.shape[2]))
+    mapped_flat = (matrix @ flat.T).T
+    return mapped_flat.reshape(n_batch, n_chan, n_rhs, int(matrix.shape[0])).transpose(0, 1, 3, 2)
+
+
+def _box_outgoing_to_directional_cupy(
+    directional: CuPyDirectionalTransformsData, box_states: Any, *, cupy: Any
+) -> Any:
+    """Map batched outgoing box SVWF states to directional channels on device."""
+
+    states = cupy.asarray(box_states, dtype=cupy.complex128)
+    nscl = int(directional.Fth.shape[1])
+    if int(states.shape[1]) != 2 * nscl:
+        raise ValueError(
+            f"box_states second dimension must be {2 * nscl}, got {int(states.shape[1])}."
+        )
+    a_box = states[:, :nscl, :]
+    b_box = states[:, nscl:, :]
+    a_theta = cupy.einsum("dn,bnr->bdr", directional.Fth, a_box)
+    a_phi = cupy.einsum("dn,bnr->bdr", directional.Fph, a_box)
+    b_theta = cupy.einsum("dn,bnr->bdr", directional.Fth, b_box)
+    b_phi = cupy.einsum("dn,bnr->bdr", directional.Fph, b_box)
+    perm = directional.grid.reflection_permutation
+    return cupy.stack(
+        (
+            cupy.take(a_theta, perm, axis=1),
+            cupy.take(a_phi, perm, axis=1),
+            cupy.take(b_theta, perm, axis=1),
+            cupy.take(b_phi, perm, axis=1),
+        ),
+        axis=1,
+    )
+
+
+def _directional_to_box_regular_cupy(
+    directional: CuPyDirectionalTransformsData, directional_channels: Any, *, cupy: Any
+) -> Any:
+    """Map batched directional channels to regular box SVWF states on device."""
+
+    channels = cupy.asarray(directional_channels, dtype=cupy.complex128)
+    if int(channels.shape[1]) != 4:
+        raise ValueError(
+            f"directional channel batch must have 4 channels, got {int(channels.shape[1])}."
+        )
+    perm = directional.grid.reflection_permutation
+    a_theta = cupy.take(channels[:, 0], perm, axis=1)
+    a_phi = cupy.take(channels[:, 1], perm, axis=1)
+    b_theta = cupy.take(channels[:, 2], perm, axis=1)
+    b_phi = cupy.take(channels[:, 3], perm, axis=1)
+
+    top = (
+        cupy.einsum("sn,bnr->bsr", directional.Fth_adj, a_theta)
+        + cupy.einsum("sn,bnr->bsr", directional.Fph_adj, a_phi)
+        + cupy.einsum("sn,bnr->bsr", directional.Gth_adj, b_theta)
+        + cupy.einsum("sn,bnr->bsr", directional.Gph_adj, b_phi)
+    )
+    bottom = (
+        cupy.einsum("sn,bnr->bsr", directional.Fth_adj, b_theta)
+        + cupy.einsum("sn,bnr->bsr", directional.Fph_adj, b_phi)
+        + cupy.einsum("sn,bnr->bsr", directional.Gth_adj, a_theta)
+        + cupy.einsum("sn,bnr->bsr", directional.Gph_adj, a_phi)
+    )
+    return cupy.concatenate((top, bottom), axis=1)
+
+
+def _aggregate_leaf_box_states(
+    x_states: Any,
+    *,
+    leaves: tuple[Any, ...],
+    aggregation: tuple[Any, ...],
+    box_nm: int,
+    nrhs: int,
+    cupy: Any,
+) -> Any:
+    """Aggregate particle coefficients into one outgoing box state per leaf."""
+
+    box_states = cupy.zeros((len(leaves), int(box_nm), int(nrhs)), dtype=cupy.complex128)
+    for leaf in leaves:
+        particle_indices = np.asarray(leaf.particle_indices, dtype=np.int64)
+        idx = cupy.asarray(particle_indices, dtype=cupy.int64)
+        coeffs = x_states[idx].reshape(-1, nrhs)
+        box_states[int(leaf.id)] = aggregation[int(leaf.id)] @ coeffs
+    return box_states
+
+
+def _receive_leaf_boxes_to_particles(
+    incoming_box: Any,
+    *,
+    leaves: tuple[Any, ...],
+    receive: tuple[Any, ...],
+    nm: int,
+    n_particles: int,
+    nrhs: int,
+    cupy: Any,
+) -> Any:
+    """Scatter leaf-local incoming box states back to particle coefficients."""
+
+    y = cupy.zeros((int(n_particles), int(nm), int(nrhs)), dtype=cupy.complex128)
+    for leaf in leaves:
+        pid = np.asarray(leaf.particle_indices, dtype=np.int64)
+        idx = cupy.asarray(pid, dtype=cupy.int64)
+        contribution = receive[int(leaf.id)] @ incoming_box[int(leaf.id)]
+        y[idx] += contribution.reshape(pid.size, nm, nrhs)
+    return y
+
+
+def _apply_exact_near_pairs(prepared: CuPyMLFMMPreparedData, x_states: Any, *, cupy: Any) -> Any:
+    """Apply directed exact-near pair blocks on device."""
+
+    near = prepared.near_pairs
+    n_pairs = int(near.dst_particle_indices.size)
+    y = cupy.zeros_like(x_states, dtype=cupy.complex128)
+    if n_pairs == 0:
+        return y
+    src_values = x_states[near.src_particle_indices]  # (P, nm, nrhs)
+    contrib = cupy.einsum("pij,pjr->pir", near.blocks, src_values)
+    _add_at_complex128(y, near.dst_particle_indices, contrib, cupy=cupy)
+    return y
+
+
+def _apply_single_level_far(prepared: CuPyMLFMMPreparedData, x_states: Any, *, cupy: Any) -> Any:
+    """Apply sampled single-level far interactions on device."""
+
+    single = prepared.single_level
+    if single is None:
+        raise RuntimeError("Internal CuPy MLFMM error: missing single-level prepared data.")
+    leaves = prepared.resolved_plan.partition.leaves
+    n_particles, nm, nrhs = (int(v) for v in x_states.shape)
+    box_nm = int(single.aggregation[0].shape[0])
+    box_states = _aggregate_leaf_box_states(
+        x_states,
+        leaves=leaves,
+        aggregation=single.aggregation,
+        box_nm=box_nm,
+        nrhs=nrhs,
+        cupy=cupy,
+    )
+    outgoing = _box_outgoing_to_directional_cupy(single.directional, box_states, cupy=cupy)
+    incoming = cupy.zeros_like(outgoing, dtype=cupy.complex128)
+    for offset, batch in single.far_offset_batches.items():
+        translated = (
+            outgoing[batch.src_indices] * single.offset_diagonals[offset][None, None, :, None]
+        )
+        _add_at_complex128(incoming, batch.dst_indices, translated, cupy=cupy)
+    incoming_box = _directional_to_box_regular_cupy(single.directional, incoming, cupy=cupy)
+    return _receive_leaf_boxes_to_particles(
+        incoming_box,
+        leaves=leaves,
+        receive=single.receive,
+        nm=nm,
+        n_particles=n_particles,
+        nrhs=nrhs,
+        cupy=cupy,
+    )
+
+
+def _apply_multilevel_far(prepared: CuPyMLFMMPreparedData, x_states: Any, *, cupy: Any) -> Any:
+    """Apply sampled multilevel far interactions on device."""
+
+    multilevel = prepared.multilevel
+    if multilevel is None:
+        raise RuntimeError("Internal CuPy MLFMM error: missing multilevel prepared data.")
+    leaves = prepared.resolved_plan.partition.leaves
+    n_particles, nm, nrhs = (int(v) for v in x_states.shape)
+    levels = multilevel.levels
+    outgoing = [
+        cupy.zeros(
+            (
+                int(level.coords.shape[0]),
+                4,
+                int(level.directional.grid.directions.shape[0]),
+                nrhs,
+            ),
+            dtype=cupy.complex128,
+        )
+        for level in levels
+    ]
+    incoming = [cupy.zeros_like(values, dtype=cupy.complex128) for values in outgoing]
+    leaf_level = int(multilevel.leaf_level)
+    box_nm = int(multilevel.aggregation[0].shape[0])
+    leaf_box_states = _aggregate_leaf_box_states(
+        x_states,
+        leaves=leaves,
+        aggregation=multilevel.aggregation,
+        box_nm=box_nm,
+        nrhs=nrhs,
+        cupy=cupy,
+    )
+    outgoing[leaf_level] = _box_outgoing_to_directional_cupy(
+        levels[leaf_level].directional,
+        leaf_box_states,
+        cupy=cupy,
+    )
+
+    for transfer in reversed(multilevel.transfers):
+        child_level = int(transfer.child_level)
+        parent_level = int(transfer.parent_level)
+        child_values = outgoing[child_level]
+        parent_values = outgoing[parent_level]
+        child_perm = levels[child_level].directional.grid.reflection_permutation
+        parent_perm = levels[parent_level].directional.grid.reflection_permutation
+        for shift, batch in transfer.batches_by_shift.items():
+            child_reindexed = _apply_reflection_to_direction_axis(
+                child_values[batch.src_indices], child_perm, cupy=cupy
+            )
+            mapped_reindexed = _apply_sparse_directional_map(
+                child_reindexed, transfer.interpolation.matrix, cupy=cupy
+            )
+            mapped = _apply_reflection_to_direction_axis(mapped_reindexed, parent_perm, cupy=cupy)
+            mapped *= transfer.phase_up_by_shift[shift][None, None, :, None]
+            _add_at_complex128(parent_values, batch.dst_indices, mapped, cupy=cupy)
+
+    for level_idx in range(int(multilevel.hf_start_level), int(multilevel.hf_end_level) + 1):
+        level = levels[level_idx]
+        for offset, batch in level.far_offset_batches.items():
+            translated = (
+                outgoing[level_idx][batch.src_indices]
+                * level.offset_diagonals[offset][None, None, :, None]
+            )
+            _add_at_complex128(incoming[level_idx], batch.dst_indices, translated, cupy=cupy)
+
+    for transfer in multilevel.transfers:
+        child_level = int(transfer.child_level)
+        parent_level = int(transfer.parent_level)
+        parent_values = incoming[parent_level]
+        child_values = incoming[child_level]
+        parent_perm = levels[parent_level].directional.grid.reflection_permutation
+        child_perm = levels[child_level].directional.grid.reflection_permutation
+        for shift, batch in transfer.batches_by_shift.items():
+            shifted = (
+                parent_values[batch.dst_indices]
+                * transfer.phase_down_by_shift[shift][None, None, :, None]
+            )
+            shifted_reindexed = _apply_reflection_to_direction_axis(shifted, parent_perm, cupy=cupy)
+            mapped_reindexed = _apply_sparse_directional_map(
+                shifted_reindexed, transfer.anterpolation.matrix, cupy=cupy
+            )
+            mapped = _apply_reflection_to_direction_axis(mapped_reindexed, child_perm, cupy=cupy)
+            _add_at_complex128(child_values, batch.src_indices, mapped, cupy=cupy)
+
+    incoming_box = _directional_to_box_regular_cupy(
+        levels[leaf_level].directional,
+        incoming[leaf_level],
+        cupy=cupy,
+    )
+    return _receive_leaf_boxes_to_particles(
+        incoming_box,
+        leaves=leaves,
+        receive=multilevel.receive,
+        nm=nm,
+        n_particles=n_particles,
+        nrhs=nrhs,
+        cupy=cupy,
+    )
+
+
+@dataclass
+class CuPyMLFMMCouplingOperator:
+    """CuPy-backed repeated-apply MLFMM coupling operator.
+
+    The MLFMM plan and one-time operators are built on CPU (NumPy reference
+    path). This class executes repeated exact-near and sampled-far applies on
+    CuPy device arrays.
+    """
+
+    cpu_coupling: MLFMMCouplingOperator
+    prepared_data: CuPyMLFMMPreparedData
+    dtype: np.dtype = np.dtype(np.complex128)
+
+    def apply(self, x: Any) -> Any:
+        cupy, _ = import_cupy()
+        if np.dtype(self.dtype) != np.dtype(np.complex128):
+            raise ValueError(
+                "CuPy MLFMM apply currently supports only complex128 "
+                f"(got {np.dtype(self.dtype)!r})."
+            )
+        nm = n_modes(int(self.cpu_coupling.lmax))
+        n_particles = int(self.cpu_coupling.positions.shape[0])
+        x_states, squeezed = _reshape_unknowns_to_particle_modes(
+            x,
+            n_particles=n_particles,
+            nm=nm,
+            cupy=cupy,
+        )
+        y_near = _apply_exact_near_pairs(self.prepared_data, x_states, cupy=cupy)
+        stage = str(self.prepared_data.stage)
+        if stage == "single_level":
+            y_far = _apply_single_level_far(self.prepared_data, x_states, cupy=cupy)
+        elif stage == "multilevel":
+            y_far = _apply_multilevel_far(self.prepared_data, x_states, cupy=cupy)
+        else:
+            raise RuntimeError(f"Unsupported CuPy MLFMM stage {stage!r}.")
+        return _restore_unknown_shape(y_near + y_far, squeezed=squeezed)
+
+
+def prepare_mlfmm_cupy_coupling(coupling: MLFMMCouplingOperator) -> CuPyMLFMMCouplingOperator:
+    """Wrap a CPU-built MLFMM coupling plan in a CuPy repeated-apply operator."""
+
+    prepared = prepare_mlfmm_cupy_data(coupling)
+    return CuPyMLFMMCouplingOperator(
+        cpu_coupling=coupling,
+        prepared_data=prepared,
+        dtype=np.dtype(coupling.dtype),
+    )
+
+
 def prepare_mlfmm_cupy_data(coupling: MLFMMCouplingOperator) -> CuPyMLFMMPreparedData:
     """Upload repeated-apply MLFMM structures from a CPU-built coupling plan.
 
@@ -519,7 +1065,7 @@ def prepare_mlfmm_cupy_data(coupling: MLFMMCouplingOperator) -> CuPyMLFMMPrepare
     -------
     CuPyMLFMMPreparedData
         Device-resident representation of all repeated-apply data needed by
-        the future CuPy MLFMM apply path.
+        the CuPy MLFMM apply path.
     """
 
     cupy, _ = import_cupy()
@@ -537,6 +1083,7 @@ def prepare_mlfmm_cupy_data(coupling: MLFMMCouplingOperator) -> CuPyMLFMMPrepare
         )
 
     partition_data = _upload_partition(coupling.resolved_plan.partition, cupy=cupy)
+    near_pairs = _upload_exact_near_pair_blocks(coupling, cupy=cupy)
     positions = _as_numpy_3cols(coupling.positions, dtype=np.float64, name="coupling.positions")
     single_level_data: CuPyMLFMMSingleLevelData | None = None
     multilevel_data: CuPyMLFMMMultilevelData | None = None
@@ -558,20 +1105,24 @@ def prepare_mlfmm_cupy_data(coupling: MLFMMCouplingOperator) -> CuPyMLFMMPrepare
         positions=cupy.asarray(positions, dtype=cupy.float64),
         partition=partition_data,
         resolved_plan=coupling.resolved_plan,
+        near_pairs=near_pairs,
         single_level=single_level_data,
         multilevel=multilevel_data,
     )
 
 
 __all__ = [
+    "CuPyMLFMMCouplingOperator",
     "CuPyDirectionalGridData",
     "CuPyDirectionalInterpolationData",
     "CuPyDirectionalTransformsData",
     "CuPyMLFMMLevelData",
     "CuPyMLFMMMultilevelData",
+    "CuPyMLFMMNearPairData",
     "CuPyMLFMMPartitionData",
     "CuPyMLFMMPreparedData",
     "CuPyMLFMMSingleLevelData",
     "CuPyMLFMMTransferData",
+    "prepare_mlfmm_cupy_coupling",
     "prepare_mlfmm_cupy_data",
 ]

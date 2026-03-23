@@ -30,6 +30,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - single-level and multilevel directional far coupling with relative-offset
     batching and shared interpolation/transform caches
   - structured resolved-plan metadata on the prepared coupling operator
+- Added a CuPy MLFMM repeated-apply backend for the existing CPU-built
+  high-frequency MLFMM plan (`operator_backend="cupy", coupling_backend="mlfmm"`):
+  - CPU plan/build remains the source of truth
+  - exact-near and sampled far repeated applies run on device
+  - direct-stage fallback remains the CuPy pairwise coupling path
+  - `complex128` is currently required for MLFMM on both NumPy and CuPy
 
 ### Changed
 - Dense/direct NumPy solves now reject true MLFMM coupling stages explicitly
@@ -48,8 +54,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Native CuPy block-GMRES now enforces per-RHS true-residual tolerance checks
-  at restart boundaries (instead of allowing aggregate/block-only convergence)
-  and reports consistent per-RHS relative-residual diagnostics.
+  with strict per-column acceptance and now performs an in-cycle true-residual
+  gate when the block proxy first reaches target, avoiding restart-boundary
+  overshoot on large restart values.
 - NumPy MLFMM preparation now enforces `complex128` operator dtype and keeps
   the prepared directional/translation arrays on that precision path.
 - Multilevel MLFMM directional interpolation now follows the validated angular

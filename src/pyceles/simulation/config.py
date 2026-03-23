@@ -250,16 +250,12 @@ class SimulationConfig:
         if backend == "cupy" and bool(self.cache_translation_blocks):
             raise ValueError(
                 "`cache_translation_blocks=True` is not supported with `operator_backend='cupy'`. "
-                "The CuPy backend currently uses only the direct raw-kernel coupling path."
+                "The CuPy backend does not expose translation-block caching."
             )
-        if backend == "cupy" and coupling_backend == "mlfmm":
-            raise ValueError(
-                "`coupling_backend='mlfmm'` is not supported yet with `operator_backend='cupy'`."
-            )
-        if backend == "numpy" and coupling_backend == "mlfmm" and self.compute_dtype == "complex64":
+        if coupling_backend == "mlfmm" and self.compute_dtype == "complex64":
             raise ValueError(
                 "`coupling_backend='mlfmm'` currently requires `compute_dtype='complex128'` "
-                "on the NumPy backend for numerical stability."
+                "on both NumPy and CuPy backends for numerical stability."
             )
 
         _, az_shared = validate_angular_grid_pair(

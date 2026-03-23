@@ -9,9 +9,14 @@ import numpy as np
 import pytest
 
 import pyceles as pcl
-from pyceles._optional import import_cupy
+from pyceles._optional import asnumpy, import_cupy
 from pyceles.core.indexing import n_modes
-from pyceles.core.operators import prepare_matvec
+from pyceles.core.operators import (
+    CuPyMLFMMCouplingOperator,
+    MLFMMCouplingOperator,
+    MLFMMOptions,
+    prepare_matvec,
+)
 from pyceles.core.particles import Particle, spheres_from_arrays
 from pyceles.io import far_field_intensity
 
@@ -120,6 +125,20 @@ def _mixed_cluster_particles() -> tuple[Particle, ...]:
             refractive_index=1.47 + 0.03j,
             euler_angles=(0.1, 0.35, -0.2),
         ),
+    )
+
+
+def _mlfmm_transition_particles() -> tuple[Particle, ...]:
+    rng = np.random.default_rng(4)
+    positions = rng.uniform(-1000.0, 1000.0, size=(60, 3))
+    radii = np.full((positions.shape[0],), 20.0, dtype=float)
+    n_particle = np.full((positions.shape[0],), 1.59 + 0.0j, dtype=np.complex128)
+    return tuple(
+        spheres_from_arrays(
+            positions=positions,
+            radii=radii,
+            refractive_indices=n_particle,
+        )
     )
 
 
@@ -280,6 +299,103 @@ def test_cupy_prepared_operator_block_rhs_matches_columnwise(
     rhs_block = np.asarray(prepared_cupy.rhs_Tb(b_block))
     rhs_cols = np.column_stack([np.asarray(prepared_cupy.rhs_Tb(b_block[:, j])) for j in range(3)])
     np.testing.assert_allclose(rhs_block, rhs_cols, rtol=rtol, atol=atol)
+
+
+@pytest.mark.parametrize(
+    ("max_leaf_particles", "expected_stage"),
+    [
+        (8, "single_level"),
+        (4, "multilevel"),
+    ],
+)
+def test_cupy_mlfmm_prepared_operator_matches_numpy_reference(
+    max_leaf_particles: int, expected_stage: str
+) -> None:
+    lmax = 1
+    wavelength = 550.0
+    n_medium = 1.0 + 0j
+    k = 2.0 * np.pi / wavelength
+    particles = _mlfmm_transition_particles()
+    options = MLFMMOptions(max_leaf_particles=max_leaf_particles, max_depth=4)
+
+    prepared_numpy = prepare_matvec(
+        lmax=lmax,
+        k=k,
+        particles=particles,
+        n_medium=n_medium,
+        radial_lut_dr=0.5,
+        cache_translation_blocks=False,
+        operator_dtype=np.complex128,
+        coupling_backend="mlfmm",
+        mlfmm_options=options,
+        backend="numpy",
+    )
+    prepared_cupy = prepare_matvec(
+        lmax=lmax,
+        k=k,
+        particles=particles,
+        n_medium=n_medium,
+        radial_lut_dr=0.5,
+        cache_translation_blocks=False,
+        operator_dtype=np.complex128,
+        coupling_backend="mlfmm",
+        mlfmm_options=options,
+        backend="cupy",
+    )
+
+    assert isinstance(prepared_numpy.coupling, MLFMMCouplingOperator)
+    assert isinstance(prepared_cupy.coupling, CuPyMLFMMCouplingOperator)
+    assert str(prepared_numpy.coupling.resolved_plan.stage) == expected_stage
+    assert str(prepared_cupy.coupling.prepared_data.stage) == expected_stage
+
+    nm = n_modes(lmax)
+    n_particles = len(particles)
+    rng = np.random.default_rng(20260323 + int(max_leaf_particles))
+    x = np.asarray(
+        rng.standard_normal(n_particles * nm) + 1j * rng.standard_normal(n_particles * nm),
+        dtype=np.complex128,
+    )
+    y_numpy = np.asarray(prepared_numpy.apply_W(x), dtype=np.complex128)
+    y_cupy = np.asarray(asnumpy(prepared_cupy.apply_W(x)), dtype=np.complex128)
+    np.testing.assert_allclose(y_cupy, y_numpy, rtol=1e-10, atol=1e-10)
+
+
+def test_cupy_mlfmm_prepared_operator_block_rhs_matches_columnwise() -> None:
+    lmax = 1
+    wavelength = 550.0
+    n_medium = 1.0 + 0j
+    k = 2.0 * np.pi / wavelength
+    particles = _mlfmm_transition_particles()
+    options = MLFMMOptions(max_leaf_particles=8, max_depth=4)
+    prepared_cupy = prepare_matvec(
+        lmax=lmax,
+        k=k,
+        particles=particles,
+        n_medium=n_medium,
+        radial_lut_dr=0.5,
+        cache_translation_blocks=False,
+        operator_dtype=np.complex128,
+        coupling_backend="mlfmm",
+        mlfmm_options=options,
+        backend="cupy",
+    )
+    assert isinstance(prepared_cupy.coupling, CuPyMLFMMCouplingOperator)
+    nm = n_modes(lmax)
+    n_particles = len(particles)
+    rng = np.random.default_rng(202603231)
+    x_block = np.asarray(
+        rng.standard_normal((n_particles * nm, 2))
+        + 1j * rng.standard_normal((n_particles * nm, 2)),
+        dtype=np.complex128,
+    )
+    y_block = np.asarray(asnumpy(prepared_cupy.apply_W(x_block)), dtype=np.complex128)
+    y_cols = np.column_stack(
+        [
+            np.asarray(asnumpy(prepared_cupy.apply_W(x_block[:, j])), dtype=np.complex128)
+            for j in range(2)
+        ]
+    )
+    np.testing.assert_allclose(y_block, y_cols, rtol=1e-10, atol=1e-10)
 
 
 @pytest.mark.parametrize(
