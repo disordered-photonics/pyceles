@@ -15,8 +15,8 @@ import numpy as np
 import numpy.typing as npt
 
 from pyceles._optional import coerce_array, import_cupy
-from pyceles.core.indexing import n_modes
-from pyceles.core.translation import translation_ab5_table, translation_block
+from pyceles.core.indexing import iter_modes, n_modes
+from pyceles.core.translation import _translation_ab5_compact_tables, _translation_plm_coeff_table
 
 from .mlfmm import (
     MLFMMCouplingOperator,
@@ -137,11 +137,21 @@ class CuPyMLFMMSingleLevelData:
 
 @dataclass(frozen=True)
 class CuPyMLFMMNearPairData:
-    """Device-ready directed exact-near particle-pair blocks."""
+    """Device-ready directed exact-near particle-pair metadata and tables."""
 
     dst_particle_indices: Any
     src_particle_indices: Any
-    blocks: Any
+    lut_re: Any
+    lut_im: Any
+    inv_dr: float
+    last_index: int
+    plm_coeffs: Any
+    compact_re_ab: Any
+    compact_im_ab: Any
+    mode_m: Any
+    pair_offset: Any
+    pair_pmin: Any
+    pair_pcount: Any
 
 
 @dataclass(frozen=True)
@@ -217,6 +227,49 @@ def _pack_pairs(pairs: tuple[tuple[int, int], ...], *, name: str) -> np.ndarray:
     if out.ndim != 2 or out.shape[1] != 2:
         raise ValueError(f"{name} must be a list/tuple of (a, b) pairs.")
     return np.ascontiguousarray(out)
+
+
+@cache
+def _mode_metadata_tables(lmax: int) -> np.ndarray:
+    """Return CELES/SMUTHI `m` mode indices indexed by flattened mode id."""
+
+    mode_m = np.zeros((n_modes(lmax),), dtype=np.int32)
+    for _tau_i, _l_i, m_i, idx in iter_modes(lmax):
+        mode_m[idx] = m_i
+    mode_m.setflags(write=False)
+    return mode_m
+
+
+@cache
+def _mode_pair_tables(lmax: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return compact p-range metadata for each `(n1, n2)` mode pair."""
+
+    nmodes_total = n_modes(lmax)
+    mode_m = _mode_metadata_tables(lmax)
+    mode_tau = np.zeros((nmodes_total,), dtype=np.int32)
+    mode_l = np.zeros((nmodes_total,), dtype=np.int32)
+    for tau_i, l_i, _m_i, idx in iter_modes(lmax):
+        mode_tau[idx] = tau_i
+        mode_l[idx] = l_i
+    pair_offset = np.zeros((nmodes_total, nmodes_total), dtype=np.int32)
+    pair_pmin = np.zeros_like(pair_offset)
+    pair_pcount = np.zeros_like(pair_offset)
+    offset = 0
+    for n1 in range(nmodes_total):
+        for n2 in range(nmodes_total):
+            p_min = max(
+                abs(int(mode_m[n1]) - int(mode_m[n2])),
+                abs(int(mode_l[n1]) - int(mode_l[n2])) + abs(int(mode_tau[n1]) - int(mode_tau[n2])),
+            )
+            p_count = int(mode_l[n1]) + int(mode_l[n2]) - p_min + 1
+            pair_offset[n1, n2] = offset
+            pair_pmin[n1, n2] = p_min
+            pair_pcount[n1, n2] = p_count
+            offset += p_count
+    pair_offset.setflags(write=False)
+    pair_pmin.setflags(write=False)
+    pair_pcount.setflags(write=False)
+    return pair_offset, pair_pmin, pair_pcount
 
 
 def _upload_dense_matrix(matrix: np.ndarray, *, name: str, cupy: Any) -> Any:
@@ -520,34 +573,11 @@ def _upload_multilevel(
     )
 
 
-def _build_exact_near_pair_blocks(coupling: MLFMMCouplingOperator) -> CuPyMLFMMNearPairData:
-    """Build directed exact-near pair blocks on CPU and return NumPy arrays."""
+def _build_exact_near_pair_indices(partition: MLFMMPartition) -> tuple[np.ndarray, np.ndarray]:
+    """Build directed exact-near particle index pairs from the resolved leaf partition."""
 
-    partition = coupling.resolved_plan.partition
-    positions = np.asarray(coupling.positions, dtype=float)
-    nm = n_modes(int(coupling.lmax))
-    ab5 = translation_ab5_table(int(coupling.lmax), dtype=np.complex128)
     dst_indices: list[int] = []
     src_indices: list[int] = []
-    blocks: list[np.ndarray] = []
-    cache = coupling._exact_block_cache
-
-    def _block_for_pair(i: int, j: int) -> np.ndarray:
-        key = (int(i), int(j))
-        if cache is not None and key in cache:
-            return np.asarray(cache[key], dtype=np.complex128)
-        wij = translation_block(
-            int(coupling.lmax),
-            float(coupling.k),
-            np.asarray(positions[int(i)] - positions[int(j)], dtype=float),
-            ab5=ab5,
-            radial_lut=coupling.radial_lut,
-        )
-        wij_arr = np.asarray(wij, dtype=np.complex128)
-        if cache is not None:
-            cache[key] = wij_arr
-        return wij_arr
-
     for a, b in partition.leaf_near_pairs:
         leaf_a = partition.leaves[int(a)]
         leaf_b = partition.leaves[int(b)]
@@ -558,64 +588,60 @@ def _build_exact_near_pair_blocks(coupling: MLFMMCouplingOperator) -> CuPyMLFMMN
                         continue
                     dst_indices.append(int(i))
                     src_indices.append(int(j))
-                    blocks.append(_block_for_pair(int(i), int(j)))
             continue
         for i in np.asarray(leaf_a.particle_indices, dtype=np.int64):
             for j in np.asarray(leaf_b.particle_indices, dtype=np.int64):
                 dst_indices.append(int(i))
                 src_indices.append(int(j))
-                blocks.append(_block_for_pair(int(i), int(j)))
                 dst_indices.append(int(j))
                 src_indices.append(int(i))
-                blocks.append(_block_for_pair(int(j), int(i)))
-
-    if blocks:
-        blocks_arr = np.ascontiguousarray(np.stack(blocks, axis=0), dtype=np.complex128)
-    else:
-        blocks_arr = np.zeros((0, nm, nm), dtype=np.complex128)
-    if blocks_arr.ndim != 3 or blocks_arr.shape[1:] != (nm, nm):
-        raise ValueError(f"Exact-near pair block tensor must have shape (P, {nm}, {nm}).")
-    return CuPyMLFMMNearPairData(
-        dst_particle_indices=np.asarray(dst_indices, dtype=np.int64),
-        src_particle_indices=np.asarray(src_indices, dtype=np.int64),
-        blocks=blocks_arr,
-    )
+    return np.asarray(dst_indices, dtype=np.int64), np.asarray(src_indices, dtype=np.int64)
 
 
-def _upload_exact_near_pair_blocks(
+def _upload_exact_near_pair_data(
     coupling: MLFMMCouplingOperator, *, cupy: Any
 ) -> CuPyMLFMMNearPairData:
-    """Upload directed exact-near pair blocks to device memory.
+    """Upload exact-near pair metadata and translation tables for on-device evaluation."""
 
-    The near-pair tensor can be large for dense clusters; use blocking host->device
-    copies to avoid large transient pinned-memory allocations in CuPy.
-    """
-
-    built = _build_exact_near_pair_blocks(coupling)
+    dst_indices, src_indices = _build_exact_near_pair_indices(coupling.resolved_plan.partition)
+    radial_lut = coupling.radial_lut
+    lut = np.asarray(radial_lut.h, dtype=np.complex128).T.copy()
+    compact_re_ab, compact_im_ab = _translation_ab5_compact_tables(
+        int(coupling.lmax), dtype=np.complex128
+    )
+    plm_coeffs = _translation_plm_coeff_table(int(coupling.lmax), dtype=np.float64).reshape(-1)
+    mode_m = _mode_metadata_tables(int(coupling.lmax))
+    pair_offset, pair_pmin, pair_pcount = _mode_pair_tables(int(coupling.lmax))
     return CuPyMLFMMNearPairData(
         dst_particle_indices=cupy.asarray(
-            _as_numpy_1d(
-                np.asarray(built.dst_particle_indices),
-                dtype=np.int64,
-                name="exact_near.dst_particle_indices",
-            ),
+            _as_numpy_1d(dst_indices, dtype=np.int64, name="exact_near.dst_particle_indices"),
             dtype=cupy.int64,
             blocking=True,
         ),
         src_particle_indices=cupy.asarray(
-            _as_numpy_1d(
-                np.asarray(built.src_particle_indices),
-                dtype=np.int64,
-                name="exact_near.src_particle_indices",
-            ),
+            _as_numpy_1d(src_indices, dtype=np.int64, name="exact_near.src_particle_indices"),
             dtype=cupy.int64,
             blocking=True,
         ),
-        blocks=cupy.asarray(
-            np.asarray(built.blocks, dtype=np.complex128),
-            dtype=cupy.complex128,
+        lut_re=cupy.asarray(
+            np.ascontiguousarray(lut.real.reshape(-1)),
+            dtype=cupy.float64,
             blocking=True,
         ),
+        lut_im=cupy.asarray(
+            np.ascontiguousarray(lut.imag.reshape(-1)),
+            dtype=cupy.float64,
+            blocking=True,
+        ),
+        inv_dr=float(radial_lut._inv_dr),
+        last_index=int(radial_lut._last_index),
+        plm_coeffs=cupy.asarray(plm_coeffs, dtype=cupy.float64, blocking=True),
+        compact_re_ab=cupy.asarray(compact_re_ab, dtype=cupy.float64, blocking=True),
+        compact_im_ab=cupy.asarray(compact_im_ab, dtype=cupy.float64, blocking=True),
+        mode_m=cupy.asarray(mode_m, dtype=cupy.int32, blocking=True),
+        pair_offset=cupy.asarray(pair_offset.reshape(-1), dtype=cupy.int32, blocking=True),
+        pair_pmin=cupy.asarray(pair_pmin.reshape(-1), dtype=cupy.int32, blocking=True),
+        pair_pcount=cupy.asarray(pair_pcount.reshape(-1), dtype=cupy.int32, blocking=True),
     )
 
 
@@ -656,6 +682,171 @@ def _apply_reflection_to_direction_axis(values: Any, permutation: Any, *, cupy: 
     """Apply one directional reflection permutation on axis 2."""
 
     return cupy.take(values, permutation, axis=2)
+
+
+@cache
+def _exact_near_pairs_c128_raw_kernel(lmax: int) -> Any:
+    cupy, _ = import_cupy()
+    lmax = int(lmax)
+    n_orders = 2 * lmax + 1
+    n_p_pdm = n_orders * (n_orders + 1) // 2
+    n_phase = 2 * n_orders - 1
+    source = f"""
+    extern "C" __device__ double assoc_legendre_function(
+        const int l,
+        const int m,
+        const double ct,
+        const double st,
+        const double* plm_coeffs
+    ) {{
+        double plm = 0.0;
+        const double st_pow = (m == 0) ? 1.0 : pow(st, (double)m);
+        int jj = 0;
+        for (int lambda = l - m; lambda >= 0; lambda -= 2) {{
+            const int idx = jj * ({n_orders} * {n_orders}) + m * {n_orders} + l;
+            plm += st_pow * pow(ct, (double)lambda) * plm_coeffs[idx];
+            jj += 1;
+        }}
+        return plm;
+    }}
+
+    extern "C" __device__ double hankel_lookup_linear(
+        const int p,
+        const double r,
+        const double* table,
+        const double inv_dr,
+        const int last_index
+    ) {{
+        if (r <= 0.0) {{
+            return table[p];
+        }}
+        double t = r * inv_dr;
+        int i0 = (int)floor(t);
+        double frac = t - (double)i0;
+        if (i0 < 0) {{
+            i0 = 0;
+            frac = 0.0;
+        }}
+        if (i0 >= last_index) {{
+            i0 = last_index - 1;
+            frac = 1.0;
+        }}
+        const int base0 = i0 * {n_orders} + p;
+        const int base1 = (i0 + 1) * {n_orders} + p;
+        return (1.0 - frac) * table[base0] + frac * table[base1];
+    }}
+
+    extern "C" __global__ void mlfmm_exact_near_pairs_c128(
+        const int n_pairs,
+        const int n_particles,
+        const int nmodes,
+        const int nrhs,
+        const double* positions,
+        const long long* dst_indices,
+        const long long* src_indices,
+        const double* re_h,
+        const double* im_h,
+        const double inv_dr,
+        const int last_index,
+        const double* plm_coeffs,
+        const double* re_ab,
+        const double* im_ab,
+        const int* mode_m,
+        const int* pair_offset,
+        const int* pair_pmin,
+        const int* pair_pcount,
+        const double* re_x,
+        const double* im_x,
+        double* re_y,
+        double* im_y
+    ) {{
+        const int n1 = blockIdx.x * blockDim.x + threadIdx.x;
+        if (n1 >= nmodes) {{
+            return;
+        }}
+        __shared__ double re_h_shared[{n_orders}];
+        __shared__ double im_h_shared[{n_orders}];
+        __shared__ double p_pdm_shared[{n_p_pdm}];
+        __shared__ double cos_mphi_shared[{n_phase}];
+        __shared__ double sin_mphi_shared[{n_phase}];
+        __shared__ double r_shared;
+        __shared__ double ct_shared;
+        __shared__ double st_shared;
+        __shared__ double phi_shared;
+        __shared__ long long dst_particle_shared;
+        __shared__ long long src_particle_shared;
+
+        const int m1 = mode_m[n1];
+        const int rhs_stride = n_particles * nmodes;
+        for (int rhs = blockIdx.z; rhs < nrhs; rhs += gridDim.z) {{
+            const int rhs_offset = rhs * rhs_stride;
+            for (int pair_idx = blockIdx.y; pair_idx < n_pairs; pair_idx += gridDim.y) {{
+                if (threadIdx.x == 0) {{
+                    dst_particle_shared = dst_indices[pair_idx];
+                    src_particle_shared = src_indices[pair_idx];
+                    const double x21 = positions[3 * dst_particle_shared] - positions[3 * src_particle_shared];
+                    const double y21 = positions[3 * dst_particle_shared + 1] - positions[3 * src_particle_shared + 1];
+                    const double z21 = positions[3 * dst_particle_shared + 2] - positions[3 * src_particle_shared + 2];
+                    r_shared = sqrt(x21 * x21 + y21 * y21 + z21 * z21);
+                    ct_shared = z21 / r_shared;
+                    st_shared = sqrt(fmax(0.0, 1.0 - ct_shared * ct_shared));
+                    phi_shared = atan2(y21, x21);
+                }}
+                __syncthreads();
+
+                for (int p = threadIdx.x; p < {n_orders}; p += blockDim.x) {{
+                    re_h_shared[p] = hankel_lookup_linear(p, r_shared, re_h, inv_dr, last_index);
+                    im_h_shared[p] = hankel_lookup_linear(p, r_shared, im_h, inv_dr, last_index);
+                    for (int absdm = 0; absdm <= p; ++absdm) {{
+                        p_pdm_shared[p * (p + 1) / 2 + absdm] =
+                            assoc_legendre_function(p, absdm, ct_shared, st_shared, plm_coeffs);
+                    }}
+                }}
+                if (threadIdx.x == 0) {{
+                    for (int dm = -2 * {lmax}; dm <= 2 * {lmax}; ++dm) {{
+                        const int idx = dm + 2 * {lmax};
+                        cos_mphi_shared[idx] = cos((double)dm * phi_shared);
+                        sin_mphi_shared[idx] = sin((double)dm * phi_shared);
+                    }}
+                }}
+                __syncthreads();
+
+                double re_incr = 0.0;
+                double im_incr = 0.0;
+                for (int n2 = 0; n2 < nmodes; ++n2) {{
+                    const double re_x_tmp = re_x[rhs_offset + src_particle_shared * nmodes + n2];
+                    const double im_x_tmp = im_x[rhs_offset + src_particle_shared * nmodes + n2];
+                    const int delta_m = mode_m[n2] - m1;
+                    const int phase_idx = delta_m + 2 * {lmax};
+                    const int pair_table_idx = n1 * nmodes + n2;
+                    const int base = pair_offset[pair_table_idx];
+                    const int p_min = pair_pmin[pair_table_idx];
+                    const int p_count = pair_pcount[pair_table_idx];
+                    for (int ip = 0; ip < p_count; ++ip) {{
+                        const int p = p_min + ip;
+                        const int ab_idx = base + ip;
+                        const double plm = p_pdm_shared[p * (p + 1) / 2 + abs(delta_m)];
+                        const double re_abp = re_ab[ab_idx] * plm;
+                        const double im_abp = im_ab[ab_idx] * plm;
+                        const double re_abph = re_abp * re_h_shared[p] - im_abp * im_h_shared[p];
+                        const double im_abph = re_abp * im_h_shared[p] + im_abp * re_h_shared[p];
+                        const double re_phase =
+                            re_abph * cos_mphi_shared[phase_idx] - im_abph * sin_mphi_shared[phase_idx];
+                        const double im_phase =
+                            re_abph * sin_mphi_shared[phase_idx] + im_abph * cos_mphi_shared[phase_idx];
+                        re_incr += re_phase * re_x_tmp - im_phase * im_x_tmp;
+                        im_incr += re_phase * im_x_tmp + im_phase * re_x_tmp;
+                    }}
+                }}
+
+                atomicAdd(&re_y[rhs_offset + dst_particle_shared * nmodes + n1], re_incr);
+                atomicAdd(&im_y[rhs_offset + dst_particle_shared * nmodes + n1], im_incr);
+                __syncthreads();
+            }}
+        }}
+    }}
+    """
+    return cupy.RawKernel(source, "mlfmm_exact_near_pairs_c128")
 
 
 @cache
@@ -854,17 +1045,61 @@ def _receive_leaf_boxes_to_particles(
 
 
 def _apply_exact_near_pairs(prepared: CuPyMLFMMPreparedData, x_states: Any, *, cupy: Any) -> Any:
-    """Apply directed exact-near pair blocks on device."""
+    """Apply exact near interactions from directed near-pair indices on device."""
 
     near = prepared.near_pairs
     n_pairs = int(near.dst_particle_indices.size)
     y = cupy.zeros_like(x_states, dtype=cupy.complex128)
     if n_pairs == 0:
         return y
-    src_values = x_states[near.src_particle_indices]  # (P, nm, nrhs)
-    contrib = cupy.einsum("pij,pjr->pir", near.blocks, src_values)
-    _add_at_complex128(y, near.dst_particle_indices, contrib, cupy=cupy)
-    return y
+    n_particles, nm, nrhs = (int(v) for v in x_states.shape)
+    x_arr = cupy.asarray(x_states, dtype=cupy.complex128)
+    x_rhs_major = cupy.transpose(x_arr, (2, 0, 1))
+    x_re = cupy.ascontiguousarray(x_rhs_major.real.reshape(-1).astype(cupy.float64, copy=False))
+    x_im = cupy.ascontiguousarray(x_rhs_major.imag.reshape(-1).astype(cupy.float64, copy=False))
+    y_re = cupy.zeros((nrhs * n_particles * nm,), dtype=cupy.float64)
+    y_im = cupy.zeros((nrhs * n_particles * nm,), dtype=cupy.float64)
+
+    props = cupy.cuda.runtime.getDeviceProperties(cupy.cuda.runtime.getDevice())
+    max_grid_y = int(props["maxGridSize"][1])
+    max_grid_z = int(props["maxGridSize"][2])
+    warp_size = int(props["warpSize"])
+    threads = max(warp_size, min(int(props["maxThreadsPerBlock"]), nm))
+    blocks_x = max(1, (nm + threads - 1) // threads)
+    grid_y = min(n_pairs, max_grid_y)
+    grid_z = min(max(1, nrhs), max_grid_z)
+
+    kernel = _exact_near_pairs_c128_raw_kernel(int(prepared.lmax))
+    kernel(
+        (int(blocks_x), int(grid_y), int(grid_z)),
+        (int(threads),),
+        (
+            np.int32(n_pairs),
+            np.int32(n_particles),
+            np.int32(nm),
+            np.int32(nrhs),
+            prepared.positions.reshape(-1),
+            near.dst_particle_indices,
+            near.src_particle_indices,
+            near.lut_re,
+            near.lut_im,
+            np.float64(float(near.inv_dr)),
+            np.int32(int(near.last_index)),
+            near.plm_coeffs,
+            near.compact_re_ab,
+            near.compact_im_ab,
+            near.mode_m,
+            near.pair_offset,
+            near.pair_pmin,
+            near.pair_pcount,
+            x_re,
+            x_im,
+            y_re,
+            y_im,
+        ),
+    )
+    out_rhs_major = (y_re + 1j * y_im).reshape(nrhs, n_particles, nm)
+    return cupy.transpose(out_rhs_major, (1, 2, 0)).astype(cupy.complex128, copy=False)
 
 
 def _apply_single_level_far(prepared: CuPyMLFMMPreparedData, x_states: Any, *, cupy: Any) -> Any:
@@ -1083,7 +1318,7 @@ def prepare_mlfmm_cupy_data(coupling: MLFMMCouplingOperator) -> CuPyMLFMMPrepare
         )
 
     partition_data = _upload_partition(coupling.resolved_plan.partition, cupy=cupy)
-    near_pairs = _upload_exact_near_pair_blocks(coupling, cupy=cupy)
+    near_pairs = _upload_exact_near_pair_data(coupling, cupy=cupy)
     positions = _as_numpy_3cols(coupling.positions, dtype=np.float64, name="coupling.positions")
     single_level_data: CuPyMLFMMSingleLevelData | None = None
     multilevel_data: CuPyMLFMMMultilevelData | None = None
