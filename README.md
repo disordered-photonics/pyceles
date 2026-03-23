@@ -321,6 +321,12 @@ Current MLFMM scope/limits:
   backends in `complex128`
 - on the CuPy path, one-time hierarchy/build preparation stays on the validated
   CPU reference implementation, while repeated MLFMM applies run on device
+- CuPy exact-near evaluation is memory-aware: near interactions are applied
+  from directed pair indices plus compact translation tables on device, rather
+  than from a pre-uploaded dense near-block tensor
+- CuPy grouped far-offset accumulation uses weighted device kernels (for both
+  single-level and multilevel sampled far passes) to reduce intermediate tensor
+  traffic in the repeated-apply path
 - matrix-free iterative solves for true MLFMM stages
 - dense/direct solves remain pairwise-only (MLFMM stages are matrix-free)
 - the current implementation targets the high-frequency regime only

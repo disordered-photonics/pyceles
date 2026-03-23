@@ -878,6 +878,43 @@ def _add_at_complex128_raw_kernel() -> Any:
     return cupy.RawKernel(source, "add_at_complex128")
 
 
+@cache
+def _weighted_add_at_complex128_raw_kernel() -> Any:
+    cupy, _ = import_cupy()
+    source = r"""
+    #include <cupy/complex.cuh>
+    extern "C" __global__ void weighted_add_at_complex128(
+        const long long n_pairs,
+        const long long n_dirs,
+        const long long nrhs,
+        const long long* dst,
+        const complex<double>* values,
+        const complex<double>* weights,
+        complex<double>* out
+    ) {
+        const long long width = 4LL * n_dirs * nrhs;
+        const long long tid = (long long)blockIdx.x * (long long)blockDim.x + (long long)threadIdx.x;
+        const long long total = n_pairs * width;
+        for (long long i = tid; i < total; i += (long long)blockDim.x * (long long)gridDim.x) {
+            const long long pair_idx = i / width;
+            const long long lane = i - pair_idx * width;
+            const long long chan_stride = n_dirs * nrhs;
+            const long long chan = lane / chan_stride;
+            const long long rem = lane - chan * chan_stride;
+            const long long dir = rem / nrhs;
+            const long long rhs = rem - dir * nrhs;
+            const long long out_row = dst[pair_idx];
+            const long long out_idx = ((out_row * 4LL + chan) * n_dirs + dir) * nrhs + rhs;
+            const complex<double> v = values[i] * weights[dir];
+            double* out_ptr = reinterpret_cast<double*>(&out[out_idx]);
+            atomicAdd(out_ptr + 0, v.real());
+            atomicAdd(out_ptr + 1, v.imag());
+        }
+    }
+    """
+    return cupy.RawKernel(source, "weighted_add_at_complex128")
+
+
 def _add_at_complex128(target: Any, indices: Any, values: Any, *, cupy: Any) -> None:
     """Apply `add.at`-style indexed accumulation for complex128 batches on device.
 
@@ -918,6 +955,69 @@ def _add_at_complex128(target: Any, indices: Any, values: Any, *, cupy: Any) -> 
             np.int64(width),
             idx,
             values_flat,
+            out_flat,
+        ),
+    )
+
+
+def _weighted_add_at_complex128(
+    target: Any,
+    indices: Any,
+    values: Any,
+    weights: Any,
+    *,
+    cupy: Any,
+) -> None:
+    """Apply weighted `add.at` accumulation for `(pair, 4, ndir, nrhs)` batches."""
+
+    idx = cupy.asarray(indices, dtype=cupy.int64).reshape(-1)
+    if int(idx.size) == 0:
+        return
+    tgt = cupy.asarray(target, dtype=cupy.complex128)
+    vals = cupy.asarray(values, dtype=cupy.complex128)
+    w = cupy.asarray(weights, dtype=cupy.complex128).reshape(-1)
+    if vals.ndim != 4 or int(vals.shape[0]) != int(idx.size):
+        raise ValueError(
+            "Weighted add-at expects values with shape (n_pairs, 4, ndir, nrhs). "
+            f"Got {tuple(int(v) for v in vals.shape)} for n_pairs={int(idx.size)}."
+        )
+    if int(vals.shape[1]) != 4:
+        raise ValueError(
+            f"Weighted add-at expects 4 directional channels, got {int(vals.shape[1])}."
+        )
+    if int(vals.shape[2]) != int(w.size):
+        raise ValueError(
+            "Weighted add-at direction count mismatch between values and weights: "
+            f"{int(vals.shape[2])} vs {int(w.size)}."
+        )
+    if tuple(int(v) for v in tgt.shape[1:]) != (
+        int(vals.shape[1]),
+        int(vals.shape[2]),
+        int(vals.shape[3]),
+    ):
+        raise ValueError(
+            "Weighted add-at target/value trailing-shape mismatch: "
+            f"target={tuple(int(v) for v in tgt.shape[1:])}, "
+            f"values={tuple(int(v) for v in vals.shape[1:])}."
+        )
+    if int(cupy.max(idx)) >= int(tgt.shape[0]) or int(cupy.min(idx)) < 0:
+        raise ValueError("Weighted add-at index out of bounds for target tensor.")
+    vals_flat = cupy.ascontiguousarray(vals.reshape(int(idx.size), -1))
+    out_flat = tgt.reshape(-1)
+    threads = 256
+    total = int(vals_flat.size)
+    blocks = max(1, (total + threads - 1) // threads)
+    kernel = _weighted_add_at_complex128_raw_kernel()
+    kernel(
+        (int(blocks),),
+        (threads,),
+        (
+            np.int64(int(idx.size)),
+            np.int64(int(w.size)),
+            np.int64(int(vals.shape[3])),
+            idx,
+            vals_flat,
+            w,
             out_flat,
         ),
     )
@@ -1103,7 +1203,11 @@ def _apply_exact_near_pairs(prepared: CuPyMLFMMPreparedData, x_states: Any, *, c
 
 
 def _apply_single_level_far(prepared: CuPyMLFMMPreparedData, x_states: Any, *, cupy: Any) -> Any:
-    """Apply sampled single-level far interactions on device."""
+    """Apply sampled single-level far interactions on device.
+
+    Grouped far-offset accumulation uses weighted fused kernels to avoid
+    intermediate `translated` tensors in the hot loop.
+    """
 
     single = prepared.single_level
     if single is None:
@@ -1122,10 +1226,13 @@ def _apply_single_level_far(prepared: CuPyMLFMMPreparedData, x_states: Any, *, c
     outgoing = _box_outgoing_to_directional_cupy(single.directional, box_states, cupy=cupy)
     incoming = cupy.zeros_like(outgoing, dtype=cupy.complex128)
     for offset, batch in single.far_offset_batches.items():
-        translated = (
-            outgoing[batch.src_indices] * single.offset_diagonals[offset][None, None, :, None]
+        _weighted_add_at_complex128(
+            incoming,
+            batch.dst_indices,
+            outgoing[batch.src_indices],
+            single.offset_diagonals[offset],
+            cupy=cupy,
         )
-        _add_at_complex128(incoming, batch.dst_indices, translated, cupy=cupy)
     incoming_box = _directional_to_box_regular_cupy(single.directional, incoming, cupy=cupy)
     return _receive_leaf_boxes_to_particles(
         incoming_box,
@@ -1191,17 +1298,24 @@ def _apply_multilevel_far(prepared: CuPyMLFMMPreparedData, x_states: Any, *, cup
                 child_reindexed, transfer.interpolation.matrix, cupy=cupy
             )
             mapped = _apply_reflection_to_direction_axis(mapped_reindexed, parent_perm, cupy=cupy)
-            mapped *= transfer.phase_up_by_shift[shift][None, None, :, None]
-            _add_at_complex128(parent_values, batch.dst_indices, mapped, cupy=cupy)
+            _weighted_add_at_complex128(
+                parent_values,
+                batch.dst_indices,
+                mapped,
+                transfer.phase_up_by_shift[shift],
+                cupy=cupy,
+            )
 
     for level_idx in range(int(multilevel.hf_start_level), int(multilevel.hf_end_level) + 1):
         level = levels[level_idx]
         for offset, batch in level.far_offset_batches.items():
-            translated = (
-                outgoing[level_idx][batch.src_indices]
-                * level.offset_diagonals[offset][None, None, :, None]
+            _weighted_add_at_complex128(
+                incoming[level_idx],
+                batch.dst_indices,
+                outgoing[level_idx][batch.src_indices],
+                level.offset_diagonals[offset],
+                cupy=cupy,
             )
-            _add_at_complex128(incoming[level_idx], batch.dst_indices, translated, cupy=cupy)
 
     for transfer in multilevel.transfers:
         child_level = int(transfer.child_level)

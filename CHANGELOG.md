@@ -51,6 +51,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Native CuPy block-GMRES now batches block-Arnoldi orthogonalization and
   correction assembly through packed GEMM-style updates, substantially reducing
   dense-kernel overhead on measured dense multi-RHS workloads.
+- CuPy MLFMM exact-near coupling now uses a memory-aware device-evaluated path
+  (directed near-pair indices + compact translation tables) instead of
+  pre-uploaded dense near block tensors, substantially reducing large-case GPU
+  prepared-data footprint.
+- CuPy MLFMM grouped far-offset accumulation now uses weighted device kernels
+  in single-level and multilevel sampled far passes, reducing intermediate
+  tensor traffic in repeated applies.
 
 ### Fixed
 - Native CuPy block-GMRES now enforces per-RHS true-residual tolerance checks
