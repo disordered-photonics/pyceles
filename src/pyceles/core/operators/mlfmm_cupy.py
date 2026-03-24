@@ -1794,6 +1794,476 @@ def _weighted_gather_add_complex128(
 
 
 @cache
+def _transfer_up_packed_unique_complex128_raw_kernel() -> Any:
+    cupy, _ = import_cupy()
+    source = r"""
+    #include <cupy/complex.cuh>
+    extern "C" __global__ void transfer_up_packed_unique_complex128(
+        const long long n_pairs,
+        const long long n_source,
+        const long long n_target,
+        const long long n_rhs,
+        const int width,
+        const long long* src_rows,
+        const long long* dst_rows,
+        const int* packed_cols,
+        const complex<double>* packed_vals,
+        const complex<double>* phase,
+        const complex<double>* source_values,
+        complex<double>* out
+    ) {
+        const long long span = 4LL * n_target * n_rhs;
+        const long long tid = (long long)blockIdx.x * (long long)blockDim.x + (long long)threadIdx.x;
+        const long long total = n_pairs * span;
+        for (long long i = tid; i < total; i += (long long)blockDim.x * (long long)gridDim.x) {
+            const long long pair_idx = i / span;
+            const long long lane = i - pair_idx * span;
+            const long long chan_stride = n_target * n_rhs;
+            const long long chan = lane / chan_stride;
+            const long long rem = lane - chan * chan_stride;
+            const long long dst_dir = rem / n_rhs;
+            const long long rhs = rem - dst_dir * n_rhs;
+
+            const long long src_box = src_rows[pair_idx];
+            const long long dst_box = dst_rows[pair_idx];
+            const int row_base = (int)(dst_dir * (long long)width);
+
+            const long long src_base = ((src_box * 4LL + chan) * n_source) * n_rhs + rhs;
+            complex<double> acc = complex<double>(0.0, 0.0);
+            for (int k = 0; k < width; ++k) {
+                const int col = packed_cols[row_base + k];
+                if (col < 0) {
+                    break;
+                }
+                const complex<double> w = packed_vals[row_base + k];
+                const complex<double> x = source_values[src_base + (long long)col * n_rhs];
+                acc += w * x;
+            }
+            const long long out_idx = ((dst_box * 4LL + chan) * n_target + dst_dir) * n_rhs + rhs;
+            out[out_idx] += acc * phase[dst_dir];
+        }
+    }
+    """
+    return cupy.RawKernel(source, "transfer_up_packed_unique_complex128")
+
+
+@cache
+def _transfer_down_packed_unique_complex128_raw_kernel() -> Any:
+    cupy, _ = import_cupy()
+    source = r"""
+    #include <cupy/complex.cuh>
+    extern "C" __global__ void transfer_down_packed_unique_complex128(
+        const long long n_pairs,
+        const long long n_source,
+        const long long n_target,
+        const long long n_rhs,
+        const int width,
+        const long long* src_rows,
+        const long long* dst_rows,
+        const int* packed_cols,
+        const complex<double>* packed_vals,
+        const complex<double>* phase,
+        const complex<double>* source_values,
+        complex<double>* out
+    ) {
+        const long long span = 4LL * n_target * n_rhs;
+        const long long tid = (long long)blockIdx.x * (long long)blockDim.x + (long long)threadIdx.x;
+        const long long total = n_pairs * span;
+        for (long long i = tid; i < total; i += (long long)blockDim.x * (long long)gridDim.x) {
+            const long long pair_idx = i / span;
+            const long long lane = i - pair_idx * span;
+            const long long chan_stride = n_target * n_rhs;
+            const long long chan = lane / chan_stride;
+            const long long rem = lane - chan * chan_stride;
+            const long long dst_dir = rem / n_rhs;
+            const long long rhs = rem - dst_dir * n_rhs;
+
+            const long long src_box = src_rows[pair_idx];
+            const long long dst_box = dst_rows[pair_idx];
+            const int row_base = (int)(dst_dir * (long long)width);
+
+            const long long src_base = ((src_box * 4LL + chan) * n_source) * n_rhs + rhs;
+            complex<double> acc = complex<double>(0.0, 0.0);
+            for (int k = 0; k < width; ++k) {
+                const int col = packed_cols[row_base + k];
+                if (col < 0) {
+                    break;
+                }
+                const complex<double> w = packed_vals[row_base + k];
+                const complex<double> x = source_values[src_base + (long long)col * n_rhs];
+                acc += w * (phase[col] * x);
+            }
+            const long long out_idx = ((dst_box * 4LL + chan) * n_target + dst_dir) * n_rhs + rhs;
+            out[out_idx] += acc;
+        }
+    }
+    """
+    return cupy.RawKernel(source, "transfer_down_packed_unique_complex128")
+
+
+def _transfer_up_packed_unique_complex128(
+    target: Any,
+    dst_indices: Any,
+    source_values: Any,
+    src_indices: Any,
+    map_data: CuPyDirectionalInterpolationData,
+    phase: Any,
+    *,
+    cupy: Any,
+) -> None:
+    """Fused packed-stencil upward transfer: map + phase + destination accumulate."""
+
+    if str(map_data.storage) != "packed_stencil":
+        raise ValueError("Packed transfer kernel requires packed_stencil map storage.")
+    src = cupy.asarray(src_indices, dtype=cupy.int64).reshape(-1)
+    dst = cupy.asarray(dst_indices, dtype=cupy.int64).reshape(-1)
+    if int(src.size) == 0:
+        return
+    if int(src.size) != int(dst.size):
+        raise ValueError("Packed transfer source/destination index count mismatch.")
+    src_arr = cupy.asarray(source_values, dtype=cupy.complex128)
+    tgt = cupy.asarray(target, dtype=cupy.complex128)
+    if src_arr.ndim != 4 or tgt.ndim != 4:
+        raise ValueError("Packed transfer expects source/target shape (nbox,4,ndir,nrhs).")
+    n_source = int(map_data.source_order)
+    n_target = int(map_data.target_order)
+    if int(src_arr.shape[2]) != n_source or int(tgt.shape[2]) != n_target:
+        raise ValueError(
+            f"Packed transfer directional size mismatch source={int(src_arr.shape[2])}/{n_source} "
+            f"target={int(tgt.shape[2])}/{n_target}."
+        )
+    if int(src_arr.shape[3]) != int(tgt.shape[3]):
+        raise ValueError("Packed transfer RHS mismatch between source and target.")
+    if int(src_arr.shape[1]) != 4 or int(tgt.shape[1]) != 4:
+        raise ValueError("Packed transfer expects 4 directional channels.")
+    packed_cols, packed_vals, width_i32 = map_data.matrix
+    phase_arr = cupy.asarray(phase, dtype=cupy.complex128).reshape(-1)
+    if int(phase_arr.size) != n_target:
+        raise ValueError(
+            f"Packed transfer-up phase length mismatch: {int(phase_arr.size)} vs {n_target}."
+        )
+    width = int(width_i32)
+    threads = 256
+    total = int(src.size) * 4 * n_target * int(src_arr.shape[3])
+    blocks = max(1, (total + threads - 1) // threads)
+    _transfer_up_packed_unique_complex128_raw_kernel()(
+        (int(blocks),),
+        (threads,),
+        (
+            np.int64(int(src.size)),
+            np.int64(n_source),
+            np.int64(n_target),
+            np.int64(int(src_arr.shape[3])),
+            np.int32(width),
+            src,
+            dst,
+            cupy.asarray(packed_cols, dtype=cupy.int32),
+            cupy.asarray(packed_vals, dtype=cupy.complex128),
+            phase_arr,
+            src_arr.reshape(-1),
+            tgt.reshape(-1),
+        ),
+    )
+
+
+def _transfer_down_packed_unique_complex128(
+    target: Any,
+    dst_indices: Any,
+    source_values: Any,
+    src_indices: Any,
+    map_data: CuPyDirectionalInterpolationData,
+    phase: Any,
+    *,
+    cupy: Any,
+) -> None:
+    """Fused packed-stencil downward transfer: phase + map + destination accumulate."""
+
+    if str(map_data.storage) != "packed_stencil":
+        raise ValueError("Packed transfer kernel requires packed_stencil map storage.")
+    src = cupy.asarray(src_indices, dtype=cupy.int64).reshape(-1)
+    dst = cupy.asarray(dst_indices, dtype=cupy.int64).reshape(-1)
+    if int(src.size) == 0:
+        return
+    if int(src.size) != int(dst.size):
+        raise ValueError("Packed transfer source/destination index count mismatch.")
+    src_arr = cupy.asarray(source_values, dtype=cupy.complex128)
+    tgt = cupy.asarray(target, dtype=cupy.complex128)
+    if src_arr.ndim != 4 or tgt.ndim != 4:
+        raise ValueError("Packed transfer expects source/target shape (nbox,4,ndir,nrhs).")
+    n_source = int(map_data.source_order)
+    n_target = int(map_data.target_order)
+    if int(src_arr.shape[2]) != n_source or int(tgt.shape[2]) != n_target:
+        raise ValueError(
+            f"Packed transfer directional size mismatch source={int(src_arr.shape[2])}/{n_source} "
+            f"target={int(tgt.shape[2])}/{n_target}."
+        )
+    if int(src_arr.shape[3]) != int(tgt.shape[3]):
+        raise ValueError("Packed transfer RHS mismatch between source and target.")
+    if int(src_arr.shape[1]) != 4 or int(tgt.shape[1]) != 4:
+        raise ValueError("Packed transfer expects 4 directional channels.")
+    packed_cols, packed_vals, width_i32 = map_data.matrix
+    phase_arr = cupy.asarray(phase, dtype=cupy.complex128).reshape(-1)
+    if int(phase_arr.size) != n_source:
+        raise ValueError(
+            f"Packed transfer-down phase length mismatch: {int(phase_arr.size)} vs {n_source}."
+        )
+    width = int(width_i32)
+    threads = 256
+    total = int(src.size) * 4 * n_target * int(src_arr.shape[3])
+    blocks = max(1, (total + threads - 1) // threads)
+    _transfer_down_packed_unique_complex128_raw_kernel()(
+        (int(blocks),),
+        (threads,),
+        (
+            np.int64(int(src.size)),
+            np.int64(n_source),
+            np.int64(n_target),
+            np.int64(int(src_arr.shape[3])),
+            np.int32(width),
+            src,
+            dst,
+            cupy.asarray(packed_cols, dtype=cupy.int32),
+            cupy.asarray(packed_vals, dtype=cupy.complex128),
+            phase_arr,
+            src_arr.reshape(-1),
+            tgt.reshape(-1),
+        ),
+    )
+
+
+@cache
+def _transfer_up_csr_unique_complex128_raw_kernel() -> Any:
+    cupy, _ = import_cupy()
+    source = r"""
+    #include <cupy/complex.cuh>
+    extern "C" __global__ void transfer_up_csr_unique_complex128(
+        const long long n_pairs,
+        const long long n_source,
+        const long long n_target,
+        const long long n_rhs,
+        const long long* src_rows,
+        const long long* dst_rows,
+        const int* indptr,
+        const int* indices,
+        const complex<double>* values,
+        const complex<double>* phase,
+        const complex<double>* source_values,
+        complex<double>* out
+    ) {
+        const long long span = 4LL * n_target * n_rhs;
+        const long long tid = (long long)blockIdx.x * (long long)blockDim.x + (long long)threadIdx.x;
+        const long long total = n_pairs * span;
+        for (long long i = tid; i < total; i += (long long)blockDim.x * (long long)gridDim.x) {
+            const long long pair_idx = i / span;
+            const long long lane = i - pair_idx * span;
+            const long long chan_stride = n_target * n_rhs;
+            const long long chan = lane / chan_stride;
+            const long long rem = lane - chan * chan_stride;
+            const long long dst_dir = rem / n_rhs;
+            const long long rhs = rem - dst_dir * n_rhs;
+
+            const long long src_box = src_rows[pair_idx];
+            const long long dst_box = dst_rows[pair_idx];
+            const int start = indptr[dst_dir];
+            const int end = indptr[dst_dir + 1];
+            const long long src_base = ((src_box * 4LL + chan) * n_source) * n_rhs + rhs;
+
+            complex<double> acc = complex<double>(0.0, 0.0);
+            for (int p = start; p < end; ++p) {
+                const int col = indices[p];
+                const complex<double> w = values[p];
+                const complex<double> x = source_values[src_base + (long long)col * n_rhs];
+                acc += w * x;
+            }
+            const long long out_idx = ((dst_box * 4LL + chan) * n_target + dst_dir) * n_rhs + rhs;
+            out[out_idx] += acc * phase[dst_dir];
+        }
+    }
+    """
+    return cupy.RawKernel(source, "transfer_up_csr_unique_complex128")
+
+
+@cache
+def _transfer_down_csr_unique_complex128_raw_kernel() -> Any:
+    cupy, _ = import_cupy()
+    source = r"""
+    #include <cupy/complex.cuh>
+    extern "C" __global__ void transfer_down_csr_unique_complex128(
+        const long long n_pairs,
+        const long long n_source,
+        const long long n_target,
+        const long long n_rhs,
+        const long long* src_rows,
+        const long long* dst_rows,
+        const int* indptr,
+        const int* indices,
+        const complex<double>* values,
+        const complex<double>* phase,
+        const complex<double>* source_values,
+        complex<double>* out
+    ) {
+        const long long span = 4LL * n_target * n_rhs;
+        const long long tid = (long long)blockIdx.x * (long long)blockDim.x + (long long)threadIdx.x;
+        const long long total = n_pairs * span;
+        for (long long i = tid; i < total; i += (long long)blockDim.x * (long long)gridDim.x) {
+            const long long pair_idx = i / span;
+            const long long lane = i - pair_idx * span;
+            const long long chan_stride = n_target * n_rhs;
+            const long long chan = lane / chan_stride;
+            const long long rem = lane - chan * chan_stride;
+            const long long dst_dir = rem / n_rhs;
+            const long long rhs = rem - dst_dir * n_rhs;
+
+            const long long src_box = src_rows[pair_idx];
+            const long long dst_box = dst_rows[pair_idx];
+            const int start = indptr[dst_dir];
+            const int end = indptr[dst_dir + 1];
+            const long long src_base = ((src_box * 4LL + chan) * n_source) * n_rhs + rhs;
+
+            complex<double> acc = complex<double>(0.0, 0.0);
+            for (int p = start; p < end; ++p) {
+                const int col = indices[p];
+                const complex<double> w = values[p];
+                const complex<double> x = source_values[src_base + (long long)col * n_rhs];
+                acc += w * (phase[col] * x);
+            }
+            const long long out_idx = ((dst_box * 4LL + chan) * n_target + dst_dir) * n_rhs + rhs;
+            out[out_idx] += acc;
+        }
+    }
+    """
+    return cupy.RawKernel(source, "transfer_down_csr_unique_complex128")
+
+
+def _transfer_up_sparse_unique_complex128(
+    target: Any,
+    dst_indices: Any,
+    source_values: Any,
+    src_indices: Any,
+    map_data: CuPyDirectionalInterpolationData,
+    phase: Any,
+    *,
+    cupy: Any,
+) -> None:
+    """Fused sparse upward transfer: CSR map + phase + destination accumulate."""
+
+    if str(map_data.storage) != "sparse":
+        raise ValueError("Sparse transfer kernel requires sparse map storage.")
+    src = cupy.asarray(src_indices, dtype=cupy.int64).reshape(-1)
+    dst = cupy.asarray(dst_indices, dtype=cupy.int64).reshape(-1)
+    if int(src.size) == 0:
+        return
+    if int(src.size) != int(dst.size):
+        raise ValueError("Sparse transfer source/destination index count mismatch.")
+    src_arr = cupy.asarray(source_values, dtype=cupy.complex128)
+    tgt = cupy.asarray(target, dtype=cupy.complex128)
+    if src_arr.ndim != 4 or tgt.ndim != 4:
+        raise ValueError("Sparse transfer expects source/target shape (nbox,4,ndir,nrhs).")
+    n_source = int(map_data.source_order)
+    n_target = int(map_data.target_order)
+    if int(src_arr.shape[2]) != n_source or int(tgt.shape[2]) != n_target:
+        raise ValueError(
+            f"Sparse transfer directional size mismatch source={int(src_arr.shape[2])}/{n_source} "
+            f"target={int(tgt.shape[2])}/{n_target}."
+        )
+    if int(src_arr.shape[3]) != int(tgt.shape[3]):
+        raise ValueError("Sparse transfer RHS mismatch between source and target.")
+    if int(src_arr.shape[1]) != 4 or int(tgt.shape[1]) != 4:
+        raise ValueError("Sparse transfer expects 4 directional channels.")
+    sparse = map_data.matrix
+    phase_arr = cupy.asarray(phase, dtype=cupy.complex128).reshape(-1)
+    if int(phase_arr.size) != n_target:
+        raise ValueError(
+            f"Sparse transfer-up phase length mismatch: {int(phase_arr.size)} vs {n_target}."
+        )
+    threads = 256
+    total = int(src.size) * 4 * n_target * int(src_arr.shape[3])
+    blocks = max(1, (total + threads - 1) // threads)
+    _transfer_up_csr_unique_complex128_raw_kernel()(
+        (int(blocks),),
+        (threads,),
+        (
+            np.int64(int(src.size)),
+            np.int64(n_source),
+            np.int64(n_target),
+            np.int64(int(src_arr.shape[3])),
+            src,
+            dst,
+            cupy.asarray(sparse.indptr, dtype=cupy.int32),
+            cupy.asarray(sparse.indices, dtype=cupy.int32),
+            cupy.asarray(sparse.data, dtype=cupy.complex128),
+            phase_arr,
+            src_arr.reshape(-1),
+            tgt.reshape(-1),
+        ),
+    )
+
+
+def _transfer_down_sparse_unique_complex128(
+    target: Any,
+    dst_indices: Any,
+    source_values: Any,
+    src_indices: Any,
+    map_data: CuPyDirectionalInterpolationData,
+    phase: Any,
+    *,
+    cupy: Any,
+) -> None:
+    """Fused sparse downward transfer: phase + CSR map + destination accumulate."""
+
+    if str(map_data.storage) != "sparse":
+        raise ValueError("Sparse transfer kernel requires sparse map storage.")
+    src = cupy.asarray(src_indices, dtype=cupy.int64).reshape(-1)
+    dst = cupy.asarray(dst_indices, dtype=cupy.int64).reshape(-1)
+    if int(src.size) == 0:
+        return
+    if int(src.size) != int(dst.size):
+        raise ValueError("Sparse transfer source/destination index count mismatch.")
+    src_arr = cupy.asarray(source_values, dtype=cupy.complex128)
+    tgt = cupy.asarray(target, dtype=cupy.complex128)
+    if src_arr.ndim != 4 or tgt.ndim != 4:
+        raise ValueError("Sparse transfer expects source/target shape (nbox,4,ndir,nrhs).")
+    n_source = int(map_data.source_order)
+    n_target = int(map_data.target_order)
+    if int(src_arr.shape[2]) != n_source or int(tgt.shape[2]) != n_target:
+        raise ValueError(
+            f"Sparse transfer directional size mismatch source={int(src_arr.shape[2])}/{n_source} "
+            f"target={int(tgt.shape[2])}/{n_target}."
+        )
+    if int(src_arr.shape[3]) != int(tgt.shape[3]):
+        raise ValueError("Sparse transfer RHS mismatch between source and target.")
+    if int(src_arr.shape[1]) != 4 or int(tgt.shape[1]) != 4:
+        raise ValueError("Sparse transfer expects 4 directional channels.")
+    sparse = map_data.matrix
+    phase_arr = cupy.asarray(phase, dtype=cupy.complex128).reshape(-1)
+    if int(phase_arr.size) != n_source:
+        raise ValueError(
+            f"Sparse transfer-down phase length mismatch: {int(phase_arr.size)} vs {n_source}."
+        )
+    threads = 256
+    total = int(src.size) * 4 * n_target * int(src_arr.shape[3])
+    blocks = max(1, (total + threads - 1) // threads)
+    _transfer_down_csr_unique_complex128_raw_kernel()(
+        (int(blocks),),
+        (threads,),
+        (
+            np.int64(int(src.size)),
+            np.int64(n_source),
+            np.int64(n_target),
+            np.int64(int(src_arr.shape[3])),
+            src,
+            dst,
+            cupy.asarray(sparse.indptr, dtype=cupy.int32),
+            cupy.asarray(sparse.indices, dtype=cupy.int32),
+            cupy.asarray(sparse.data, dtype=cupy.complex128),
+            phase_arr,
+            src_arr.reshape(-1),
+            tgt.reshape(-1),
+        ),
+    )
+
+
+@cache
 def _directional_packed_stencil_map_c128_raw_kernel() -> Any:
     cupy, _ = import_cupy()
     source = r"""
@@ -2329,17 +2799,38 @@ def _apply_multilevel_far(
         child_values = outgoing[child_level]
         parent_values = outgoing[parent_level]
         for shift, batch in transfer.batches_by_shift.items():
-            mapped = _apply_directional_map(
-                child_values[batch.src_indices], transfer.map_up, cupy=cupy
-            )
-            _weighted_add_at_complex128(
-                parent_values,
-                batch.dst_indices,
-                mapped,
-                transfer.phase_up_by_shift[shift],
-                assume_unique_indices=bool(batch.dst_unique),
-                cupy=cupy,
-            )
+            if str(transfer.map_up.storage) == "packed_stencil" and bool(batch.dst_unique):
+                _transfer_up_packed_unique_complex128(
+                    parent_values,
+                    batch.dst_indices,
+                    child_values,
+                    batch.src_indices,
+                    transfer.map_up,
+                    transfer.phase_up_by_shift[shift],
+                    cupy=cupy,
+                )
+            elif str(transfer.map_up.storage) == "sparse" and bool(batch.dst_unique):
+                _transfer_up_sparse_unique_complex128(
+                    parent_values,
+                    batch.dst_indices,
+                    child_values,
+                    batch.src_indices,
+                    transfer.map_up,
+                    transfer.phase_up_by_shift[shift],
+                    cupy=cupy,
+                )
+            else:
+                mapped = _apply_directional_map(
+                    child_values[batch.src_indices], transfer.map_up, cupy=cupy
+                )
+                _weighted_add_at_complex128(
+                    parent_values,
+                    batch.dst_indices,
+                    mapped,
+                    transfer.phase_up_by_shift[shift],
+                    assume_unique_indices=bool(batch.dst_unique),
+                    cupy=cupy,
+                )
 
     for level_idx in range(int(multilevel.hf_start_level), int(multilevel.hf_end_level) + 1):
         level = levels[level_idx]
@@ -2360,18 +2851,39 @@ def _apply_multilevel_far(
         parent_values = incoming[parent_level]
         child_values = incoming[child_level]
         for shift, batch in transfer.batches_by_shift.items():
-            shifted = (
-                parent_values[batch.dst_indices]
-                * transfer.phase_down_by_shift[shift][None, None, :, None]
-            )
-            mapped = _apply_directional_map(shifted, transfer.map_down, cupy=cupy)
-            _add_at_complex128(
-                child_values,
-                batch.src_indices,
-                mapped,
-                assume_unique_indices=bool(batch.src_unique),
-                cupy=cupy,
-            )
+            if str(transfer.map_down.storage) == "packed_stencil" and bool(batch.src_unique):
+                _transfer_down_packed_unique_complex128(
+                    child_values,
+                    batch.src_indices,
+                    parent_values,
+                    batch.dst_indices,
+                    transfer.map_down,
+                    transfer.phase_down_by_shift[shift],
+                    cupy=cupy,
+                )
+            elif str(transfer.map_down.storage) == "sparse" and bool(batch.src_unique):
+                _transfer_down_sparse_unique_complex128(
+                    child_values,
+                    batch.src_indices,
+                    parent_values,
+                    batch.dst_indices,
+                    transfer.map_down,
+                    transfer.phase_down_by_shift[shift],
+                    cupy=cupy,
+                )
+            else:
+                shifted = (
+                    parent_values[batch.dst_indices]
+                    * transfer.phase_down_by_shift[shift][None, None, :, None]
+                )
+                mapped = _apply_directional_map(shifted, transfer.map_down, cupy=cupy)
+                _add_at_complex128(
+                    child_values,
+                    batch.src_indices,
+                    mapped,
+                    assume_unique_indices=bool(batch.src_unique),
+                    cupy=cupy,
+                )
 
     incoming_box = _directional_to_box_regular_cupy(
         levels[leaf_level].directional,

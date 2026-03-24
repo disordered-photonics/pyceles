@@ -64,6 +64,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CuPy MLFMM directional forward/inverse transforms now use packed batched-GEMM
   forms with reflection pre-folded into uploaded operators, replacing the
   previous multi-einsum runtime path.
+- CuPy MLFMM multilevel transfer stages now use fused map+phase+accumulate
+  kernels for packed-stencil and sparse transfer maps, avoiding intermediate
+  shifted/mapped directional tensors in repeated applies.
+- CuPy MLFMM sampled-far apply now reuses per-RHS workspaces (outgoing/incoming
+  hierarchy buffers plus leaf/incoming-box intermediates) across iterations to
+  reduce allocation churn in iterative solves.
 - MLFMM precision policy now accepts `compute_dtype="complex64"` on both NumPy
   and CuPy backends; this request is applied to exact-near interactions while
   sampled-far interactions remain `complex128`.
