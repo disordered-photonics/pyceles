@@ -53,10 +53,6 @@ class CuPyDirectionalTransformsData:
     Fph: Any
     Gth: Any
     Gph: Any
-    Fth_adj: Any
-    Fph_adj: Any
-    Gth_adj: Any
-    Gph_adj: Any
 
 
 @dataclass(frozen=True)
@@ -130,7 +126,6 @@ class CuPyMLFMMTransferData:
     child_level: int
     parent_level: int
     interpolation: CuPyDirectionalInterpolationData
-    anterpolation: CuPyDirectionalInterpolationData
     batches_by_shift: dict[Offset3, CuPyOffsetBatchData]
     phase_up_by_shift: dict[Offset3, Any]
     phase_down_by_shift: dict[Offset3, Any]
@@ -318,10 +313,6 @@ def _upload_directional_transforms(
     fph = _as_numpy_2d(transforms.Fph, dtype=np.complex128, name="directional.Fph")
     gth = _as_numpy_2d(transforms.Gth, dtype=np.complex128, name="directional.Gth")
     gph = _as_numpy_2d(transforms.Gph, dtype=np.complex128, name="directional.Gph")
-    fth_adj = _as_numpy_2d(transforms.Fth_adj, dtype=np.complex128, name="directional.Fth_adj")
-    fph_adj = _as_numpy_2d(transforms.Fph_adj, dtype=np.complex128, name="directional.Fph_adj")
-    gth_adj = _as_numpy_2d(transforms.Gth_adj, dtype=np.complex128, name="directional.Gth_adj")
-    gph_adj = _as_numpy_2d(transforms.Gph_adj, dtype=np.complex128, name="directional.Gph_adj")
     n_dir = directions.shape[0]
     if (
         fth.shape[0] != n_dir
@@ -332,16 +323,6 @@ def _upload_directional_transforms(
         raise ValueError(
             "Directional forward transform row count must match sampled direction count."
         )
-    if (
-        fth_adj.shape[1] != n_dir
-        or fph_adj.shape[1] != n_dir
-        or gth_adj.shape[1] != n_dir
-        or gph_adj.shape[1] != n_dir
-    ):
-        raise ValueError(
-            "Directional adjoint transform column count must match sampled direction count."
-        )
-
     return CuPyDirectionalTransformsData(
         box_order=int(transforms.box_order),
         grid_order=int(transforms.grid.order),
@@ -355,10 +336,6 @@ def _upload_directional_transforms(
         Fph=cupy.asarray(fph, dtype=cupy.complex128),
         Gth=cupy.asarray(gth, dtype=cupy.complex128),
         Gph=cupy.asarray(gph, dtype=cupy.complex128),
-        Fth_adj=cupy.asarray(fth_adj, dtype=cupy.complex128),
-        Fph_adj=cupy.asarray(fph_adj, dtype=cupy.complex128),
-        Gth_adj=cupy.asarray(gth_adj, dtype=cupy.complex128),
-        Gph_adj=cupy.asarray(gph_adj, dtype=cupy.complex128),
     )
 
 
@@ -441,7 +418,6 @@ def _upload_partition(partition: MLFMMPartition, *, cupy: Any) -> CuPyMLFMMParti
 def _upload_leaf_apply_groups(
     *,
     aggregation: tuple[np.ndarray, ...],
-    receive: tuple[np.ndarray, ...],
     partition: CuPyMLFMMPartitionData,
     cupy: Any,
     name: str,
@@ -449,10 +425,6 @@ def _upload_leaf_apply_groups(
     """Upload grouped leaf operators with uniform occupancy for batched GEMM."""
 
     n_leaves = int(len(aggregation))
-    if int(len(receive)) != n_leaves:
-        raise ValueError(
-            f"{name} aggregation/receive leaf counts mismatch: {n_leaves} vs {int(len(receive))}."
-        )
     offsets = partition.leaf_particle_offsets_host
     flat_indices = partition.leaf_particle_indices_host
     if int(offsets.size) != n_leaves + 1:
@@ -470,9 +442,8 @@ def _upload_leaf_apply_groups(
         if q <= 0:
             raise ValueError(f"{name}[{leaf_id}] has non-positive occupancy {q}.")
         agg_leaf = np.asarray(aggregation[leaf_id], dtype=np.complex128)
-        recv_leaf = np.asarray(receive[leaf_id], dtype=np.complex128)
-        if agg_leaf.ndim != 2 or recv_leaf.ndim != 2:
-            raise ValueError(f"{name}[{leaf_id}] aggregation/receive must be 2D matrices.")
+        if agg_leaf.ndim != 2:
+            raise ValueError(f"{name}[{leaf_id}] aggregation must be a 2D matrix.")
         if int(agg_leaf.shape[0]) != box_nm:
             raise ValueError(
                 f"{name}[{leaf_id}] box-row mismatch: {int(agg_leaf.shape[0])} vs {box_nm}."
@@ -482,10 +453,6 @@ def _upload_leaf_apply_groups(
                 f"{name}[{leaf_id}] aggregation columns {int(agg_leaf.shape[1])} not divisible by occupancy {q}."
             )
         nmodes_leaf = int(agg_leaf.shape[1] // q)
-        if int(recv_leaf.shape[0]) != q * nmodes_leaf or int(recv_leaf.shape[1]) != box_nm:
-            raise ValueError(
-                f"{name}[{leaf_id}] receive shape {recv_leaf.shape} inconsistent with occupancy {q} and nmodes {nmodes_leaf}."
-            )
         if nmodes_ref is None:
             nmodes_ref = nmodes_leaf
         elif nmodes_leaf != nmodes_ref:
@@ -507,14 +474,7 @@ def _upload_leaf_apply_groups(
             start = int(offsets[leaf_id])
             end = int(offsets[leaf_id + 1])
             part_idx_np[local_idx] = flat_indices[start:end]
-            agg_leaf = np.asarray(aggregation[leaf_id], dtype=np.complex128)
-            recv_leaf = np.asarray(receive[leaf_id], dtype=np.complex128)
-            adj_leaf = np.asarray(np.conjugate(agg_leaf).T, dtype=np.complex128)
-            if not np.allclose(recv_leaf, adj_leaf, rtol=1.0e-12, atol=1.0e-12):
-                raise ValueError(
-                    f"{name}[{leaf_id}] expected receive == aggregation^H; invariant violation."
-                )
-            agg_group[local_idx] = agg_leaf
+            agg_group[local_idx] = np.asarray(aggregation[leaf_id], dtype=np.complex128)
         grouped.append(
             CuPyLeafApplyGroupData(
                 occupancy=occupancy,
@@ -552,7 +512,6 @@ def _upload_single_level(
 
     box_nm, leaf_groups = _upload_leaf_apply_groups(
         aggregation=single.aggregation,
-        receive=single.receive,
         partition=partition,
         cupy=cupy,
         name="single_level",
@@ -641,19 +600,15 @@ def _upload_transfer(
         )
         phase_down[shift] = cupy.asarray(phase_arr, dtype=cupy.complex128)
 
+    interpolation = _upload_sparse_interpolation(
+        transfer.interpolation,
+        cupy=cupy,
+        cupyx_sparse=cupyx_sparse,
+    )
     return CuPyMLFMMTransferData(
         child_level=int(transfer.child_level),
         parent_level=int(transfer.parent_level),
-        interpolation=_upload_sparse_interpolation(
-            transfer.interpolation,
-            cupy=cupy,
-            cupyx_sparse=cupyx_sparse,
-        ),
-        anterpolation=_upload_sparse_interpolation(
-            transfer.anterpolation,
-            cupy=cupy,
-            cupyx_sparse=cupyx_sparse,
-        ),
+        interpolation=interpolation,
         batches_by_shift=_upload_offset_batches(
             transfer.batches_by_shift,
             cupy=cupy,
@@ -673,7 +628,6 @@ def _upload_multilevel(
 ) -> CuPyMLFMMMultilevelData:
     box_nm, leaf_groups = _upload_leaf_apply_groups(
         aggregation=multilevel.aggregation,
-        receive=multilevel.receive,
         partition=partition,
         cupy=cupy,
         name="multilevel",
@@ -1283,18 +1237,22 @@ def _directional_to_box_regular_cupy(
     a_phi = cupy.take(channels[:, 1], perm, axis=1)
     b_theta = cupy.take(channels[:, 2], perm, axis=1)
     b_phi = cupy.take(channels[:, 3], perm, axis=1)
+    fth_adj = directional.Fth.T.conj()
+    fph_adj = directional.Fph.T.conj()
+    gth_adj = directional.Gth.T.conj()
+    gph_adj = directional.Gph.T.conj()
 
     top = (
-        cupy.einsum("sn,bnr->bsr", directional.Fth_adj, a_theta)
-        + cupy.einsum("sn,bnr->bsr", directional.Fph_adj, a_phi)
-        + cupy.einsum("sn,bnr->bsr", directional.Gth_adj, b_theta)
-        + cupy.einsum("sn,bnr->bsr", directional.Gph_adj, b_phi)
+        cupy.einsum("sn,bnr->bsr", fth_adj, a_theta)
+        + cupy.einsum("sn,bnr->bsr", fph_adj, a_phi)
+        + cupy.einsum("sn,bnr->bsr", gth_adj, b_theta)
+        + cupy.einsum("sn,bnr->bsr", gph_adj, b_phi)
     )
     bottom = (
-        cupy.einsum("sn,bnr->bsr", directional.Fth_adj, b_theta)
-        + cupy.einsum("sn,bnr->bsr", directional.Fph_adj, b_phi)
-        + cupy.einsum("sn,bnr->bsr", directional.Gth_adj, a_theta)
-        + cupy.einsum("sn,bnr->bsr", directional.Gph_adj, a_phi)
+        cupy.einsum("sn,bnr->bsr", fth_adj, b_theta)
+        + cupy.einsum("sn,bnr->bsr", fph_adj, b_phi)
+        + cupy.einsum("sn,bnr->bsr", gth_adj, a_theta)
+        + cupy.einsum("sn,bnr->bsr", gph_adj, a_phi)
     )
     return cupy.concatenate((top, bottom), axis=1)
 
@@ -1432,6 +1390,7 @@ def _apply_single_level_far(prepared: CuPyMLFMMPreparedData, x_states: Any, *, c
             batch.dst_indices,
             outgoing[batch.src_indices],
             single.offset_diagonals[offset],
+            assume_unique_indices=bool(batch.dst_unique),
             cupy=cupy,
         )
     incoming_box = _directional_to_box_regular_cupy(single.directional, incoming, cupy=cupy)
@@ -1502,6 +1461,7 @@ def _apply_multilevel_far(prepared: CuPyMLFMMPreparedData, x_states: Any, *, cup
                 batch.dst_indices,
                 mapped,
                 transfer.phase_up_by_shift[shift],
+                assume_unique_indices=bool(batch.dst_unique),
                 cupy=cupy,
             )
 
@@ -1513,6 +1473,7 @@ def _apply_multilevel_far(prepared: CuPyMLFMMPreparedData, x_states: Any, *, cup
                 batch.dst_indices,
                 outgoing[level_idx][batch.src_indices],
                 level.offset_diagonals[offset],
+                assume_unique_indices=bool(batch.dst_unique),
                 cupy=cupy,
             )
 
@@ -1530,13 +1491,14 @@ def _apply_multilevel_far(prepared: CuPyMLFMMPreparedData, x_states: Any, *, cup
             )
             shifted_reindexed = _apply_reflection_to_direction_axis(shifted, parent_perm, cupy=cupy)
             mapped_reindexed = _apply_sparse_directional_map(
-                shifted_reindexed, transfer.anterpolation.matrix, cupy=cupy
+                shifted_reindexed, transfer.interpolation.matrix.T, cupy=cupy
             )
             mapped = _apply_reflection_to_direction_axis(mapped_reindexed, child_perm, cupy=cupy)
             _add_at_complex128(
                 child_values,
                 batch.src_indices,
                 mapped,
+                assume_unique_indices=bool(batch.src_unique),
                 cupy=cupy,
             )
 
