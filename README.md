@@ -328,6 +328,11 @@ Current MLFMM scope/limits:
 - CuPy grouped far-offset accumulation uses weighted device kernels (for both
   single-level and multilevel sampled far passes) to reduce intermediate tensor
   traffic in the repeated-apply path
+- grouped far/transfer accumulation uses non-atomic kernels under a strict
+  grouped-batch uniqueness contract; preparation fails fast if an unexpected
+  non-unique grouped schedule is encountered
+- CuPy MLFMM prepared-cache payloads are compact host artifacts; device-resident
+  prepared data is rebuilt on load instead of being pickled directly
 - matrix-free iterative solves for true MLFMM stages
 - dense/direct solves remain pairwise-only (MLFMM stages are matrix-free)
 - the current implementation targets the high-frequency regime only

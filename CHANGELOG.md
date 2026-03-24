@@ -58,9 +58,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CuPy MLFMM grouped far-offset accumulation now uses weighted device kernels
   in single-level and multilevel sampled far passes, reducing intermediate
   tensor traffic in repeated applies.
+- CuPy MLFMM grouped far/transfer batches now enforce source/destination
+  uniqueness at upload time and fail fast on violations, while keeping
+  non-atomic accumulation in the repeated-apply path.
+- CuPy MLFMM directional forward/inverse transforms now use packed batched-GEMM
+  forms with reflection pre-folded into uploaded operators, replacing the
+  previous multi-einsum runtime path.
 - MLFMM precision policy now accepts `compute_dtype="complex64"` on both NumPy
   and CuPy backends; this request is applied to exact-near interactions while
   sampled-far interactions remain `complex128`.
+- CuPy MLFMM prepared-cache serialization now stores compact host artifacts and
+  rebuilds device prepared data on load, reducing cache footprint and avoiding
+  device-graph pickling.
 
 ### Fixed
 - Native CuPy block-GMRES now enforces per-RHS true-residual tolerance checks
@@ -71,6 +80,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   kernel and lookup-table uploads (instead of only casting the final near
   output), restoring the intended mixed-precision speedup while keeping
   sampled-far interactions on `complex128`.
+- CuPy MLFMM repeated apply now memoizes grouped leaf receive adjoints per
+  runtime object, removing repeated grouped `swapaxes(...).conj()` work in the
+  hot loop.
 - Multilevel MLFMM directional interpolation now follows the validated angular
   ordering and transfer conventions, avoiding severe GMRES stagnation on
   benchmark-scale multilevel runs.

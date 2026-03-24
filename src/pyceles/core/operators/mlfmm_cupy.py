@@ -6,7 +6,7 @@ CPU build/planning remains the single source of truth in `mlfmm.py`.
 This module validates and uploads repeated-apply structures to device memory.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cache
 from importlib import import_module
 from typing import Any
@@ -147,15 +147,22 @@ class CuPyMLFMMHostCacheData:
 
 @dataclass(frozen=True)
 class CuPyDirectionalTransformsData:
-    """Device copy of SVWF<->directional transforms for one box/grid order."""
+    """Device directional transform payload for one box/grid order.
+
+    Matrices are prepacked for batched GEMM on repeated apply:
+    - `forward_F` maps one scalar SVWF block (`nscl`) to two reflected
+      directional channels (`theta`, `phi`) with shape `(2*ndir, nscl)`.
+    - `inverse_A_adj` and `inverse_G_adj` are reflected adjoint blocks used by
+      the inverse map with shapes `(nscl, 2*ndir)`.
+    """
 
     box_order: int
     grid_order: int
     grid: CuPyDirectionalGridData
-    Fth: Any
-    Fph: Any
-    Gth: Any
-    Gph: Any
+    nscl: int
+    forward_F: Any
+    inverse_A_adj: Any
+    inverse_G_adj: Any
 
 
 @dataclass(frozen=True)
@@ -183,7 +190,13 @@ class CuPyMLFMMPartitionData:
 
 @dataclass(frozen=True)
 class CuPyOffsetBatchData:
-    """Device copy of grouped source/target index batches for one relative offset."""
+    """Device copy of grouped source/target index batches for one relative offset.
+
+    `src_unique`/`dst_unique` are computed from the uploaded host batches and
+    are used to route accumulation kernels:
+    - unique destination batches can use non-atomic kernels;
+    - non-unique batches fall back to atomic accumulation kernels.
+    """
 
     src_indices: Any
     dst_indices: Any
@@ -423,6 +436,29 @@ def _upload_directional_transforms(
         raise ValueError(
             "Directional forward transform row count must match sampled direction count."
         )
+    nscl = int(fth.shape[1])
+    perm = np.asarray(reflection, dtype=np.int64)
+    inv_perm = np.ascontiguousarray(np.argsort(perm), dtype=np.int64)
+
+    # Outgoing map: pre-fold reflection row permutation and stack theta/phi
+    # into one (2*ndir, nscl) matrix for batched GEMM.
+    f_stack = np.ascontiguousarray(
+        np.vstack((fth[perm, :], fph[perm, :])),
+        dtype=np.complex128,
+    )
+
+    # Incoming map: pre-fold reflection on columns via A @ P equivalence
+    # (implemented as column reindex by inverse permutation), then stack
+    # [theta,phi] blocks for compact batched GEMM.
+    a_adj = np.ascontiguousarray(
+        np.hstack((np.conjugate(fth.T)[:, inv_perm], np.conjugate(fph.T)[:, inv_perm])),
+        dtype=np.complex128,
+    )
+    g_adj = np.ascontiguousarray(
+        np.hstack((np.conjugate(gth.T)[:, inv_perm], np.conjugate(gph.T)[:, inv_perm])),
+        dtype=np.complex128,
+    )
+
     return CuPyDirectionalTransformsData(
         box_order=int(transforms.box_order),
         grid_order=int(transforms.grid.order),
@@ -431,10 +467,10 @@ def _upload_directional_transforms(
             n_directions=int(n_dir),
             reflection_permutation=cupy.asarray(reflection, dtype=cupy.int64),
         ),
-        Fth=cupy.asarray(fth, dtype=cupy.complex128),
-        Fph=cupy.asarray(fph, dtype=cupy.complex128),
-        Gth=cupy.asarray(gth, dtype=cupy.complex128),
-        Gph=cupy.asarray(gph, dtype=cupy.complex128),
+        nscl=nscl,
+        forward_F=cupy.asarray(f_stack, dtype=cupy.complex128),
+        inverse_A_adj=cupy.asarray(a_adj, dtype=cupy.complex128),
+        inverse_G_adj=cupy.asarray(g_adj, dtype=cupy.complex128),
     )
 
 
@@ -522,6 +558,8 @@ def _upload_directional_map(
 def _upload_offset_batches(
     batches: dict[Offset3, tuple[np.ndarray, np.ndarray]], *, cupy: Any, name: str
 ) -> dict[Offset3, CuPyOffsetBatchData]:
+    """Upload grouped source/target batches and enforce uniqueness contract."""
+
     out: dict[Offset3, CuPyOffsetBatchData] = {}
     for offset, (src_idx, dst_idx) in batches.items():
         src = _as_numpy_1d(src_idx, dtype=np.int64, name=f"{name}[{offset}].src")
@@ -530,12 +568,16 @@ def _upload_offset_batches(
             raise ValueError(
                 f"{name}[{offset}] source/target batch size mismatch: {src.size} vs {dst.size}."
             )
+        src_unique = bool(np.unique(src).size == src.size)
+        dst_unique = bool(np.unique(dst).size == dst.size)
+        if not src_unique or not dst_unique:
+            raise ValueError(
+                f"{name}[{offset}] violates grouped uniqueness contract "
+                f"(src_unique={src_unique}, dst_unique={dst_unique})."
+            )
         out[offset] = CuPyOffsetBatchData(
             src_indices=cupy.asarray(src, dtype=cupy.int64),
             dst_indices=cupy.asarray(dst, dtype=cupy.int64),
-            # Source/target arrays are unique by construction in the CPU
-            # batch builders (`_leaf_offset_batches`,
-            # `_build_multilevel_far_offset_batches`, transfer grouping by shift).
             src_unique=True,
             dst_unique=True,
         )
@@ -1150,12 +1192,6 @@ def _restore_unknown_shape(y: Any, *, squeezed: bool) -> Any:
         return y.reshape(-1)
     n_particles, nm, nrhs = (int(v) for v in y.shape)
     return y.reshape(n_particles * nm, nrhs)
-
-
-def _apply_reflection_to_direction_axis(values: Any, permutation: Any, *, cupy: Any) -> Any:
-    """Apply one directional reflection permutation on axis 2."""
-
-    return cupy.take(values, permutation, axis=2)
 
 
 @cache
@@ -1849,26 +1885,23 @@ def _box_outgoing_to_directional_cupy(
     """Map batched outgoing box SVWF states to directional channels on device."""
 
     states = cupy.asarray(box_states, dtype=cupy.complex128)
-    nscl = int(directional.Fth.shape[1])
+    nscl = int(directional.nscl)
     if int(states.shape[1]) != 2 * nscl:
         raise ValueError(
             f"box_states second dimension must be {2 * nscl}, got {int(states.shape[1])}."
         )
+    ndir = int(directional.grid.n_directions)
+    n_batch = int(states.shape[0])
     a_box = states[:, :nscl, :]
     b_box = states[:, nscl:, :]
-    a_theta = cupy.einsum("dn,bnr->bdr", directional.Fth, a_box)
-    a_phi = cupy.einsum("dn,bnr->bdr", directional.Fph, a_box)
-    b_theta = cupy.einsum("dn,bnr->bdr", directional.Fth, b_box)
-    b_phi = cupy.einsum("dn,bnr->bdr", directional.Fph, b_box)
-    perm = directional.grid.reflection_permutation
-    return cupy.stack(
-        (
-            cupy.take(a_theta, perm, axis=1),
-            cupy.take(a_phi, perm, axis=1),
-            cupy.take(b_theta, perm, axis=1),
-            cupy.take(b_phi, perm, axis=1),
-        ),
-        axis=1,
+    pair_dir = cupy.matmul(
+        directional.forward_F[None, :, :],
+        cupy.concatenate((a_box, b_box), axis=0),
+    )
+    a_dir = pair_dir[:n_batch]
+    b_dir = pair_dir[n_batch:]
+    return cupy.concatenate((a_dir, b_dir), axis=1).reshape(
+        n_batch, 4, ndir, int(states.shape[2])
     )
 
 
@@ -1882,28 +1915,18 @@ def _directional_to_box_regular_cupy(
         raise ValueError(
             f"directional channel batch must have 4 channels, got {int(channels.shape[1])}."
         )
-    perm = directional.grid.reflection_permutation
-    a_theta = cupy.take(channels[:, 0], perm, axis=1)
-    a_phi = cupy.take(channels[:, 1], perm, axis=1)
-    b_theta = cupy.take(channels[:, 2], perm, axis=1)
-    b_phi = cupy.take(channels[:, 3], perm, axis=1)
-    fth_adj = directional.Fth.T.conj()
-    fph_adj = directional.Fph.T.conj()
-    gth_adj = directional.Gth.T.conj()
-    gph_adj = directional.Gph.T.conj()
-
-    top = (
-        cupy.einsum("sn,bnr->bsr", fth_adj, a_theta)
-        + cupy.einsum("sn,bnr->bsr", fph_adj, a_phi)
-        + cupy.einsum("sn,bnr->bsr", gth_adj, b_theta)
-        + cupy.einsum("sn,bnr->bsr", gph_adj, b_phi)
-    )
-    bottom = (
-        cupy.einsum("sn,bnr->bsr", fth_adj, b_theta)
-        + cupy.einsum("sn,bnr->bsr", fph_adj, b_phi)
-        + cupy.einsum("sn,bnr->bsr", gth_adj, a_theta)
-        + cupy.einsum("sn,bnr->bsr", gph_adj, a_phi)
-    )
+    n_batch = int(channels.shape[0])
+    ch_ab = cupy.concatenate((channels[:, 0], channels[:, 1]), axis=1)
+    ch_bb = cupy.concatenate((channels[:, 2], channels[:, 3]), axis=1)
+    ch_pair = cupy.concatenate((ch_ab, ch_bb), axis=0)
+    a_pair = cupy.matmul(directional.inverse_A_adj[None, :, :], ch_pair)
+    g_pair = cupy.matmul(directional.inverse_G_adj[None, :, :], ch_pair)
+    a_ab = a_pair[:n_batch]
+    a_bb = a_pair[n_batch:]
+    g_ab = g_pair[:n_batch]
+    g_bb = g_pair[n_batch:]
+    top = a_ab + g_bb
+    bottom = g_ab + a_bb
     return cupy.concatenate((top, bottom), axis=1)
 
 
@@ -1933,12 +1956,18 @@ def _receive_leaf_boxes_to_particles(
     incoming_box: Any,
     *,
     leaf_groups: tuple[CuPyLeafApplyGroupData, ...],
+    receive_adjoint_cache: dict[int, Any] | None,
     nm: int,
     n_particles: int,
     nrhs: int,
     cupy: Any,
 ) -> Any:
-    """Scatter leaf-local incoming box states back to particle coefficients."""
+    """Scatter leaf-local incoming box states back to particle coefficients.
+
+    When provided, `receive_adjoint_cache` stores one conjugate-transposed
+    grouped aggregation tensor per leaf group so repeated applies do not
+    recompute `swapaxes(...).conj()` in the hot loop.
+    """
 
     y = cupy.zeros((int(n_particles), int(nm), int(nrhs)), dtype=cupy.complex128)
     for group in leaf_groups:
@@ -1946,7 +1975,15 @@ def _receive_leaf_boxes_to_particles(
         idx = group.particle_indices
         n_group = int(idx.shape[0])
         occupancy = int(group.occupancy)
-        receive_adj = cupy.swapaxes(group.aggregation, 1, 2).conj()
+        receive_adj: Any
+        if receive_adjoint_cache is not None:
+            cache_key = int(group.aggregation.data.ptr)
+            receive_adj = receive_adjoint_cache.get(cache_key)
+            if receive_adj is None:
+                receive_adj = cupy.swapaxes(group.aggregation, 1, 2).conj()
+                receive_adjoint_cache[cache_key] = receive_adj
+        else:
+            receive_adj = cupy.swapaxes(group.aggregation, 1, 2).conj()
         contribution = cupy.matmul(receive_adj, incoming_box[leaf_ids]).reshape(
             n_group, occupancy, int(nm), int(nrhs)
         )
@@ -2032,7 +2069,13 @@ def _apply_exact_near_pairs(prepared: CuPyMLFMMPreparedData, x_states: Any, *, c
     return cupy.transpose(out_rhs_major, (1, 2, 0)).astype(cupy_out_dtype, copy=False)
 
 
-def _apply_single_level_far(prepared: CuPyMLFMMPreparedData, x_states: Any, *, cupy: Any) -> Any:
+def _apply_single_level_far(
+    prepared: CuPyMLFMMPreparedData,
+    x_states: Any,
+    *,
+    receive_adjoint_cache: dict[int, Any] | None,
+    cupy: Any,
+) -> Any:
     """Apply sampled single-level far interactions on device.
 
     Grouped far-offset accumulation uses weighted fused kernels to avoid
@@ -2068,6 +2111,7 @@ def _apply_single_level_far(prepared: CuPyMLFMMPreparedData, x_states: Any, *, c
     return _receive_leaf_boxes_to_particles(
         incoming_box,
         leaf_groups=single.leaf_groups,
+        receive_adjoint_cache=receive_adjoint_cache,
         nm=nm,
         n_particles=n_particles,
         nrhs=nrhs,
@@ -2075,7 +2119,13 @@ def _apply_single_level_far(prepared: CuPyMLFMMPreparedData, x_states: Any, *, c
     )
 
 
-def _apply_multilevel_far(prepared: CuPyMLFMMPreparedData, x_states: Any, *, cupy: Any) -> Any:
+def _apply_multilevel_far(
+    prepared: CuPyMLFMMPreparedData,
+    x_states: Any,
+    *,
+    receive_adjoint_cache: dict[int, Any] | None,
+    cupy: Any,
+) -> Any:
     """Apply sampled multilevel far interactions on device."""
 
     multilevel = prepared.multilevel
@@ -2170,6 +2220,7 @@ def _apply_multilevel_far(prepared: CuPyMLFMMPreparedData, x_states: Any, *, cup
     return _receive_leaf_boxes_to_particles(
         incoming_box,
         leaf_groups=multilevel.leaf_groups,
+        receive_adjoint_cache=receive_adjoint_cache,
         nm=nm,
         n_particles=n_particles,
         nrhs=nrhs,
@@ -2199,6 +2250,7 @@ class CuPyMLFMMCouplingOperator:
     dtype: np.dtype = np.dtype(np.complex128)
     near_dtype: np.dtype = np.dtype(np.complex128)
     far_dtype: np.dtype = np.dtype(np.complex128)
+    _receive_adjoint_cache: dict[int, Any] = field(default_factory=dict, init=False, repr=False)
 
     def apply(self, x: Any) -> Any:
         cupy, _ = import_cupy()
@@ -2232,9 +2284,19 @@ class CuPyMLFMMCouplingOperator:
         y_near = _apply_exact_near_pairs(self.prepared_data, x_states, cupy=cupy)
         stage = str(self.prepared_data.stage)
         if stage == "single_level":
-            y_far = _apply_single_level_far(self.prepared_data, x_states, cupy=cupy)
+            y_far = _apply_single_level_far(
+                self.prepared_data,
+                x_states,
+                receive_adjoint_cache=self._receive_adjoint_cache,
+                cupy=cupy,
+            )
         elif stage == "multilevel":
-            y_far = _apply_multilevel_far(self.prepared_data, x_states, cupy=cupy)
+            y_far = _apply_multilevel_far(
+                self.prepared_data,
+                x_states,
+                receive_adjoint_cache=self._receive_adjoint_cache,
+                cupy=cupy,
+            )
         else:
             raise RuntimeError(f"Unsupported CuPy MLFMM stage {stage!r}.")
         y_total = cupy.asarray(y_near, dtype=cupy.complex128) + cupy.asarray(
@@ -2267,6 +2329,7 @@ class CuPyMLFMMCouplingOperator:
         self.dtype = np.dtype(state.get("dtype", np.complex128))
         self.near_dtype = np.dtype(state.get("near_dtype", self.dtype))
         self.far_dtype = np.dtype(state.get("far_dtype", np.complex128))
+        self._receive_adjoint_cache = {}
         self.prepared_data = prepare_mlfmm_cupy_data(self.host_cache)
 
 
