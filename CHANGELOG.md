@@ -35,7 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - CPU plan/build remains the source of truth
   - exact-near and sampled far repeated applies run on device
   - direct-stage fallback remains the CuPy pairwise coupling path
-  - `complex128` is currently required for MLFMM on both NumPy and CuPy
+  - sampled-far MLFMM interactions stay on `complex128` for both NumPy and CuPy
 
 ### Changed
 - Dense/direct NumPy solves now reject true MLFMM coupling stages explicitly
@@ -58,14 +58,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CuPy MLFMM grouped far-offset accumulation now uses weighted device kernels
   in single-level and multilevel sampled far passes, reducing intermediate
   tensor traffic in repeated applies.
+- MLFMM precision policy now accepts `compute_dtype="complex64"` on both NumPy
+  and CuPy backends; this request is applied to exact-near interactions while
+  sampled-far interactions remain `complex128`.
 
 ### Fixed
 - Native CuPy block-GMRES now enforces per-RHS true-residual tolerance checks
   with strict per-column acceptance and now performs an in-cycle true-residual
   gate when the block proxy first reaches target, avoiding restart-boundary
   overshoot on large restart values.
-- NumPy MLFMM preparation now enforces `complex128` operator dtype and keeps
-  the prepared directional/translation arrays on that precision path.
+- CuPy MLFMM exact-near now honors `compute_dtype="complex64"` in the device
+  kernel and lookup-table uploads (instead of only casting the final near
+  output), restoring the intended mixed-precision speedup while keeping
+  sampled-far interactions on `complex128`.
 - Multilevel MLFMM directional interpolation now follows the validated angular
   ordering and transfer conventions, avoiding severe GMRES stagnation on
   benchmark-scale multilevel runs.

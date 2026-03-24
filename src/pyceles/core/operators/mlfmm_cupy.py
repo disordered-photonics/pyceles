@@ -156,6 +156,8 @@ class CuPyMLFMMSingleLevelData:
 class CuPyMLFMMNearPairData:
     """Device-ready directed exact-near particle-pair metadata and tables."""
 
+    near_dtype: np.dtype
+    positions: Any
     dst_particle_indices: Any
     src_particle_indices: Any
     lut_re: Any
@@ -198,6 +200,15 @@ class CuPyMLFMMPreparedData:
     near_pairs: CuPyMLFMMNearPairData
     single_level: CuPyMLFMMSingleLevelData | None = None
     multilevel: CuPyMLFMMMultilevelData | None = None
+
+
+def _cupy_complex_dtype(dtype: np.dtype, *, cupy: Any) -> Any:
+    dt = np.dtype(dtype)
+    if dt == np.dtype(np.complex64):
+        return cupy.complex64
+    if dt == np.dtype(np.complex128):
+        return cupy.complex128
+    raise ValueError(f"Unsupported complex dtype {dt!r}.")
 
 
 def _as_numpy_1d(arr: np.ndarray, *, dtype: npt.DTypeLike, name: str) -> np.ndarray:
@@ -789,7 +800,23 @@ def _upload_exact_near_pair_data(
 
     dst_indices, src_indices = _build_exact_near_pair_indices(coupling.resolved_plan.partition)
     radial_lut = coupling.radial_lut
-    lut = np.asarray(radial_lut.h, dtype=np.complex128).T.copy()
+    near_dtype = np.dtype(coupling.near_dtype)
+    if near_dtype not in {np.dtype(np.complex64), np.dtype(np.complex128)}:
+        raise ValueError(
+            "CuPy MLFMM near path supports only complex64/complex128 near dtypes. "
+            f"Got {near_dtype!r}."
+        )
+    real_dtype: type[np.floating[Any]]
+    lut_dtype: type[np.complexfloating[Any, Any]]
+    if near_dtype == np.dtype(np.complex64):
+        real_dtype = np.float32
+        cupy_real_dtype = cupy.float32
+        lut_dtype = np.complex64
+    else:
+        real_dtype = np.float64
+        cupy_real_dtype = cupy.float64
+        lut_dtype = np.complex128
+    lut = np.asarray(radial_lut.h, dtype=np.complex128).T.astype(lut_dtype, copy=False)
     compact_re_ab, compact_im_ab = _translation_ab5_compact_tables(
         int(coupling.lmax), dtype=np.complex128
     )
@@ -797,6 +824,12 @@ def _upload_exact_near_pair_data(
     mode_m = _mode_metadata_tables(int(coupling.lmax))
     pair_offset, pair_pmin, pair_pcount = _mode_pair_tables(int(coupling.lmax))
     return CuPyMLFMMNearPairData(
+        near_dtype=near_dtype,
+        positions=cupy.asarray(
+            np.ascontiguousarray(np.asarray(coupling.positions, dtype=real_dtype).reshape(-1)),
+            dtype=cupy_real_dtype,
+            blocking=True,
+        ),
         dst_particle_indices=cupy.asarray(
             _as_numpy_1d(dst_indices, dtype=np.int64, name="exact_near.dst_particle_indices"),
             dtype=cupy.int64,
@@ -808,20 +841,26 @@ def _upload_exact_near_pair_data(
             blocking=True,
         ),
         lut_re=cupy.asarray(
-            np.ascontiguousarray(lut.real.reshape(-1)),
-            dtype=cupy.float64,
+            np.ascontiguousarray(lut.real.reshape(-1), dtype=real_dtype),
+            dtype=cupy_real_dtype,
             blocking=True,
         ),
         lut_im=cupy.asarray(
-            np.ascontiguousarray(lut.imag.reshape(-1)),
-            dtype=cupy.float64,
+            np.ascontiguousarray(lut.imag.reshape(-1), dtype=real_dtype),
+            dtype=cupy_real_dtype,
             blocking=True,
         ),
         inv_dr=float(radial_lut._inv_dr),
         last_index=int(radial_lut._last_index),
-        plm_coeffs=cupy.asarray(plm_coeffs, dtype=cupy.float64, blocking=True),
-        compact_re_ab=cupy.asarray(compact_re_ab, dtype=cupy.float64, blocking=True),
-        compact_im_ab=cupy.asarray(compact_im_ab, dtype=cupy.float64, blocking=True),
+        plm_coeffs=cupy.asarray(
+            plm_coeffs.astype(real_dtype, copy=False), dtype=cupy_real_dtype, blocking=True
+        ),
+        compact_re_ab=cupy.asarray(
+            compact_re_ab.astype(real_dtype, copy=False), dtype=cupy_real_dtype, blocking=True
+        ),
+        compact_im_ab=cupy.asarray(
+            compact_im_ab.astype(real_dtype, copy=False), dtype=cupy_real_dtype, blocking=True
+        ),
         mode_m=cupy.asarray(mode_m, dtype=cupy.int32, blocking=True),
         pair_offset=cupy.asarray(pair_offset.reshape(-1), dtype=cupy.int32, blocking=True),
         pair_pmin=cupy.asarray(pair_pmin.reshape(-1), dtype=cupy.int32, blocking=True),
@@ -830,24 +869,30 @@ def _upload_exact_near_pair_data(
 
 
 def _reshape_unknowns_to_particle_modes(
-    x: Any, *, n_particles: int, nm: int, cupy: Any
+    x: Any,
+    *,
+    n_particles: int,
+    nm: int,
+    dtype: np.dtype,
+    cupy: Any,
 ) -> tuple[Any, bool]:
     """Reshape `(n*nm,)` or `(n*nm, nrhs)` unknowns to `(n, nm, nrhs)`."""
 
-    arr = coerce_array(x, dtype=np.dtype(np.complex128), prefer_cupy=True)
+    arr = coerce_array(x, dtype=np.dtype(dtype), prefer_cupy=True)
+    cupy_dtype = _cupy_complex_dtype(np.dtype(dtype), cupy=cupy)
     if arr.ndim == 1:
         if int(arr.size) != int(n_particles * nm):
             raise ValueError(
                 f"MLFMM CuPy apply expected vector size {n_particles * nm}, got {int(arr.size)}."
             )
-        return cupy.asarray(arr, dtype=cupy.complex128).reshape(n_particles, nm, 1), True
+        return cupy.asarray(arr, dtype=cupy_dtype).reshape(n_particles, nm, 1), True
     if arr.ndim == 2:
         if int(arr.shape[0]) != int(n_particles * nm):
             raise ValueError(
                 "MLFMM CuPy apply expected 2D unknowns with first dimension "
                 f"{n_particles * nm}, got {tuple(int(v) for v in arr.shape)}."
             )
-        return cupy.asarray(arr, dtype=cupy.complex128).reshape(
+        return cupy.asarray(arr, dtype=cupy_dtype).reshape(
             n_particles, nm, int(arr.shape[1])
         ), False
     raise ValueError(f"MLFMM CuPy apply expects 1D or 2D unknowns, got ndim={arr.ndim}.")
@@ -869,98 +914,106 @@ def _apply_reflection_to_direction_axis(values: Any, permutation: Any, *, cupy: 
 
 
 @cache
-def _exact_near_pairs_c128_raw_kernel(lmax: int) -> Any:
+def _exact_near_pairs_raw_kernel(lmax: int, near_dtype_name: str) -> Any:
     cupy, _ = import_cupy()
     lmax = int(lmax)
+    near_dtype = np.dtype(near_dtype_name)
+    if near_dtype == np.dtype(np.complex64):
+        real_t = "float"
+    elif near_dtype == np.dtype(np.complex128):
+        real_t = "double"
+    else:
+        raise ValueError(
+            "CuPy MLFMM near kernel supports only complex64/complex128 near dtypes. "
+            f"Got {near_dtype!r}."
+        )
     n_orders = 2 * lmax + 1
     n_p_pdm = n_orders * (n_orders + 1) // 2
     n_phase = 2 * n_orders - 1
     source = f"""
-    extern "C" __device__ double assoc_legendre_function(
+    extern "C" __device__ {real_t} assoc_legendre_function(
         const int l,
         const int m,
-        const double ct,
-        const double st,
-        const double* plm_coeffs
+        const {real_t} ct,
+        const {real_t} st,
+        const {real_t}* plm_coeffs
     ) {{
-        double plm = 0.0;
-        const double st_pow = (m == 0) ? 1.0 : pow(st, (double)m);
+        {real_t} plm = ({real_t})0.0;
+        const {real_t} st_pow = (m == 0) ? ({real_t})1.0 : pow(st, ({real_t})m);
         int jj = 0;
         for (int lambda = l - m; lambda >= 0; lambda -= 2) {{
             const int idx = jj * ({n_orders} * {n_orders}) + m * {n_orders} + l;
-            plm += st_pow * pow(ct, (double)lambda) * plm_coeffs[idx];
+            plm += st_pow * pow(ct, ({real_t})lambda) * plm_coeffs[idx];
             jj += 1;
         }}
         return plm;
     }}
 
-    extern "C" __device__ double hankel_lookup_linear(
+    extern "C" __device__ {real_t} hankel_lookup_linear(
         const int p,
-        const double r,
-        const double* table,
-        const double inv_dr,
+        const {real_t} r,
+        const {real_t}* table,
+        const {real_t} inv_dr,
         const int last_index
     ) {{
-        if (r <= 0.0) {{
+        if (r <= ({real_t})0.0) {{
             return table[p];
         }}
-        double t = r * inv_dr;
+        {real_t} t = r * inv_dr;
         int i0 = (int)floor(t);
-        double frac = t - (double)i0;
+        {real_t} frac = t - ({real_t})i0;
         if (i0 < 0) {{
             i0 = 0;
-            frac = 0.0;
+            frac = ({real_t})0.0;
         }}
         if (i0 >= last_index) {{
             i0 = last_index - 1;
-            frac = 1.0;
+            frac = ({real_t})1.0;
         }}
         const int base0 = i0 * {n_orders} + p;
         const int base1 = (i0 + 1) * {n_orders} + p;
-        return (1.0 - frac) * table[base0] + frac * table[base1];
+        return (({real_t})1.0 - frac) * table[base0] + frac * table[base1];
     }}
 
-    extern "C" __global__ void mlfmm_exact_near_pairs_c128(
+    extern "C" __global__ void mlfmm_exact_near_pairs(
         const int n_pairs,
         const int n_particles,
         const int nmodes,
         const int nrhs,
-        const double* positions,
+        const {real_t}* positions,
         const long long* dst_indices,
         const long long* src_indices,
-        const double* re_h,
-        const double* im_h,
-        const double inv_dr,
+        const {real_t}* re_h,
+        const {real_t}* im_h,
+        const {real_t} inv_dr,
         const int last_index,
-        const double* plm_coeffs,
-        const double* re_ab,
-        const double* im_ab,
+        const {real_t}* plm_coeffs,
+        const {real_t}* re_ab,
+        const {real_t}* im_ab,
         const int* mode_m,
         const int* pair_offset,
         const int* pair_pmin,
         const int* pair_pcount,
-        const double* re_x,
-        const double* im_x,
-        double* re_y,
-        double* im_y
+        const {real_t}* re_x,
+        const {real_t}* im_x,
+        {real_t}* re_y,
+        {real_t}* im_y
     ) {{
         const int n1 = blockIdx.x * blockDim.x + threadIdx.x;
-        if (n1 >= nmodes) {{
-            return;
-        }}
-        __shared__ double re_h_shared[{n_orders}];
-        __shared__ double im_h_shared[{n_orders}];
-        __shared__ double p_pdm_shared[{n_p_pdm}];
-        __shared__ double cos_mphi_shared[{n_phase}];
-        __shared__ double sin_mphi_shared[{n_phase}];
-        __shared__ double r_shared;
-        __shared__ double ct_shared;
-        __shared__ double st_shared;
-        __shared__ double phi_shared;
+        const bool active = (n1 < nmodes);
+        __shared__ {real_t} re_h_shared[{n_orders}];
+        __shared__ {real_t} im_h_shared[{n_orders}];
+        __shared__ {real_t} p_pdm_shared[{n_p_pdm}];
+        __shared__ {real_t} cos_mphi_shared[{n_phase}];
+        __shared__ {real_t} sin_mphi_shared[{n_phase}];
+        __shared__ {real_t} r_shared;
+        __shared__ {real_t} ct_shared;
+        __shared__ {real_t} st_shared;
+        __shared__ {real_t} phi_shared;
         __shared__ long long dst_particle_shared;
         __shared__ long long src_particle_shared;
 
-        const int m1 = mode_m[n1];
+        const int m1 = active ? mode_m[n1] : 0;
         const int rhs_stride = n_particles * nmodes;
         for (int rhs = blockIdx.z; rhs < nrhs; rhs += gridDim.z) {{
             const int rhs_offset = rhs * rhs_stride;
@@ -968,12 +1021,12 @@ def _exact_near_pairs_c128_raw_kernel(lmax: int) -> Any:
                 if (threadIdx.x == 0) {{
                     dst_particle_shared = dst_indices[pair_idx];
                     src_particle_shared = src_indices[pair_idx];
-                    const double x21 = positions[3 * dst_particle_shared] - positions[3 * src_particle_shared];
-                    const double y21 = positions[3 * dst_particle_shared + 1] - positions[3 * src_particle_shared + 1];
-                    const double z21 = positions[3 * dst_particle_shared + 2] - positions[3 * src_particle_shared + 2];
+                    const {real_t} x21 = positions[3 * dst_particle_shared] - positions[3 * src_particle_shared];
+                    const {real_t} y21 = positions[3 * dst_particle_shared + 1] - positions[3 * src_particle_shared + 1];
+                    const {real_t} z21 = positions[3 * dst_particle_shared + 2] - positions[3 * src_particle_shared + 2];
                     r_shared = sqrt(x21 * x21 + y21 * y21 + z21 * z21);
                     ct_shared = z21 / r_shared;
-                    st_shared = sqrt(fmax(0.0, 1.0 - ct_shared * ct_shared));
+                    st_shared = sqrt(fmax(({real_t})0.0, ({real_t})1.0 - ct_shared * ct_shared));
                     phi_shared = atan2(y21, x21);
                 }}
                 __syncthreads();
@@ -989,48 +1042,50 @@ def _exact_near_pairs_c128_raw_kernel(lmax: int) -> Any:
                 if (threadIdx.x == 0) {{
                     for (int dm = -2 * {lmax}; dm <= 2 * {lmax}; ++dm) {{
                         const int idx = dm + 2 * {lmax};
-                        cos_mphi_shared[idx] = cos((double)dm * phi_shared);
-                        sin_mphi_shared[idx] = sin((double)dm * phi_shared);
+                        cos_mphi_shared[idx] = cos(({real_t})dm * phi_shared);
+                        sin_mphi_shared[idx] = sin(({real_t})dm * phi_shared);
                     }}
                 }}
                 __syncthreads();
 
-                double re_incr = 0.0;
-                double im_incr = 0.0;
-                for (int n2 = 0; n2 < nmodes; ++n2) {{
-                    const double re_x_tmp = re_x[rhs_offset + src_particle_shared * nmodes + n2];
-                    const double im_x_tmp = im_x[rhs_offset + src_particle_shared * nmodes + n2];
-                    const int delta_m = mode_m[n2] - m1;
-                    const int phase_idx = delta_m + 2 * {lmax};
-                    const int pair_table_idx = n1 * nmodes + n2;
-                    const int base = pair_offset[pair_table_idx];
-                    const int p_min = pair_pmin[pair_table_idx];
-                    const int p_count = pair_pcount[pair_table_idx];
-                    for (int ip = 0; ip < p_count; ++ip) {{
-                        const int p = p_min + ip;
-                        const int ab_idx = base + ip;
-                        const double plm = p_pdm_shared[p * (p + 1) / 2 + abs(delta_m)];
-                        const double re_abp = re_ab[ab_idx] * plm;
-                        const double im_abp = im_ab[ab_idx] * plm;
-                        const double re_abph = re_abp * re_h_shared[p] - im_abp * im_h_shared[p];
-                        const double im_abph = re_abp * im_h_shared[p] + im_abp * re_h_shared[p];
-                        const double re_phase =
-                            re_abph * cos_mphi_shared[phase_idx] - im_abph * sin_mphi_shared[phase_idx];
-                        const double im_phase =
-                            re_abph * sin_mphi_shared[phase_idx] + im_abph * cos_mphi_shared[phase_idx];
-                        re_incr += re_phase * re_x_tmp - im_phase * im_x_tmp;
-                        im_incr += re_phase * im_x_tmp + im_phase * re_x_tmp;
+                if (active) {{
+                    {real_t} re_incr = ({real_t})0.0;
+                    {real_t} im_incr = ({real_t})0.0;
+                    for (int n2 = 0; n2 < nmodes; ++n2) {{
+                        const {real_t} re_x_tmp = re_x[rhs_offset + src_particle_shared * nmodes + n2];
+                        const {real_t} im_x_tmp = im_x[rhs_offset + src_particle_shared * nmodes + n2];
+                        const int delta_m = mode_m[n2] - m1;
+                        const int phase_idx = delta_m + 2 * {lmax};
+                        const int pair_table_idx = n1 * nmodes + n2;
+                        const int base = pair_offset[pair_table_idx];
+                        const int p_min = pair_pmin[pair_table_idx];
+                        const int p_count = pair_pcount[pair_table_idx];
+                        for (int ip = 0; ip < p_count; ++ip) {{
+                            const int p = p_min + ip;
+                            const int ab_idx = base + ip;
+                            const {real_t} plm = p_pdm_shared[p * (p + 1) / 2 + abs(delta_m)];
+                            const {real_t} re_abp = re_ab[ab_idx] * plm;
+                            const {real_t} im_abp = im_ab[ab_idx] * plm;
+                            const {real_t} re_abph = re_abp * re_h_shared[p] - im_abp * im_h_shared[p];
+                            const {real_t} im_abph = re_abp * im_h_shared[p] + im_abp * re_h_shared[p];
+                            const {real_t} re_phase =
+                                re_abph * cos_mphi_shared[phase_idx] - im_abph * sin_mphi_shared[phase_idx];
+                            const {real_t} im_phase =
+                                re_abph * sin_mphi_shared[phase_idx] + im_abph * cos_mphi_shared[phase_idx];
+                            re_incr += re_phase * re_x_tmp - im_phase * im_x_tmp;
+                            im_incr += re_phase * im_x_tmp + im_phase * re_x_tmp;
+                        }}
                     }}
-                }}
 
-                atomicAdd(&re_y[rhs_offset + dst_particle_shared * nmodes + n1], re_incr);
-                atomicAdd(&im_y[rhs_offset + dst_particle_shared * nmodes + n1], im_incr);
+                    atomicAdd(&re_y[rhs_offset + dst_particle_shared * nmodes + n1], re_incr);
+                    atomicAdd(&im_y[rhs_offset + dst_particle_shared * nmodes + n1], im_incr);
+                }}
                 __syncthreads();
             }}
         }}
     }}
     """
-    return cupy.RawKernel(source, "mlfmm_exact_near_pairs_c128")
+    return cupy.RawKernel(source, "mlfmm_exact_near_pairs")
 
 
 @cache
@@ -1658,17 +1713,35 @@ def _apply_exact_near_pairs(prepared: CuPyMLFMMPreparedData, x_states: Any, *, c
     """Apply exact near interactions from directed near-pair indices on device."""
 
     near = prepared.near_pairs
+    near_dtype = np.dtype(near.near_dtype)
+    np_real_type: type[np.floating[Any]]
+    if near_dtype == np.dtype(np.complex64):
+        cupy_out_dtype = cupy.complex64
+        cupy_real_dtype = cupy.float32
+        np_real_type = np.float32
+    elif near_dtype == np.dtype(np.complex128):
+        cupy_out_dtype = cupy.complex128
+        cupy_real_dtype = cupy.float64
+        np_real_type = np.float64
+    else:
+        raise ValueError(
+            "CuPy MLFMM near path supports only complex64/complex128 near dtypes. "
+            f"Got {near_dtype!r}."
+        )
+    cupy_compute_dtype = cupy_out_dtype
+    kernel = _exact_near_pairs_raw_kernel(int(prepared.lmax), near_dtype.str)
+
     n_pairs = int(near.dst_particle_indices.size)
-    y = cupy.zeros_like(x_states, dtype=cupy.complex128)
+    y = cupy.zeros_like(x_states, dtype=cupy_out_dtype)
     if n_pairs == 0:
         return y
     n_particles, nm, nrhs = (int(v) for v in x_states.shape)
-    x_arr = cupy.asarray(x_states, dtype=cupy.complex128)
+    x_arr = cupy.asarray(x_states, dtype=cupy_compute_dtype)
     x_rhs_major = cupy.transpose(x_arr, (2, 0, 1))
-    x_re = cupy.ascontiguousarray(x_rhs_major.real.reshape(-1).astype(cupy.float64, copy=False))
-    x_im = cupy.ascontiguousarray(x_rhs_major.imag.reshape(-1).astype(cupy.float64, copy=False))
-    y_re = cupy.zeros((nrhs * n_particles * nm,), dtype=cupy.float64)
-    y_im = cupy.zeros((nrhs * n_particles * nm,), dtype=cupy.float64)
+    x_re = cupy.ascontiguousarray(x_rhs_major.real.reshape(-1).astype(cupy_real_dtype, copy=False))
+    x_im = cupy.ascontiguousarray(x_rhs_major.imag.reshape(-1).astype(cupy_real_dtype, copy=False))
+    y_re = cupy.zeros((nrhs * n_particles * nm,), dtype=cupy_real_dtype)
+    y_im = cupy.zeros((nrhs * n_particles * nm,), dtype=cupy_real_dtype)
 
     props = cupy.cuda.runtime.getDeviceProperties(cupy.cuda.runtime.getDevice())
     max_grid_y = int(props["maxGridSize"][1])
@@ -1679,7 +1752,6 @@ def _apply_exact_near_pairs(prepared: CuPyMLFMMPreparedData, x_states: Any, *, c
     grid_y = min(n_pairs, max_grid_y)
     grid_z = min(max(1, nrhs), max_grid_z)
 
-    kernel = _exact_near_pairs_c128_raw_kernel(int(prepared.lmax))
     kernel(
         (int(blocks_x), int(grid_y), int(grid_z)),
         (int(threads),),
@@ -1688,12 +1760,12 @@ def _apply_exact_near_pairs(prepared: CuPyMLFMMPreparedData, x_states: Any, *, c
             np.int32(n_particles),
             np.int32(nm),
             np.int32(nrhs),
-            prepared.positions.reshape(-1),
+            near.positions,
             near.dst_particle_indices,
             near.src_particle_indices,
             near.lut_re,
             near.lut_im,
-            np.float64(float(near.inv_dr)),
+            np_real_type(float(near.inv_dr)),
             np.int32(int(near.last_index)),
             near.plm_coeffs,
             near.compact_re_ab,
@@ -1708,8 +1780,11 @@ def _apply_exact_near_pairs(prepared: CuPyMLFMMPreparedData, x_states: Any, *, c
             y_im,
         ),
     )
-    out_rhs_major = (y_re + 1j * y_im).reshape(nrhs, n_particles, nm)
-    return cupy.transpose(out_rhs_major, (1, 2, 0)).astype(cupy.complex128, copy=False)
+    out_rhs_major = (
+        y_re.astype(cupy_out_dtype, copy=False)
+        + y_im.astype(cupy_out_dtype, copy=False) * cupy.asarray(1j, dtype=cupy_out_dtype)
+    ).reshape(nrhs, n_particles, nm)
+    return cupy.transpose(out_rhs_major, (1, 2, 0)).astype(cupy_out_dtype, copy=False)
 
 
 def _apply_single_level_far(prepared: CuPyMLFMMPreparedData, x_states: Any, *, cupy: Any) -> Any:
@@ -1864,18 +1939,38 @@ class CuPyMLFMMCouplingOperator:
     The MLFMM plan and one-time operators are built on CPU (NumPy reference
     path). This class executes repeated exact-near and sampled-far applies on
     CuPy device arrays.
+
+    Precision policy mirrors the NumPy MLFMM reference path:
+    - exact-near runs at `near_dtype` (`complex64` or `complex128`);
+    - sampled-far runs at `far_dtype` (currently fixed to `complex128`);
+    - public output is cast to `dtype`.
     """
 
     cpu_coupling: MLFMMCouplingOperator
     prepared_data: CuPyMLFMMPreparedData
     dtype: np.dtype = np.dtype(np.complex128)
+    near_dtype: np.dtype = np.dtype(np.complex128)
+    far_dtype: np.dtype = np.dtype(np.complex128)
 
     def apply(self, x: Any) -> Any:
         cupy, _ = import_cupy()
-        if np.dtype(self.dtype) != np.dtype(np.complex128):
+        out_dtype = np.dtype(self.dtype)
+        near_dtype = np.dtype(self.near_dtype)
+        far_dtype = np.dtype(self.far_dtype)
+        if out_dtype not in {np.dtype(np.complex64), np.dtype(np.complex128)}:
             raise ValueError(
-                "CuPy MLFMM apply currently supports only complex128 "
-                f"(got {np.dtype(self.dtype)!r})."
+                "CuPy MLFMM apply supports only complex64/complex128 output dtypes "
+                f"(got {out_dtype!r})."
+            )
+        if near_dtype not in {np.dtype(np.complex64), np.dtype(np.complex128)}:
+            raise ValueError(
+                "CuPy MLFMM apply supports only complex64/complex128 near dtypes "
+                f"(got {near_dtype!r})."
+            )
+        if far_dtype != np.dtype(np.complex128):
+            raise ValueError(
+                "CuPy MLFMM sampled-far apply requires complex128 far precision "
+                f"(got {far_dtype!r})."
             )
         nm = n_modes(int(self.cpu_coupling.lmax))
         n_particles = int(self.cpu_coupling.positions.shape[0])
@@ -1883,6 +1978,7 @@ class CuPyMLFMMCouplingOperator:
             x,
             n_particles=n_particles,
             nm=nm,
+            dtype=out_dtype,
             cupy=cupy,
         )
         y_near = _apply_exact_near_pairs(self.prepared_data, x_states, cupy=cupy)
@@ -1893,7 +1989,13 @@ class CuPyMLFMMCouplingOperator:
             y_far = _apply_multilevel_far(self.prepared_data, x_states, cupy=cupy)
         else:
             raise RuntimeError(f"Unsupported CuPy MLFMM stage {stage!r}.")
-        return _restore_unknown_shape(y_near + y_far, squeezed=squeezed)
+        y_total = cupy.asarray(y_near, dtype=cupy.complex128) + cupy.asarray(
+            y_far, dtype=cupy.complex128
+        )
+        return _restore_unknown_shape(
+            y_total.astype(_cupy_complex_dtype(out_dtype, cupy=cupy), copy=False),
+            squeezed=squeezed,
+        )
 
 
 def prepare_mlfmm_cupy_coupling(coupling: MLFMMCouplingOperator) -> CuPyMLFMMCouplingOperator:
@@ -1904,6 +2006,8 @@ def prepare_mlfmm_cupy_coupling(coupling: MLFMMCouplingOperator) -> CuPyMLFMMCou
         cpu_coupling=coupling,
         prepared_data=prepared,
         dtype=np.dtype(coupling.dtype),
+        near_dtype=np.dtype(coupling.near_dtype),
+        far_dtype=np.dtype(coupling.far_dtype),
     )
 
 
@@ -1919,15 +2023,22 @@ def prepare_mlfmm_cupy_data(coupling: MLFMMCouplingOperator) -> CuPyMLFMMPrepare
     -------
     CuPyMLFMMPreparedData
         Device-resident representation of all repeated-apply data needed by
-        the CuPy MLFMM apply path.
+        the CuPy MLFMM apply path. Exact-near payload dtype follows
+        `coupling.near_dtype`; sampled-far payloads stay on complex128.
     """
 
     cupy, _ = import_cupy()
     cupyx_sparse = import_module("cupyx.scipy.sparse")
-    if np.dtype(coupling.dtype) != np.dtype(np.complex128):
+    near_dtype = np.dtype(coupling.near_dtype)
+    if near_dtype not in {np.dtype(np.complex64), np.dtype(np.complex128)}:
         raise ValueError(
-            "CuPy MLFMM preparation currently supports only complex128 "
-            f"(got {np.dtype(coupling.dtype)!r})."
+            "CuPy MLFMM preparation supports only complex64/complex128 near dtypes. "
+            f"Got {near_dtype!r}."
+        )
+    if np.dtype(coupling.far_dtype) != np.dtype(np.complex128):
+        raise ValueError(
+            "CuPy MLFMM preparation requires complex128 sampled-far precision. "
+            f"Got far_dtype={np.dtype(coupling.far_dtype)!r}."
         )
     stage = str(coupling.resolved_plan.stage)
     if stage not in {"single_level", "multilevel"}:

@@ -104,20 +104,24 @@ def test_simulation_direct_solve_rejects_true_mlfmm_coupling(prepared_multilevel
         solve_sources_core(sim, {"source": _plane_wave()})
 
 
-def test_prepare_matvec_rejects_numpy_mlfmm_complex64_operator_dtype() -> None:
+def test_prepare_matvec_accepts_numpy_mlfmm_complex64_operator_dtype() -> None:
     lmax, k, particles = _mlfmm_single_level_problem()
-    with pytest.raises(ValueError, match="operator_dtype=complex128"):
-        prepare_matvec(
-            lmax=lmax,
-            k=k,
-            particles=particles,
-            n_medium=1.0 + 0j,
-            radial_lut_dr=1.0,
-            cache_translation_blocks=False,
-            coupling_backend="mlfmm",
-            mlfmm_options=MLFMMOptions(max_leaf_particles=1, max_depth=2),
-            operator_dtype=np.complex64,
-        )
+    prepared = prepare_matvec(
+        lmax=lmax,
+        k=k,
+        particles=particles,
+        n_medium=1.0 + 0j,
+        radial_lut_dr=1.0,
+        cache_translation_blocks=False,
+        coupling_backend="mlfmm",
+        mlfmm_options=MLFMMOptions(max_leaf_particles=1, max_depth=2),
+        operator_dtype=np.complex64,
+    )
+    assert isinstance(prepared.coupling, MLFMMCouplingOperator)
+    coupling = prepared.coupling
+    assert coupling.dtype == np.dtype(np.complex64)
+    assert coupling.near_dtype == np.dtype(np.complex64)
+    assert coupling.far_dtype == np.dtype(np.complex128)
 
 
 @pytest.mark.parametrize(
@@ -156,3 +160,29 @@ def test_prepare_matvec_mlfmm_internal_arrays_stay_complex128(
         assert leaf_data.directional.Fth.dtype == np.dtype(np.complex128)
         assert leaf_data.directional.Gth.dtype == np.dtype(np.complex128)
         assert next(iter(leaf_data.offset_diagonals.values())).dtype == np.dtype(np.complex128)
+
+
+def test_prepare_matvec_mlfmm_complex64_keeps_far_internal_complex128() -> None:
+    lmax, k, particles = _mlfmm_multilevel_problem()
+    prepared = prepare_matvec(
+        lmax=lmax,
+        k=k,
+        particles=particles,
+        n_medium=1.0 + 0j,
+        radial_lut_dr=1.0,
+        cache_translation_blocks=False,
+        coupling_backend="mlfmm",
+        mlfmm_options=MLFMMOptions(max_leaf_particles=1, max_depth=3),
+        operator_dtype=np.complex64,
+    )
+
+    assert isinstance(prepared.coupling, MLFMMCouplingOperator)
+    coupling = prepared.coupling
+    assert coupling.dtype == np.dtype(np.complex64)
+    assert coupling.near_dtype == np.dtype(np.complex64)
+    assert coupling.far_dtype == np.dtype(np.complex128)
+    assert coupling.radial_lut.dtype == np.dtype(np.complex128)
+
+    assert coupling.multilevel is not None
+    assert coupling.multilevel.aggregation[0].dtype == np.dtype(np.complex128)
+    assert coupling.multilevel.receive[0].dtype == np.dtype(np.complex128)

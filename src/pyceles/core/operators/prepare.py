@@ -229,11 +229,6 @@ def prepare_matvec(
     ).reshape(-1)
     coupling_name = str(coupling_backend).lower()
     op_dtype = np.dtype(operator_dtype)
-    if backend == "numpy" and coupling_name == "mlfmm" and op_dtype == np.dtype(np.complex64):
-        raise ValueError(
-            "`coupling_backend='mlfmm'` currently requires `operator_dtype=complex128` "
-            "for numerical stability on the NumPy backend."
-        )
     k_f = float(k)
     ab5 = translation_ab5_table(int(lmax), dtype=op_dtype)
 
@@ -331,11 +326,6 @@ def prepare_matvec(
                 ),
             )
         elif coupling_name == "mlfmm":
-            if op_dtype != np.dtype(np.complex128):
-                raise ValueError(
-                    "`coupling_backend='mlfmm'` currently requires `operator_dtype=complex128` "
-                    "on the CuPy backend."
-                )
             cpu_mlfmm = prepare_mlfmm_coupling(
                 lmax=int(lmax),
                 k=k_f,

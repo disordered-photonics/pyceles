@@ -398,6 +398,59 @@ def test_cupy_mlfmm_prepared_operator_block_rhs_matches_columnwise() -> None:
     np.testing.assert_allclose(y_block, y_cols, rtol=1e-10, atol=1e-10)
 
 
+def test_cupy_mlfmm_complex64_request_matches_numpy_with_far_complex128() -> None:
+    lmax = 1
+    wavelength = 550.0
+    n_medium = 1.0 + 0j
+    k = 2.0 * np.pi / wavelength
+    particles = _mlfmm_transition_particles()
+    options = MLFMMOptions(max_leaf_particles=8, max_depth=4)
+
+    prepared_numpy = prepare_matvec(
+        lmax=lmax,
+        k=k,
+        particles=particles,
+        n_medium=n_medium,
+        radial_lut_dr=0.5,
+        cache_translation_blocks=False,
+        operator_dtype=np.complex64,
+        coupling_backend="mlfmm",
+        mlfmm_options=options,
+        backend="numpy",
+    )
+    prepared_cupy = prepare_matvec(
+        lmax=lmax,
+        k=k,
+        particles=particles,
+        n_medium=n_medium,
+        radial_lut_dr=0.5,
+        cache_translation_blocks=False,
+        operator_dtype=np.complex64,
+        coupling_backend="mlfmm",
+        mlfmm_options=options,
+        backend="cupy",
+    )
+
+    assert isinstance(prepared_numpy.coupling, MLFMMCouplingOperator)
+    assert isinstance(prepared_cupy.coupling, CuPyMLFMMCouplingOperator)
+    assert prepared_numpy.coupling.near_dtype == np.dtype(np.complex64)
+    assert prepared_numpy.coupling.far_dtype == np.dtype(np.complex128)
+    assert prepared_cupy.coupling.near_dtype == np.dtype(np.complex64)
+    assert prepared_cupy.coupling.far_dtype == np.dtype(np.complex128)
+
+    nm = n_modes(lmax)
+    n_particles = len(particles)
+    rng = np.random.default_rng(20260324)
+    x = np.asarray(
+        rng.standard_normal(n_particles * nm) + 1j * rng.standard_normal(n_particles * nm),
+        dtype=np.complex64,
+    )
+    y_numpy = np.asarray(prepared_numpy.apply_W(x), dtype=np.complex64)
+    y_cupy = np.asarray(asnumpy(prepared_cupy.apply_W(x)), dtype=np.complex64)
+    assert y_cupy.dtype == np.dtype(np.complex64)
+    np.testing.assert_allclose(y_cupy, y_numpy, rtol=3e-4, atol=3e-5)
+
+
 @pytest.mark.parametrize(
     (
         "operator_dtype",

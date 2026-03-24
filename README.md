@@ -41,7 +41,8 @@ Users of pyceles are referred to the publications listed in the CELES and SMUTHI
   - relative-offset batching, interior radial-LUT reuse, and shared directional
     interpolation/transforms across occupied boxes
   - structured resolved-plan metadata through the prepared operator
-  - current guardrail: NumPy MLFMM requires `compute_dtype=complex128`
+  - precision policy: `compute_dtype=complex64` affects exact-near MLFMM work,
+    while sampled far interactions remain `complex128` on both NumPy and CuPy
 - CuPy direct backend for the same `A = I - T W` operator:
   - fused RawKernel pairwise coupling `W·x` for `complex64` and `complex128`
   - GPU single-body `T` support for diagonal groups and explicit dense spherical-basis blocks
@@ -318,7 +319,7 @@ that path automatically on labeled multi-channel runs.
 
 Current MLFMM scope/limits:
 - matrix-free MLFMM stages are available on both NumPy and CuPy operator
-  backends in `complex128`
+  backends, with sampled-far interactions fixed to `complex128`
 - on the CuPy path, one-time hierarchy/build preparation stays on the validated
   CPU reference implementation, while repeated MLFMM applies run on device
 - CuPy exact-near evaluation is memory-aware: near interactions are applied

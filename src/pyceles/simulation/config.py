@@ -94,6 +94,9 @@ class SimulationConfig:
       postprocessing where accelerated kernels exist.
     - Stage-specific postprocessing kernels may still fall back to the NumPy
       reference implementation when no accelerated path has shipped yet.
+    - For `coupling_backend="mlfmm"`, `compute_dtype="complex64"` applies to
+      exact-near interactions while sampled-far MLFMM operators stay on
+      `complex128`.
 
     Geometry / physics policy:
     - the current homogeneous-medium solver path assumes real `n_medium`
@@ -252,12 +255,6 @@ class SimulationConfig:
                 "`cache_translation_blocks=True` is not supported with `operator_backend='cupy'`. "
                 "The CuPy backend does not expose translation-block caching."
             )
-        if coupling_backend == "mlfmm" and self.compute_dtype == "complex64":
-            raise ValueError(
-                "`coupling_backend='mlfmm'` currently requires `compute_dtype='complex128'` "
-                "on both NumPy and CuPy backends for numerical stability."
-            )
-
         _, az_shared = validate_angular_grid_pair(
             polar_name="polar_angles",
             azimuthal_name="azimuthal_angles",

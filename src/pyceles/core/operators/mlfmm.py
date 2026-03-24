@@ -153,6 +153,11 @@ class MLFMMCouplingOperator:
     The near part stays exact on the resolved leaf partition. The far part is
     applied through either a single occupied-leaf sampled level or a multilevel
     occupied-box hierarchy, depending on the resolved stage.
+
+    Precision policy:
+    - `near_dtype` follows the requested operator compute precision.
+    - `far_dtype` is fixed to complex128 for the sampled-far hierarchy.
+    - `dtype` controls the public coupling output dtype.
     """
 
     lmax: int
@@ -161,6 +166,8 @@ class MLFMMCouplingOperator:
     radial_lut: RadialLUT
     resolved_plan: MLFMMResolvedPlan
     dtype: np.dtype = np.dtype(np.complex128)
+    near_dtype: np.dtype = np.dtype(np.complex128)
+    far_dtype: np.dtype = np.dtype(np.complex128)
     cache_translation_blocks: bool = False
     single_level: MLFMMSingleLevelOperators | None = None
     multilevel: MLFMMMultilevelOperators | None = None
@@ -173,6 +180,10 @@ class MLFMMCouplingOperator:
             raise ValueError("multilevel operators are required for multilevel MLFMM coupling.")
         if self.resolved_plan.stage == "direct":
             raise ValueError("MLFMMCouplingOperator is not used for the direct stage.")
+        if np.dtype(self.far_dtype) != np.dtype(np.complex128):
+            raise ValueError(
+                "MLFMM sampled-far path requires `far_dtype=complex128` for stability."
+            )
         if self.cache_translation_blocks and self._exact_block_cache is None:
             self._exact_block_cache = {}
 
@@ -182,6 +193,8 @@ class MLFMMCouplingOperator:
         if self.resolved_plan.stage == "single_level":
             if self.single_level is None:
                 raise RuntimeError("Internal error: single-level operators are missing.")
+            near_dtype = np.dtype(self.near_dtype)
+            far_dtype = np.dtype(self.far_dtype)
             y_near, y_far = apply_single_level_mlfmm(
                 lmax=int(self.lmax),
                 k=float(self.k),
@@ -189,13 +202,17 @@ class MLFMMCouplingOperator:
                 x=x,
                 operators=self.single_level,
                 radial_lut=self.radial_lut,
-                dtype=self.dtype,
+                near_dtype=near_dtype,
+                far_dtype=far_dtype,
                 block_cache=self._exact_block_cache,
             )
-            return np.asarray(y_near + y_far, dtype=self.dtype)
+            y_total = np.asarray(y_near, dtype=far_dtype) + np.asarray(y_far, dtype=far_dtype)
+            return np.asarray(y_total, dtype=self.dtype)
         if self.resolved_plan.stage == "multilevel":
             if self.multilevel is None:
                 raise RuntimeError("Internal error: multilevel operators are missing.")
+            near_dtype = np.dtype(self.near_dtype)
+            far_dtype = np.dtype(self.far_dtype)
             y_near, y_far = apply_multilevel_mlfmm(
                 lmax=int(self.lmax),
                 k=float(self.k),
@@ -203,10 +220,12 @@ class MLFMMCouplingOperator:
                 x=x,
                 operators=self.multilevel,
                 radial_lut=self.radial_lut,
-                dtype=self.dtype,
+                near_dtype=near_dtype,
+                far_dtype=far_dtype,
                 block_cache=self._exact_block_cache,
             )
-            return np.asarray(y_near + y_far, dtype=self.dtype)
+            y_total = np.asarray(y_near, dtype=far_dtype) + np.asarray(y_far, dtype=far_dtype)
+            return np.asarray(y_total, dtype=self.dtype)
         raise RuntimeError(f"Unsupported MLFMM stage {self.resolved_plan.stage!r}.")
 
     def populate(self, *, show_progress: bool = False) -> None:
@@ -900,6 +919,8 @@ def apply_single_level_mlfmm(
     operators: MLFMMSingleLevelOperators,
     radial_lut: RadialLUT | None = None,
     dtype: np.dtype | type[np.complexfloating] | type[np.complex128] = np.complex128,
+    near_dtype: np.dtype | type[np.complexfloating] | type[np.complex128] | None = None,
+    far_dtype: np.dtype | type[np.complexfloating] | type[np.complex128] | None = None,
     block_cache: dict[tuple[int, int], np.ndarray] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Apply exact leaf-near interactions and sampled single-level far interactions.
@@ -910,38 +931,40 @@ def apply_single_level_mlfmm(
     """
 
     out_dtype = np.dtype(dtype)
+    near_out_dtype = np.dtype(out_dtype if near_dtype is None else near_dtype)
+    far_out_dtype = np.dtype(out_dtype if far_dtype is None else far_dtype)
     y_near = _exact_leaf_near_apply(
         lmax=int(lmax),
         k=float(k),
         positions=np.asarray(positions, dtype=float),
-        x=np.asarray(x),
+        x=np.asarray(x, dtype=near_out_dtype),
         partition=operators.partition,
         radial_lut=radial_lut,
-        dtype=out_dtype,
+        dtype=near_out_dtype,
         block_cache=block_cache,
     )
     leaf_states = _leaf_box_states(
         lmax=int(lmax),
         positions=np.asarray(positions, dtype=float),
-        x=np.asarray(x),
+        x=np.asarray(x, dtype=far_out_dtype),
         partition=operators.partition,
         aggregation=operators.aggregation,
-        dtype=out_dtype,
+        dtype=far_out_dtype,
     )
     ndir = int(operators.directional.grid.directions.shape[0])
-    outgoing = np.zeros((len(operators.partition.leaves), 4, ndir), dtype=out_dtype)
+    outgoing = np.zeros((len(operators.partition.leaves), 4, ndir), dtype=far_out_dtype)
     for leaf_id, box_state in enumerate(leaf_states):
         channels = box_outgoing_to_directional(operators.directional, box_state)
         for chan_idx, channel in enumerate(channels):
-            outgoing[leaf_id, chan_idx] = np.asarray(channel, dtype=out_dtype)
+            outgoing[leaf_id, chan_idx] = np.asarray(channel, dtype=far_out_dtype)
 
-    incoming = np.zeros_like(outgoing, dtype=out_dtype)
+    incoming = np.zeros_like(outgoing, dtype=far_out_dtype)
     for offset, (src_idx, dst_idx) in operators.far_offset_batches.items():
         translated = outgoing[src_idx] * operators.offset_diagonals[offset][None, None, :]
         np.add.at(incoming, dst_idx, translated)
 
     box_nm = n_modes(int(operators.box_order))
-    incoming_box = np.zeros((len(operators.partition.leaves), box_nm), dtype=out_dtype)
+    incoming_box = np.zeros((len(operators.partition.leaves), box_nm), dtype=far_out_dtype)
     for leaf_id in range(len(operators.partition.leaves)):
         incoming_box[leaf_id] = directional_to_box_regular(
             operators.directional,
@@ -953,7 +976,7 @@ def apply_single_level_mlfmm(
 
     nm = n_modes(int(lmax))
     ns = np.asarray(positions).shape[0]
-    y_far = np.zeros((ns, nm), dtype=out_dtype)
+    y_far = np.zeros((ns, nm), dtype=far_out_dtype)
     for leaf in operators.partition.leaves:
         contribution = operators.receive[int(leaf.id)] @ incoming_box[int(leaf.id)]
         y_far[leaf.particle_indices] += contribution.reshape(leaf.particle_indices.size, nm)
@@ -1209,6 +1232,8 @@ def apply_multilevel_mlfmm(
     operators: MLFMMMultilevelOperators,
     radial_lut: RadialLUT | None = None,
     dtype: np.dtype | type[np.complexfloating] | type[np.complex128] = np.complex128,
+    near_dtype: np.dtype | type[np.complexfloating] | type[np.complex128] | None = None,
+    far_dtype: np.dtype | type[np.complexfloating] | type[np.complex128] | None = None,
     block_cache: dict[tuple[int, int], np.ndarray] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Apply exact leaf-near interactions and multilevel sampled far interactions.
@@ -1219,38 +1244,40 @@ def apply_multilevel_mlfmm(
     """
 
     out_dtype = np.dtype(dtype)
+    near_out_dtype = np.dtype(out_dtype if near_dtype is None else near_dtype)
+    far_out_dtype = np.dtype(out_dtype if far_dtype is None else far_dtype)
     y_near = _exact_leaf_near_apply(
         lmax=int(lmax),
         k=float(k),
         positions=np.asarray(positions, dtype=float),
-        x=np.asarray(x),
+        x=np.asarray(x, dtype=near_out_dtype),
         partition=operators.partition,
         radial_lut=radial_lut,
-        dtype=out_dtype,
+        dtype=near_out_dtype,
         block_cache=block_cache,
     )
     outgoing = [
         np.zeros(
             (level.coords.shape[0], 4, level.directional.grid.directions.shape[0]),
-            dtype=out_dtype,
+            dtype=far_out_dtype,
         )
         for level in operators.levels
     ]
-    incoming = [np.zeros_like(values, dtype=out_dtype) for values in outgoing]
+    incoming = [np.zeros_like(values, dtype=far_out_dtype) for values in outgoing]
 
     leaf_level = int(operators.leaf_level)
     leaf_states = _leaf_box_states(
         lmax=int(lmax),
         positions=np.asarray(positions, dtype=float),
-        x=np.asarray(x),
+        x=np.asarray(x, dtype=far_out_dtype),
         partition=operators.partition,
         aggregation=operators.aggregation,
-        dtype=out_dtype,
+        dtype=far_out_dtype,
     )
     for leaf_id, box_state in enumerate(leaf_states):
         channels = box_outgoing_to_directional(operators.levels[leaf_level].directional, box_state)
         for chan_idx, channel in enumerate(channels):
-            outgoing[leaf_level][leaf_id, chan_idx] = np.asarray(channel, dtype=out_dtype)
+            outgoing[leaf_level][leaf_id, chan_idx] = np.asarray(channel, dtype=far_out_dtype)
 
     # Upward transfer uses the reflection-indexed directional ordering expected
     # by the sparse interpolation tables. We therefore:
@@ -1278,7 +1305,9 @@ def apply_multilevel_mlfmm(
                 mapped_reindexed,
                 parent_level.directional.grid.reflection_permutation,
             )
-            mapped *= np.asarray(transfer.phase_up_by_shift[shift], dtype=out_dtype)[None, None, :]
+            mapped *= np.asarray(transfer.phase_up_by_shift[shift], dtype=far_out_dtype)[
+                None, None, :
+            ]
             np.add.at(parent_values, parent_idx, mapped)
 
     for level_idx in range(int(operators.hf_start_level), int(operators.hf_end_level) + 1):
@@ -1304,7 +1333,7 @@ def apply_multilevel_mlfmm(
                 parent_values[parent_idx]
                 * np.asarray(
                     transfer.phase_down_by_shift[shift],
-                    dtype=out_dtype,
+                    dtype=far_out_dtype,
                 )[None, None, :]
             )
             shifted_reindexed = _apply_reflection_to_channel_batches(
@@ -1322,7 +1351,7 @@ def apply_multilevel_mlfmm(
             np.add.at(child_values, child_idx, mapped)
 
     box_nm = n_modes(int(operators.levels[leaf_level].box_order))
-    incoming_box = np.zeros((len(operators.partition.leaves), box_nm), dtype=out_dtype)
+    incoming_box = np.zeros((len(operators.partition.leaves), box_nm), dtype=far_out_dtype)
     for leaf_id in range(len(operators.partition.leaves)):
         incoming_box[leaf_id] = directional_to_box_regular(
             operators.levels[leaf_level].directional,
@@ -1334,7 +1363,7 @@ def apply_multilevel_mlfmm(
 
     nm = n_modes(int(lmax))
     ns = np.asarray(positions).shape[0]
-    y_far = np.zeros((ns, nm), dtype=out_dtype)
+    y_far = np.zeros((ns, nm), dtype=far_out_dtype)
     for leaf in operators.partition.leaves:
         contribution = operators.receive[int(leaf.id)] @ incoming_box[int(leaf.id)]
         y_far[leaf.particle_indices] += contribution.reshape(leaf.particle_indices.size, nm)
@@ -1360,10 +1389,15 @@ def prepare_mlfmm_coupling(
     If the geometry resolves to the direct stage, this helper returns the
     canonical pairwise coupling backend directly instead of wrapping it in an
     MLFMM object.
+
+    For non-direct MLFMM stages, sampled-far operators are always prepared in
+    complex128 while exact-near interactions keep the requested compute dtype.
     """
 
     t_prepare_start = perf_counter()
     out_dtype = np.dtype(dtype)
+    near_out_dtype = np.dtype(dtype)
+    far_out_dtype = np.dtype(np.complex128)
     pts = np.asarray(positions, dtype=float)
     radii = np.asarray(particle_circumscribing_radii, dtype=float)
     resolved_options = MLFMMOptions() if options is None else options
@@ -1372,6 +1406,15 @@ def prepare_mlfmm_coupling(
         particle_circumscribing_radii=radii,
         options=resolved_options,
     )
+    radial_lut_hf = radial_lut
+    if resolved.stage != "direct" and np.dtype(radial_lut.dtype) != np.dtype(np.complex128):
+        radial_lut_hf = RadialLUT(
+            lmax=int(lmax),
+            k=float(k),
+            r_max=float(radial_lut.r_grid[-1]),
+            dr=float(radial_lut.dr),
+            dtype=np.complex128,
+        )
     if show_progress:
         occupancies = np.asarray(
             [leaf.particle_indices.size for leaf in resolved.partition.leaves],
@@ -1412,18 +1455,20 @@ def prepare_mlfmm_coupling(
             k=float(k),
             positions=pts,
             partition=resolved.partition,
-            radial_lut=radial_lut,
+            radial_lut=radial_lut_hf,
             accuracy_level=int(resolved_options.accuracy_level),
             order_additive=int(resolved_options.order_additive),
-            dtype=out_dtype,
+            dtype=far_out_dtype,
         )
         out = MLFMMCouplingOperator(
             lmax=int(lmax),
             k=float(k),
             positions=pts,
-            radial_lut=radial_lut,
+            radial_lut=radial_lut_hf,
             resolved_plan=resolved,
             dtype=out_dtype,
+            near_dtype=near_out_dtype,
+            far_dtype=far_out_dtype,
             cache_translation_blocks=bool(cache_translation_blocks),
             single_level=single_level,
         )
@@ -1439,18 +1484,20 @@ def prepare_mlfmm_coupling(
         k=float(k),
         positions=pts,
         partition=resolved.partition,
-        radial_lut=radial_lut,
+        radial_lut=radial_lut_hf,
         accuracy_level=int(resolved_options.accuracy_level),
         order_additive=int(resolved_options.order_additive),
-        dtype=out_dtype,
+        dtype=far_out_dtype,
     )
     out = MLFMMCouplingOperator(
         lmax=int(lmax),
         k=float(k),
         positions=pts,
-        radial_lut=radial_lut,
+        radial_lut=radial_lut_hf,
         resolved_plan=resolved,
         dtype=out_dtype,
+        near_dtype=near_out_dtype,
+        far_dtype=far_out_dtype,
         cache_translation_blocks=bool(cache_translation_blocks),
         multilevel=multilevel,
     )
