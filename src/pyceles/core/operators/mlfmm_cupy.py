@@ -26,7 +26,7 @@ from .mlfmm import (
     MLFMMSingleLevelOperators,
     MLFMMTransferOperators,
 )
-from .mlfmm_directional import MLFMMDirectionalInterpolation, MLFMMDirectionalTransforms
+from .mlfmm_directional import MLFMMDirectionalTransforms
 from .mlfmm_partition import MLFMMPartition
 
 Offset3 = tuple[int, int, int]
@@ -57,12 +57,17 @@ class CuPyDirectionalTransformsData:
 
 @dataclass(frozen=True)
 class CuPyDirectionalInterpolationData:
-    """Device copy of one sparse interpolation/anterpolation operator."""
+    """Device copy of one directional transfer map.
+
+    The map is stored either as a CuPy dense matrix (`storage="dense"`) or
+    as a CuPy CSR sparse matrix (`storage="sparse"`).
+    """
 
     source_order: int
     target_order: int
     matrix: Any
     nnz: int
+    storage: str
 
 
 @dataclass(frozen=True)
@@ -125,7 +130,8 @@ class CuPyMLFMMTransferData:
 
     child_level: int
     parent_level: int
-    interpolation: CuPyDirectionalInterpolationData
+    map_up: CuPyDirectionalInterpolationData
+    map_down: CuPyDirectionalInterpolationData
     batches_by_shift: dict[Offset3, CuPyOffsetBatchData]
     phase_up_by_shift: dict[Offset3, Any]
     phase_down_by_shift: dict[Offset3, Any]
@@ -339,30 +345,84 @@ def _upload_directional_transforms(
     )
 
 
-def _upload_sparse_interpolation(
-    interpolation: MLFMMDirectionalInterpolation, *, cupy: Any, cupyx_sparse: Any
+def _upload_directional_map(
+    matrix_csr: Any,
+    *,
+    source_order: int,
+    target_order: int,
+    cupy: Any,
+    cupyx_sparse: Any,
 ) -> CuPyDirectionalInterpolationData:
-    csr = interpolation.matrix.tocsr()
+    """Upload one directional transfer map with adaptive dense/sparse storage.
+
+    Dense storage is only enabled for substantially dense operators. For
+    low-width stencil-like maps, a packed row-stencil kernel is preferred.
+    """
+
+    csr = matrix_csr.tocsr().astype(np.complex128)
+    rows, cols = int(csr.shape[0]), int(csr.shape[1])
+    nnz = int(csr.nnz)
+    total = rows * cols
+    density = (float(nnz) / float(total)) if total > 0 else 0.0
+    dense_bytes = total * np.dtype(np.complex128).itemsize
+    use_dense = bool(total > 0 and dense_bytes <= (128 * 1024 * 1024) and density >= 2.5e-1)
+    if use_dense:
+        dense = np.ascontiguousarray(csr.toarray(), dtype=np.complex128)
+        return CuPyDirectionalInterpolationData(
+            source_order=int(source_order),
+            target_order=int(target_order),
+            matrix=cupy.asarray(dense, dtype=cupy.complex128),
+            nnz=nnz,
+            storage="dense",
+        )
+
+    row_ptr = np.ascontiguousarray(np.asarray(csr.indptr, dtype=np.int32))
+    row_nnz = np.diff(row_ptr)
+    max_row_nnz = int(row_nnz.max(initial=0))
+    use_packed_stencil = bool(nnz > 0 and max_row_nnz > 0 and max_row_nnz <= 32)
+    if use_packed_stencil:
+        idx_pack = np.full((rows, max_row_nnz), -1, dtype=np.int32)
+        val_pack = np.zeros((rows, max_row_nnz), dtype=np.complex128)
+        cols_arr = np.asarray(csr.indices, dtype=np.int32)
+        vals_arr = np.asarray(csr.data, dtype=np.complex128)
+        for row in range(rows):
+            start = int(row_ptr[row])
+            end = int(row_ptr[row + 1])
+            width = end - start
+            if width <= 0:
+                continue
+            idx_pack[row, :width] = cols_arr[start:end]
+            val_pack[row, :width] = vals_arr[start:end]
+        packed = (
+            cupy.asarray(np.ascontiguousarray(idx_pack.reshape(-1)), dtype=cupy.int32),
+            cupy.asarray(np.ascontiguousarray(val_pack.reshape(-1)), dtype=cupy.complex128),
+            np.int32(max_row_nnz),
+        )
+        return CuPyDirectionalInterpolationData(
+            source_order=int(source_order),
+            target_order=int(target_order),
+            matrix=packed,
+            nnz=nnz,
+            storage="packed_stencil",
+        )
+
     data = np.ascontiguousarray(np.asarray(csr.data, dtype=np.complex128))
     indices = np.ascontiguousarray(np.asarray(csr.indices, dtype=np.int32))
-    indptr = np.ascontiguousarray(np.asarray(csr.indptr, dtype=np.int32))
-    if indptr.size != csr.shape[0] + 1:
-        raise ValueError("Interpolation CSR indptr size is inconsistent with shape.")
-    if indices.size != data.size:
-        raise ValueError("Interpolation CSR indices/data length mismatch.")
-    dev = cupyx_sparse.csr_matrix(
+    indptr = row_ptr
+    sparse = cupyx_sparse.csr_matrix(
         (
             cupy.asarray(data, dtype=cupy.complex128),
             cupy.asarray(indices, dtype=cupy.int32),
             cupy.asarray(indptr, dtype=cupy.int32),
         ),
-        shape=csr.shape,
+        shape=(rows, cols),
     )
     return CuPyDirectionalInterpolationData(
-        source_order=int(interpolation.source_order),
-        target_order=int(interpolation.target_order),
-        matrix=dev,
-        nnz=int(csr.nnz),
+        source_order=int(source_order),
+        target_order=int(target_order),
+        matrix=sparse,
+        nnz=nnz,
+        storage="sparse",
     )
 
 
@@ -581,7 +641,12 @@ def _upload_level(level: MLFMMLevelOperators, *, cupy: Any) -> CuPyMLFMMLevelDat
 
 
 def _upload_transfer(
-    transfer: MLFMMTransferOperators, *, cupy: Any, cupyx_sparse: Any
+    transfer: MLFMMTransferOperators,
+    *,
+    child_reflection_permutation: np.ndarray,
+    parent_reflection_permutation: np.ndarray,
+    cupy: Any,
+    cupyx_sparse: Any,
 ) -> CuPyMLFMMTransferData:
     phase_up: dict[Offset3, Any] = {}
     phase_down: dict[Offset3, Any] = {}
@@ -600,15 +665,42 @@ def _upload_transfer(
         )
         phase_down[shift] = cupy.asarray(phase_arr, dtype=cupy.complex128)
 
-    interpolation = _upload_sparse_interpolation(
-        transfer.interpolation,
+    child_perm = _as_numpy_1d(
+        child_reflection_permutation,
+        dtype=np.int64,
+        name=f"transfer[{transfer.child_level}->{transfer.parent_level}].child_reflection_permutation",
+    )
+    parent_perm = _as_numpy_1d(
+        parent_reflection_permutation,
+        dtype=np.int64,
+        name=f"transfer[{transfer.child_level}->{transfer.parent_level}].parent_reflection_permutation",
+    )
+    child_inv = np.ascontiguousarray(np.argsort(child_perm), dtype=np.int64)
+    parent_inv = np.ascontiguousarray(np.argsort(parent_perm), dtype=np.int64)
+
+    interp_csr = transfer.interpolation.matrix.tocsr().astype(np.complex128)
+    map_up_csr = interp_csr[parent_perm, :][:, child_inv].tocsr().astype(np.complex128)
+    map_down_csr = interp_csr.T.tocsr()[child_perm, :][:, parent_inv].tocsr().astype(np.complex128)
+
+    map_up = _upload_directional_map(
+        map_up_csr,
+        source_order=int(interp_csr.shape[1]),
+        target_order=int(interp_csr.shape[0]),
+        cupy=cupy,
+        cupyx_sparse=cupyx_sparse,
+    )
+    map_down = _upload_directional_map(
+        map_down_csr,
+        source_order=int(map_down_csr.shape[1]),
+        target_order=int(map_down_csr.shape[0]),
         cupy=cupy,
         cupyx_sparse=cupyx_sparse,
     )
     return CuPyMLFMMTransferData(
         child_level=int(transfer.child_level),
         parent_level=int(transfer.parent_level),
-        interpolation=interpolation,
+        map_up=map_up,
+        map_down=map_down,
         batches_by_shift=_upload_offset_batches(
             transfer.batches_by_shift,
             cupy=cupy,
@@ -632,10 +724,28 @@ def _upload_multilevel(
         cupy=cupy,
         name="multilevel",
     )
+    cpu_level_by_index = {int(level.level): level for level in multilevel.levels}
+    levels = tuple(_upload_level(level, cupy=cupy) for level in multilevel.levels)
     return CuPyMLFMMMultilevelData(
-        levels=tuple(_upload_level(level, cupy=cupy) for level in multilevel.levels),
+        levels=levels,
         transfers=tuple(
-            _upload_transfer(transfer, cupy=cupy, cupyx_sparse=cupyx_sparse)
+            _upload_transfer(
+                transfer,
+                child_reflection_permutation=np.asarray(
+                    cpu_level_by_index[
+                        int(transfer.child_level)
+                    ].directional.grid.reflection_permutation,
+                    dtype=np.int64,
+                ),
+                parent_reflection_permutation=np.asarray(
+                    cpu_level_by_index[
+                        int(transfer.parent_level)
+                    ].directional.grid.reflection_permutation,
+                    dtype=np.int64,
+                ),
+                cupy=cupy,
+                cupyx_sparse=cupyx_sparse,
+            )
             for transfer in multilevel.transfers
         ),
         leaf_level=int(multilevel.leaf_level),
@@ -1049,6 +1159,83 @@ def _weighted_add_unique_complex128_raw_kernel() -> Any:
     return cupy.RawKernel(source, "weighted_add_unique_complex128")
 
 
+@cache
+def _weighted_gather_add_at_complex128_raw_kernel() -> Any:
+    cupy, _ = import_cupy()
+    source = r"""
+    #include <cupy/complex.cuh>
+    extern "C" __global__ void weighted_gather_add_at_complex128(
+        const long long n_pairs,
+        const long long n_dirs,
+        const long long nrhs,
+        const long long* src,
+        const long long* dst,
+        const complex<double>* source_values,
+        const complex<double>* weights,
+        complex<double>* out
+    ) {
+        const long long width = 4LL * n_dirs * nrhs;
+        const long long tid = (long long)blockIdx.x * (long long)blockDim.x + (long long)threadIdx.x;
+        const long long total = n_pairs * width;
+        for (long long i = tid; i < total; i += (long long)blockDim.x * (long long)gridDim.x) {
+            const long long pair_idx = i / width;
+            const long long lane = i - pair_idx * width;
+            const long long chan_stride = n_dirs * nrhs;
+            const long long chan = lane / chan_stride;
+            const long long rem = lane - chan * chan_stride;
+            const long long dir = rem / nrhs;
+            const long long rhs = rem - dir * nrhs;
+            const long long src_row = src[pair_idx];
+            const long long dst_row = dst[pair_idx];
+            const long long src_idx = ((src_row * 4LL + chan) * n_dirs + dir) * nrhs + rhs;
+            const long long out_idx = ((dst_row * 4LL + chan) * n_dirs + dir) * nrhs + rhs;
+            const complex<double> v = source_values[src_idx] * weights[dir];
+            double* out_ptr = reinterpret_cast<double*>(&out[out_idx]);
+            atomicAdd(out_ptr + 0, v.real());
+            atomicAdd(out_ptr + 1, v.imag());
+        }
+    }
+    """
+    return cupy.RawKernel(source, "weighted_gather_add_at_complex128")
+
+
+@cache
+def _weighted_gather_add_unique_complex128_raw_kernel() -> Any:
+    cupy, _ = import_cupy()
+    source = r"""
+    #include <cupy/complex.cuh>
+    extern "C" __global__ void weighted_gather_add_unique_complex128(
+        const long long n_pairs,
+        const long long n_dirs,
+        const long long nrhs,
+        const long long* src,
+        const long long* dst,
+        const complex<double>* source_values,
+        const complex<double>* weights,
+        complex<double>* out
+    ) {
+        const long long width = 4LL * n_dirs * nrhs;
+        const long long tid = (long long)blockIdx.x * (long long)blockDim.x + (long long)threadIdx.x;
+        const long long total = n_pairs * width;
+        for (long long i = tid; i < total; i += (long long)blockDim.x * (long long)gridDim.x) {
+            const long long pair_idx = i / width;
+            const long long lane = i - pair_idx * width;
+            const long long chan_stride = n_dirs * nrhs;
+            const long long chan = lane / chan_stride;
+            const long long rem = lane - chan * chan_stride;
+            const long long dir = rem / nrhs;
+            const long long rhs = rem - dir * nrhs;
+            const long long src_row = src[pair_idx];
+            const long long dst_row = dst[pair_idx];
+            const long long src_idx = ((src_row * 4LL + chan) * n_dirs + dir) * nrhs + rhs;
+            const long long out_idx = ((dst_row * 4LL + chan) * n_dirs + dir) * nrhs + rhs;
+            out[out_idx] += source_values[src_idx] * weights[dir];
+        }
+    }
+    """
+    return cupy.RawKernel(source, "weighted_gather_add_unique_complex128")
+
+
 def _add_at_complex128(
     target: Any,
     indices: Any,
@@ -1173,24 +1360,187 @@ def _weighted_add_at_complex128(
     )
 
 
-def _apply_sparse_directional_map(values: Any, matrix: Any, *, cupy: Any) -> Any:
-    """Apply one sparse directional map on channel batches.
+def _weighted_gather_add_complex128(
+    target: Any,
+    dst_indices: Any,
+    source_values: Any,
+    src_indices: Any,
+    weights: Any,
+    *,
+    assume_unique_indices: bool = False,
+    cupy: Any,
+) -> None:
+    """Gather directional rows from `source_values`, apply directional weights, and add into `target`."""
+
+    src = cupy.asarray(src_indices, dtype=cupy.int64).reshape(-1)
+    dst = cupy.asarray(dst_indices, dtype=cupy.int64).reshape(-1)
+    if int(src.size) == 0:
+        return
+    if int(src.size) != int(dst.size):
+        raise ValueError(
+            "Weighted gather-add source/destination index count mismatch: "
+            f"{int(src.size)} vs {int(dst.size)}."
+        )
+    src_arr = cupy.asarray(source_values, dtype=cupy.complex128)
+    tgt = cupy.asarray(target, dtype=cupy.complex128)
+    w = cupy.asarray(weights, dtype=cupy.complex128).reshape(-1)
+    if src_arr.ndim != 4:
+        raise ValueError(
+            f"Weighted gather-add expects source shape (nbox, 4, ndir, nrhs), got ndim={src_arr.ndim}."
+        )
+    if int(src_arr.shape[1]) != 4 or int(tgt.shape[1]) != 4:
+        raise ValueError("Weighted gather-add expects 4 directional channels.")
+    if int(src_arr.shape[2]) != int(w.size):
+        raise ValueError(
+            "Weighted gather-add direction count mismatch between source and weights: "
+            f"{int(src_arr.shape[2])} vs {int(w.size)}."
+        )
+    if tuple(int(v) for v in tgt.shape[1:]) != tuple(int(v) for v in src_arr.shape[1:]):
+        raise ValueError(
+            "Weighted gather-add source/target trailing-shape mismatch: "
+            f"source={tuple(int(v) for v in src_arr.shape[1:])}, "
+            f"target={tuple(int(v) for v in tgt.shape[1:])}."
+        )
+    if (
+        int(cupy.max(src)) >= int(src_arr.shape[0])
+        or int(cupy.min(src)) < 0
+        or int(cupy.max(dst)) >= int(tgt.shape[0])
+        or int(cupy.min(dst)) < 0
+    ):
+        raise ValueError("Weighted gather-add index out of bounds.")
+
+    threads = 256
+    total = int(src.size) * 4 * int(w.size) * int(src_arr.shape[3])
+    blocks = max(1, (total + threads - 1) // threads)
+    kernel = (
+        _weighted_gather_add_unique_complex128_raw_kernel()
+        if bool(assume_unique_indices)
+        else _weighted_gather_add_at_complex128_raw_kernel()
+    )
+    kernel(
+        (int(blocks),),
+        (threads,),
+        (
+            np.int64(int(src.size)),
+            np.int64(int(w.size)),
+            np.int64(int(src_arr.shape[3])),
+            src,
+            dst,
+            src_arr.reshape(-1),
+            w,
+            tgt.reshape(-1),
+        ),
+    )
+
+
+@cache
+def _directional_packed_stencil_map_c128_raw_kernel() -> Any:
+    cupy, _ = import_cupy()
+    source = r"""
+    #include <cupy/complex.cuh>
+    extern "C" __global__ void directional_packed_stencil_map_c128(
+        const long long n_batch,
+        const long long n_chan,
+        const long long n_source,
+        const long long n_target,
+        const long long n_rhs,
+        const int width,
+        const int* packed_cols,
+        const complex<double>* packed_vals,
+        const complex<double>* src,
+        complex<double>* out
+    ) {
+        const long long tid = (long long)blockIdx.x * (long long)blockDim.x + (long long)threadIdx.x;
+        const long long total = n_batch * n_chan * n_target * n_rhs;
+        for (long long i = tid; i < total; i += (long long)blockDim.x * (long long)gridDim.x) {
+            long long t = i;
+            const long long rhs = t % n_rhs;
+            t /= n_rhs;
+            const long long dst = t % n_target;
+            t /= n_target;
+            const long long chan = t % n_chan;
+            const long long batch = t / n_chan;
+
+            const long long src_base = ((batch * n_chan + chan) * n_source) * n_rhs + rhs;
+            const int row_base = (int)(dst * (long long)width);
+            complex<double> acc = complex<double>(0.0, 0.0);
+            for (int k = 0; k < width; ++k) {
+                const int col = packed_cols[row_base + k];
+                if (col < 0) {
+                    break;
+                }
+                const complex<double> w = packed_vals[row_base + k];
+                const complex<double> x = src[src_base + (long long)col * n_rhs];
+                acc += w * x;
+            }
+            out[i] = acc;
+        }
+    }
+    """
+    return cupy.RawKernel(source, "directional_packed_stencil_map_c128")
+
+
+def _apply_directional_map(
+    values: Any, map_data: CuPyDirectionalInterpolationData, *, cupy: Any
+) -> Any:
+    """Apply one directional transfer map on channel batches.
 
     Parameters
     ----------
     values:
         Shape `(nbatch, 4, n_source, nrhs)`.
-    matrix:
-        CSR-like sparse matrix with shape `(n_target, n_source)`.
+    map_data:
+        Device transfer map metadata.
     """
 
     arr = cupy.asarray(values, dtype=cupy.complex128)
+    if arr.ndim != 4 or int(arr.shape[1]) != 4:
+        raise ValueError("Directional transfer input must have shape (nbatch, 4, n_source, nrhs).")
+    if int(arr.shape[2]) != int(map_data.source_order):
+        raise ValueError(
+            "Directional transfer source-order mismatch: "
+            f"{int(arr.shape[2])} vs {int(map_data.source_order)}."
+        )
     n_batch = int(arr.shape[0])
     n_chan = int(arr.shape[1])
     n_rhs = int(arr.shape[3])
-    flat = arr.transpose(0, 1, 3, 2).reshape(-1, int(arr.shape[2]))
-    mapped_flat = (matrix @ flat.T).T
-    return mapped_flat.reshape(n_batch, n_chan, n_rhs, int(matrix.shape[0])).transpose(0, 1, 3, 2)
+    source_order = int(arr.shape[2])
+    flat = arr.transpose(0, 1, 3, 2).reshape(-1, source_order)
+    if str(map_data.storage) == "dense":
+        dense = cupy.asarray(map_data.matrix, dtype=cupy.complex128)
+        mapped_flat = flat @ dense.T
+        target_order = int(dense.shape[0])
+    elif str(map_data.storage) == "packed_stencil":
+        packed_cols, packed_vals, width_i32 = map_data.matrix
+        width = int(width_i32)
+        target_order = int(map_data.target_order)
+        src = cupy.ascontiguousarray(arr)
+        out = cupy.empty((n_batch, n_chan, target_order, n_rhs), dtype=cupy.complex128)
+        total = n_batch * n_chan * target_order * n_rhs
+        threads = 256
+        blocks = max(1, (total + threads - 1) // threads)
+        _directional_packed_stencil_map_c128_raw_kernel()(
+            (int(blocks),),
+            (threads,),
+            (
+                np.int64(n_batch),
+                np.int64(n_chan),
+                np.int64(source_order),
+                np.int64(target_order),
+                np.int64(n_rhs),
+                np.int32(width),
+                cupy.asarray(packed_cols, dtype=cupy.int32),
+                cupy.asarray(packed_vals, dtype=cupy.complex128),
+                src.reshape(-1),
+                out.reshape(-1),
+            ),
+        )
+        return out
+    else:
+        sparse = map_data.matrix
+        mapped_flat = (sparse @ flat.T).T
+        target_order = int(sparse.shape[0])
+    return mapped_flat.reshape(n_batch, n_chan, n_rhs, target_order).transpose(0, 1, 3, 2)
 
 
 def _box_outgoing_to_directional_cupy(
@@ -1385,10 +1735,11 @@ def _apply_single_level_far(prepared: CuPyMLFMMPreparedData, x_states: Any, *, c
     outgoing = _box_outgoing_to_directional_cupy(single.directional, box_states, cupy=cupy)
     incoming = cupy.zeros_like(outgoing, dtype=cupy.complex128)
     for offset, batch in single.far_offset_batches.items():
-        _weighted_add_at_complex128(
+        _weighted_gather_add_complex128(
             incoming,
             batch.dst_indices,
-            outgoing[batch.src_indices],
+            outgoing,
+            batch.src_indices,
             single.offset_diagonals[offset],
             assume_unique_indices=bool(batch.dst_unique),
             cupy=cupy,
@@ -1446,16 +1797,10 @@ def _apply_multilevel_far(prepared: CuPyMLFMMPreparedData, x_states: Any, *, cup
         parent_level = int(transfer.parent_level)
         child_values = outgoing[child_level]
         parent_values = outgoing[parent_level]
-        child_perm = levels[child_level].directional.grid.reflection_permutation
-        parent_perm = levels[parent_level].directional.grid.reflection_permutation
         for shift, batch in transfer.batches_by_shift.items():
-            child_reindexed = _apply_reflection_to_direction_axis(
-                child_values[batch.src_indices], child_perm, cupy=cupy
+            mapped = _apply_directional_map(
+                child_values[batch.src_indices], transfer.map_up, cupy=cupy
             )
-            mapped_reindexed = _apply_sparse_directional_map(
-                child_reindexed, transfer.interpolation.matrix, cupy=cupy
-            )
-            mapped = _apply_reflection_to_direction_axis(mapped_reindexed, parent_perm, cupy=cupy)
             _weighted_add_at_complex128(
                 parent_values,
                 batch.dst_indices,
@@ -1468,10 +1813,11 @@ def _apply_multilevel_far(prepared: CuPyMLFMMPreparedData, x_states: Any, *, cup
     for level_idx in range(int(multilevel.hf_start_level), int(multilevel.hf_end_level) + 1):
         level = levels[level_idx]
         for offset, batch in level.far_offset_batches.items():
-            _weighted_add_at_complex128(
+            _weighted_gather_add_complex128(
                 incoming[level_idx],
                 batch.dst_indices,
-                outgoing[level_idx][batch.src_indices],
+                outgoing[level_idx],
+                batch.src_indices,
                 level.offset_diagonals[offset],
                 assume_unique_indices=bool(batch.dst_unique),
                 cupy=cupy,
@@ -1482,18 +1828,12 @@ def _apply_multilevel_far(prepared: CuPyMLFMMPreparedData, x_states: Any, *, cup
         parent_level = int(transfer.parent_level)
         parent_values = incoming[parent_level]
         child_values = incoming[child_level]
-        parent_perm = levels[parent_level].directional.grid.reflection_permutation
-        child_perm = levels[child_level].directional.grid.reflection_permutation
         for shift, batch in transfer.batches_by_shift.items():
             shifted = (
                 parent_values[batch.dst_indices]
                 * transfer.phase_down_by_shift[shift][None, None, :, None]
             )
-            shifted_reindexed = _apply_reflection_to_direction_axis(shifted, parent_perm, cupy=cupy)
-            mapped_reindexed = _apply_sparse_directional_map(
-                shifted_reindexed, transfer.interpolation.matrix.T, cupy=cupy
-            )
-            mapped = _apply_reflection_to_direction_axis(mapped_reindexed, child_perm, cupy=cupy)
+            mapped = _apply_directional_map(shifted, transfer.map_down, cupy=cupy)
             _add_at_complex128(
                 child_values,
                 batch.src_indices,
