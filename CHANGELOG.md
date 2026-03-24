@@ -55,6 +55,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (directed near-pair indices + compact translation tables) instead of
   pre-uploaded dense near block tensors, substantially reducing large-case GPU
   prepared-data footprint.
+- CuPy MLFMM exact-near apply now uses direct complex input/output in the
+  device kernel, removing per-iteration real/imag marshaling and reassembly on
+  the host-side orchestration path.
 - CuPy MLFMM grouped far-offset accumulation now uses weighted device kernels
   in single-level and multilevel sampled far passes, reducing intermediate
   tensor traffic in repeated applies.

@@ -1225,8 +1225,10 @@ def _exact_near_pairs_raw_kernel(lmax: int, near_dtype_name: str) -> Any:
     near_dtype = np.dtype(near_dtype_name)
     if near_dtype == np.dtype(np.complex64):
         real_t = "float"
+        complex_t = "complex<float>"
     elif near_dtype == np.dtype(np.complex128):
         real_t = "double"
+        complex_t = "complex<double>"
     else:
         raise ValueError(
             "CuPy MLFMM near kernel supports only complex64/complex128 near dtypes. "
@@ -1236,6 +1238,7 @@ def _exact_near_pairs_raw_kernel(lmax: int, near_dtype_name: str) -> Any:
     n_p_pdm = n_orders * (n_orders + 1) // 2
     n_phase = 2 * n_orders - 1
     source = f"""
+    #include <cupy/complex.cuh>
     extern "C" __device__ {real_t} assoc_legendre_function(
         const int l,
         const int m,
@@ -1299,10 +1302,8 @@ def _exact_near_pairs_raw_kernel(lmax: int, near_dtype_name: str) -> Any:
         const int* pair_offset,
         const int* pair_pmin,
         const int* pair_pcount,
-        const {real_t}* re_x,
-        const {real_t}* im_x,
-        {real_t}* re_y,
-        {real_t}* im_y
+        const {complex_t}* x,
+        {complex_t}* y
     ) {{
         const int n1 = blockIdx.x * blockDim.x + threadIdx.x;
         const bool active = (n1 < nmodes);
@@ -1319,9 +1320,7 @@ def _exact_near_pairs_raw_kernel(lmax: int, near_dtype_name: str) -> Any:
         __shared__ long long src_particle_shared;
 
         const int m1 = active ? mode_m[n1] : 0;
-        const int rhs_stride = n_particles * nmodes;
         for (int rhs = blockIdx.z; rhs < nrhs; rhs += gridDim.z) {{
-            const int rhs_offset = rhs * rhs_stride;
             for (int pair_idx = blockIdx.y; pair_idx < n_pairs; pair_idx += gridDim.y) {{
                 if (threadIdx.x == 0) {{
                     dst_particle_shared = dst_indices[pair_idx];
@@ -1357,8 +1356,10 @@ def _exact_near_pairs_raw_kernel(lmax: int, near_dtype_name: str) -> Any:
                     {real_t} re_incr = ({real_t})0.0;
                     {real_t} im_incr = ({real_t})0.0;
                     for (int n2 = 0; n2 < nmodes; ++n2) {{
-                        const {real_t} re_x_tmp = re_x[rhs_offset + src_particle_shared * nmodes + n2];
-                        const {real_t} im_x_tmp = im_x[rhs_offset + src_particle_shared * nmodes + n2];
+                        const long long x_idx = (((long long)src_particle_shared * nmodes + n2) * nrhs) + rhs;
+                        const {complex_t} x_tmp = x[x_idx];
+                        const {real_t} re_x_tmp = x_tmp.real();
+                        const {real_t} im_x_tmp = x_tmp.imag();
                         const int delta_m = mode_m[n2] - m1;
                         const int phase_idx = delta_m + 2 * {lmax};
                         const int pair_table_idx = n1 * nmodes + n2;
@@ -1382,8 +1383,10 @@ def _exact_near_pairs_raw_kernel(lmax: int, near_dtype_name: str) -> Any:
                         }}
                     }}
 
-                    atomicAdd(&re_y[rhs_offset + dst_particle_shared * nmodes + n1], re_incr);
-                    atomicAdd(&im_y[rhs_offset + dst_particle_shared * nmodes + n1], im_incr);
+                    const long long y_idx = (((long long)dst_particle_shared * nmodes + n1) * nrhs) + rhs;
+                    {real_t}* y_ptr = reinterpret_cast<{real_t}*>(&y[y_idx]);
+                    atomicAdd(y_ptr + 0, re_incr);
+                    atomicAdd(y_ptr + 1, im_incr);
                 }}
                 __syncthreads();
             }}
@@ -2622,12 +2625,8 @@ def _apply_exact_near_pairs(prepared: CuPyMLFMMPreparedData, x_states: Any, *, c
     if n_pairs == 0:
         return y
     n_particles, nm, nrhs = (int(v) for v in x_states.shape)
-    x_arr = cupy.asarray(x_states, dtype=cupy_compute_dtype)
-    x_rhs_major = cupy.transpose(x_arr, (2, 0, 1))
-    x_re = cupy.ascontiguousarray(x_rhs_major.real.reshape(-1).astype(cupy_real_dtype, copy=False))
-    x_im = cupy.ascontiguousarray(x_rhs_major.imag.reshape(-1).astype(cupy_real_dtype, copy=False))
-    y_re = cupy.zeros((nrhs * n_particles * nm,), dtype=cupy_real_dtype)
-    y_im = cupy.zeros((nrhs * n_particles * nm,), dtype=cupy_real_dtype)
+    x_arr = cupy.ascontiguousarray(cupy.asarray(x_states, dtype=cupy_compute_dtype))
+    y_arr = cupy.zeros((n_particles, nm, nrhs), dtype=cupy_compute_dtype)
 
     props = cupy.cuda.runtime.getDeviceProperties(cupy.cuda.runtime.getDevice())
     max_grid_y = int(props["maxGridSize"][1])
@@ -2660,17 +2659,11 @@ def _apply_exact_near_pairs(prepared: CuPyMLFMMPreparedData, x_states: Any, *, c
             near.pair_offset,
             near.pair_pmin,
             near.pair_pcount,
-            x_re,
-            x_im,
-            y_re,
-            y_im,
+            x_arr.reshape(-1),
+            y_arr.reshape(-1),
         ),
     )
-    out_rhs_major = (
-        y_re.astype(cupy_out_dtype, copy=False)
-        + y_im.astype(cupy_out_dtype, copy=False) * cupy.asarray(1j, dtype=cupy_out_dtype)
-    ).reshape(nrhs, n_particles, nm)
-    return cupy.transpose(out_rhs_major, (1, 2, 0)).astype(cupy_out_dtype, copy=False)
+    return y_arr.astype(cupy_out_dtype, copy=False)
 
 
 def _apply_single_level_far(
@@ -2820,6 +2813,9 @@ def _apply_multilevel_far(
                     cupy=cupy,
                 )
             else:
+                # Internal fallback for non-unique batches or unsupported map
+                # storage. Grouped batches are currently validated as unique
+                # during upload, so this should remain a rare compatibility path.
                 mapped = _apply_directional_map(
                     child_values[batch.src_indices], transfer.map_up, cupy=cupy
                 )
@@ -2872,6 +2868,9 @@ def _apply_multilevel_far(
                     cupy=cupy,
                 )
             else:
+                # Internal fallback for non-unique batches or unsupported map
+                # storage. Grouped batches are currently validated as unique
+                # during upload, so this should remain a rare compatibility path.
                 shifted = (
                     parent_values[batch.dst_indices]
                     * transfer.phase_down_by_shift[shift][None, None, :, None]

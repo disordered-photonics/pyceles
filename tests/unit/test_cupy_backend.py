@@ -17,6 +17,7 @@ from pyceles.core.operators import (
     MLFMMOptions,
     prepare_matvec,
 )
+from pyceles.core.operators.mlfmm_cupy import _upload_offset_batches
 from pyceles.core.particles import Particle, spheres_from_arrays
 from pyceles.io import far_field_intensity
 
@@ -126,6 +127,22 @@ def _mixed_cluster_particles() -> tuple[Particle, ...]:
             euler_angles=(0.1, 0.35, -0.2),
         ),
     )
+
+
+def test_cupy_mlfmm_upload_offset_batches_rejects_nonunique() -> None:
+    cupy, _ = import_cupy()
+    with pytest.raises(ValueError, match="violates grouped uniqueness contract"):
+        _upload_offset_batches(
+            {(0, 0, 0): (np.array([1, 1], dtype=np.int64), np.array([2, 3], dtype=np.int64))},
+            cupy=cupy,
+            name="test_batches",
+        )
+    with pytest.raises(ValueError, match="violates grouped uniqueness contract"):
+        _upload_offset_batches(
+            {(0, 0, 0): (np.array([1, 2], dtype=np.int64), np.array([3, 3], dtype=np.int64))},
+            cupy=cupy,
+            name="test_batches",
+        )
 
 
 def _mlfmm_transition_particles() -> tuple[Particle, ...]:
