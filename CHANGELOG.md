@@ -79,6 +79,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CuPy MLFMM prepared-cache serialization now stores compact host artifacts and
   rebuilds device prepared data on load, reducing cache footprint and avoiding
   device-graph pickling.
+- CuPy MLFMM exact-near cache/runtime payload now uses directed leaf-pair
+  schedules plus leaf particle tables instead of expanded directed particle-pair
+  lists, improving memory scalability on large clusters.
 
 ### Fixed
 - Native CuPy block-GMRES now enforces per-RHS true-residual tolerance checks

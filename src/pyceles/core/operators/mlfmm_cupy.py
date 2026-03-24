@@ -127,8 +127,8 @@ class CuPyMLFMMHostCacheData:
     leaf_particle_offsets: np.ndarray
     leaf_particle_indices: np.ndarray
     near_positions_flat: np.ndarray
-    near_dst_particle_indices: np.ndarray
-    near_src_particle_indices: np.ndarray
+    near_dst_leaf_indices: np.ndarray
+    near_src_leaf_indices: np.ndarray
     near_lut_re: np.ndarray
     near_lut_im: np.ndarray
     near_inv_dr: float
@@ -259,12 +259,14 @@ class CuPyMLFMMSingleLevelData:
 
 @dataclass(frozen=True)
 class CuPyMLFMMNearPairData:
-    """Device-ready directed exact-near particle-pair metadata and tables."""
+    """Device-ready directed exact-near leaf schedule and translation tables."""
 
     near_dtype: np.dtype
     positions: Any
-    dst_particle_indices: Any
-    src_particle_indices: Any
+    leaf_particle_offsets: Any
+    leaf_particle_indices: Any
+    dst_leaf_indices: Any
+    src_leaf_indices: Any
     lut_re: Any
     lut_im: Any
     inv_dr: float
@@ -361,16 +363,16 @@ def _as_numpy_3cols(arr: np.ndarray, *, dtype: npt.DTypeLike, name: str) -> np.n
 def _pack_index_lists(
     index_lists: tuple[np.ndarray, ...] | list[np.ndarray],
 ) -> tuple[np.ndarray, np.ndarray]:
-    offsets = np.zeros((len(index_lists) + 1,), dtype=np.int64)
+    offsets = np.zeros((len(index_lists) + 1,), dtype=np.int32)
     flat_parts: list[np.ndarray] = []
     cursor = 0
     for i, values in enumerate(index_lists):
-        arr = np.asarray(values, dtype=np.int64).reshape(-1)
+        arr = np.asarray(values, dtype=np.int32).reshape(-1)
         flat_parts.append(np.ascontiguousarray(arr))
         cursor += int(arr.size)
         offsets[i + 1] = cursor
     flat = (
-        np.concatenate(flat_parts, dtype=np.int64) if flat_parts else np.zeros((0,), dtype=np.int64)
+        np.concatenate(flat_parts, dtype=np.int32) if flat_parts else np.zeros((0,), dtype=np.int32)
     )
     return offsets, flat
 
@@ -438,7 +440,7 @@ def _upload_directional_transforms(
         n_dir = int(directions.shape[0])
     reflection = _as_numpy_1d(
         grid.reflection_permutation,
-        dtype=np.int64,
+        dtype=np.int32,
         name="directional.grid.reflection_permutation",
     )
     if reflection.size != n_dir:
@@ -461,8 +463,8 @@ def _upload_directional_transforms(
             "Directional forward transform row count must match sampled direction count."
         )
     nscl = int(fth.shape[1])
-    perm = np.asarray(reflection, dtype=np.int64)
-    inv_perm = np.ascontiguousarray(np.argsort(perm), dtype=np.int64)
+    perm = np.asarray(reflection, dtype=np.int32)
+    inv_perm = np.ascontiguousarray(np.argsort(perm), dtype=np.int32)
 
     # Outgoing map: pre-fold reflection row permutation and stack theta/phi
     # into one (2*ndir, nscl) matrix for batched GEMM.
@@ -489,7 +491,7 @@ def _upload_directional_transforms(
         grid=CuPyDirectionalGridData(
             order=int(grid.order),
             n_directions=int(n_dir),
-            reflection_permutation=cupy.asarray(reflection, dtype=cupy.int64),
+            reflection_permutation=cupy.asarray(reflection, dtype=cupy.int32),
         ),
         nscl=nscl,
         forward_F=cupy.asarray(f_stack, dtype=cupy.complex128),
@@ -586,8 +588,8 @@ def _upload_offset_batches(
 
     out: dict[Offset3, CuPyOffsetBatchData] = {}
     for offset, (src_idx, dst_idx) in batches.items():
-        src = _as_numpy_1d(src_idx, dtype=np.int64, name=f"{name}[{offset}].src")
-        dst = _as_numpy_1d(dst_idx, dtype=np.int64, name=f"{name}[{offset}].dst")
+        src = _as_numpy_1d(src_idx, dtype=np.int32, name=f"{name}[{offset}].src")
+        dst = _as_numpy_1d(dst_idx, dtype=np.int32, name=f"{name}[{offset}].dst")
         if src.size != dst.size:
             raise ValueError(
                 f"{name}[{offset}] source/target batch size mismatch: {src.size} vs {dst.size}."
@@ -600,8 +602,8 @@ def _upload_offset_batches(
                 f"(src_unique={src_unique}, dst_unique={dst_unique})."
             )
         out[offset] = CuPyOffsetBatchData(
-            src_indices=cupy.asarray(src, dtype=cupy.int64),
-            dst_indices=cupy.asarray(dst, dtype=cupy.int64),
+            src_indices=cupy.asarray(src, dtype=cupy.int32),
+            dst_indices=cupy.asarray(dst, dtype=cupy.int32),
             src_unique=True,
             dst_unique=True,
         )
@@ -612,8 +614,8 @@ def _partition_from_host_cache(cache: CuPyMLFMMHostCacheData) -> CuPyMLFMMPartit
     """Build upload-only partition lookup from compact host cache data."""
 
     return CuPyMLFMMPartitionData(
-        leaf_particle_offsets_host=np.asarray(cache.leaf_particle_offsets, dtype=np.int64),
-        leaf_particle_indices_host=np.asarray(cache.leaf_particle_indices, dtype=np.int64),
+        leaf_particle_offsets_host=np.asarray(cache.leaf_particle_offsets, dtype=np.int32),
+        leaf_particle_indices_host=np.asarray(cache.leaf_particle_indices, dtype=np.int32),
     )
 
 
@@ -625,8 +627,8 @@ def _copy_batches_host(
     out: dict[Offset3, tuple[np.ndarray, np.ndarray]] = {}
     for key, (src, dst) in batches.items():
         out[key] = (
-            np.ascontiguousarray(np.asarray(src, dtype=np.int64).reshape(-1)),
-            np.ascontiguousarray(np.asarray(dst, dtype=np.int64).reshape(-1)),
+            np.ascontiguousarray(np.asarray(src, dtype=np.int32).reshape(-1)),
+            np.ascontiguousarray(np.asarray(dst, dtype=np.int32).reshape(-1)),
         )
     return out
 
@@ -644,7 +646,7 @@ def _copy_directional_host(
             order=int(transforms.grid.order),
             n_directions=n_dir,
             reflection_permutation=np.ascontiguousarray(
-                np.asarray(transforms.grid.reflection_permutation, dtype=np.int64).reshape(-1)
+                np.asarray(transforms.grid.reflection_permutation, dtype=np.int32).reshape(-1)
             ),
         ),
         Fth=np.ascontiguousarray(np.asarray(transforms.Fth, dtype=np.complex128)),
@@ -739,7 +741,7 @@ def _build_mlfmm_cupy_host_cache(coupling: MLFMMCouplingOperator) -> CuPyMLFMMHo
     leaf_offsets, leaf_indices = _pack_index_lists(
         [leaf.particle_indices for leaf in partition.leaves]
     )
-    dst_indices, src_indices = _build_exact_near_pair_indices(partition)
+    dst_leaf_indices, src_leaf_indices = _build_exact_near_leaf_pair_schedule(partition)
     lut = np.asarray(coupling.radial_lut.h, dtype=np.complex128).T.astype(lut_dtype, copy=False)
     compact_re_ab, compact_im_ab = _translation_ab5_compact_tables(
         int(coupling.lmax), dtype=np.complex128
@@ -767,13 +769,13 @@ def _build_mlfmm_cupy_host_cache(coupling: MLFMMCouplingOperator) -> CuPyMLFMMHo
         near_dtype=np.dtype(coupling.near_dtype),
         far_dtype=np.dtype(coupling.far_dtype),
         n_particles=int(np.asarray(coupling.positions).shape[0]),
-        leaf_particle_offsets=np.ascontiguousarray(leaf_offsets, dtype=np.int64),
-        leaf_particle_indices=np.ascontiguousarray(leaf_indices, dtype=np.int64),
+        leaf_particle_offsets=np.ascontiguousarray(leaf_offsets, dtype=np.int32),
+        leaf_particle_indices=np.ascontiguousarray(leaf_indices, dtype=np.int32),
         near_positions_flat=np.ascontiguousarray(
             np.asarray(coupling.positions, dtype=real_dtype).reshape(-1)
         ),
-        near_dst_particle_indices=np.ascontiguousarray(dst_indices, dtype=np.int64),
-        near_src_particle_indices=np.ascontiguousarray(src_indices, dtype=np.int64),
+        near_dst_leaf_indices=np.ascontiguousarray(dst_leaf_indices, dtype=np.int32),
+        near_src_leaf_indices=np.ascontiguousarray(src_leaf_indices, dtype=np.int32),
         near_lut_re=np.ascontiguousarray(lut.real.reshape(-1), dtype=real_dtype),
         near_lut_im=np.ascontiguousarray(lut.imag.reshape(-1), dtype=real_dtype),
         near_inv_dr=float(coupling.radial_lut._inv_dr),
@@ -848,9 +850,9 @@ def _upload_leaf_apply_groups(
 
     grouped: list[CuPyLeafApplyGroupData] = []
     for occupancy in sorted(leaf_ids_by_occupancy):
-        leaf_ids_np = np.asarray(leaf_ids_by_occupancy[occupancy], dtype=np.int64)
+        leaf_ids_np = np.asarray(leaf_ids_by_occupancy[occupancy], dtype=np.int32)
         n_group = int(leaf_ids_np.size)
-        part_idx_np = np.empty((n_group, occupancy), dtype=np.int64)
+        part_idx_np = np.empty((n_group, occupancy), dtype=np.int32)
         agg_group = np.empty((n_group, box_nm, occupancy * nmodes_ref), dtype=np.complex128)
         for local_idx, leaf_id in enumerate(leaf_ids_np.tolist()):
             start = int(offsets[leaf_id])
@@ -861,8 +863,8 @@ def _upload_leaf_apply_groups(
             CuPyLeafApplyGroupData(
                 occupancy=occupancy,
                 nmodes=nmodes_ref,
-                leaf_ids=cupy.asarray(leaf_ids_np, dtype=cupy.int64),
-                particle_indices=cupy.asarray(part_idx_np, dtype=cupy.int64),
+                leaf_ids=cupy.asarray(leaf_ids_np, dtype=cupy.int32),
+                particle_indices=cupy.asarray(part_idx_np, dtype=cupy.int32),
                 aggregation=cupy.asarray(
                     np.ascontiguousarray(agg_group),
                     dtype=cupy.complex128,
@@ -982,16 +984,16 @@ def _upload_transfer(
 
     child_perm = _as_numpy_1d(
         child_reflection_permutation,
-        dtype=np.int64,
+        dtype=np.int32,
         name=f"transfer[{transfer.child_level}->{transfer.parent_level}].child_reflection_permutation",
     )
     parent_perm = _as_numpy_1d(
         parent_reflection_permutation,
-        dtype=np.int64,
+        dtype=np.int32,
         name=f"transfer[{transfer.child_level}->{transfer.parent_level}].parent_reflection_permutation",
     )
-    child_inv = np.ascontiguousarray(np.argsort(child_perm), dtype=np.int64)
-    parent_inv = np.ascontiguousarray(np.argsort(parent_perm), dtype=np.int64)
+    child_inv = np.ascontiguousarray(np.argsort(child_perm), dtype=np.int32)
+    parent_inv = np.ascontiguousarray(np.argsort(parent_perm), dtype=np.int32)
 
     interp_csr = transfer.interpolation.matrix.tocsr().astype(np.complex128)
     map_up_csr = interp_csr[parent_perm, :][:, child_inv].tocsr().astype(np.complex128)
@@ -1050,13 +1052,13 @@ def _upload_multilevel(
                     cpu_level_by_index[
                         int(transfer.child_level)
                     ].directional.grid.reflection_permutation,
-                    dtype=np.int64,
+                    dtype=np.int32,
                 ),
                 parent_reflection_permutation=np.asarray(
                     cpu_level_by_index[
                         int(transfer.parent_level)
                     ].directional.grid.reflection_permutation,
-                    dtype=np.int64,
+                    dtype=np.int32,
                 ),
                 cupy=cupy,
                 cupyx_sparse=cupyx_sparse,
@@ -1072,35 +1074,30 @@ def _upload_multilevel(
     )
 
 
-def _build_exact_near_pair_indices(partition: MLFMMPartition) -> tuple[np.ndarray, np.ndarray]:
-    """Build directed exact-near particle index pairs from the resolved leaf partition."""
+def _build_exact_near_leaf_pair_schedule(
+    partition: MLFMMPartition,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Build directed exact-near leaf-pair schedule from the resolved partition."""
 
-    dst_indices: list[int] = []
-    src_indices: list[int] = []
+    dst_leaf_indices: list[int] = []
+    src_leaf_indices: list[int] = []
     for a, b in partition.leaf_near_pairs:
-        leaf_a = partition.leaves[int(a)]
-        leaf_b = partition.leaves[int(b)]
-        if int(a) == int(b):
-            for i in np.asarray(leaf_a.particle_indices, dtype=np.int64):
-                for j in np.asarray(leaf_a.particle_indices, dtype=np.int64):
-                    if int(i) == int(j):
-                        continue
-                    dst_indices.append(int(i))
-                    src_indices.append(int(j))
-            continue
-        for i in np.asarray(leaf_a.particle_indices, dtype=np.int64):
-            for j in np.asarray(leaf_b.particle_indices, dtype=np.int64):
-                dst_indices.append(int(i))
-                src_indices.append(int(j))
-                dst_indices.append(int(j))
-                src_indices.append(int(i))
-    return np.asarray(dst_indices, dtype=np.int64), np.asarray(src_indices, dtype=np.int64)
+        ia = int(a)
+        ib = int(b)
+        dst_leaf_indices.append(ia)
+        src_leaf_indices.append(ib)
+        if ia != ib:
+            dst_leaf_indices.append(ib)
+            src_leaf_indices.append(ia)
+    return np.asarray(dst_leaf_indices, dtype=np.int32), np.asarray(
+        src_leaf_indices, dtype=np.int32
+    )
 
 
 def _upload_exact_near_pair_data_from_host_cache(
     cache: CuPyMLFMMHostCacheData, *, cupy: Any
 ) -> CuPyMLFMMNearPairData:
-    """Upload exact-near payload directly from compact host cache arrays."""
+    """Upload exact-near leaf schedule and translation payload from host cache."""
 
     near_dtype = np.dtype(cache.near_dtype)
     if near_dtype == np.dtype(np.complex64):
@@ -1119,14 +1116,24 @@ def _upload_exact_near_pair_data_from_host_cache(
             dtype=cupy_real_dtype,
             blocking=True,
         ),
-        dst_particle_indices=cupy.asarray(
-            np.ascontiguousarray(np.asarray(cache.near_dst_particle_indices, dtype=np.int64)),
-            dtype=cupy.int64,
+        leaf_particle_offsets=cupy.asarray(
+            np.ascontiguousarray(np.asarray(cache.leaf_particle_offsets, dtype=np.int32)),
+            dtype=cupy.int32,
             blocking=True,
         ),
-        src_particle_indices=cupy.asarray(
-            np.ascontiguousarray(np.asarray(cache.near_src_particle_indices, dtype=np.int64)),
-            dtype=cupy.int64,
+        leaf_particle_indices=cupy.asarray(
+            np.ascontiguousarray(np.asarray(cache.leaf_particle_indices, dtype=np.int32)),
+            dtype=cupy.int32,
+            blocking=True,
+        ),
+        dst_leaf_indices=cupy.asarray(
+            np.ascontiguousarray(np.asarray(cache.near_dst_leaf_indices, dtype=np.int32)),
+            dtype=cupy.int32,
+            blocking=True,
+        ),
+        src_leaf_indices=cupy.asarray(
+            np.ascontiguousarray(np.asarray(cache.near_src_leaf_indices, dtype=np.int32)),
+            dtype=cupy.int32,
             blocking=True,
         ),
         lut_re=cupy.asarray(
@@ -1284,13 +1291,14 @@ def _exact_near_pairs_raw_kernel(lmax: int, near_dtype_name: str) -> Any:
     }}
 
     extern "C" __global__ void mlfmm_exact_near_pairs(
-        const int n_pairs,
-        const int n_particles,
+        const int n_leaf_pairs,
         const int nmodes,
         const int nrhs,
         const {real_t}* positions,
-        const long long* dst_indices,
-        const long long* src_indices,
+        const int* dst_leaf_indices,
+        const int* src_leaf_indices,
+        const int* leaf_particle_offsets,
+        const int* leaf_particle_indices,
         const {real_t}* re_h,
         const {real_t}* im_h,
         const {real_t} inv_dr,
@@ -1316,79 +1324,110 @@ def _exact_near_pairs_raw_kernel(lmax: int, near_dtype_name: str) -> Any:
         __shared__ {real_t} ct_shared;
         __shared__ {real_t} st_shared;
         __shared__ {real_t} phi_shared;
-        __shared__ long long dst_particle_shared;
-        __shared__ long long src_particle_shared;
+        __shared__ int dst_leaf_shared;
+        __shared__ int src_leaf_shared;
+        __shared__ int dst_particle_shared;
+        __shared__ int src_particle_shared;
 
         const int m1 = active ? mode_m[n1] : 0;
         for (int rhs = blockIdx.z; rhs < nrhs; rhs += gridDim.z) {{
-            for (int pair_idx = blockIdx.y; pair_idx < n_pairs; pair_idx += gridDim.y) {{
+            for (int leaf_pair_idx = blockIdx.y; leaf_pair_idx < n_leaf_pairs; leaf_pair_idx += gridDim.y) {{
                 if (threadIdx.x == 0) {{
-                    dst_particle_shared = dst_indices[pair_idx];
-                    src_particle_shared = src_indices[pair_idx];
-                    const {real_t} x21 = positions[3 * dst_particle_shared] - positions[3 * src_particle_shared];
-                    const {real_t} y21 = positions[3 * dst_particle_shared + 1] - positions[3 * src_particle_shared + 1];
-                    const {real_t} z21 = positions[3 * dst_particle_shared + 2] - positions[3 * src_particle_shared + 2];
-                    r_shared = sqrt(x21 * x21 + y21 * y21 + z21 * z21);
-                    ct_shared = z21 / r_shared;
-                    st_shared = sqrt(fmax(({real_t})0.0, ({real_t})1.0 - ct_shared * ct_shared));
-                    phi_shared = atan2(y21, x21);
+                    dst_leaf_shared = dst_leaf_indices[leaf_pair_idx];
+                    src_leaf_shared = src_leaf_indices[leaf_pair_idx];
                 }}
                 __syncthreads();
 
-                for (int p = threadIdx.x; p < {n_orders}; p += blockDim.x) {{
-                    re_h_shared[p] = hankel_lookup_linear(p, r_shared, re_h, inv_dr, last_index);
-                    im_h_shared[p] = hankel_lookup_linear(p, r_shared, im_h, inv_dr, last_index);
-                    for (int absdm = 0; absdm <= p; ++absdm) {{
-                        p_pdm_shared[p * (p + 1) / 2 + absdm] =
-                            assoc_legendre_function(p, absdm, ct_shared, st_shared, plm_coeffs);
-                    }}
-                }}
-                if (threadIdx.x == 0) {{
-                    for (int dm = -2 * {lmax}; dm <= 2 * {lmax}; ++dm) {{
-                        const int idx = dm + 2 * {lmax};
-                        cos_mphi_shared[idx] = cos(({real_t})dm * phi_shared);
-                        sin_mphi_shared[idx] = sin(({real_t})dm * phi_shared);
-                    }}
-                }}
-                __syncthreads();
+                const int dst_start = leaf_particle_offsets[dst_leaf_shared];
+                const int dst_end = leaf_particle_offsets[dst_leaf_shared + 1];
+                const int src_start = leaf_particle_offsets[src_leaf_shared];
+                const int src_end = leaf_particle_offsets[src_leaf_shared + 1];
 
-                if (active) {{
-                    {real_t} re_incr = ({real_t})0.0;
-                    {real_t} im_incr = ({real_t})0.0;
-                    for (int n2 = 0; n2 < nmodes; ++n2) {{
-                        const long long x_idx = (((long long)src_particle_shared * nmodes + n2) * nrhs) + rhs;
-                        const {complex_t} x_tmp = x[x_idx];
-                        const {real_t} re_x_tmp = x_tmp.real();
-                        const {real_t} im_x_tmp = x_tmp.imag();
-                        const int delta_m = mode_m[n2] - m1;
-                        const int phase_idx = delta_m + 2 * {lmax};
-                        const int pair_table_idx = n1 * nmodes + n2;
-                        const int base = pair_offset[pair_table_idx];
-                        const int p_min = pair_pmin[pair_table_idx];
-                        const int p_count = pair_pcount[pair_table_idx];
-                        for (int ip = 0; ip < p_count; ++ip) {{
-                            const int p = p_min + ip;
-                            const int ab_idx = base + ip;
-                            const {real_t} plm = p_pdm_shared[p * (p + 1) / 2 + abs(delta_m)];
-                            const {real_t} re_abp = re_ab[ab_idx] * plm;
-                            const {real_t} im_abp = im_ab[ab_idx] * plm;
-                            const {real_t} re_abph = re_abp * re_h_shared[p] - im_abp * im_h_shared[p];
-                            const {real_t} im_abph = re_abp * im_h_shared[p] + im_abp * re_h_shared[p];
-                            const {real_t} re_phase =
-                                re_abph * cos_mphi_shared[phase_idx] - im_abph * sin_mphi_shared[phase_idx];
-                            const {real_t} im_phase =
-                                re_abph * sin_mphi_shared[phase_idx] + im_abph * cos_mphi_shared[phase_idx];
-                            re_incr += re_phase * re_x_tmp - im_phase * im_x_tmp;
-                            im_incr += re_phase * im_x_tmp + im_phase * re_x_tmp;
+                for (int dst_ptr = dst_start; dst_ptr < dst_end; ++dst_ptr) {{
+                    const int dst_particle = leaf_particle_indices[dst_ptr];
+                    for (int src_ptr = src_start; src_ptr < src_end; ++src_ptr) {{
+                        const int src_particle = leaf_particle_indices[src_ptr];
+                        if (dst_leaf_shared == src_leaf_shared && dst_particle == src_particle) {{
+                            continue;
                         }}
-                    }}
 
-                    const long long y_idx = (((long long)dst_particle_shared * nmodes + n1) * nrhs) + rhs;
-                    {real_t}* y_ptr = reinterpret_cast<{real_t}*>(&y[y_idx]);
-                    atomicAdd(y_ptr + 0, re_incr);
-                    atomicAdd(y_ptr + 1, im_incr);
+                        if (threadIdx.x == 0) {{
+                            dst_particle_shared = dst_particle;
+                            src_particle_shared = src_particle;
+                            const {real_t} x21 =
+                                positions[3 * dst_particle_shared] - positions[3 * src_particle_shared];
+                            const {real_t} y21 =
+                                positions[3 * dst_particle_shared + 1] - positions[3 * src_particle_shared + 1];
+                            const {real_t} z21 =
+                                positions[3 * dst_particle_shared + 2] - positions[3 * src_particle_shared + 2];
+                            r_shared = sqrt(x21 * x21 + y21 * y21 + z21 * z21);
+                            ct_shared = z21 / r_shared;
+                            st_shared = sqrt(fmax(({real_t})0.0, ({real_t})1.0 - ct_shared * ct_shared));
+                            phi_shared = atan2(y21, x21);
+                        }}
+                        __syncthreads();
+
+                        for (int p = threadIdx.x; p < {n_orders}; p += blockDim.x) {{
+                            re_h_shared[p] = hankel_lookup_linear(p, r_shared, re_h, inv_dr, last_index);
+                            im_h_shared[p] = hankel_lookup_linear(p, r_shared, im_h, inv_dr, last_index);
+                            for (int absdm = 0; absdm <= p; ++absdm) {{
+                                p_pdm_shared[p * (p + 1) / 2 + absdm] =
+                                    assoc_legendre_function(p, absdm, ct_shared, st_shared, plm_coeffs);
+                            }}
+                        }}
+                        if (threadIdx.x == 0) {{
+                            for (int dm = -2 * {lmax}; dm <= 2 * {lmax}; ++dm) {{
+                                const int idx = dm + 2 * {lmax};
+                                cos_mphi_shared[idx] = cos(({real_t})dm * phi_shared);
+                                sin_mphi_shared[idx] = sin(({real_t})dm * phi_shared);
+                            }}
+                        }}
+                        __syncthreads();
+
+                        if (active) {{
+                            {real_t} re_incr = ({real_t})0.0;
+                            {real_t} im_incr = ({real_t})0.0;
+                            for (int n2 = 0; n2 < nmodes; ++n2) {{
+                                const long long x_idx =
+                                    (((long long)src_particle_shared * nmodes + n2) * nrhs) + rhs;
+                                const {complex_t} x_tmp = x[x_idx];
+                                const {real_t} re_x_tmp = x_tmp.real();
+                                const {real_t} im_x_tmp = x_tmp.imag();
+                                const int delta_m = mode_m[n2] - m1;
+                                const int phase_idx = delta_m + 2 * {lmax};
+                                const int pair_table_idx = n1 * nmodes + n2;
+                                const int base = pair_offset[pair_table_idx];
+                                const int p_min = pair_pmin[pair_table_idx];
+                                const int p_count = pair_pcount[pair_table_idx];
+                                for (int ip = 0; ip < p_count; ++ip) {{
+                                    const int p = p_min + ip;
+                                    const int ab_idx = base + ip;
+                                    const {real_t} plm =
+                                        p_pdm_shared[p * (p + 1) / 2 + abs(delta_m)];
+                                    const {real_t} re_abp = re_ab[ab_idx] * plm;
+                                    const {real_t} im_abp = im_ab[ab_idx] * plm;
+                                    const {real_t} re_abph =
+                                        re_abp * re_h_shared[p] - im_abp * im_h_shared[p];
+                                    const {real_t} im_abph =
+                                        re_abp * im_h_shared[p] + im_abp * re_h_shared[p];
+                                    const {real_t} re_phase =
+                                        re_abph * cos_mphi_shared[phase_idx] - im_abph * sin_mphi_shared[phase_idx];
+                                    const {real_t} im_phase =
+                                        re_abph * sin_mphi_shared[phase_idx] + im_abph * cos_mphi_shared[phase_idx];
+                                    re_incr += re_phase * re_x_tmp - im_phase * im_x_tmp;
+                                    im_incr += re_phase * im_x_tmp + im_phase * re_x_tmp;
+                                }}
+                            }}
+
+                            const long long y_idx =
+                                (((long long)dst_particle_shared * nmodes + n1) * nrhs) + rhs;
+                            {real_t}* y_ptr = reinterpret_cast<{real_t}*>(&y[y_idx]);
+                            atomicAdd(y_ptr + 0, re_incr);
+                            atomicAdd(y_ptr + 1, im_incr);
+                        }}
+                        __syncthreads();
+                    }}
                 }}
-                __syncthreads();
             }}
         }}
     }}
@@ -1404,7 +1443,7 @@ def _add_at_complex128_raw_kernel() -> Any:
     extern "C" __global__ void add_at_complex128(
         const long long n_pairs,
         const long long width,
-        const long long* dst,
+        const int* dst,
         const complex<double>* values,
         complex<double>* out
     ) {
@@ -1433,7 +1472,7 @@ def _add_unique_complex128_raw_kernel() -> Any:
     extern "C" __global__ void add_unique_complex128(
         const long long n_pairs,
         const long long width,
-        const long long* dst,
+        const int* dst,
         const complex<double>* values,
         complex<double>* out
     ) {
@@ -1460,7 +1499,7 @@ def _weighted_add_at_complex128_raw_kernel() -> Any:
         const long long n_pairs,
         const long long n_dirs,
         const long long nrhs,
-        const long long* dst,
+        const int* dst,
         const complex<double>* values,
         const complex<double>* weights,
         complex<double>* out
@@ -1497,7 +1536,7 @@ def _weighted_add_unique_complex128_raw_kernel() -> Any:
         const long long n_pairs,
         const long long n_dirs,
         const long long nrhs,
-        const long long* dst,
+        const int* dst,
         const complex<double>* values,
         const complex<double>* weights,
         complex<double>* out
@@ -1531,8 +1570,8 @@ def _weighted_gather_add_at_complex128_raw_kernel() -> Any:
         const long long n_pairs,
         const long long n_dirs,
         const long long nrhs,
-        const long long* src,
-        const long long* dst,
+        const int* src,
+        const int* dst,
         const complex<double>* source_values,
         const complex<double>* weights,
         complex<double>* out
@@ -1571,8 +1610,8 @@ def _weighted_gather_add_unique_complex128_raw_kernel() -> Any:
         const long long n_pairs,
         const long long n_dirs,
         const long long nrhs,
-        const long long* src,
-        const long long* dst,
+        const int* src,
+        const int* dst,
         const complex<double>* source_values,
         const complex<double>* weights,
         complex<double>* out
@@ -1614,7 +1653,7 @@ def _add_at_complex128(
     real/imag updates in the hot loop.
     """
 
-    idx = cupy.asarray(indices, dtype=cupy.int64).reshape(-1)
+    idx = cupy.asarray(indices, dtype=cupy.int32).reshape(-1)
     if int(idx.size) == 0:
         return
     tgt = cupy.asarray(target, dtype=cupy.complex128)
@@ -1666,7 +1705,7 @@ def _weighted_add_at_complex128(
 ) -> None:
     """Apply weighted `add.at` accumulation for `(pair, 4, ndir, nrhs)` batches."""
 
-    idx = cupy.asarray(indices, dtype=cupy.int64).reshape(-1)
+    idx = cupy.asarray(indices, dtype=cupy.int32).reshape(-1)
     if int(idx.size) == 0:
         return
     tgt = cupy.asarray(target, dtype=cupy.complex128)
@@ -1735,8 +1774,8 @@ def _weighted_gather_add_complex128(
 ) -> None:
     """Gather directional rows from `source_values`, apply directional weights, and add into `target`."""
 
-    src = cupy.asarray(src_indices, dtype=cupy.int64).reshape(-1)
-    dst = cupy.asarray(dst_indices, dtype=cupy.int64).reshape(-1)
+    src = cupy.asarray(src_indices, dtype=cupy.int32).reshape(-1)
+    dst = cupy.asarray(dst_indices, dtype=cupy.int32).reshape(-1)
     if int(src.size) == 0:
         return
     if int(src.size) != int(dst.size):
@@ -1807,8 +1846,8 @@ def _transfer_up_packed_unique_complex128_raw_kernel() -> Any:
         const long long n_target,
         const long long n_rhs,
         const int width,
-        const long long* src_rows,
-        const long long* dst_rows,
+        const int* src_rows,
+        const int* dst_rows,
         const int* packed_cols,
         const complex<double>* packed_vals,
         const complex<double>* phase,
@@ -1861,8 +1900,8 @@ def _transfer_down_packed_unique_complex128_raw_kernel() -> Any:
         const long long n_target,
         const long long n_rhs,
         const int width,
-        const long long* src_rows,
-        const long long* dst_rows,
+        const int* src_rows,
+        const int* dst_rows,
         const int* packed_cols,
         const complex<double>* packed_vals,
         const complex<double>* phase,
@@ -1918,8 +1957,8 @@ def _transfer_up_packed_unique_complex128(
 
     if str(map_data.storage) != "packed_stencil":
         raise ValueError("Packed transfer kernel requires packed_stencil map storage.")
-    src = cupy.asarray(src_indices, dtype=cupy.int64).reshape(-1)
-    dst = cupy.asarray(dst_indices, dtype=cupy.int64).reshape(-1)
+    src = cupy.asarray(src_indices, dtype=cupy.int32).reshape(-1)
+    dst = cupy.asarray(dst_indices, dtype=cupy.int32).reshape(-1)
     if int(src.size) == 0:
         return
     if int(src.size) != int(dst.size):
@@ -1983,8 +2022,8 @@ def _transfer_down_packed_unique_complex128(
 
     if str(map_data.storage) != "packed_stencil":
         raise ValueError("Packed transfer kernel requires packed_stencil map storage.")
-    src = cupy.asarray(src_indices, dtype=cupy.int64).reshape(-1)
-    dst = cupy.asarray(dst_indices, dtype=cupy.int64).reshape(-1)
+    src = cupy.asarray(src_indices, dtype=cupy.int32).reshape(-1)
+    dst = cupy.asarray(dst_indices, dtype=cupy.int32).reshape(-1)
     if int(src.size) == 0:
         return
     if int(src.size) != int(dst.size):
@@ -2044,8 +2083,8 @@ def _transfer_up_csr_unique_complex128_raw_kernel() -> Any:
         const long long n_source,
         const long long n_target,
         const long long n_rhs,
-        const long long* src_rows,
-        const long long* dst_rows,
+        const int* src_rows,
+        const int* dst_rows,
         const int* indptr,
         const int* indices,
         const complex<double>* values,
@@ -2096,8 +2135,8 @@ def _transfer_down_csr_unique_complex128_raw_kernel() -> Any:
         const long long n_source,
         const long long n_target,
         const long long n_rhs,
-        const long long* src_rows,
-        const long long* dst_rows,
+        const int* src_rows,
+        const int* dst_rows,
         const int* indptr,
         const int* indices,
         const complex<double>* values,
@@ -2152,8 +2191,8 @@ def _transfer_up_sparse_unique_complex128(
 
     if str(map_data.storage) != "sparse":
         raise ValueError("Sparse transfer kernel requires sparse map storage.")
-    src = cupy.asarray(src_indices, dtype=cupy.int64).reshape(-1)
-    dst = cupy.asarray(dst_indices, dtype=cupy.int64).reshape(-1)
+    src = cupy.asarray(src_indices, dtype=cupy.int32).reshape(-1)
+    dst = cupy.asarray(dst_indices, dtype=cupy.int32).reshape(-1)
     if int(src.size) == 0:
         return
     if int(src.size) != int(dst.size):
@@ -2216,8 +2255,8 @@ def _transfer_down_sparse_unique_complex128(
 
     if str(map_data.storage) != "sparse":
         raise ValueError("Sparse transfer kernel requires sparse map storage.")
-    src = cupy.asarray(src_indices, dtype=cupy.int64).reshape(-1)
-    dst = cupy.asarray(dst_indices, dtype=cupy.int64).reshape(-1)
+    src = cupy.asarray(src_indices, dtype=cupy.int32).reshape(-1)
+    dst = cupy.asarray(dst_indices, dtype=cupy.int32).reshape(-1)
     if int(src.size) == 0:
         return
     if int(src.size) != int(dst.size):
@@ -2606,11 +2645,9 @@ def _apply_exact_near_pairs(prepared: CuPyMLFMMPreparedData, x_states: Any, *, c
     np_real_type: type[np.floating[Any]]
     if near_dtype == np.dtype(np.complex64):
         cupy_out_dtype = cupy.complex64
-        cupy_real_dtype = cupy.float32
         np_real_type = np.float32
     elif near_dtype == np.dtype(np.complex128):
         cupy_out_dtype = cupy.complex128
-        cupy_real_dtype = cupy.float64
         np_real_type = np.float64
     else:
         raise ValueError(
@@ -2620,9 +2657,9 @@ def _apply_exact_near_pairs(prepared: CuPyMLFMMPreparedData, x_states: Any, *, c
     cupy_compute_dtype = cupy_out_dtype
     kernel = _exact_near_pairs_raw_kernel(int(prepared.lmax), near_dtype.str)
 
-    n_pairs = int(near.dst_particle_indices.size)
+    n_leaf_pairs = int(near.dst_leaf_indices.size)
     y = cupy.zeros_like(x_states, dtype=cupy_out_dtype)
-    if n_pairs == 0:
+    if n_leaf_pairs == 0:
         return y
     n_particles, nm, nrhs = (int(v) for v in x_states.shape)
     x_arr = cupy.ascontiguousarray(cupy.asarray(x_states, dtype=cupy_compute_dtype))
@@ -2634,20 +2671,21 @@ def _apply_exact_near_pairs(prepared: CuPyMLFMMPreparedData, x_states: Any, *, c
     warp_size = int(props["warpSize"])
     threads = max(warp_size, min(int(props["maxThreadsPerBlock"]), nm))
     blocks_x = max(1, (nm + threads - 1) // threads)
-    grid_y = min(n_pairs, max_grid_y)
+    grid_y = min(n_leaf_pairs, max_grid_y)
     grid_z = min(max(1, nrhs), max_grid_z)
 
     kernel(
         (int(blocks_x), int(grid_y), int(grid_z)),
         (int(threads),),
         (
-            np.int32(n_pairs),
-            np.int32(n_particles),
+            np.int32(n_leaf_pairs),
             np.int32(nm),
             np.int32(nrhs),
             near.positions,
-            near.dst_particle_indices,
-            near.src_particle_indices,
+            near.dst_leaf_indices,
+            near.src_leaf_indices,
+            near.leaf_particle_offsets,
+            near.leaf_particle_indices,
             near.lut_re,
             near.lut_im,
             np_real_type(float(near.inv_dr)),
@@ -2739,7 +2777,13 @@ def _apply_multilevel_far(
     workspace: CuPyMLFMMMultilevelWorkspace | None,
     cupy: Any,
 ) -> Any:
-    """Apply sampled multilevel far interactions on device."""
+    """Apply sampled multilevel far interactions on device.
+
+    Transfer loops route unique grouped batches through fused kernels. The
+    high-level branch is retained as a compatibility fallback for unsupported
+    storage variants and is a deletion candidate once transfer contracts are
+    fully locked.
+    """
 
     multilevel = prepared.multilevel
     if multilevel is None:
@@ -3021,12 +3065,12 @@ class CuPyMLFMMCouplingOperator:
     def __setstate__(self, state: dict[str, Any]) -> None:
         """Restore from host cache and regenerate CuPy prepared data."""
         self.host_cache = state["host_cache"]
-        self.lmax = int(state.get("lmax", self.host_cache.lmax))
-        self.n_particles = int(state.get("n_particles", self.host_cache.n_particles))
+        self.lmax = int(state["lmax"])
+        self.n_particles = int(state["n_particles"])
         self.cpu_coupling = None
-        self.dtype = np.dtype(state.get("dtype", np.complex128))
-        self.near_dtype = np.dtype(state.get("near_dtype", self.dtype))
-        self.far_dtype = np.dtype(state.get("far_dtype", np.complex128))
+        self.dtype = np.dtype(state["dtype"])
+        self.near_dtype = np.dtype(state["near_dtype"])
+        self.far_dtype = np.dtype(state["far_dtype"])
         self._receive_adjoint_cache = {}
         self._single_level_workspace_cache = {}
         self._multilevel_workspace_cache = {}
