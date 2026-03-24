@@ -22,7 +22,6 @@ from .mlfmm import (
     MLFMMCouplingOperator,
     MLFMMLevelOperators,
     MLFMMMultilevelOperators,
-    MLFMMResolvedPlan,
     MLFMMSingleLevelOperators,
     MLFMMTransferOperators,
 )
@@ -37,9 +36,113 @@ class CuPyDirectionalGridData:
     """Device copy of one directional sampling grid."""
 
     order: int
-    directions: Any
-    weights: Any
+    n_directions: int
     reflection_permutation: Any
+
+
+@dataclass(frozen=True)
+class CuPyHostDirectionalGridData:
+    """Compact host directional-grid payload used for cache serialization."""
+
+    order: int
+    n_directions: int
+    reflection_permutation: np.ndarray
+
+
+@dataclass(frozen=True)
+class CuPyHostDirectionalTransformsData:
+    """Compact host directional transform payload with canonical operators only."""
+
+    box_order: int
+    grid_order: int
+    grid: CuPyHostDirectionalGridData
+    Fth: np.ndarray
+    Fph: np.ndarray
+    Gth: np.ndarray
+    Gph: np.ndarray
+
+
+@dataclass(frozen=True)
+class CuPyHostLevelData:
+    """Compact host per-level payload for multilevel upload."""
+
+    level: int
+    n_boxes: int
+    box_order: int
+    translator_order: int
+    grid_order: int
+    directional: CuPyHostDirectionalTransformsData
+    far_offset_batches: dict[Offset3, tuple[np.ndarray, np.ndarray]]
+    offset_diagonals: dict[Offset3, np.ndarray]
+
+
+@dataclass(frozen=True)
+class CuPyHostTransferData:
+    """Compact host transfer payload with canonical interpolation map only."""
+
+    child_level: int
+    parent_level: int
+    interpolation: Any
+    batches_by_shift: dict[Offset3, tuple[np.ndarray, np.ndarray]]
+    phase_up_by_shift: dict[Offset3, np.ndarray]
+    phase_down_by_shift: dict[Offset3, np.ndarray]
+
+
+@dataclass(frozen=True)
+class CuPyHostSingleLevelData:
+    """Compact host single-level payload for CuPy upload."""
+
+    box_order: int
+    translator_order: int
+    grid_order: int
+    directional: CuPyHostDirectionalTransformsData
+    aggregation: tuple[np.ndarray, ...]
+    far_offset_batches: dict[Offset3, tuple[np.ndarray, np.ndarray]]
+    offset_diagonals: dict[Offset3, np.ndarray]
+
+
+@dataclass(frozen=True)
+class CuPyHostMultilevelData:
+    """Compact host multilevel payload for CuPy upload."""
+
+    levels: tuple[CuPyHostLevelData, ...]
+    transfers: tuple[CuPyHostTransferData, ...]
+    leaf_level: int
+    hf_start_level: int
+    hf_end_level: int
+    aggregation: tuple[np.ndarray, ...]
+
+
+@dataclass(frozen=True)
+class CuPyMLFMMHostCacheData:
+    """Compact host-only cache artifact for CuPy MLFMM preparation."""
+
+    lmax: int
+    k: float
+    stage: str
+    dtype: np.dtype
+    near_dtype: np.dtype
+    far_dtype: np.dtype
+    n_particles: int
+    leaf_particle_offsets: np.ndarray
+    leaf_particle_indices: np.ndarray
+    near_positions_flat: np.ndarray
+    near_dst_particle_indices: np.ndarray
+    near_src_particle_indices: np.ndarray
+    near_lut_re: np.ndarray
+    near_lut_im: np.ndarray
+    near_inv_dr: float
+    near_last_index: int
+    near_plm_coeffs: np.ndarray
+    near_compact_re_ab: np.ndarray
+    near_compact_im_ab: np.ndarray
+    near_mode_m: np.ndarray
+    near_pair_offset: np.ndarray
+    near_pair_pmin: np.ndarray
+    near_pair_pcount: np.ndarray
+    single_level: CuPyHostSingleLevelData | None = None
+    multilevel: CuPyHostMultilevelData | None = None
+    plan_summary: dict[str, int | float | str] | None = None
 
 
 @dataclass(frozen=True)
@@ -72,17 +175,10 @@ class CuPyDirectionalInterpolationData:
 
 @dataclass(frozen=True)
 class CuPyMLFMMPartitionData:
-    """Device-ready encoding of occupied leaves and pair schedules."""
+    """Host-side leaf-to-particle lookup used only during upload grouping."""
 
-    root_center: Any
-    root_half_size: float
-    depth: int
     leaf_particle_offsets_host: np.ndarray
     leaf_particle_indices_host: np.ndarray
-    leaf_particle_offsets: Any
-    leaf_particle_indices: Any
-    leaf_near_pairs: Any
-    leaf_far_pairs: Any
 
 
 @dataclass(frozen=True)
@@ -111,11 +207,7 @@ class CuPyMLFMMLevelData:
     """Device-ready per-level data used in multilevel repeated applies."""
 
     level: int
-    coords: Any
-    centers: Any
-    parent_indices: Any
-    children_offsets: Any
-    children_indices: Any
+    n_boxes: int
     box_order: int
     translator_order: int
     grid_order: int
@@ -194,9 +286,6 @@ class CuPyMLFMMPreparedData:
     lmax: int
     k: float
     stage: str
-    positions: Any
-    partition: CuPyMLFMMPartitionData
-    resolved_plan: MLFMMResolvedPlan
     near_pairs: CuPyMLFMMNearPairData
     single_level: CuPyMLFMMSingleLevelData | None = None
     multilevel: CuPyMLFMMMultilevelData | None = None
@@ -249,15 +338,6 @@ def _pack_index_lists(
     return offsets, flat
 
 
-def _pack_pairs(pairs: tuple[tuple[int, int], ...], *, name: str) -> np.ndarray:
-    if len(pairs) == 0:
-        return np.zeros((0, 2), dtype=np.int64)
-    out = np.asarray(pairs, dtype=np.int64)
-    if out.ndim != 2 or out.shape[1] != 2:
-        raise ValueError(f"{name} must be a list/tuple of (a, b) pairs.")
-    return np.ascontiguousarray(out)
-
-
 @cache
 def _mode_metadata_tables(lmax: int) -> np.ndarray:
     """Return CELES/SMUTHI `m` mode indices indexed by flattened mode id."""
@@ -302,27 +382,31 @@ def _mode_pair_tables(lmax: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 
 
 def _upload_directional_transforms(
-    transforms: MLFMMDirectionalTransforms, *, cupy: Any
+    transforms: MLFMMDirectionalTransforms | CuPyHostDirectionalTransformsData, *, cupy: Any
 ) -> CuPyDirectionalTransformsData:
     grid = transforms.grid
-    directions = _as_numpy_3cols(
-        grid.directions, dtype=np.float64, name="directional.grid.directions"
-    )
-    weights = _as_numpy_1d(grid.weights, dtype=np.float64, name="directional.grid.weights")
+    n_dir: int
+    if hasattr(grid, "n_directions"):
+        n_dir = int(grid.n_directions)
+    else:
+        directions = _as_numpy_3cols(
+            grid.directions, dtype=np.float64, name="directional.grid.directions"
+        )
+        weights = _as_numpy_1d(grid.weights, dtype=np.float64, name="directional.grid.weights")
+        if directions.shape[0] != weights.size:
+            raise ValueError(
+                "Directional grid directions/weights mismatch: "
+                f"{directions.shape[0]} vs {weights.size}."
+            )
+        n_dir = int(directions.shape[0])
     reflection = _as_numpy_1d(
         grid.reflection_permutation,
         dtype=np.int64,
         name="directional.grid.reflection_permutation",
     )
-    if directions.shape[0] != weights.size:
+    if reflection.size != n_dir:
         raise ValueError(
-            "Directional grid directions/weights mismatch: "
-            f"{directions.shape[0]} vs {weights.size}."
-        )
-    if reflection.size != weights.size:
-        raise ValueError(
-            "Directional grid reflection-permutation size mismatch: "
-            f"{reflection.size} vs {weights.size}."
+            f"Directional grid reflection-permutation size mismatch: {reflection.size} vs {n_dir}."
         )
 
     # Directional transforms are complex128 reference operators; keep them exact.
@@ -330,7 +414,6 @@ def _upload_directional_transforms(
     fph = _as_numpy_2d(transforms.Fph, dtype=np.complex128, name="directional.Fph")
     gth = _as_numpy_2d(transforms.Gth, dtype=np.complex128, name="directional.Gth")
     gph = _as_numpy_2d(transforms.Gph, dtype=np.complex128, name="directional.Gph")
-    n_dir = directions.shape[0]
     if (
         fth.shape[0] != n_dir
         or fph.shape[0] != n_dir
@@ -345,8 +428,7 @@ def _upload_directional_transforms(
         grid_order=int(transforms.grid.order),
         grid=CuPyDirectionalGridData(
             order=int(grid.order),
-            directions=cupy.asarray(directions, dtype=cupy.float64),
-            weights=cupy.asarray(weights, dtype=cupy.float64),
+            n_directions=int(n_dir),
             reflection_permutation=cupy.asarray(reflection, dtype=cupy.int64),
         ),
         Fth=cupy.asarray(fth, dtype=cupy.complex128),
@@ -460,29 +542,192 @@ def _upload_offset_batches(
     return out
 
 
-def _upload_partition(partition: MLFMMPartition, *, cupy: Any) -> CuPyMLFMMPartitionData:
-    leaf_particle_offsets, leaf_particle_indices = _pack_index_lists(
+def _partition_from_host_cache(cache: CuPyMLFMMHostCacheData) -> CuPyMLFMMPartitionData:
+    """Build upload-only partition lookup from compact host cache data."""
+
+    return CuPyMLFMMPartitionData(
+        leaf_particle_offsets_host=np.asarray(cache.leaf_particle_offsets, dtype=np.int64),
+        leaf_particle_indices_host=np.asarray(cache.leaf_particle_indices, dtype=np.int64),
+    )
+
+
+def _copy_batches_host(
+    batches: dict[Offset3, tuple[np.ndarray, np.ndarray]],
+) -> dict[Offset3, tuple[np.ndarray, np.ndarray]]:
+    """Return contiguous host copies of index batches for cache payloads."""
+
+    out: dict[Offset3, tuple[np.ndarray, np.ndarray]] = {}
+    for key, (src, dst) in batches.items():
+        out[key] = (
+            np.ascontiguousarray(np.asarray(src, dtype=np.int64).reshape(-1)),
+            np.ascontiguousarray(np.asarray(dst, dtype=np.int64).reshape(-1)),
+        )
+    return out
+
+
+def _copy_directional_host(
+    transforms: MLFMMDirectionalTransforms,
+) -> CuPyHostDirectionalTransformsData:
+    """Extract canonical directional operators into a compact host payload."""
+
+    n_dir = int(np.asarray(transforms.grid.reflection_permutation).size)
+    return CuPyHostDirectionalTransformsData(
+        box_order=int(transforms.box_order),
+        grid_order=int(transforms.grid.order),
+        grid=CuPyHostDirectionalGridData(
+            order=int(transforms.grid.order),
+            n_directions=n_dir,
+            reflection_permutation=np.ascontiguousarray(
+                np.asarray(transforms.grid.reflection_permutation, dtype=np.int64).reshape(-1)
+            ),
+        ),
+        Fth=np.ascontiguousarray(np.asarray(transforms.Fth, dtype=np.complex128)),
+        Fph=np.ascontiguousarray(np.asarray(transforms.Fph, dtype=np.complex128)),
+        Gth=np.ascontiguousarray(np.asarray(transforms.Gth, dtype=np.complex128)),
+        Gph=np.ascontiguousarray(np.asarray(transforms.Gph, dtype=np.complex128)),
+    )
+
+
+def _build_host_single_level(single: MLFMMSingleLevelOperators) -> CuPyHostSingleLevelData:
+    """Build compact host cache payload for one single-level sampled-far stage."""
+
+    return CuPyHostSingleLevelData(
+        box_order=int(single.box_order),
+        translator_order=int(single.translator_order),
+        grid_order=int(single.grid_order),
+        directional=_copy_directional_host(single.directional),
+        aggregation=tuple(
+            np.ascontiguousarray(np.asarray(block, dtype=np.complex128))
+            for block in single.aggregation
+        ),
+        far_offset_batches=_copy_batches_host(single.far_offset_batches),
+        offset_diagonals={
+            key: np.ascontiguousarray(np.asarray(values, dtype=np.complex128).reshape(-1))
+            for key, values in single.offset_diagonals.items()
+        },
+    )
+
+
+def _build_host_multilevel(multilevel: MLFMMMultilevelOperators) -> CuPyHostMultilevelData:
+    """Build compact host cache payload for one multilevel sampled-far stage."""
+
+    levels = tuple(
+        CuPyHostLevelData(
+            level=int(level.level),
+            n_boxes=int(np.asarray(level.coords).shape[0]),
+            box_order=int(level.box_order),
+            translator_order=int(level.translator_order),
+            grid_order=int(level.grid_order),
+            directional=_copy_directional_host(level.directional),
+            far_offset_batches=_copy_batches_host(level.far_offset_batches),
+            offset_diagonals={
+                key: np.ascontiguousarray(np.asarray(values, dtype=np.complex128).reshape(-1))
+                for key, values in level.offset_diagonals.items()
+            },
+        )
+        for level in multilevel.levels
+    )
+    transfers = tuple(
+        CuPyHostTransferData(
+            child_level=int(transfer.child_level),
+            parent_level=int(transfer.parent_level),
+            interpolation=transfer.interpolation,
+            batches_by_shift=_copy_batches_host(transfer.batches_by_shift),
+            phase_up_by_shift={
+                key: np.ascontiguousarray(np.asarray(values, dtype=np.complex128).reshape(-1))
+                for key, values in transfer.phase_up_by_shift.items()
+            },
+            phase_down_by_shift={
+                key: np.ascontiguousarray(np.asarray(values, dtype=np.complex128).reshape(-1))
+                for key, values in transfer.phase_down_by_shift.items()
+            },
+        )
+        for transfer in multilevel.transfers
+    )
+    return CuPyHostMultilevelData(
+        levels=levels,
+        transfers=transfers,
+        leaf_level=int(multilevel.leaf_level),
+        hf_start_level=int(multilevel.hf_start_level),
+        hf_end_level=int(multilevel.hf_end_level),
+        aggregation=tuple(
+            np.ascontiguousarray(np.asarray(block, dtype=np.complex128))
+            for block in multilevel.aggregation
+        ),
+    )
+
+
+def _build_mlfmm_cupy_host_cache(coupling: MLFMMCouplingOperator) -> CuPyMLFMMHostCacheData:
+    """Build a compact host-only MLFMM cache artifact from CPU reference operators."""
+
+    near_dtype = np.dtype(coupling.near_dtype)
+    real_dtype: type[np.floating[Any]]
+    lut_dtype: type[np.complexfloating[Any, Any]]
+    if near_dtype == np.dtype(np.complex64):
+        real_dtype = np.float32
+        lut_dtype = np.complex64
+    else:
+        real_dtype = np.float64
+        lut_dtype = np.complex128
+    partition = coupling.resolved_plan.partition
+    leaf_offsets, leaf_indices = _pack_index_lists(
         [leaf.particle_indices for leaf in partition.leaves]
     )
-    return CuPyMLFMMPartitionData(
-        root_center=cupy.asarray(
-            _as_numpy_1d(partition.root_center, dtype=np.float64, name="partition.root_center"),
-            dtype=cupy.float64,
+    dst_indices, src_indices = _build_exact_near_pair_indices(partition)
+    lut = np.asarray(coupling.radial_lut.h, dtype=np.complex128).T.astype(lut_dtype, copy=False)
+    compact_re_ab, compact_im_ab = _translation_ab5_compact_tables(
+        int(coupling.lmax), dtype=np.complex128
+    )
+    plm_coeffs = _translation_plm_coeff_table(int(coupling.lmax), dtype=np.float64).reshape(-1)
+    mode_m = _mode_metadata_tables(int(coupling.lmax))
+    pair_offset, pair_pmin, pair_pcount = _mode_pair_tables(int(coupling.lmax))
+    plan = coupling.resolved_plan
+    plan_summary: dict[str, int | float | str] = {
+        "stage": str(plan.stage),
+        "selected_depth": int(plan.selected_depth),
+        "depth_from_occupancy": int(plan.depth_from_occupancy),
+        "depth_from_size_floor": int(plan.depth_from_size_floor),
+        "occupied_leaf_count": int(plan.occupied_leaf_count),
+        "max_particles_per_leaf": int(plan.max_particles_per_leaf),
+        "root_side_length": float(plan.root_side_length),
+        "leaf_side_length": float(plan.leaf_side_length),
+        "max_global_radius": float(plan.max_global_radius),
+    }
+    return CuPyMLFMMHostCacheData(
+        lmax=int(coupling.lmax),
+        k=float(coupling.k),
+        stage=str(coupling.resolved_plan.stage),
+        dtype=np.dtype(coupling.dtype),
+        near_dtype=np.dtype(coupling.near_dtype),
+        far_dtype=np.dtype(coupling.far_dtype),
+        n_particles=int(np.asarray(coupling.positions).shape[0]),
+        leaf_particle_offsets=np.ascontiguousarray(leaf_offsets, dtype=np.int64),
+        leaf_particle_indices=np.ascontiguousarray(leaf_indices, dtype=np.int64),
+        near_positions_flat=np.ascontiguousarray(
+            np.asarray(coupling.positions, dtype=real_dtype).reshape(-1)
         ),
-        root_half_size=float(partition.root_half_size),
-        depth=int(partition.depth),
-        leaf_particle_offsets_host=np.asarray(leaf_particle_offsets, dtype=np.int64),
-        leaf_particle_indices_host=np.asarray(leaf_particle_indices, dtype=np.int64),
-        leaf_particle_offsets=cupy.asarray(leaf_particle_offsets, dtype=cupy.int64),
-        leaf_particle_indices=cupy.asarray(leaf_particle_indices, dtype=cupy.int64),
-        leaf_near_pairs=cupy.asarray(
-            _pack_pairs(partition.leaf_near_pairs, name="partition.leaf_near_pairs"),
-            dtype=cupy.int64,
+        near_dst_particle_indices=np.ascontiguousarray(dst_indices, dtype=np.int64),
+        near_src_particle_indices=np.ascontiguousarray(src_indices, dtype=np.int64),
+        near_lut_re=np.ascontiguousarray(lut.real.reshape(-1), dtype=real_dtype),
+        near_lut_im=np.ascontiguousarray(lut.imag.reshape(-1), dtype=real_dtype),
+        near_inv_dr=float(coupling.radial_lut._inv_dr),
+        near_last_index=int(coupling.radial_lut._last_index),
+        near_plm_coeffs=np.ascontiguousarray(plm_coeffs, dtype=real_dtype),
+        near_compact_re_ab=np.ascontiguousarray(compact_re_ab, dtype=real_dtype),
+        near_compact_im_ab=np.ascontiguousarray(compact_im_ab, dtype=real_dtype),
+        near_mode_m=np.ascontiguousarray(mode_m, dtype=np.int32),
+        near_pair_offset=np.ascontiguousarray(pair_offset.reshape(-1), dtype=np.int32),
+        near_pair_pmin=np.ascontiguousarray(pair_pmin.reshape(-1), dtype=np.int32),
+        near_pair_pcount=np.ascontiguousarray(pair_pcount.reshape(-1), dtype=np.int32),
+        single_level=(
+            _build_host_single_level(coupling.single_level)
+            if coupling.single_level is not None
+            else None
         ),
-        leaf_far_pairs=cupy.asarray(
-            _pack_pairs(partition.leaf_far_pairs, name="partition.leaf_far_pairs"),
-            dtype=cupy.int64,
+        multilevel=(
+            _build_host_multilevel(coupling.multilevel) if coupling.multilevel is not None else None
         ),
+        plan_summary=plan_summary,
     )
 
 
@@ -563,10 +808,13 @@ def _upload_leaf_apply_groups(
 
 
 def _upload_single_level(
-    single: MLFMMSingleLevelOperators, partition: CuPyMLFMMPartitionData, *, cupy: Any
+    single: MLFMMSingleLevelOperators | CuPyHostSingleLevelData,
+    partition: CuPyMLFMMPartitionData,
+    *,
+    cupy: Any,
 ) -> CuPyMLFMMSingleLevelData:
     directional = _upload_directional_transforms(single.directional, cupy=cupy)
-    ndir = int(np.asarray(single.directional.grid.directions).shape[0])
+    ndir = int(directional.grid.n_directions)
     offset_diagonals: dict[Offset3, Any] = {}
     for offset, diag in single.offset_diagonals.items():
         diag_arr = _as_numpy_1d(
@@ -604,10 +852,11 @@ def _upload_single_level(
     )
 
 
-def _upload_level(level: MLFMMLevelOperators, *, cupy: Any) -> CuPyMLFMMLevelData:
+def _upload_level(
+    level: MLFMMLevelOperators | CuPyHostLevelData, *, cupy: Any
+) -> CuPyMLFMMLevelData:
     directional = _upload_directional_transforms(level.directional, cupy=cupy)
-    children_offsets, children_indices = _pack_index_lists(level.children)
-    ndir = int(np.asarray(level.directional.grid.directions).shape[0])
+    ndir = int(directional.grid.n_directions)
     offset_diagonals: dict[Offset3, Any] = {}
     for offset, diag in level.offset_diagonals.items():
         diag_arr = _as_numpy_1d(
@@ -619,25 +868,14 @@ def _upload_level(level: MLFMMLevelOperators, *, cupy: Any) -> CuPyMLFMMLevelDat
             )
         offset_diagonals[offset] = cupy.asarray(diag_arr, dtype=cupy.complex128)
 
-    coords = _as_numpy_3cols(level.coords, dtype=np.int64, name=f"level[{level.level}].coords")
-    centers = _as_numpy_3cols(level.centers, dtype=np.float64, name=f"level[{level.level}].centers")
-    parent_indices = _as_numpy_1d(
-        level.parent_indices,
-        dtype=np.int64,
-        name=f"level[{level.level}].parent_indices",
-    )
-    if coords.shape[0] != centers.shape[0] or coords.shape[0] != parent_indices.size:
-        raise ValueError(
-            f"level {level.level} inconsistent box counts among coords/centers/parent_indices."
-        )
+    if hasattr(level, "n_boxes"):
+        n_boxes = int(level.n_boxes)
+    else:
+        n_boxes = int(np.asarray(level.coords).shape[0])
 
     return CuPyMLFMMLevelData(
         level=int(level.level),
-        coords=cupy.asarray(coords, dtype=cupy.int64),
-        centers=cupy.asarray(centers, dtype=cupy.float64),
-        parent_indices=cupy.asarray(parent_indices, dtype=cupy.int64),
-        children_offsets=cupy.asarray(children_offsets, dtype=cupy.int64),
-        children_indices=cupy.asarray(children_indices, dtype=cupy.int64),
+        n_boxes=n_boxes,
         box_order=int(level.box_order),
         translator_order=int(level.translator_order),
         grid_order=int(level.grid_order),
@@ -652,7 +890,7 @@ def _upload_level(level: MLFMMLevelOperators, *, cupy: Any) -> CuPyMLFMMLevelDat
 
 
 def _upload_transfer(
-    transfer: MLFMMTransferOperators,
+    transfer: MLFMMTransferOperators | CuPyHostTransferData,
     *,
     child_reflection_permutation: np.ndarray,
     parent_reflection_permutation: np.ndarray,
@@ -723,7 +961,7 @@ def _upload_transfer(
 
 
 def _upload_multilevel(
-    multilevel: MLFMMMultilevelOperators,
+    multilevel: MLFMMMultilevelOperators | CuPyHostMultilevelData,
     partition: CuPyMLFMMPartitionData,
     *,
     cupy: Any,
@@ -793,78 +1031,85 @@ def _build_exact_near_pair_indices(partition: MLFMMPartition) -> tuple[np.ndarra
     return np.asarray(dst_indices, dtype=np.int64), np.asarray(src_indices, dtype=np.int64)
 
 
-def _upload_exact_near_pair_data(
-    coupling: MLFMMCouplingOperator, *, cupy: Any
+def _upload_exact_near_pair_data_from_host_cache(
+    cache: CuPyMLFMMHostCacheData, *, cupy: Any
 ) -> CuPyMLFMMNearPairData:
-    """Upload exact-near pair metadata and translation tables for on-device evaluation."""
+    """Upload exact-near payload directly from compact host cache arrays."""
 
-    dst_indices, src_indices = _build_exact_near_pair_indices(coupling.resolved_plan.partition)
-    radial_lut = coupling.radial_lut
-    near_dtype = np.dtype(coupling.near_dtype)
-    if near_dtype not in {np.dtype(np.complex64), np.dtype(np.complex128)}:
+    near_dtype = np.dtype(cache.near_dtype)
+    if near_dtype == np.dtype(np.complex64):
+        cupy_real_dtype = cupy.float32
+    elif near_dtype == np.dtype(np.complex128):
+        cupy_real_dtype = cupy.float64
+    else:
         raise ValueError(
             "CuPy MLFMM near path supports only complex64/complex128 near dtypes. "
             f"Got {near_dtype!r}."
         )
-    real_dtype: type[np.floating[Any]]
-    lut_dtype: type[np.complexfloating[Any, Any]]
-    if near_dtype == np.dtype(np.complex64):
-        real_dtype = np.float32
-        cupy_real_dtype = cupy.float32
-        lut_dtype = np.complex64
-    else:
-        real_dtype = np.float64
-        cupy_real_dtype = cupy.float64
-        lut_dtype = np.complex128
-    lut = np.asarray(radial_lut.h, dtype=np.complex128).T.astype(lut_dtype, copy=False)
-    compact_re_ab, compact_im_ab = _translation_ab5_compact_tables(
-        int(coupling.lmax), dtype=np.complex128
-    )
-    plm_coeffs = _translation_plm_coeff_table(int(coupling.lmax), dtype=np.float64).reshape(-1)
-    mode_m = _mode_metadata_tables(int(coupling.lmax))
-    pair_offset, pair_pmin, pair_pcount = _mode_pair_tables(int(coupling.lmax))
     return CuPyMLFMMNearPairData(
         near_dtype=near_dtype,
         positions=cupy.asarray(
-            np.ascontiguousarray(np.asarray(coupling.positions, dtype=real_dtype).reshape(-1)),
+            np.ascontiguousarray(np.asarray(cache.near_positions_flat).reshape(-1)),
             dtype=cupy_real_dtype,
             blocking=True,
         ),
         dst_particle_indices=cupy.asarray(
-            _as_numpy_1d(dst_indices, dtype=np.int64, name="exact_near.dst_particle_indices"),
+            np.ascontiguousarray(np.asarray(cache.near_dst_particle_indices, dtype=np.int64)),
             dtype=cupy.int64,
             blocking=True,
         ),
         src_particle_indices=cupy.asarray(
-            _as_numpy_1d(src_indices, dtype=np.int64, name="exact_near.src_particle_indices"),
+            np.ascontiguousarray(np.asarray(cache.near_src_particle_indices, dtype=np.int64)),
             dtype=cupy.int64,
             blocking=True,
         ),
         lut_re=cupy.asarray(
-            np.ascontiguousarray(lut.real.reshape(-1), dtype=real_dtype),
+            np.ascontiguousarray(np.asarray(cache.near_lut_re).reshape(-1)),
             dtype=cupy_real_dtype,
             blocking=True,
         ),
         lut_im=cupy.asarray(
-            np.ascontiguousarray(lut.imag.reshape(-1), dtype=real_dtype),
+            np.ascontiguousarray(np.asarray(cache.near_lut_im).reshape(-1)),
             dtype=cupy_real_dtype,
             blocking=True,
         ),
-        inv_dr=float(radial_lut._inv_dr),
-        last_index=int(radial_lut._last_index),
+        inv_dr=float(cache.near_inv_dr),
+        last_index=int(cache.near_last_index),
         plm_coeffs=cupy.asarray(
-            plm_coeffs.astype(real_dtype, copy=False), dtype=cupy_real_dtype, blocking=True
+            np.ascontiguousarray(np.asarray(cache.near_plm_coeffs).reshape(-1)),
+            dtype=cupy_real_dtype,
+            blocking=True,
         ),
         compact_re_ab=cupy.asarray(
-            compact_re_ab.astype(real_dtype, copy=False), dtype=cupy_real_dtype, blocking=True
+            np.ascontiguousarray(np.asarray(cache.near_compact_re_ab).reshape(-1)),
+            dtype=cupy_real_dtype,
+            blocking=True,
         ),
         compact_im_ab=cupy.asarray(
-            compact_im_ab.astype(real_dtype, copy=False), dtype=cupy_real_dtype, blocking=True
+            np.ascontiguousarray(np.asarray(cache.near_compact_im_ab).reshape(-1)),
+            dtype=cupy_real_dtype,
+            blocking=True,
         ),
-        mode_m=cupy.asarray(mode_m, dtype=cupy.int32, blocking=True),
-        pair_offset=cupy.asarray(pair_offset.reshape(-1), dtype=cupy.int32, blocking=True),
-        pair_pmin=cupy.asarray(pair_pmin.reshape(-1), dtype=cupy.int32, blocking=True),
-        pair_pcount=cupy.asarray(pair_pcount.reshape(-1), dtype=cupy.int32, blocking=True),
+        mode_m=cupy.asarray(
+            np.ascontiguousarray(np.asarray(cache.near_mode_m, dtype=np.int32)),
+            dtype=cupy.int32,
+            blocking=True,
+        ),
+        pair_offset=cupy.asarray(
+            np.ascontiguousarray(np.asarray(cache.near_pair_offset, dtype=np.int32)),
+            dtype=cupy.int32,
+            blocking=True,
+        ),
+        pair_pmin=cupy.asarray(
+            np.ascontiguousarray(np.asarray(cache.near_pair_pmin, dtype=np.int32)),
+            dtype=cupy.int32,
+            blocking=True,
+        ),
+        pair_pcount=cupy.asarray(
+            np.ascontiguousarray(np.asarray(cache.near_pair_pcount, dtype=np.int32)),
+            dtype=cupy.int32,
+            blocking=True,
+        ),
     )
 
 
@@ -1841,9 +2086,9 @@ def _apply_multilevel_far(prepared: CuPyMLFMMPreparedData, x_states: Any, *, cup
     outgoing = [
         cupy.zeros(
             (
-                int(level.coords.shape[0]),
+                int(level.n_boxes),
                 4,
-                int(level.directional.grid.directions.shape[0]),
+                int(level.directional.grid.n_directions),
                 nrhs,
             ),
             dtype=cupy.complex128,
@@ -1946,8 +2191,11 @@ class CuPyMLFMMCouplingOperator:
     - public output is cast to `dtype`.
     """
 
-    cpu_coupling: MLFMMCouplingOperator
+    lmax: int
+    n_particles: int
     prepared_data: CuPyMLFMMPreparedData
+    host_cache: CuPyMLFMMHostCacheData
+    cpu_coupling: MLFMMCouplingOperator | None = None
     dtype: np.dtype = np.dtype(np.complex128)
     near_dtype: np.dtype = np.dtype(np.complex128)
     far_dtype: np.dtype = np.dtype(np.complex128)
@@ -1972,8 +2220,8 @@ class CuPyMLFMMCouplingOperator:
                 "CuPy MLFMM sampled-far apply requires complex128 far precision "
                 f"(got {far_dtype!r})."
             )
-        nm = n_modes(int(self.cpu_coupling.lmax))
-        n_particles = int(self.cpu_coupling.positions.shape[0])
+        nm = n_modes(int(self.lmax))
+        n_particles = int(self.n_particles)
         x_states, squeezed = _reshape_unknowns_to_particle_modes(
             x,
             n_particles=n_particles,
@@ -1997,27 +2245,58 @@ class CuPyMLFMMCouplingOperator:
             squeezed=squeezed,
         )
 
+    def __getstate__(self) -> dict[str, Any]:
+        """Serialize only host-side MLFMM state; rebuild device payload on load."""
+
+        return {
+            "_cache_version": 1,
+            "host_cache": self.host_cache,
+            "lmax": int(self.lmax),
+            "n_particles": int(self.n_particles),
+            "dtype": np.dtype(self.dtype),
+            "near_dtype": np.dtype(self.near_dtype),
+            "far_dtype": np.dtype(self.far_dtype),
+        }
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        """Restore from host cache and regenerate CuPy prepared data."""
+        self.host_cache = state["host_cache"]
+        self.lmax = int(state.get("lmax", self.host_cache.lmax))
+        self.n_particles = int(state.get("n_particles", self.host_cache.n_particles))
+        self.cpu_coupling = None
+        self.dtype = np.dtype(state.get("dtype", np.complex128))
+        self.near_dtype = np.dtype(state.get("near_dtype", self.dtype))
+        self.far_dtype = np.dtype(state.get("far_dtype", np.complex128))
+        self.prepared_data = prepare_mlfmm_cupy_data(self.host_cache)
+
 
 def prepare_mlfmm_cupy_coupling(coupling: MLFMMCouplingOperator) -> CuPyMLFMMCouplingOperator:
     """Wrap a CPU-built MLFMM coupling plan in a CuPy repeated-apply operator."""
 
-    prepared = prepare_mlfmm_cupy_data(coupling)
+    host_cache = _build_mlfmm_cupy_host_cache(coupling)
+    prepared = prepare_mlfmm_cupy_data(host_cache)
     return CuPyMLFMMCouplingOperator(
-        cpu_coupling=coupling,
+        lmax=int(coupling.lmax),
+        n_particles=int(np.asarray(coupling.positions).shape[0]),
         prepared_data=prepared,
+        host_cache=host_cache,
+        cpu_coupling=None,
         dtype=np.dtype(coupling.dtype),
         near_dtype=np.dtype(coupling.near_dtype),
         far_dtype=np.dtype(coupling.far_dtype),
     )
 
 
-def prepare_mlfmm_cupy_data(coupling: MLFMMCouplingOperator) -> CuPyMLFMMPreparedData:
+def prepare_mlfmm_cupy_data(
+    source: MLFMMCouplingOperator | CuPyMLFMMHostCacheData,
+) -> CuPyMLFMMPreparedData:
     """Upload repeated-apply MLFMM structures from a CPU-built coupling plan.
 
     Parameters
     ----------
-    coupling:
-        CPU-built MLFMM coupling object from `prepare_mlfmm_coupling(...)`.
+    source:
+        Either the CPU-built MLFMM coupling object from
+        `prepare_mlfmm_coupling(...)`, or a compact host cache payload.
 
     Returns
     -------
@@ -2029,47 +2308,48 @@ def prepare_mlfmm_cupy_data(coupling: MLFMMCouplingOperator) -> CuPyMLFMMPrepare
 
     cupy, _ = import_cupy()
     cupyx_sparse = import_module("cupyx.scipy.sparse")
-    near_dtype = np.dtype(coupling.near_dtype)
+    host_cache = (
+        source
+        if isinstance(source, CuPyMLFMMHostCacheData)
+        else _build_mlfmm_cupy_host_cache(source)
+    )
+    near_dtype = np.dtype(host_cache.near_dtype)
     if near_dtype not in {np.dtype(np.complex64), np.dtype(np.complex128)}:
         raise ValueError(
             "CuPy MLFMM preparation supports only complex64/complex128 near dtypes. "
             f"Got {near_dtype!r}."
         )
-    if np.dtype(coupling.far_dtype) != np.dtype(np.complex128):
+    if np.dtype(host_cache.far_dtype) != np.dtype(np.complex128):
         raise ValueError(
             "CuPy MLFMM preparation requires complex128 sampled-far precision. "
-            f"Got far_dtype={np.dtype(coupling.far_dtype)!r}."
+            f"Got far_dtype={np.dtype(host_cache.far_dtype)!r}."
         )
-    stage = str(coupling.resolved_plan.stage)
+    stage = str(host_cache.stage)
     if stage not in {"single_level", "multilevel"}:
         raise ValueError(
             "CuPy MLFMM preparation requires a non-direct MLFMM stage. "
             f"Resolved stage is {stage!r}."
         )
 
-    partition_data = _upload_partition(coupling.resolved_plan.partition, cupy=cupy)
-    near_pairs = _upload_exact_near_pair_data(coupling, cupy=cupy)
-    positions = _as_numpy_3cols(coupling.positions, dtype=np.float64, name="coupling.positions")
+    partition_data = _partition_from_host_cache(host_cache)
+    near_pairs = _upload_exact_near_pair_data_from_host_cache(host_cache, cupy=cupy)
     single_level_data: CuPyMLFMMSingleLevelData | None = None
     multilevel_data: CuPyMLFMMMultilevelData | None = None
     if stage == "single_level":
-        if coupling.single_level is None:
+        if host_cache.single_level is None:
             raise ValueError("single_level stage was selected but no single-level operators exist.")
-        single_level_data = _upload_single_level(coupling.single_level, partition_data, cupy=cupy)
+        single_level_data = _upload_single_level(host_cache.single_level, partition_data, cupy=cupy)
     else:
-        if coupling.multilevel is None:
+        if host_cache.multilevel is None:
             raise ValueError("multilevel stage was selected but no multilevel operators exist.")
         multilevel_data = _upload_multilevel(
-            coupling.multilevel, partition_data, cupy=cupy, cupyx_sparse=cupyx_sparse
+            host_cache.multilevel, partition_data, cupy=cupy, cupyx_sparse=cupyx_sparse
         )
 
     return CuPyMLFMMPreparedData(
-        lmax=int(coupling.lmax),
-        k=float(coupling.k),
+        lmax=int(host_cache.lmax),
+        k=float(host_cache.k),
         stage=stage,
-        positions=cupy.asarray(positions, dtype=cupy.float64),
-        partition=partition_data,
-        resolved_plan=coupling.resolved_plan,
         near_pairs=near_pairs,
         single_level=single_level_data,
         multilevel=multilevel_data,
