@@ -76,6 +76,8 @@ class CuPyMLFMMPartitionData:
     root_center: Any
     root_half_size: float
     depth: int
+    leaf_particle_offsets_host: np.ndarray
+    leaf_particle_indices_host: np.ndarray
     leaf_particle_offsets: Any
     leaf_particle_indices: Any
     leaf_near_pairs: Any
@@ -88,6 +90,19 @@ class CuPyOffsetBatchData:
 
     src_indices: Any
     dst_indices: Any
+    src_unique: bool
+    dst_unique: bool
+
+
+@dataclass(frozen=True)
+class CuPyLeafApplyGroupData:
+    """Grouped leaf data with uniform occupancy for batched leaf GEMMs."""
+
+    occupancy: int
+    nmodes: int
+    leaf_ids: Any
+    particle_indices: Any
+    aggregation: Any
 
 
 @dataclass(frozen=True)
@@ -128,9 +143,10 @@ class CuPyMLFMMSingleLevelData:
     box_order: int
     translator_order: int
     grid_order: int
+    box_nm: int
+    n_leaves: int
     directional: CuPyDirectionalTransformsData
-    aggregation: tuple[Any, ...]
-    receive: tuple[Any, ...]
+    leaf_groups: tuple[CuPyLeafApplyGroupData, ...]
     far_offset_batches: dict[Offset3, CuPyOffsetBatchData]
     offset_diagonals: dict[Offset3, Any]
 
@@ -163,8 +179,9 @@ class CuPyMLFMMMultilevelData:
     leaf_level: int
     hf_start_level: int
     hf_end_level: int
-    aggregation: tuple[Any, ...]
-    receive: tuple[Any, ...]
+    box_nm: int
+    n_leaves: int
+    leaf_groups: tuple[CuPyLeafApplyGroupData, ...]
 
 
 @dataclass(frozen=True)
@@ -270,11 +287,6 @@ def _mode_pair_tables(lmax: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     pair_pmin.setflags(write=False)
     pair_pcount.setflags(write=False)
     return pair_offset, pair_pmin, pair_pcount
-
-
-def _upload_dense_matrix(matrix: np.ndarray, *, name: str, cupy: Any) -> Any:
-    arr = _as_numpy_2d(matrix, dtype=np.complex128, name=name)
-    return cupy.asarray(arr, dtype=cupy.complex128)
 
 
 def _upload_directional_transforms(
@@ -391,6 +403,11 @@ def _upload_offset_batches(
         out[offset] = CuPyOffsetBatchData(
             src_indices=cupy.asarray(src, dtype=cupy.int64),
             dst_indices=cupy.asarray(dst, dtype=cupy.int64),
+            # Source/target arrays are unique by construction in the CPU
+            # batch builders (`_leaf_offset_batches`,
+            # `_build_multilevel_far_offset_batches`, transfer grouping by shift).
+            src_unique=True,
+            dst_unique=True,
         )
     return out
 
@@ -406,6 +423,8 @@ def _upload_partition(partition: MLFMMPartition, *, cupy: Any) -> CuPyMLFMMParti
         ),
         root_half_size=float(partition.root_half_size),
         depth=int(partition.depth),
+        leaf_particle_offsets_host=np.asarray(leaf_particle_offsets, dtype=np.int64),
+        leaf_particle_indices_host=np.asarray(leaf_particle_indices, dtype=np.int64),
         leaf_particle_offsets=cupy.asarray(leaf_particle_offsets, dtype=cupy.int64),
         leaf_particle_indices=cupy.asarray(leaf_particle_indices, dtype=cupy.int64),
         leaf_near_pairs=cupy.asarray(
@@ -419,8 +438,101 @@ def _upload_partition(partition: MLFMMPartition, *, cupy: Any) -> CuPyMLFMMParti
     )
 
 
+def _upload_leaf_apply_groups(
+    *,
+    aggregation: tuple[np.ndarray, ...],
+    receive: tuple[np.ndarray, ...],
+    partition: CuPyMLFMMPartitionData,
+    cupy: Any,
+    name: str,
+) -> tuple[int, tuple[CuPyLeafApplyGroupData, ...]]:
+    """Upload grouped leaf operators with uniform occupancy for batched GEMM."""
+
+    n_leaves = int(len(aggregation))
+    if int(len(receive)) != n_leaves:
+        raise ValueError(
+            f"{name} aggregation/receive leaf counts mismatch: {n_leaves} vs {int(len(receive))}."
+        )
+    offsets = partition.leaf_particle_offsets_host
+    flat_indices = partition.leaf_particle_indices_host
+    if int(offsets.size) != n_leaves + 1:
+        raise ValueError(
+            f"{name} partition offsets size mismatch: {int(offsets.size)} vs {n_leaves + 1}."
+        )
+    if n_leaves == 0:
+        return 0, tuple()
+
+    box_nm = int(np.asarray(aggregation[0]).shape[0])
+    leaf_ids_by_occupancy: dict[int, list[int]] = {}
+    nmodes_ref: int | None = None
+    for leaf_id in range(n_leaves):
+        q = int(offsets[leaf_id + 1] - offsets[leaf_id])
+        if q <= 0:
+            raise ValueError(f"{name}[{leaf_id}] has non-positive occupancy {q}.")
+        agg_leaf = np.asarray(aggregation[leaf_id], dtype=np.complex128)
+        recv_leaf = np.asarray(receive[leaf_id], dtype=np.complex128)
+        if agg_leaf.ndim != 2 or recv_leaf.ndim != 2:
+            raise ValueError(f"{name}[{leaf_id}] aggregation/receive must be 2D matrices.")
+        if int(agg_leaf.shape[0]) != box_nm:
+            raise ValueError(
+                f"{name}[{leaf_id}] box-row mismatch: {int(agg_leaf.shape[0])} vs {box_nm}."
+            )
+        if int(agg_leaf.shape[1]) % q != 0:
+            raise ValueError(
+                f"{name}[{leaf_id}] aggregation columns {int(agg_leaf.shape[1])} not divisible by occupancy {q}."
+            )
+        nmodes_leaf = int(agg_leaf.shape[1] // q)
+        if int(recv_leaf.shape[0]) != q * nmodes_leaf or int(recv_leaf.shape[1]) != box_nm:
+            raise ValueError(
+                f"{name}[{leaf_id}] receive shape {recv_leaf.shape} inconsistent with occupancy {q} and nmodes {nmodes_leaf}."
+            )
+        if nmodes_ref is None:
+            nmodes_ref = nmodes_leaf
+        elif nmodes_leaf != nmodes_ref:
+            raise ValueError(
+                f"{name} inconsistent nmodes across leaves: {nmodes_leaf} vs {nmodes_ref}."
+            )
+        leaf_ids_by_occupancy.setdefault(q, []).append(leaf_id)
+
+    if nmodes_ref is None:
+        return box_nm, tuple()
+
+    grouped: list[CuPyLeafApplyGroupData] = []
+    for occupancy in sorted(leaf_ids_by_occupancy):
+        leaf_ids_np = np.asarray(leaf_ids_by_occupancy[occupancy], dtype=np.int64)
+        n_group = int(leaf_ids_np.size)
+        part_idx_np = np.empty((n_group, occupancy), dtype=np.int64)
+        agg_group = np.empty((n_group, box_nm, occupancy * nmodes_ref), dtype=np.complex128)
+        for local_idx, leaf_id in enumerate(leaf_ids_np.tolist()):
+            start = int(offsets[leaf_id])
+            end = int(offsets[leaf_id + 1])
+            part_idx_np[local_idx] = flat_indices[start:end]
+            agg_leaf = np.asarray(aggregation[leaf_id], dtype=np.complex128)
+            recv_leaf = np.asarray(receive[leaf_id], dtype=np.complex128)
+            adj_leaf = np.asarray(np.conjugate(agg_leaf).T, dtype=np.complex128)
+            if not np.allclose(recv_leaf, adj_leaf, rtol=1.0e-12, atol=1.0e-12):
+                raise ValueError(
+                    f"{name}[{leaf_id}] expected receive == aggregation^H; invariant violation."
+                )
+            agg_group[local_idx] = agg_leaf
+        grouped.append(
+            CuPyLeafApplyGroupData(
+                occupancy=occupancy,
+                nmodes=nmodes_ref,
+                leaf_ids=cupy.asarray(leaf_ids_np, dtype=cupy.int64),
+                particle_indices=cupy.asarray(part_idx_np, dtype=cupy.int64),
+                aggregation=cupy.asarray(
+                    np.ascontiguousarray(agg_group),
+                    dtype=cupy.complex128,
+                    blocking=True,
+                ),
+            )
+        )
+    return box_nm, tuple(grouped)
+
+
 def _upload_single_level(
-    single: MLFMMSingleLevelOperators, *, cupy: Any
+    single: MLFMMSingleLevelOperators, partition: CuPyMLFMMPartitionData, *, cupy: Any
 ) -> CuPyMLFMMSingleLevelData:
     directional = _upload_directional_transforms(single.directional, cupy=cupy)
     ndir = int(np.asarray(single.directional.grid.directions).shape[0])
@@ -438,19 +550,21 @@ def _upload_single_level(
             )
         offset_diagonals[offset] = cupy.asarray(diag_arr, dtype=cupy.complex128)
 
+    box_nm, leaf_groups = _upload_leaf_apply_groups(
+        aggregation=single.aggregation,
+        receive=single.receive,
+        partition=partition,
+        cupy=cupy,
+        name="single_level",
+    )
     return CuPyMLFMMSingleLevelData(
         box_order=int(single.box_order),
         translator_order=int(single.translator_order),
         grid_order=int(single.grid_order),
+        box_nm=box_nm,
+        n_leaves=int(len(single.aggregation)),
         directional=directional,
-        aggregation=tuple(
-            _upload_dense_matrix(matrix, name=f"single_level.aggregation[{i}]", cupy=cupy)
-            for i, matrix in enumerate(single.aggregation)
-        ),
-        receive=tuple(
-            _upload_dense_matrix(matrix, name=f"single_level.receive[{i}]", cupy=cupy)
-            for i, matrix in enumerate(single.receive)
-        ),
+        leaf_groups=leaf_groups,
         far_offset_batches=_upload_offset_batches(
             single.far_offset_batches,
             cupy=cupy,
@@ -551,8 +665,19 @@ def _upload_transfer(
 
 
 def _upload_multilevel(
-    multilevel: MLFMMMultilevelOperators, *, cupy: Any, cupyx_sparse: Any
+    multilevel: MLFMMMultilevelOperators,
+    partition: CuPyMLFMMPartitionData,
+    *,
+    cupy: Any,
+    cupyx_sparse: Any,
 ) -> CuPyMLFMMMultilevelData:
+    box_nm, leaf_groups = _upload_leaf_apply_groups(
+        aggregation=multilevel.aggregation,
+        receive=multilevel.receive,
+        partition=partition,
+        cupy=cupy,
+        name="multilevel",
+    )
     return CuPyMLFMMMultilevelData(
         levels=tuple(_upload_level(level, cupy=cupy) for level in multilevel.levels),
         transfers=tuple(
@@ -562,14 +687,9 @@ def _upload_multilevel(
         leaf_level=int(multilevel.leaf_level),
         hf_start_level=int(multilevel.hf_start_level),
         hf_end_level=int(multilevel.hf_end_level),
-        aggregation=tuple(
-            _upload_dense_matrix(matrix, name=f"multilevel.aggregation[{i}]", cupy=cupy)
-            for i, matrix in enumerate(multilevel.aggregation)
-        ),
-        receive=tuple(
-            _upload_dense_matrix(matrix, name=f"multilevel.receive[{i}]", cupy=cupy)
-            for i, matrix in enumerate(multilevel.receive)
-        ),
+        box_nm=box_nm,
+        n_leaves=int(len(multilevel.aggregation)),
+        leaf_groups=leaf_groups,
     )
 
 
@@ -879,6 +999,32 @@ def _add_at_complex128_raw_kernel() -> Any:
 
 
 @cache
+def _add_unique_complex128_raw_kernel() -> Any:
+    cupy, _ = import_cupy()
+    source = r"""
+    #include <cupy/complex.cuh>
+    extern "C" __global__ void add_unique_complex128(
+        const long long n_pairs,
+        const long long width,
+        const long long* dst,
+        const complex<double>* values,
+        complex<double>* out
+    ) {
+        const long long tid = (long long)blockIdx.x * (long long)blockDim.x + (long long)threadIdx.x;
+        const long long total = n_pairs * width;
+        for (long long i = tid; i < total; i += (long long)blockDim.x * (long long)gridDim.x) {
+            const long long pair_idx = i / width;
+            const long long lane = i - pair_idx * width;
+            const long long out_row = dst[pair_idx];
+            const long long out_idx = out_row * width + lane;
+            out[out_idx] += values[i];
+        }
+    }
+    """
+    return cupy.RawKernel(source, "add_unique_complex128")
+
+
+@cache
 def _weighted_add_at_complex128_raw_kernel() -> Any:
     cupy, _ = import_cupy()
     source = r"""
@@ -915,7 +1061,48 @@ def _weighted_add_at_complex128_raw_kernel() -> Any:
     return cupy.RawKernel(source, "weighted_add_at_complex128")
 
 
-def _add_at_complex128(target: Any, indices: Any, values: Any, *, cupy: Any) -> None:
+@cache
+def _weighted_add_unique_complex128_raw_kernel() -> Any:
+    cupy, _ = import_cupy()
+    source = r"""
+    #include <cupy/complex.cuh>
+    extern "C" __global__ void weighted_add_unique_complex128(
+        const long long n_pairs,
+        const long long n_dirs,
+        const long long nrhs,
+        const long long* dst,
+        const complex<double>* values,
+        const complex<double>* weights,
+        complex<double>* out
+    ) {
+        const long long width = 4LL * n_dirs * nrhs;
+        const long long tid = (long long)blockIdx.x * (long long)blockDim.x + (long long)threadIdx.x;
+        const long long total = n_pairs * width;
+        for (long long i = tid; i < total; i += (long long)blockDim.x * (long long)gridDim.x) {
+            const long long pair_idx = i / width;
+            const long long lane = i - pair_idx * width;
+            const long long chan_stride = n_dirs * nrhs;
+            const long long chan = lane / chan_stride;
+            const long long rem = lane - chan * chan_stride;
+            const long long dir = rem / nrhs;
+            const long long rhs = rem - dir * nrhs;
+            const long long out_row = dst[pair_idx];
+            const long long out_idx = ((out_row * 4LL + chan) * n_dirs + dir) * nrhs + rhs;
+            out[out_idx] += values[i] * weights[dir];
+        }
+    }
+    """
+    return cupy.RawKernel(source, "weighted_add_unique_complex128")
+
+
+def _add_at_complex128(
+    target: Any,
+    indices: Any,
+    values: Any,
+    *,
+    assume_unique_indices: bool = False,
+    cupy: Any,
+) -> None:
     """Apply `add.at`-style indexed accumulation for complex128 batches on device.
 
     We use a specialized kernel because, as of CuPy 14.0.1, `cupy.add.at`
@@ -943,7 +1130,11 @@ def _add_at_complex128(target: Any, indices: Any, values: Any, *, cupy: Any) -> 
     if int(cupy.max(idx)) >= int(tgt.shape[0]) or int(cupy.min(idx)) < 0:
         raise ValueError("Scatter-add index out of bounds for target tensor.")
 
-    kernel = _add_at_complex128_raw_kernel()
+    kernel = (
+        _add_unique_complex128_raw_kernel()
+        if bool(assume_unique_indices)
+        else _add_at_complex128_raw_kernel()
+    )
     threads = 256
     total = int(idx.size) * width
     blocks = max(1, (total + threads - 1) // threads)
@@ -966,6 +1157,7 @@ def _weighted_add_at_complex128(
     values: Any,
     weights: Any,
     *,
+    assume_unique_indices: bool = False,
     cupy: Any,
 ) -> None:
     """Apply weighted `add.at` accumulation for `(pair, 4, ndir, nrhs)` batches."""
@@ -1007,7 +1199,11 @@ def _weighted_add_at_complex128(
     threads = 256
     total = int(vals_flat.size)
     blocks = max(1, (total + threads - 1) // threads)
-    kernel = _weighted_add_at_complex128_raw_kernel()
+    kernel = (
+        _weighted_add_unique_complex128_raw_kernel()
+        if bool(assume_unique_indices)
+        else _weighted_add_at_complex128_raw_kernel()
+    )
     kernel(
         (int(blocks),),
         (threads,),
@@ -1106,28 +1302,29 @@ def _directional_to_box_regular_cupy(
 def _aggregate_leaf_box_states(
     x_states: Any,
     *,
-    leaves: tuple[Any, ...],
-    aggregation: tuple[Any, ...],
+    leaf_groups: tuple[CuPyLeafApplyGroupData, ...],
+    n_leaves: int,
     box_nm: int,
     nrhs: int,
     cupy: Any,
 ) -> Any:
     """Aggregate particle coefficients into one outgoing box state per leaf."""
 
-    box_states = cupy.zeros((len(leaves), int(box_nm), int(nrhs)), dtype=cupy.complex128)
-    for leaf in leaves:
-        particle_indices = np.asarray(leaf.particle_indices, dtype=np.int64)
-        idx = cupy.asarray(particle_indices, dtype=cupy.int64)
-        coeffs = x_states[idx].reshape(-1, nrhs)
-        box_states[int(leaf.id)] = aggregation[int(leaf.id)] @ coeffs
+    box_states = cupy.zeros((n_leaves, int(box_nm), int(nrhs)), dtype=cupy.complex128)
+    for group in leaf_groups:
+        idx = group.particle_indices
+        n_group = int(idx.shape[0])
+        occupancy = int(group.occupancy)
+        nmodes = int(group.nmodes)
+        coeffs = x_states[idx].reshape(n_group, occupancy * nmodes, int(nrhs))
+        box_states[group.leaf_ids] = cupy.matmul(group.aggregation, coeffs)
     return box_states
 
 
 def _receive_leaf_boxes_to_particles(
     incoming_box: Any,
     *,
-    leaves: tuple[Any, ...],
-    receive: tuple[Any, ...],
+    leaf_groups: tuple[CuPyLeafApplyGroupData, ...],
     nm: int,
     n_particles: int,
     nrhs: int,
@@ -1136,11 +1333,16 @@ def _receive_leaf_boxes_to_particles(
     """Scatter leaf-local incoming box states back to particle coefficients."""
 
     y = cupy.zeros((int(n_particles), int(nm), int(nrhs)), dtype=cupy.complex128)
-    for leaf in leaves:
-        pid = np.asarray(leaf.particle_indices, dtype=np.int64)
-        idx = cupy.asarray(pid, dtype=cupy.int64)
-        contribution = receive[int(leaf.id)] @ incoming_box[int(leaf.id)]
-        y[idx] += contribution.reshape(pid.size, nm, nrhs)
+    for group in leaf_groups:
+        leaf_ids = group.leaf_ids
+        idx = group.particle_indices
+        n_group = int(idx.shape[0])
+        occupancy = int(group.occupancy)
+        receive_adj = cupy.swapaxes(group.aggregation, 1, 2).conj()
+        contribution = cupy.matmul(receive_adj, incoming_box[leaf_ids]).reshape(
+            n_group, occupancy, int(nm), int(nrhs)
+        )
+        y[idx] += contribution
     return y
 
 
@@ -1212,13 +1414,12 @@ def _apply_single_level_far(prepared: CuPyMLFMMPreparedData, x_states: Any, *, c
     single = prepared.single_level
     if single is None:
         raise RuntimeError("Internal CuPy MLFMM error: missing single-level prepared data.")
-    leaves = prepared.resolved_plan.partition.leaves
     n_particles, nm, nrhs = (int(v) for v in x_states.shape)
-    box_nm = int(single.aggregation[0].shape[0])
+    box_nm = int(single.box_nm)
     box_states = _aggregate_leaf_box_states(
         x_states,
-        leaves=leaves,
-        aggregation=single.aggregation,
+        leaf_groups=single.leaf_groups,
+        n_leaves=int(single.n_leaves),
         box_nm=box_nm,
         nrhs=nrhs,
         cupy=cupy,
@@ -1236,8 +1437,7 @@ def _apply_single_level_far(prepared: CuPyMLFMMPreparedData, x_states: Any, *, c
     incoming_box = _directional_to_box_regular_cupy(single.directional, incoming, cupy=cupy)
     return _receive_leaf_boxes_to_particles(
         incoming_box,
-        leaves=leaves,
-        receive=single.receive,
+        leaf_groups=single.leaf_groups,
         nm=nm,
         n_particles=n_particles,
         nrhs=nrhs,
@@ -1251,7 +1451,6 @@ def _apply_multilevel_far(prepared: CuPyMLFMMPreparedData, x_states: Any, *, cup
     multilevel = prepared.multilevel
     if multilevel is None:
         raise RuntimeError("Internal CuPy MLFMM error: missing multilevel prepared data.")
-    leaves = prepared.resolved_plan.partition.leaves
     n_particles, nm, nrhs = (int(v) for v in x_states.shape)
     levels = multilevel.levels
     outgoing = [
@@ -1268,11 +1467,11 @@ def _apply_multilevel_far(prepared: CuPyMLFMMPreparedData, x_states: Any, *, cup
     ]
     incoming = [cupy.zeros_like(values, dtype=cupy.complex128) for values in outgoing]
     leaf_level = int(multilevel.leaf_level)
-    box_nm = int(multilevel.aggregation[0].shape[0])
+    box_nm = int(multilevel.box_nm)
     leaf_box_states = _aggregate_leaf_box_states(
         x_states,
-        leaves=leaves,
-        aggregation=multilevel.aggregation,
+        leaf_groups=multilevel.leaf_groups,
+        n_leaves=int(multilevel.n_leaves),
         box_nm=box_nm,
         nrhs=nrhs,
         cupy=cupy,
@@ -1334,7 +1533,12 @@ def _apply_multilevel_far(prepared: CuPyMLFMMPreparedData, x_states: Any, *, cup
                 shifted_reindexed, transfer.anterpolation.matrix, cupy=cupy
             )
             mapped = _apply_reflection_to_direction_axis(mapped_reindexed, child_perm, cupy=cupy)
-            _add_at_complex128(child_values, batch.src_indices, mapped, cupy=cupy)
+            _add_at_complex128(
+                child_values,
+                batch.src_indices,
+                mapped,
+                cupy=cupy,
+            )
 
     incoming_box = _directional_to_box_regular_cupy(
         levels[leaf_level].directional,
@@ -1343,8 +1547,7 @@ def _apply_multilevel_far(prepared: CuPyMLFMMPreparedData, x_states: Any, *, cup
     )
     return _receive_leaf_boxes_to_particles(
         incoming_box,
-        leaves=leaves,
-        receive=multilevel.receive,
+        leaf_groups=multilevel.leaf_groups,
         nm=nm,
         n_particles=n_particles,
         nrhs=nrhs,
@@ -1439,12 +1642,12 @@ def prepare_mlfmm_cupy_data(coupling: MLFMMCouplingOperator) -> CuPyMLFMMPrepare
     if stage == "single_level":
         if coupling.single_level is None:
             raise ValueError("single_level stage was selected but no single-level operators exist.")
-        single_level_data = _upload_single_level(coupling.single_level, cupy=cupy)
+        single_level_data = _upload_single_level(coupling.single_level, partition_data, cupy=cupy)
     else:
         if coupling.multilevel is None:
             raise ValueError("multilevel stage was selected but no multilevel operators exist.")
         multilevel_data = _upload_multilevel(
-            coupling.multilevel, cupy=cupy, cupyx_sparse=cupyx_sparse
+            coupling.multilevel, partition_data, cupy=cupy, cupyx_sparse=cupyx_sparse
         )
 
     return CuPyMLFMMPreparedData(
@@ -1465,6 +1668,7 @@ __all__ = [
     "CuPyDirectionalGridData",
     "CuPyDirectionalInterpolationData",
     "CuPyDirectionalTransformsData",
+    "CuPyLeafApplyGroupData",
     "CuPyMLFMMLevelData",
     "CuPyMLFMMMultilevelData",
     "CuPyMLFMMNearPairData",
