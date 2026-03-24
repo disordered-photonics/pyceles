@@ -304,6 +304,30 @@ class CuPyMLFMMPreparedData:
     multilevel: CuPyMLFMMMultilevelData | None = None
 
 
+@dataclass
+class CuPyMLFMMSingleLevelWorkspace:
+    """Reusable single-level far-path work buffers for one RHS width."""
+
+    nrhs: int
+    box_states: Any
+    outgoing: Any
+    incoming: Any
+    incoming_box: Any
+    y_states: Any
+
+
+@dataclass
+class CuPyMLFMMMultilevelWorkspace:
+    """Reusable multilevel far-path work buffers for one RHS width."""
+
+    nrhs: int
+    outgoing: list[Any]
+    incoming: list[Any]
+    leaf_box_states: Any
+    incoming_box: Any
+    y_states: Any
+
+
 def _cupy_complex_dtype(dtype: np.dtype, *, cupy: Any) -> Any:
     dt = np.dtype(dtype)
     if dt == np.dtype(np.complex64):
@@ -1880,7 +1904,11 @@ def _apply_directional_map(
 
 
 def _box_outgoing_to_directional_cupy(
-    directional: CuPyDirectionalTransformsData, box_states: Any, *, cupy: Any
+    directional: CuPyDirectionalTransformsData,
+    box_states: Any,
+    *,
+    out: Any | None = None,
+    cupy: Any,
 ) -> Any:
     """Map batched outgoing box SVWF states to directional channels on device."""
 
@@ -1900,13 +1928,24 @@ def _box_outgoing_to_directional_cupy(
     )
     a_dir = pair_dir[:n_batch]
     b_dir = pair_dir[n_batch:]
-    return cupy.concatenate((a_dir, b_dir), axis=1).reshape(
-        n_batch, 4, ndir, int(states.shape[2])
+    out_arr = (
+        cupy.asarray(out, dtype=cupy.complex128)
+        if out is not None
+        else cupy.empty((n_batch, 4, ndir, int(states.shape[2])), dtype=cupy.complex128)
     )
+    out_arr[:, 0, :, :] = a_dir[:, :ndir, :]
+    out_arr[:, 1, :, :] = a_dir[:, ndir:, :]
+    out_arr[:, 2, :, :] = b_dir[:, :ndir, :]
+    out_arr[:, 3, :, :] = b_dir[:, ndir:, :]
+    return out_arr
 
 
 def _directional_to_box_regular_cupy(
-    directional: CuPyDirectionalTransformsData, directional_channels: Any, *, cupy: Any
+    directional: CuPyDirectionalTransformsData,
+    directional_channels: Any,
+    *,
+    out: Any | None = None,
+    cupy: Any,
 ) -> Any:
     """Map batched directional channels to regular box SVWF states on device."""
 
@@ -1925,9 +1964,18 @@ def _directional_to_box_regular_cupy(
     a_bb = a_pair[n_batch:]
     g_ab = g_pair[:n_batch]
     g_bb = g_pair[n_batch:]
-    top = a_ab + g_bb
-    bottom = g_ab + a_bb
-    return cupy.concatenate((top, bottom), axis=1)
+    out_arr = (
+        cupy.asarray(out, dtype=cupy.complex128)
+        if out is not None
+        else cupy.empty(
+            (n_batch, int(directional.nscl) * 2, int(channels.shape[3])),
+            dtype=cupy.complex128,
+        )
+    )
+    nscl = int(directional.nscl)
+    out_arr[:, :nscl, :] = a_ab + g_bb
+    out_arr[:, nscl:, :] = g_ab + a_bb
+    return out_arr
 
 
 def _aggregate_leaf_box_states(
@@ -1937,11 +1985,17 @@ def _aggregate_leaf_box_states(
     n_leaves: int,
     box_nm: int,
     nrhs: int,
+    out: Any | None = None,
     cupy: Any,
 ) -> Any:
     """Aggregate particle coefficients into one outgoing box state per leaf."""
 
-    box_states = cupy.zeros((n_leaves, int(box_nm), int(nrhs)), dtype=cupy.complex128)
+    box_states = (
+        cupy.asarray(out, dtype=cupy.complex128)
+        if out is not None
+        else cupy.zeros((n_leaves, int(box_nm), int(nrhs)), dtype=cupy.complex128)
+    )
+    box_states.fill(0)
     for group in leaf_groups:
         idx = group.particle_indices
         n_group = int(idx.shape[0])
@@ -1960,6 +2014,7 @@ def _receive_leaf_boxes_to_particles(
     nm: int,
     n_particles: int,
     nrhs: int,
+    out: Any | None = None,
     cupy: Any,
 ) -> Any:
     """Scatter leaf-local incoming box states back to particle coefficients.
@@ -1969,7 +2024,12 @@ def _receive_leaf_boxes_to_particles(
     recompute `swapaxes(...).conj()` in the hot loop.
     """
 
-    y = cupy.zeros((int(n_particles), int(nm), int(nrhs)), dtype=cupy.complex128)
+    y = (
+        cupy.asarray(out, dtype=cupy.complex128)
+        if out is not None
+        else cupy.zeros((int(n_particles), int(nm), int(nrhs)), dtype=cupy.complex128)
+    )
+    y.fill(0)
     for group in leaf_groups:
         leaf_ids = group.leaf_ids
         idx = group.particle_indices
@@ -1989,6 +2049,80 @@ def _receive_leaf_boxes_to_particles(
         )
         y[idx] += contribution
     return y
+
+
+def _ensure_single_level_workspace(
+    prepared: CuPyMLFMMPreparedData,
+    *,
+    n_particles: int,
+    nm: int,
+    nrhs: int,
+    cache: dict[int, CuPyMLFMMSingleLevelWorkspace],
+    cupy: Any,
+) -> CuPyMLFMMSingleLevelWorkspace:
+    """Return reusable single-level far workspace keyed by RHS count."""
+
+    single = prepared.single_level
+    if single is None:
+        raise RuntimeError("Internal CuPy MLFMM error: missing single-level prepared data.")
+    key = int(nrhs)
+    ws = cache.get(key)
+    if ws is not None:
+        return ws
+    n_leaves = int(single.n_leaves)
+    box_nm = int(single.box_nm)
+    ndir = int(single.directional.grid.n_directions)
+    ws = CuPyMLFMMSingleLevelWorkspace(
+        nrhs=key,
+        box_states=cupy.empty((n_leaves, box_nm, key), dtype=cupy.complex128),
+        outgoing=cupy.empty((n_leaves, 4, ndir, key), dtype=cupy.complex128),
+        incoming=cupy.empty((n_leaves, 4, ndir, key), dtype=cupy.complex128),
+        incoming_box=cupy.empty((n_leaves, box_nm, key), dtype=cupy.complex128),
+        y_states=cupy.empty((int(n_particles), int(nm), key), dtype=cupy.complex128),
+    )
+    cache[key] = ws
+    return ws
+
+
+def _ensure_multilevel_workspace(
+    prepared: CuPyMLFMMPreparedData,
+    *,
+    n_particles: int,
+    nm: int,
+    nrhs: int,
+    cache: dict[int, CuPyMLFMMMultilevelWorkspace],
+    cupy: Any,
+) -> CuPyMLFMMMultilevelWorkspace:
+    """Return reusable multilevel far workspace keyed by RHS count."""
+
+    multilevel = prepared.multilevel
+    if multilevel is None:
+        raise RuntimeError("Internal CuPy MLFMM error: missing multilevel prepared data.")
+    key = int(nrhs)
+    ws = cache.get(key)
+    if ws is not None:
+        return ws
+    levels = multilevel.levels
+    outgoing = [
+        cupy.empty(
+            (int(level.n_boxes), 4, int(level.directional.grid.n_directions), key),
+            dtype=cupy.complex128,
+        )
+        for level in levels
+    ]
+    incoming = [cupy.empty_like(values, dtype=cupy.complex128) for values in outgoing]
+    n_leaves = int(multilevel.n_leaves)
+    box_nm = int(multilevel.box_nm)
+    ws = CuPyMLFMMMultilevelWorkspace(
+        nrhs=key,
+        outgoing=outgoing,
+        incoming=incoming,
+        leaf_box_states=cupy.empty((n_leaves, box_nm, key), dtype=cupy.complex128),
+        incoming_box=cupy.empty((n_leaves, box_nm, key), dtype=cupy.complex128),
+        y_states=cupy.empty((int(n_particles), int(nm), key), dtype=cupy.complex128),
+    )
+    cache[key] = ws
+    return ws
 
 
 def _apply_exact_near_pairs(prepared: CuPyMLFMMPreparedData, x_states: Any, *, cupy: Any) -> Any:
@@ -2074,6 +2208,7 @@ def _apply_single_level_far(
     x_states: Any,
     *,
     receive_adjoint_cache: dict[int, Any] | None,
+    workspace: CuPyMLFMMSingleLevelWorkspace | None,
     cupy: Any,
 ) -> Any:
     """Apply sampled single-level far interactions on device.
@@ -2086,6 +2221,7 @@ def _apply_single_level_far(
     if single is None:
         raise RuntimeError("Internal CuPy MLFMM error: missing single-level prepared data.")
     n_particles, nm, nrhs = (int(v) for v in x_states.shape)
+    ws = workspace
     box_nm = int(single.box_nm)
     box_states = _aggregate_leaf_box_states(
         x_states,
@@ -2093,10 +2229,17 @@ def _apply_single_level_far(
         n_leaves=int(single.n_leaves),
         box_nm=box_nm,
         nrhs=nrhs,
+        out=(ws.box_states if ws is not None else None),
         cupy=cupy,
     )
-    outgoing = _box_outgoing_to_directional_cupy(single.directional, box_states, cupy=cupy)
-    incoming = cupy.zeros_like(outgoing, dtype=cupy.complex128)
+    outgoing = _box_outgoing_to_directional_cupy(
+        single.directional,
+        box_states,
+        out=(ws.outgoing if ws is not None else None),
+        cupy=cupy,
+    )
+    incoming = ws.incoming if ws is not None else cupy.zeros_like(outgoing, dtype=cupy.complex128)
+    incoming.fill(0)
     for offset, batch in single.far_offset_batches.items():
         _weighted_gather_add_complex128(
             incoming,
@@ -2107,7 +2250,12 @@ def _apply_single_level_far(
             assume_unique_indices=bool(batch.dst_unique),
             cupy=cupy,
         )
-    incoming_box = _directional_to_box_regular_cupy(single.directional, incoming, cupy=cupy)
+    incoming_box = _directional_to_box_regular_cupy(
+        single.directional,
+        incoming,
+        out=(ws.incoming_box if ws is not None else None),
+        cupy=cupy,
+    )
     return _receive_leaf_boxes_to_particles(
         incoming_box,
         leaf_groups=single.leaf_groups,
@@ -2115,6 +2263,7 @@ def _apply_single_level_far(
         nm=nm,
         n_particles=n_particles,
         nrhs=nrhs,
+        out=(ws.y_states if ws is not None else None),
         cupy=cupy,
     )
 
@@ -2124,6 +2273,7 @@ def _apply_multilevel_far(
     x_states: Any,
     *,
     receive_adjoint_cache: dict[int, Any] | None,
+    workspace: CuPyMLFMMMultilevelWorkspace | None,
     cupy: Any,
 ) -> Any:
     """Apply sampled multilevel far interactions on device."""
@@ -2133,19 +2283,28 @@ def _apply_multilevel_far(
         raise RuntimeError("Internal CuPy MLFMM error: missing multilevel prepared data.")
     n_particles, nm, nrhs = (int(v) for v in x_states.shape)
     levels = multilevel.levels
-    outgoing = [
-        cupy.zeros(
-            (
-                int(level.n_boxes),
-                4,
-                int(level.directional.grid.n_directions),
-                nrhs,
-            ),
-            dtype=cupy.complex128,
-        )
-        for level in levels
-    ]
-    incoming = [cupy.zeros_like(values, dtype=cupy.complex128) for values in outgoing]
+    ws = workspace
+    if ws is None:
+        outgoing = [
+            cupy.zeros(
+                (
+                    int(level.n_boxes),
+                    4,
+                    int(level.directional.grid.n_directions),
+                    nrhs,
+                ),
+                dtype=cupy.complex128,
+            )
+            for level in levels
+        ]
+        incoming = [cupy.zeros_like(values, dtype=cupy.complex128) for values in outgoing]
+    else:
+        outgoing = ws.outgoing
+        incoming = ws.incoming
+        for arr in outgoing:
+            arr.fill(0)
+        for arr in incoming:
+            arr.fill(0)
     leaf_level = int(multilevel.leaf_level)
     box_nm = int(multilevel.box_nm)
     leaf_box_states = _aggregate_leaf_box_states(
@@ -2154,11 +2313,13 @@ def _apply_multilevel_far(
         n_leaves=int(multilevel.n_leaves),
         box_nm=box_nm,
         nrhs=nrhs,
+        out=(ws.leaf_box_states if ws is not None else None),
         cupy=cupy,
     )
-    outgoing[leaf_level] = _box_outgoing_to_directional_cupy(
+    _box_outgoing_to_directional_cupy(
         levels[leaf_level].directional,
         leaf_box_states,
+        out=outgoing[leaf_level],
         cupy=cupy,
     )
 
@@ -2215,6 +2376,7 @@ def _apply_multilevel_far(
     incoming_box = _directional_to_box_regular_cupy(
         levels[leaf_level].directional,
         incoming[leaf_level],
+        out=(ws.incoming_box if ws is not None else None),
         cupy=cupy,
     )
     return _receive_leaf_boxes_to_particles(
@@ -2224,6 +2386,7 @@ def _apply_multilevel_far(
         nm=nm,
         n_particles=n_particles,
         nrhs=nrhs,
+        out=(ws.y_states if ws is not None else None),
         cupy=cupy,
     )
 
@@ -2251,6 +2414,12 @@ class CuPyMLFMMCouplingOperator:
     near_dtype: np.dtype = np.dtype(np.complex128)
     far_dtype: np.dtype = np.dtype(np.complex128)
     _receive_adjoint_cache: dict[int, Any] = field(default_factory=dict, init=False, repr=False)
+    _single_level_workspace_cache: dict[int, CuPyMLFMMSingleLevelWorkspace] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _multilevel_workspace_cache: dict[int, CuPyMLFMMMultilevelWorkspace] = field(
+        default_factory=dict, init=False, repr=False
+    )
 
     def apply(self, x: Any) -> Any:
         cupy, _ = import_cupy()
@@ -2284,17 +2453,35 @@ class CuPyMLFMMCouplingOperator:
         y_near = _apply_exact_near_pairs(self.prepared_data, x_states, cupy=cupy)
         stage = str(self.prepared_data.stage)
         if stage == "single_level":
+            single_ws = _ensure_single_level_workspace(
+                self.prepared_data,
+                n_particles=n_particles,
+                nm=nm,
+                nrhs=int(x_states.shape[2]),
+                cache=self._single_level_workspace_cache,
+                cupy=cupy,
+            )
             y_far = _apply_single_level_far(
                 self.prepared_data,
                 x_states,
                 receive_adjoint_cache=self._receive_adjoint_cache,
+                workspace=single_ws,
                 cupy=cupy,
             )
         elif stage == "multilevel":
+            multi_ws = _ensure_multilevel_workspace(
+                self.prepared_data,
+                n_particles=n_particles,
+                nm=nm,
+                nrhs=int(x_states.shape[2]),
+                cache=self._multilevel_workspace_cache,
+                cupy=cupy,
+            )
             y_far = _apply_multilevel_far(
                 self.prepared_data,
                 x_states,
                 receive_adjoint_cache=self._receive_adjoint_cache,
+                workspace=multi_ws,
                 cupy=cupy,
             )
         else:
@@ -2330,6 +2517,8 @@ class CuPyMLFMMCouplingOperator:
         self.near_dtype = np.dtype(state.get("near_dtype", self.dtype))
         self.far_dtype = np.dtype(state.get("far_dtype", np.complex128))
         self._receive_adjoint_cache = {}
+        self._single_level_workspace_cache = {}
+        self._multilevel_workspace_cache = {}
         self.prepared_data = prepare_mlfmm_cupy_data(self.host_cache)
 
 
