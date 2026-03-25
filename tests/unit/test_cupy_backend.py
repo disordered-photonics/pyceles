@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import pickle
 import tempfile
 from pathlib import Path
 from typing import Generator, Literal
@@ -13,9 +14,12 @@ from pyceles._optional import asnumpy, import_cupy
 from pyceles.core.indexing import n_modes
 from pyceles.core.operators import (
     CuPyMLFMMCouplingOperator,
+    CuPyMLFMMHostCachePolicy,
     MLFMMCouplingOperator,
     MLFMMOptions,
+    build_mlfmm_cupy_host_cache,
     prepare_matvec,
+    prepare_mlfmm_cupy_data,
 )
 from pyceles.core.operators.mlfmm_cupy import _upload_offset_batches
 from pyceles.core.particles import Particle, spheres_from_arrays
@@ -143,6 +147,62 @@ def test_cupy_mlfmm_upload_offset_batches_rejects_nonunique() -> None:
             cupy=cupy,
             name="test_batches",
         )
+
+
+def _transition_numpy_mlfmm_coupling() -> MLFMMCouplingOperator:
+    prepared = prepare_matvec(
+        lmax=3,
+        k=2.0 * np.pi / 550.0,
+        particles=list(_mlfmm_transition_particles()),
+        n_medium=1.0 + 0j,
+        radial_lut_dr=0.5,
+        cache_translation_blocks=False,
+        coupling_backend="mlfmm",
+        mlfmm_options=MLFMMOptions(max_leaf_particles=4, max_depth=8),
+        backend="numpy",
+    )
+    coupling = prepared.coupling
+    if not isinstance(coupling, MLFMMCouplingOperator):
+        raise AssertionError("Transition fixture unexpectedly resolved to direct stage.")
+    return coupling
+
+
+def test_cupy_mlfmm_host_cache_policy_low_host_memory_recomputes_static_tables() -> None:
+    coupling = _transition_numpy_mlfmm_coupling()
+    policy = CuPyMLFMMHostCachePolicy(memory_budget="low_host_memory")
+    host_cache = build_mlfmm_cupy_host_cache(coupling, host_cache_policy=policy)
+    assert host_cache.host_memory_budget == "low_host_memory"
+    assert host_cache.near_plm_coeffs is None
+    assert host_cache.near_compact_re_ab is None
+    assert host_cache.near_compact_im_ab is None
+    assert host_cache.near_mode_m is None
+    assert host_cache.near_pair_offset is None
+    assert host_cache.near_pair_pmin is None
+    assert host_cache.near_pair_pcount is None
+
+    prepared = prepare_mlfmm_cupy_data(host_cache)
+    assert prepared.stage in {"single_level", "multilevel"}
+    assert int(prepared.near_pairs.mode_m.size) > 0
+    assert int(prepared.near_pairs.pair_offset.size) > 0
+
+
+def test_cupy_mlfmm_runtime_operator_is_non_picklable() -> None:
+    prepared = prepare_matvec(
+        lmax=3,
+        k=2.0 * np.pi / 550.0,
+        particles=list(_mlfmm_transition_particles()),
+        n_medium=1.0 + 0j,
+        radial_lut_dr=0.5,
+        cache_translation_blocks=False,
+        coupling_backend="mlfmm",
+        mlfmm_options=MLFMMOptions(max_leaf_particles=4, max_depth=8),
+        backend="cupy",
+    )
+    coupling = prepared.coupling
+    if not isinstance(coupling, CuPyMLFMMCouplingOperator):
+        raise AssertionError("Transition fixture unexpectedly resolved to direct CuPy fallback.")
+    with pytest.raises(TypeError, match="non-picklable"):
+        _ = pickle.dumps(coupling)
 
 
 def _mlfmm_transition_particles() -> tuple[Particle, ...]:

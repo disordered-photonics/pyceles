@@ -44,7 +44,10 @@ from .mlfmm import (
 )
 from .mlfmm_cupy import (
     CuPyMLFMMCouplingOperator,
+    CuPyMLFMMHostCacheData,
+    CuPyMLFMMHostCachePolicy,
     CuPyMLFMMPreparedData,
+    build_mlfmm_cupy_host_cache,
     prepare_mlfmm_cupy_coupling,
     prepare_mlfmm_cupy_data,
 )
@@ -59,6 +62,8 @@ __all__ = [
     "CouplingOperator",
     "CuPyDiagonalParticleTOperator",
     "CuPyMLFMMCouplingOperator",
+    "CuPyMLFMMHostCacheData",
+    "CuPyMLFMMHostCachePolicy",
     "CuPyMLFMMPreparedData",
     "CuPyPairwiseCouplingOperator",
     "DenseTGroup",
@@ -78,6 +83,7 @@ __all__ = [
     "apply_W_numpy",
     "assemble_dense_A_numpy",
     "build_T_mode_diagonal",
+    "build_mlfmm_cupy_host_cache",
     "estimate_translation_cache_bytes",
     "make_axisymmetric_block_group_factory",
     "make_axisymmetric_group_factory",

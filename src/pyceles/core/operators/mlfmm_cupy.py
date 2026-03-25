@@ -9,7 +9,7 @@ This module validates and uploads repeated-apply structures to device memory.
 from dataclasses import dataclass, field
 from functools import cache
 from importlib import import_module
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import numpy.typing as npt
@@ -29,6 +29,19 @@ from .mlfmm_directional import MLFMMDirectionalTransforms
 from .mlfmm_partition import MLFMMPartition
 
 Offset3 = tuple[int, int, int]
+CuPyMLFMMHostMemoryBudget = Literal["balanced", "low_host_memory"]
+
+
+@dataclass(frozen=True)
+class CuPyMLFMMHostCachePolicy:
+    """Memory-tier policy for compact host cache retention vs recomputation.
+
+    `balanced` keeps static exact-near tables in host RAM to minimize rebuild
+    overhead. `low_host_memory` drops those static tables from host cache and
+    recomputes them during device upload.
+    """
+
+    memory_budget: CuPyMLFMMHostMemoryBudget = "balanced"
 
 
 @dataclass(frozen=True)
@@ -133,13 +146,14 @@ class CuPyMLFMMHostCacheData:
     near_lut_im: np.ndarray
     near_inv_dr: float
     near_last_index: int
-    near_plm_coeffs: np.ndarray
-    near_compact_re_ab: np.ndarray
-    near_compact_im_ab: np.ndarray
-    near_mode_m: np.ndarray
-    near_pair_offset: np.ndarray
-    near_pair_pmin: np.ndarray
-    near_pair_pcount: np.ndarray
+    near_plm_coeffs: np.ndarray | None
+    near_compact_re_ab: np.ndarray | None
+    near_compact_im_ab: np.ndarray | None
+    near_mode_m: np.ndarray | None
+    near_pair_offset: np.ndarray | None
+    near_pair_pmin: np.ndarray | None
+    near_pair_pcount: np.ndarray | None
+    host_memory_budget: CuPyMLFMMHostMemoryBudget = "balanced"
     single_level: CuPyHostSingleLevelData | None = None
     multilevel: CuPyHostMultilevelData | None = None
     plan_summary: dict[str, int | float | str] | None = None
@@ -192,16 +206,12 @@ class CuPyMLFMMPartitionData:
 class CuPyOffsetBatchData:
     """Device copy of grouped source/target index batches for one relative offset.
 
-    `src_unique`/`dst_unique` are computed from the uploaded host batches and
-    are used to route accumulation kernels:
-    - unique destination batches can use non-atomic kernels;
-    - non-unique batches fall back to atomic accumulation kernels.
+    Grouped schedules are validated as unique during upload, so repeated apply
+    can run non-atomic unique-index accumulation kernels unconditionally.
     """
 
     src_indices: Any
     dst_indices: Any
-    src_unique: bool
-    dst_unique: bool
 
 
 @dataclass(frozen=True)
@@ -299,7 +309,6 @@ class CuPyMLFMMPreparedData:
     """Top-level CuPy representation of a CPU-built MLFMM plan."""
 
     lmax: int
-    k: float
     stage: str
     near_pairs: CuPyMLFMMNearPairData
     single_level: CuPyMLFMMSingleLevelData | None = None
@@ -604,8 +613,6 @@ def _upload_offset_batches(
         out[offset] = CuPyOffsetBatchData(
             src_indices=cupy.asarray(src, dtype=cupy.int32),
             dst_indices=cupy.asarray(dst, dtype=cupy.int32),
-            src_unique=True,
-            dst_unique=True,
         )
     return out
 
@@ -725,9 +732,20 @@ def _build_host_multilevel(multilevel: MLFMMMultilevelOperators) -> CuPyHostMult
     )
 
 
-def _build_mlfmm_cupy_host_cache(coupling: MLFMMCouplingOperator) -> CuPyMLFMMHostCacheData:
+def _resolve_host_cache_policy(
+    policy: CuPyMLFMMHostCachePolicy | None,
+) -> CuPyMLFMMHostCachePolicy:
+    return CuPyMLFMMHostCachePolicy() if policy is None else policy
+
+
+def _build_mlfmm_cupy_host_cache(
+    coupling: MLFMMCouplingOperator,
+    *,
+    host_cache_policy: CuPyMLFMMHostCachePolicy | None = None,
+) -> CuPyMLFMMHostCacheData:
     """Build a compact host-only MLFMM cache artifact from CPU reference operators."""
 
+    policy = _resolve_host_cache_policy(host_cache_policy)
     near_dtype = np.dtype(coupling.near_dtype)
     real_dtype: type[np.floating[Any]]
     lut_dtype: type[np.complexfloating[Any, Any]]
@@ -743,12 +761,22 @@ def _build_mlfmm_cupy_host_cache(coupling: MLFMMCouplingOperator) -> CuPyMLFMMHo
     )
     dst_leaf_indices, src_leaf_indices = _build_exact_near_leaf_pair_schedule(partition)
     lut = np.asarray(coupling.radial_lut.h, dtype=np.complex128).T.astype(lut_dtype, copy=False)
-    compact_re_ab, compact_im_ab = _translation_ab5_compact_tables(
-        int(coupling.lmax), dtype=np.complex128
-    )
-    plm_coeffs = _translation_plm_coeff_table(int(coupling.lmax), dtype=np.float64).reshape(-1)
-    mode_m = _mode_metadata_tables(int(coupling.lmax))
-    pair_offset, pair_pmin, pair_pcount = _mode_pair_tables(int(coupling.lmax))
+    keep_static_near_tables = policy.memory_budget == "balanced"
+    if keep_static_near_tables:
+        compact_re_ab, compact_im_ab = _translation_ab5_compact_tables(
+            int(coupling.lmax), dtype=np.complex128
+        )
+        plm_coeffs = _translation_plm_coeff_table(int(coupling.lmax), dtype=np.float64).reshape(-1)
+        mode_m = _mode_metadata_tables(int(coupling.lmax))
+        pair_offset, pair_pmin, pair_pcount = _mode_pair_tables(int(coupling.lmax))
+    else:
+        compact_re_ab = None
+        compact_im_ab = None
+        plm_coeffs = None
+        mode_m = None
+        pair_offset = None
+        pair_pmin = None
+        pair_pcount = None
     plan = coupling.resolved_plan
     plan_summary: dict[str, int | float | str] = {
         "stage": str(plan.stage),
@@ -780,13 +808,36 @@ def _build_mlfmm_cupy_host_cache(coupling: MLFMMCouplingOperator) -> CuPyMLFMMHo
         near_lut_im=np.ascontiguousarray(lut.imag.reshape(-1), dtype=real_dtype),
         near_inv_dr=float(coupling.radial_lut._inv_dr),
         near_last_index=int(coupling.radial_lut._last_index),
-        near_plm_coeffs=np.ascontiguousarray(plm_coeffs, dtype=real_dtype),
-        near_compact_re_ab=np.ascontiguousarray(compact_re_ab, dtype=real_dtype),
-        near_compact_im_ab=np.ascontiguousarray(compact_im_ab, dtype=real_dtype),
-        near_mode_m=np.ascontiguousarray(mode_m, dtype=np.int32),
-        near_pair_offset=np.ascontiguousarray(pair_offset.reshape(-1), dtype=np.int32),
-        near_pair_pmin=np.ascontiguousarray(pair_pmin.reshape(-1), dtype=np.int32),
-        near_pair_pcount=np.ascontiguousarray(pair_pcount.reshape(-1), dtype=np.int32),
+        near_plm_coeffs=(
+            np.ascontiguousarray(plm_coeffs, dtype=real_dtype) if plm_coeffs is not None else None
+        ),
+        near_compact_re_ab=(
+            np.ascontiguousarray(compact_re_ab, dtype=real_dtype)
+            if compact_re_ab is not None
+            else None
+        ),
+        near_compact_im_ab=(
+            np.ascontiguousarray(compact_im_ab, dtype=real_dtype)
+            if compact_im_ab is not None
+            else None
+        ),
+        near_mode_m=(np.ascontiguousarray(mode_m, dtype=np.int32) if mode_m is not None else None),
+        near_pair_offset=(
+            np.ascontiguousarray(pair_offset.reshape(-1), dtype=np.int32)
+            if pair_offset is not None
+            else None
+        ),
+        near_pair_pmin=(
+            np.ascontiguousarray(pair_pmin.reshape(-1), dtype=np.int32)
+            if pair_pmin is not None
+            else None
+        ),
+        near_pair_pcount=(
+            np.ascontiguousarray(pair_pcount.reshape(-1), dtype=np.int32)
+            if pair_pcount is not None
+            else None
+        ),
+        host_memory_budget=policy.memory_budget,
         single_level=(
             _build_host_single_level(coupling.single_level)
             if coupling.single_level is not None
@@ -1094,6 +1145,67 @@ def _build_exact_near_leaf_pair_schedule(
     )
 
 
+def _resolve_exact_near_static_tables_from_host_cache(
+    cache: CuPyMLFMMHostCacheData,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Return static exact-near tables, recomputing when cache policy omits them."""
+
+    near_dtype = np.dtype(cache.near_dtype)
+    if near_dtype == np.dtype(np.complex64):
+        real_dtype: np.dtype[Any] = np.dtype(np.float32)
+    elif near_dtype == np.dtype(np.complex128):
+        real_dtype = np.dtype(np.float64)
+    else:
+        raise ValueError(
+            "CuPy MLFMM near path supports only complex64/complex128 near dtypes. "
+            f"Got {near_dtype!r}."
+        )
+    if (
+        cache.near_plm_coeffs is not None
+        and cache.near_compact_re_ab is not None
+        and cache.near_compact_im_ab is not None
+        and cache.near_mode_m is not None
+        and cache.near_pair_offset is not None
+        and cache.near_pair_pmin is not None
+        and cache.near_pair_pcount is not None
+    ):
+        plm_coeffs = np.asarray(cache.near_plm_coeffs, dtype=real_dtype).reshape(-1)
+        compact_re_ab = np.asarray(cache.near_compact_re_ab, dtype=real_dtype).reshape(-1)
+        compact_im_ab = np.asarray(cache.near_compact_im_ab, dtype=real_dtype).reshape(-1)
+        mode_m = np.asarray(cache.near_mode_m, dtype=np.int32).reshape(-1)
+        pair_offset = np.asarray(cache.near_pair_offset, dtype=np.int32).reshape(-1)
+        pair_pmin = np.asarray(cache.near_pair_pmin, dtype=np.int32).reshape(-1)
+        pair_pcount = np.asarray(cache.near_pair_pcount, dtype=np.int32).reshape(-1)
+        return (
+            np.ascontiguousarray(plm_coeffs, dtype=real_dtype),
+            np.ascontiguousarray(compact_re_ab, dtype=real_dtype),
+            np.ascontiguousarray(compact_im_ab, dtype=real_dtype),
+            np.ascontiguousarray(mode_m, dtype=np.int32),
+            np.ascontiguousarray(pair_offset, dtype=np.int32),
+            np.ascontiguousarray(pair_pmin, dtype=np.int32),
+            np.ascontiguousarray(pair_pcount, dtype=np.int32),
+        )
+
+    # Under `low_host_memory`, static tables are intentionally omitted from the
+    # host cache and rebuilt on demand during upload.
+    lmax = int(cache.lmax)
+    compact_re_ab_raw, compact_im_ab_raw = _translation_ab5_compact_tables(
+        lmax, dtype=np.complex128
+    )
+    plm_coeffs_raw = _translation_plm_coeff_table(lmax, dtype=np.float64).reshape(-1)
+    mode_m = _mode_metadata_tables(lmax)
+    pair_offset_raw, pair_pmin_raw, pair_pcount_raw = _mode_pair_tables(lmax)
+    return (
+        np.ascontiguousarray(plm_coeffs_raw, dtype=real_dtype),
+        np.ascontiguousarray(compact_re_ab_raw, dtype=real_dtype),
+        np.ascontiguousarray(compact_im_ab_raw, dtype=real_dtype),
+        np.ascontiguousarray(mode_m, dtype=np.int32),
+        np.ascontiguousarray(pair_offset_raw.reshape(-1), dtype=np.int32),
+        np.ascontiguousarray(pair_pmin_raw.reshape(-1), dtype=np.int32),
+        np.ascontiguousarray(pair_pcount_raw.reshape(-1), dtype=np.int32),
+    )
+
+
 def _upload_exact_near_pair_data_from_host_cache(
     cache: CuPyMLFMMHostCacheData, *, cupy: Any
 ) -> CuPyMLFMMNearPairData:
@@ -1109,6 +1221,15 @@ def _upload_exact_near_pair_data_from_host_cache(
             "CuPy MLFMM near path supports only complex64/complex128 near dtypes. "
             f"Got {near_dtype!r}."
         )
+    (
+        plm_coeffs,
+        compact_re_ab,
+        compact_im_ab,
+        mode_m,
+        pair_offset,
+        pair_pmin,
+        pair_pcount,
+    ) = _resolve_exact_near_static_tables_from_host_cache(cache)
     return CuPyMLFMMNearPairData(
         near_dtype=near_dtype,
         positions=cupy.asarray(
@@ -1149,37 +1270,37 @@ def _upload_exact_near_pair_data_from_host_cache(
         inv_dr=float(cache.near_inv_dr),
         last_index=int(cache.near_last_index),
         plm_coeffs=cupy.asarray(
-            np.ascontiguousarray(np.asarray(cache.near_plm_coeffs).reshape(-1)),
+            np.ascontiguousarray(plm_coeffs.reshape(-1)),
             dtype=cupy_real_dtype,
             blocking=True,
         ),
         compact_re_ab=cupy.asarray(
-            np.ascontiguousarray(np.asarray(cache.near_compact_re_ab).reshape(-1)),
+            np.ascontiguousarray(compact_re_ab.reshape(-1)),
             dtype=cupy_real_dtype,
             blocking=True,
         ),
         compact_im_ab=cupy.asarray(
-            np.ascontiguousarray(np.asarray(cache.near_compact_im_ab).reshape(-1)),
+            np.ascontiguousarray(compact_im_ab.reshape(-1)),
             dtype=cupy_real_dtype,
             blocking=True,
         ),
         mode_m=cupy.asarray(
-            np.ascontiguousarray(np.asarray(cache.near_mode_m, dtype=np.int32)),
+            np.ascontiguousarray(mode_m, dtype=np.int32),
             dtype=cupy.int32,
             blocking=True,
         ),
         pair_offset=cupy.asarray(
-            np.ascontiguousarray(np.asarray(cache.near_pair_offset, dtype=np.int32)),
+            np.ascontiguousarray(pair_offset, dtype=np.int32),
             dtype=cupy.int32,
             blocking=True,
         ),
         pair_pmin=cupy.asarray(
-            np.ascontiguousarray(np.asarray(cache.near_pair_pmin, dtype=np.int32)),
+            np.ascontiguousarray(pair_pmin, dtype=np.int32),
             dtype=cupy.int32,
             blocking=True,
         ),
         pair_pcount=cupy.asarray(
-            np.ascontiguousarray(np.asarray(cache.near_pair_pcount, dtype=np.int32)),
+            np.ascontiguousarray(pair_pcount, dtype=np.int32),
             dtype=cupy.int32,
             blocking=True,
         ),
@@ -1436,35 +1557,6 @@ def _exact_near_pairs_raw_kernel(lmax: int, near_dtype_name: str) -> Any:
 
 
 @cache
-def _add_at_complex128_raw_kernel() -> Any:
-    cupy, _ = import_cupy()
-    source = r"""
-    #include <cupy/complex.cuh>
-    extern "C" __global__ void add_at_complex128(
-        const long long n_pairs,
-        const long long width,
-        const int* dst,
-        const complex<double>* values,
-        complex<double>* out
-    ) {
-        const long long tid = (long long)blockIdx.x * (long long)blockDim.x + (long long)threadIdx.x;
-        const long long total = n_pairs * width;
-        for (long long i = tid; i < total; i += (long long)blockDim.x * (long long)gridDim.x) {
-            const long long pair_idx = i / width;
-            const long long lane = i - pair_idx * width;
-            const long long out_row = dst[pair_idx];
-            const long long out_idx = out_row * width + lane;
-            const complex<double> v = values[i];
-            double* out_ptr = reinterpret_cast<double*>(&out[out_idx]);
-            atomicAdd(out_ptr + 0, v.real());
-            atomicAdd(out_ptr + 1, v.imag());
-        }
-    }
-    """
-    return cupy.RawKernel(source, "add_at_complex128")
-
-
-@cache
 def _add_unique_complex128_raw_kernel() -> Any:
     cupy, _ = import_cupy()
     source = r"""
@@ -1488,43 +1580,6 @@ def _add_unique_complex128_raw_kernel() -> Any:
     }
     """
     return cupy.RawKernel(source, "add_unique_complex128")
-
-
-@cache
-def _weighted_add_at_complex128_raw_kernel() -> Any:
-    cupy, _ = import_cupy()
-    source = r"""
-    #include <cupy/complex.cuh>
-    extern "C" __global__ void weighted_add_at_complex128(
-        const long long n_pairs,
-        const long long n_dirs,
-        const long long nrhs,
-        const int* dst,
-        const complex<double>* values,
-        const complex<double>* weights,
-        complex<double>* out
-    ) {
-        const long long width = 4LL * n_dirs * nrhs;
-        const long long tid = (long long)blockIdx.x * (long long)blockDim.x + (long long)threadIdx.x;
-        const long long total = n_pairs * width;
-        for (long long i = tid; i < total; i += (long long)blockDim.x * (long long)gridDim.x) {
-            const long long pair_idx = i / width;
-            const long long lane = i - pair_idx * width;
-            const long long chan_stride = n_dirs * nrhs;
-            const long long chan = lane / chan_stride;
-            const long long rem = lane - chan * chan_stride;
-            const long long dir = rem / nrhs;
-            const long long rhs = rem - dir * nrhs;
-            const long long out_row = dst[pair_idx];
-            const long long out_idx = ((out_row * 4LL + chan) * n_dirs + dir) * nrhs + rhs;
-            const complex<double> v = values[i] * weights[dir];
-            double* out_ptr = reinterpret_cast<double*>(&out[out_idx]);
-            atomicAdd(out_ptr + 0, v.real());
-            atomicAdd(out_ptr + 1, v.imag());
-        }
-    }
-    """
-    return cupy.RawKernel(source, "weighted_add_at_complex128")
 
 
 @cache
@@ -1559,46 +1614,6 @@ def _weighted_add_unique_complex128_raw_kernel() -> Any:
     }
     """
     return cupy.RawKernel(source, "weighted_add_unique_complex128")
-
-
-@cache
-def _weighted_gather_add_at_complex128_raw_kernel() -> Any:
-    cupy, _ = import_cupy()
-    source = r"""
-    #include <cupy/complex.cuh>
-    extern "C" __global__ void weighted_gather_add_at_complex128(
-        const long long n_pairs,
-        const long long n_dirs,
-        const long long nrhs,
-        const int* src,
-        const int* dst,
-        const complex<double>* source_values,
-        const complex<double>* weights,
-        complex<double>* out
-    ) {
-        const long long width = 4LL * n_dirs * nrhs;
-        const long long tid = (long long)blockIdx.x * (long long)blockDim.x + (long long)threadIdx.x;
-        const long long total = n_pairs * width;
-        for (long long i = tid; i < total; i += (long long)blockDim.x * (long long)gridDim.x) {
-            const long long pair_idx = i / width;
-            const long long lane = i - pair_idx * width;
-            const long long chan_stride = n_dirs * nrhs;
-            const long long chan = lane / chan_stride;
-            const long long rem = lane - chan * chan_stride;
-            const long long dir = rem / nrhs;
-            const long long rhs = rem - dir * nrhs;
-            const long long src_row = src[pair_idx];
-            const long long dst_row = dst[pair_idx];
-            const long long src_idx = ((src_row * 4LL + chan) * n_dirs + dir) * nrhs + rhs;
-            const long long out_idx = ((dst_row * 4LL + chan) * n_dirs + dir) * nrhs + rhs;
-            const complex<double> v = source_values[src_idx] * weights[dir];
-            double* out_ptr = reinterpret_cast<double*>(&out[out_idx]);
-            atomicAdd(out_ptr + 0, v.real());
-            atomicAdd(out_ptr + 1, v.imag());
-        }
-    }
-    """
-    return cupy.RawKernel(source, "weighted_gather_add_at_complex128")
 
 
 @cache
@@ -1643,15 +1658,9 @@ def _add_at_complex128(
     indices: Any,
     values: Any,
     *,
-    assume_unique_indices: bool = False,
     cupy: Any,
 ) -> None:
-    """Apply `add.at`-style indexed accumulation for complex128 batches on device.
-
-    We use a specialized kernel because, as of CuPy 14.0.1, `cupy.add.at`
-    does not accept complex dtypes. The custom kernel also avoids splitting
-    real/imag updates in the hot loop.
-    """
+    """Apply unique-index indexed accumulation for complex128 batches on device."""
 
     idx = cupy.asarray(indices, dtype=cupy.int32).reshape(-1)
     if int(idx.size) == 0:
@@ -1673,11 +1682,7 @@ def _add_at_complex128(
     if int(cupy.max(idx)) >= int(tgt.shape[0]) or int(cupy.min(idx)) < 0:
         raise ValueError("Scatter-add index out of bounds for target tensor.")
 
-    kernel = (
-        _add_unique_complex128_raw_kernel()
-        if bool(assume_unique_indices)
-        else _add_at_complex128_raw_kernel()
-    )
+    kernel = _add_unique_complex128_raw_kernel()
     threads = 256
     total = int(idx.size) * width
     blocks = max(1, (total + threads - 1) // threads)
@@ -1700,7 +1705,6 @@ def _weighted_add_at_complex128(
     values: Any,
     weights: Any,
     *,
-    assume_unique_indices: bool = False,
     cupy: Any,
 ) -> None:
     """Apply weighted `add.at` accumulation for `(pair, 4, ndir, nrhs)` batches."""
@@ -1742,11 +1746,7 @@ def _weighted_add_at_complex128(
     threads = 256
     total = int(vals_flat.size)
     blocks = max(1, (total + threads - 1) // threads)
-    kernel = (
-        _weighted_add_unique_complex128_raw_kernel()
-        if bool(assume_unique_indices)
-        else _weighted_add_at_complex128_raw_kernel()
-    )
+    kernel = _weighted_add_unique_complex128_raw_kernel()
     kernel(
         (int(blocks),),
         (threads,),
@@ -1769,7 +1769,6 @@ def _weighted_gather_add_complex128(
     src_indices: Any,
     weights: Any,
     *,
-    assume_unique_indices: bool = False,
     cupy: Any,
 ) -> None:
     """Gather directional rows from `source_values`, apply directional weights, and add into `target`."""
@@ -1814,11 +1813,7 @@ def _weighted_gather_add_complex128(
     threads = 256
     total = int(src.size) * 4 * int(w.size) * int(src_arr.shape[3])
     blocks = max(1, (total + threads - 1) // threads)
-    kernel = (
-        _weighted_gather_add_unique_complex128_raw_kernel()
-        if bool(assume_unique_indices)
-        else _weighted_gather_add_at_complex128_raw_kernel()
-    )
+    kernel = _weighted_gather_add_unique_complex128_raw_kernel()
     kernel(
         (int(blocks),),
         (threads,),
@@ -2748,7 +2743,6 @@ def _apply_single_level_far(
             outgoing,
             batch.src_indices,
             single.offset_diagonals[offset],
-            assume_unique_indices=bool(batch.dst_unique),
             cupy=cupy,
         )
     incoming_box = _directional_to_box_regular_cupy(
@@ -2779,10 +2773,9 @@ def _apply_multilevel_far(
 ) -> Any:
     """Apply sampled multilevel far interactions on device.
 
-    Transfer loops route unique grouped batches through fused kernels. The
-    high-level branch is retained as a compatibility fallback for unsupported
-    storage variants and is a deletion candidate once transfer contracts are
-    fully locked.
+    Grouped source/target schedules are validated as unique during upload.
+    Transfer loops run unique-index kernels and keep a high-level fallback only
+    for map-storage variants that do not have a fused kernel yet.
     """
 
     multilevel = prepared.multilevel
@@ -2836,7 +2829,7 @@ def _apply_multilevel_far(
         child_values = outgoing[child_level]
         parent_values = outgoing[parent_level]
         for shift, batch in transfer.batches_by_shift.items():
-            if str(transfer.map_up.storage) == "packed_stencil" and bool(batch.dst_unique):
+            if str(transfer.map_up.storage) == "packed_stencil":
                 _transfer_up_packed_unique_complex128(
                     parent_values,
                     batch.dst_indices,
@@ -2846,7 +2839,7 @@ def _apply_multilevel_far(
                     transfer.phase_up_by_shift[shift],
                     cupy=cupy,
                 )
-            elif str(transfer.map_up.storage) == "sparse" and bool(batch.dst_unique):
+            elif str(transfer.map_up.storage) == "sparse":
                 _transfer_up_sparse_unique_complex128(
                     parent_values,
                     batch.dst_indices,
@@ -2857,9 +2850,7 @@ def _apply_multilevel_far(
                     cupy=cupy,
                 )
             else:
-                # Internal fallback for non-unique batches or unsupported map
-                # storage. Grouped batches are currently validated as unique
-                # during upload, so this should remain a rare compatibility path.
+                # Internal fallback for unsupported map storage variants.
                 mapped = _apply_directional_map(
                     child_values[batch.src_indices], transfer.map_up, cupy=cupy
                 )
@@ -2868,7 +2859,6 @@ def _apply_multilevel_far(
                     batch.dst_indices,
                     mapped,
                     transfer.phase_up_by_shift[shift],
-                    assume_unique_indices=bool(batch.dst_unique),
                     cupy=cupy,
                 )
 
@@ -2881,7 +2871,6 @@ def _apply_multilevel_far(
                 outgoing[level_idx],
                 batch.src_indices,
                 level.offset_diagonals[offset],
-                assume_unique_indices=bool(batch.dst_unique),
                 cupy=cupy,
             )
 
@@ -2891,7 +2880,7 @@ def _apply_multilevel_far(
         parent_values = incoming[parent_level]
         child_values = incoming[child_level]
         for shift, batch in transfer.batches_by_shift.items():
-            if str(transfer.map_down.storage) == "packed_stencil" and bool(batch.src_unique):
+            if str(transfer.map_down.storage) == "packed_stencil":
                 _transfer_down_packed_unique_complex128(
                     child_values,
                     batch.src_indices,
@@ -2901,7 +2890,7 @@ def _apply_multilevel_far(
                     transfer.phase_down_by_shift[shift],
                     cupy=cupy,
                 )
-            elif str(transfer.map_down.storage) == "sparse" and bool(batch.src_unique):
+            elif str(transfer.map_down.storage) == "sparse":
                 _transfer_down_sparse_unique_complex128(
                     child_values,
                     batch.src_indices,
@@ -2912,9 +2901,7 @@ def _apply_multilevel_far(
                     cupy=cupy,
                 )
             else:
-                # Internal fallback for non-unique batches or unsupported map
-                # storage. Grouped batches are currently validated as unique
-                # during upload, so this should remain a rare compatibility path.
+                # Internal fallback for unsupported map storage variants.
                 shifted = (
                     parent_values[batch.dst_indices]
                     * transfer.phase_down_by_shift[shift][None, None, :, None]
@@ -2924,7 +2911,6 @@ def _apply_multilevel_far(
                     child_values,
                     batch.src_indices,
                     mapped,
-                    assume_unique_indices=bool(batch.src_unique),
                     cupy=cupy,
                 )
 
@@ -2964,7 +2950,7 @@ class CuPyMLFMMCouplingOperator:
     n_particles: int
     prepared_data: CuPyMLFMMPreparedData
     host_cache: CuPyMLFMMHostCacheData
-    cpu_coupling: MLFMMCouplingOperator | None = None
+    host_cache_policy: CuPyMLFMMHostCachePolicy = field(default_factory=CuPyMLFMMHostCachePolicy)
     dtype: np.dtype = np.dtype(np.complex128)
     near_dtype: np.dtype = np.dtype(np.complex128)
     far_dtype: np.dtype = np.dtype(np.complex128)
@@ -3050,52 +3036,54 @@ class CuPyMLFMMCouplingOperator:
         )
 
     def __getstate__(self) -> dict[str, Any]:
-        """Serialize only host-side MLFMM state; rebuild device payload on load."""
-
-        return {
-            "_cache_version": 1,
-            "host_cache": self.host_cache,
-            "lmax": int(self.lmax),
-            "n_particles": int(self.n_particles),
-            "dtype": np.dtype(self.dtype),
-            "near_dtype": np.dtype(self.near_dtype),
-            "far_dtype": np.dtype(self.far_dtype),
-        }
+        raise TypeError(
+            "CuPyMLFMMCouplingOperator is runtime-only and intentionally non-picklable. "
+            "Persist the compact host cache explicitly if debug serialization is required."
+        )
 
     def __setstate__(self, state: dict[str, Any]) -> None:
-        """Restore from host cache and regenerate CuPy prepared data."""
-        self.host_cache = state["host_cache"]
-        self.lmax = int(state["lmax"])
-        self.n_particles = int(state["n_particles"])
-        self.cpu_coupling = None
-        self.dtype = np.dtype(state["dtype"])
-        self.near_dtype = np.dtype(state["near_dtype"])
-        self.far_dtype = np.dtype(state["far_dtype"])
-        self._receive_adjoint_cache = {}
-        self._single_level_workspace_cache = {}
-        self._multilevel_workspace_cache = {}
-        self.prepared_data = prepare_mlfmm_cupy_data(self.host_cache)
+        raise TypeError(
+            "CuPyMLFMMCouplingOperator cannot be unpickled. Rebuild it from a CPU MLFMM "
+            "coupling plan or from an explicit compact host cache payload."
+        )
 
 
-def prepare_mlfmm_cupy_coupling(coupling: MLFMMCouplingOperator) -> CuPyMLFMMCouplingOperator:
+def prepare_mlfmm_cupy_coupling(
+    coupling: MLFMMCouplingOperator,
+    *,
+    host_cache_policy: CuPyMLFMMHostCachePolicy | None = None,
+) -> CuPyMLFMMCouplingOperator:
     """Wrap a CPU-built MLFMM coupling plan in a CuPy repeated-apply operator."""
 
-    host_cache = _build_mlfmm_cupy_host_cache(coupling)
-    prepared = prepare_mlfmm_cupy_data(host_cache)
+    policy = _resolve_host_cache_policy(host_cache_policy)
+    host_cache = _build_mlfmm_cupy_host_cache(coupling, host_cache_policy=policy)
+    prepared = prepare_mlfmm_cupy_data(host_cache, host_cache_policy=policy)
     return CuPyMLFMMCouplingOperator(
         lmax=int(coupling.lmax),
         n_particles=int(np.asarray(coupling.positions).shape[0]),
         prepared_data=prepared,
         host_cache=host_cache,
-        cpu_coupling=None,
+        host_cache_policy=policy,
         dtype=np.dtype(coupling.dtype),
         near_dtype=np.dtype(coupling.near_dtype),
         far_dtype=np.dtype(coupling.far_dtype),
     )
 
 
+def build_mlfmm_cupy_host_cache(
+    coupling: MLFMMCouplingOperator,
+    *,
+    host_cache_policy: CuPyMLFMMHostCachePolicy | None = None,
+) -> CuPyMLFMMHostCacheData:
+    """Build compact host-only reusable MLFMM state for explicit debug workflows."""
+
+    return _build_mlfmm_cupy_host_cache(coupling, host_cache_policy=host_cache_policy)
+
+
 def prepare_mlfmm_cupy_data(
     source: MLFMMCouplingOperator | CuPyMLFMMHostCacheData,
+    *,
+    host_cache_policy: CuPyMLFMMHostCachePolicy | None = None,
 ) -> CuPyMLFMMPreparedData:
     """Upload repeated-apply MLFMM structures from a CPU-built coupling plan.
 
@@ -3115,10 +3103,11 @@ def prepare_mlfmm_cupy_data(
 
     cupy, _ = import_cupy()
     cupyx_sparse = import_module("cupyx.scipy.sparse")
+    policy = _resolve_host_cache_policy(host_cache_policy)
     host_cache = (
         source
         if isinstance(source, CuPyMLFMMHostCacheData)
-        else _build_mlfmm_cupy_host_cache(source)
+        else _build_mlfmm_cupy_host_cache(source, host_cache_policy=policy)
     )
     near_dtype = np.dtype(host_cache.near_dtype)
     if near_dtype not in {np.dtype(np.complex64), np.dtype(np.complex128)}:
@@ -3155,7 +3144,6 @@ def prepare_mlfmm_cupy_data(
 
     return CuPyMLFMMPreparedData(
         lmax=int(host_cache.lmax),
-        k=float(host_cache.k),
         stage=stage,
         near_pairs=near_pairs,
         single_level=single_level_data,
@@ -3164,6 +3152,8 @@ def prepare_mlfmm_cupy_data(
 
 
 __all__ = [
+    "CuPyMLFMMHostCacheData",
+    "CuPyMLFMMHostCachePolicy",
     "CuPyMLFMMCouplingOperator",
     "CuPyDirectionalGridData",
     "CuPyDirectionalInterpolationData",
@@ -3176,6 +3166,7 @@ __all__ = [
     "CuPyMLFMMPreparedData",
     "CuPyMLFMMSingleLevelData",
     "CuPyMLFMMTransferData",
+    "build_mlfmm_cupy_host_cache",
     "prepare_mlfmm_cupy_coupling",
     "prepare_mlfmm_cupy_data",
 ]
