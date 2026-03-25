@@ -649,26 +649,55 @@ def _build_leaf_box_maps(
     partition: MLFMMPartition,
     radial_lut: RadialLUT | None,
     dtype: np.dtype,
+    leaf_map_backend: Literal["numpy", "cupy"] = "numpy",
 ) -> tuple[tuple[np.ndarray, ...], tuple[np.ndarray, ...]]:
     """Build particle-to-box aggregation maps and adjoint box-to-particle receive maps."""
 
+    backend = str(leaf_map_backend).strip().lower()
+    if backend == "cupy":
+        from .mlfmm_cupy import build_leaf_box_maps_cupy
+
+        return build_leaf_box_maps_cupy(
+            lmax=int(lmax),
+            box_order=int(box_order),
+            k=float(k),
+            positions=np.asarray(positions, dtype=float),
+            partition=partition,
+            radial_lut=radial_lut,
+            dtype=np.dtype(dtype),
+        )
+    if backend != "numpy":
+        raise ValueError(
+            f"Unsupported leaf-map backend {leaf_map_backend!r}. Use 'numpy' or 'cupy'."
+        )
+
     full_order = max(int(lmax), int(box_order))
     ab5 = translation_ab5_table(full_order, dtype=np.complex128)
-    aggregation: list[np.ndarray] = []
-    for leaf in partition.leaves:
+    leaves = tuple(sorted(partition.leaves, key=lambda leaf: int(leaf.id)))
+    n_leaves = len(leaves)
+    aggregation_by_id: list[np.ndarray | None] = [None] * n_leaves
+    for leaf in leaves:
+        leaf_id = int(leaf.id)
+        leaf_center = np.asarray(leaf.center, dtype=float)
+        particle_indices = np.asarray(leaf.particle_indices, dtype=np.int64)
         agg_blocks = [
             translation_block_rect(
                 int(box_order),
                 int(lmax),
                 float(k),
-                np.asarray(leaf.center - positions[int(pidx)], dtype=float),
+                np.asarray(leaf_center - positions[int(pidx)], dtype=float),
                 ab5=ab5,
                 radial_lut=radial_lut,
                 family="interior",
             )
-            for pidx in leaf.particle_indices
+            for pidx in particle_indices
         ]
-        aggregation.append(np.hstack(agg_blocks).astype(dtype, copy=False))
+        aggregation_by_id[leaf_id] = np.hstack(agg_blocks).astype(dtype, copy=False)
+    if any(agg is None for agg in aggregation_by_id):
+        raise RuntimeError("Internal error: incomplete leaf aggregation build.")
+    aggregation = tuple(
+        np.asarray(aggregation_by_id[leaf_id], dtype=dtype) for leaf_id in range(n_leaves)
+    )
     receive = [np.asarray(np.conjugate(agg).T, dtype=dtype) for agg in aggregation]
     return tuple(aggregation), tuple(receive)
 
@@ -846,6 +875,7 @@ def build_single_level_mlfmm_operators(
     accuracy_level: int = 3,
     order_additive: int = 2,
     dtype: np.dtype | type[np.complexfloating] | type[np.complex128] = np.complex128,
+    leaf_map_backend: Literal["numpy", "cupy"] = "numpy",
 ) -> MLFMMSingleLevelOperators:
     """Build the sampled single-level HF far operator over one occupied leaf level.
 
@@ -882,6 +912,7 @@ def build_single_level_mlfmm_operators(
         partition=partition,
         radial_lut=radial_lut,
         dtype=out_dtype,
+        leaf_map_backend=leaf_map_backend,
     )
     leaf_cell_coords = _leaf_cell_coords(partition)
     far_offset_batches = _leaf_offset_batches(partition, leaf_cell_coords)
@@ -994,6 +1025,7 @@ def build_multilevel_mlfmm_operators(
     accuracy_level: int = 3,
     order_additive: int = 2,
     dtype: np.dtype | type[np.complexfloating] | type[np.complex128] = np.complex128,
+    leaf_map_backend: Literal["numpy", "cupy"] = "numpy",
 ) -> MLFMMMultilevelOperators:
     """Build multilevel sampled HF operators over occupied boxes only.
 
@@ -1193,6 +1225,7 @@ def build_multilevel_mlfmm_operators(
         partition=partition,
         radial_lut=radial_lut,
         dtype=out_dtype,
+        leaf_map_backend=leaf_map_backend,
     )
     return MLFMMMultilevelOperators(
         partition=partition,
@@ -1377,11 +1410,12 @@ def prepare_mlfmm_coupling(
     positions: np.ndarray,
     particle_circumscribing_radii: np.ndarray,
     radial_lut: RadialLUT,
-    ab5: np.ndarray,
+    ab5: np.ndarray | None = None,
     options: MLFMMOptions | None = None,
     dtype: np.dtype | type[np.complexfloating] | type[np.complex128] = np.complex128,
     cache_translation_blocks: bool = False,
     show_progress: bool = False,
+    leaf_map_backend: Literal["numpy", "cupy"] = "numpy",
 ) -> CouplingOperator:
     """Prepare the native NumPy MLFMM coupling operator or direct fallback.
 
@@ -1396,6 +1430,16 @@ def prepare_mlfmm_coupling(
 
     t_prepare_start = perf_counter()
     out_dtype = np.dtype(dtype)
+    leaf_backend = str(leaf_map_backend).strip().lower()
+    if leaf_backend not in {"numpy", "cupy"}:
+        raise ValueError(
+            f"Unsupported leaf-map backend {leaf_map_backend!r}. Use 'numpy' or 'cupy'."
+        )
+    leaf_backend_lit: Literal["numpy", "cupy"]
+    if leaf_backend == "cupy":
+        leaf_backend_lit = "cupy"
+    else:
+        leaf_backend_lit = "numpy"
     near_out_dtype = np.dtype(dtype)
     far_out_dtype = np.dtype(np.complex128)
     pts = np.asarray(positions, dtype=float)
@@ -1433,11 +1477,16 @@ def prepare_mlfmm_coupling(
     out: CouplingOperator
     if resolved.stage == "direct":
         t_stage_start = perf_counter()
+        ab5_table = (
+            np.asarray(ab5, dtype=out_dtype)
+            if ab5 is not None
+            else translation_ab5_table(int(lmax), dtype=out_dtype)
+        )
         out = PairwiseCouplingOperator(
             lmax=int(lmax),
             k=float(k),
             positions=pts,
-            ab5=np.asarray(ab5, dtype=out_dtype),
+            ab5=ab5_table,
             radial_lut=radial_lut,
             dtype=out_dtype,
             cache_translation_blocks=bool(cache_translation_blocks),
@@ -1459,6 +1508,7 @@ def prepare_mlfmm_coupling(
             accuracy_level=int(resolved_options.accuracy_level),
             order_additive=int(resolved_options.order_additive),
             dtype=far_out_dtype,
+            leaf_map_backend=leaf_backend_lit,
         )
         out = MLFMMCouplingOperator(
             lmax=int(lmax),
@@ -1488,6 +1538,7 @@ def prepare_mlfmm_coupling(
         accuracy_level=int(resolved_options.accuracy_level),
         order_additive=int(resolved_options.order_additive),
         dtype=far_out_dtype,
+        leaf_map_backend=leaf_backend_lit,
     )
     out = MLFMMCouplingOperator(
         lmax=int(lmax),

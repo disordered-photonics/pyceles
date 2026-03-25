@@ -15,8 +15,12 @@ import numpy as np
 import numpy.typing as npt
 
 from pyceles._optional import coerce_array, import_cupy
-from pyceles.core.indexing import iter_modes, n_modes
-from pyceles.core.translation import _translation_ab5_compact_tables, _translation_plm_coeff_table
+from pyceles.core.indexing import index_vswf, iter_modes, n_modes
+from pyceles.core.translation import (
+    RadialLUT,
+    _translation_ab5_compact_tables,
+    _translation_plm_coeff_table,
+)
 
 from .mlfmm import (
     MLFMMCouplingOperator,
@@ -429,6 +433,425 @@ def _mode_pair_tables(lmax: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     return pair_offset, pair_pmin, pair_pcount
 
 
+@cache
+def _leaf_translation_blocks_rect_raw_kernel(full_order: int, dtype_name: str) -> Any:
+    """Return a cached RawKernel for batched interior rectangular translation blocks."""
+
+    cupy, _ = import_cupy()
+    order = int(full_order)
+    out_dtype = np.dtype(dtype_name)
+    if out_dtype == np.dtype(np.complex64):
+        real_t = "float"
+        complex_t = "complex<float>"
+    elif out_dtype == np.dtype(np.complex128):
+        real_t = "double"
+        complex_t = "complex<double>"
+    else:
+        raise ValueError(
+            "Leaf-map GPU kernel supports only complex64/complex128 output dtypes. "
+            f"Got {out_dtype!r}."
+        )
+    n_orders = 2 * order + 1
+    n_p_pdm = n_orders * (n_orders + 1) // 2
+    n_phase = 2 * n_orders - 1
+    source = f"""
+    #include <cupy/complex.cuh>
+    extern "C" __device__ {real_t} assoc_legendre_function(
+        const int l,
+        const int m,
+        const {real_t} ct,
+        const {real_t} st,
+        const {real_t}* plm_coeffs
+    ) {{
+        {real_t} plm = ({real_t})0.0;
+        const {real_t} st_pow = (m == 0) ? ({real_t})1.0 : pow(st, ({real_t})m);
+        int jj = 0;
+        for (int lambda = l - m; lambda >= 0; lambda -= 2) {{
+            const int idx = jj * ({n_orders} * {n_orders}) + m * {n_orders} + l;
+            plm += st_pow * pow(ct, ({real_t})lambda) * plm_coeffs[idx];
+            jj += 1;
+        }}
+        return plm;
+    }}
+
+    extern "C" __device__ {complex_t} bessel_lookup_linear(
+        const int p,
+        const {real_t} r,
+        const {real_t}* re_table,
+        const {real_t}* im_table,
+        const {real_t} inv_dr,
+        const int last_index
+    ) {{
+        if (r <= ({real_t})0.0) {{
+            return {complex_t}(re_table[p], im_table[p]);
+        }}
+        {real_t} t = r * inv_dr;
+        int i0 = (int)floor(t);
+        {real_t} frac = t - ({real_t})i0;
+        if (i0 < 0) {{
+            i0 = 0;
+            frac = ({real_t})0.0;
+        }}
+        if (i0 >= last_index) {{
+            i0 = last_index - 1;
+            frac = ({real_t})1.0;
+        }}
+        const int base0 = i0 * {n_orders} + p;
+        const int base1 = (i0 + 1) * {n_orders} + p;
+        const {real_t} re_val = (({real_t})1.0 - frac) * re_table[base0] + frac * re_table[base1];
+        const {real_t} im_val = (({real_t})1.0 - frac) * im_table[base0] + frac * im_table[base1];
+        return {complex_t}(re_val, im_val);
+    }}
+
+    extern "C" __global__ void mlfmm_leaf_translation_blocks_rect(
+        const int n_pairs,
+        const int n_out_modes,
+        const int n_in_modes,
+        const int nmodes_full,
+        const {real_t}* pair_deltas,
+        const int* out_mode_indices,
+        const int* in_mode_indices,
+        const {real_t}* re_j,
+        const {real_t}* im_j,
+        const {real_t} inv_dr,
+        const int last_index,
+        const {real_t}* plm_coeffs,
+        const {real_t}* re_ab,
+        const {real_t}* im_ab,
+        const int* mode_m,
+        const int* pair_offset,
+        const int* pair_pmin,
+        const int* pair_pcount,
+        {complex_t}* out_blocks
+    ) {{
+        const int out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+        const int in_idx = blockIdx.y * blockDim.y + threadIdx.y;
+        const int pair_idx = blockIdx.z;
+        if (pair_idx >= n_pairs) {{
+            return;
+        }}
+        const int tid_flat = threadIdx.y * blockDim.x + threadIdx.x;
+        const int n_threads = blockDim.x * blockDim.y;
+
+        __shared__ {real_t} r_shared;
+        __shared__ {real_t} ct_shared;
+        __shared__ {real_t} st_shared;
+        __shared__ {real_t} phi_shared;
+        __shared__ {real_t} re_j_shared[{n_orders}];
+        __shared__ {real_t} im_j_shared[{n_orders}];
+        __shared__ {real_t} p_pdm_shared[{n_p_pdm}];
+        __shared__ {real_t} cos_mphi_shared[{n_phase}];
+        __shared__ {real_t} sin_mphi_shared[{n_phase}];
+
+        if (tid_flat == 0) {{
+            const {real_t} dx = pair_deltas[3 * pair_idx + 0];
+            const {real_t} dy = pair_deltas[3 * pair_idx + 1];
+            const {real_t} dz = pair_deltas[3 * pair_idx + 2];
+            const {real_t} rr = sqrt(dx * dx + dy * dy + dz * dz);
+            r_shared = rr;
+            if (rr > ({real_t})0.0) {{
+                ct_shared = dz / rr;
+                st_shared = sqrt(fmax(({real_t})0.0, ({real_t})1.0 - ct_shared * ct_shared));
+                phi_shared = atan2(dy, dx);
+            }} else {{
+                ct_shared = ({real_t})1.0;
+                st_shared = ({real_t})0.0;
+                phi_shared = ({real_t})0.0;
+            }}
+        }}
+        __syncthreads();
+
+        if (r_shared <= ({real_t})0.0) {{
+            if (out_idx < n_out_modes && in_idx < n_in_modes) {{
+                const int n1_zero = out_mode_indices[out_idx];
+                const int n2_zero = in_mode_indices[in_idx];
+                const long long flat_idx = ((long long)pair_idx * n_out_modes + out_idx) * n_in_modes + in_idx;
+                if (n1_zero == n2_zero) {{
+                    out_blocks[flat_idx] = {complex_t}(({real_t})1.0, ({real_t})0.0);
+                }} else {{
+                    out_blocks[flat_idx] = {complex_t}(({real_t})0.0, ({real_t})0.0);
+                }}
+            }}
+            return;
+        }}
+
+        for (int p = tid_flat; p < {n_orders}; p += n_threads) {{
+            const {complex_t} radial = bessel_lookup_linear(p, r_shared, re_j, im_j, inv_dr, last_index);
+            re_j_shared[p] = radial.real();
+            im_j_shared[p] = radial.imag();
+            for (int absdm = 0; absdm <= p; ++absdm) {{
+                p_pdm_shared[p * (p + 1) / 2 + absdm] =
+                    assoc_legendre_function(p, absdm, ct_shared, st_shared, plm_coeffs);
+            }}
+        }}
+        if (tid_flat == 0) {{
+            for (int dm = -2 * {order}; dm <= 2 * {order}; ++dm) {{
+                const int phase_idx = dm + 2 * {order};
+                cos_mphi_shared[phase_idx] = cos(({real_t})dm * phi_shared);
+                sin_mphi_shared[phase_idx] = sin(({real_t})dm * phi_shared);
+            }}
+        }}
+        __syncthreads();
+
+        if (out_idx >= n_out_modes || in_idx >= n_in_modes) {{
+            return;
+        }}
+
+        const int n1 = out_mode_indices[out_idx];
+        const int n2 = in_mode_indices[in_idx];
+        const int delta_m = mode_m[n2] - mode_m[n1];
+        const int phase_idx = delta_m + 2 * {order};
+        const int table_idx = n1 * nmodes_full + n2;
+        const int base = pair_offset[table_idx];
+        const int p_min = pair_pmin[table_idx];
+        const int p_count = pair_pcount[table_idx];
+        {real_t} re_acc = ({real_t})0.0;
+        {real_t} im_acc = ({real_t})0.0;
+        for (int ip = 0; ip < p_count; ++ip) {{
+            const int p = p_min + ip;
+            const int ab_idx = base + ip;
+            const {real_t} plm = p_pdm_shared[p * (p + 1) / 2 + abs(delta_m)];
+            const {real_t} re_abp = re_ab[ab_idx] * plm;
+            const {real_t} im_abp = im_ab[ab_idx] * plm;
+            const {real_t} re_abpr = re_abp * re_j_shared[p] - im_abp * im_j_shared[p];
+            const {real_t} im_abpr = re_abp * im_j_shared[p] + im_abp * re_j_shared[p];
+            const {real_t} re_phase =
+                re_abpr * cos_mphi_shared[phase_idx] - im_abpr * sin_mphi_shared[phase_idx];
+            const {real_t} im_phase =
+                re_abpr * sin_mphi_shared[phase_idx] + im_abpr * cos_mphi_shared[phase_idx];
+            re_acc += re_phase;
+            im_acc += im_phase;
+        }}
+
+        const long long flat_idx = ((long long)pair_idx * n_out_modes + out_idx) * n_in_modes + in_idx;
+        out_blocks[flat_idx] = {complex_t}(re_acc, im_acc);
+    }}
+    """
+    return cupy.RawKernel(source, "mlfmm_leaf_translation_blocks_rect")
+
+
+def build_leaf_box_maps_cupy(
+    *,
+    lmax: int,
+    box_order: int,
+    k: float,
+    positions: np.ndarray,
+    partition: MLFMMPartition,
+    radial_lut: RadialLUT | None,
+    dtype: np.dtype | type[np.complexfloating] | type[np.complex128],
+) -> tuple[tuple[np.ndarray, ...], tuple[np.ndarray, ...]]:
+    """Build leaf aggregation/receive maps with a CuPy-kernelized block build stage."""
+
+    if radial_lut is None:
+        raise ValueError("CuPy leaf-map build requires a radial_lut for interior bessel sampling.")
+
+    cupy, _ = import_cupy()
+    out_dtype = np.dtype(dtype)
+    if out_dtype == np.dtype(np.complex64):
+        real_dtype: np.dtype[Any] = np.dtype(np.float32)
+        cupy_complex_dtype = cupy.complex64
+        cupy_real_dtype = cupy.float32
+    elif out_dtype == np.dtype(np.complex128):
+        real_dtype = np.dtype(np.float64)
+        cupy_complex_dtype = cupy.complex128
+        cupy_real_dtype = cupy.float64
+    else:
+        raise ValueError(
+            "CuPy leaf-map build supports only complex64/complex128 output dtypes. "
+            f"Got {out_dtype!r}."
+        )
+
+    lmax_in = int(lmax)
+    lmax_out = int(box_order)
+    full_order = max(lmax_in, lmax_out)
+    nmodes_in = int(n_modes(lmax_in))
+    nmodes_out = int(n_modes(lmax_out))
+    nmodes_full = int(n_modes(full_order))
+    leaves = tuple(sorted(partition.leaves, key=lambda leaf: int(leaf.id)))
+    n_leaves = int(len(leaves))
+    if n_leaves == 0:
+        return tuple(), tuple()
+
+    positions_arr = np.asarray(positions, dtype=float).reshape(-1, 3)
+    if int(radial_lut.lmax) < full_order:
+        radial_lut_full = RadialLUT(
+            lmax=full_order,
+            k=float(k),
+            r_max=float(radial_lut.r_grid[-1]),
+            dr=float(radial_lut.dr),
+            dtype=out_dtype,
+        )
+    else:
+        radial_lut_full = radial_lut
+
+    out_mode_idx = np.fromiter(
+        (
+            index_vswf(int(l_i), int(m_i), int(tau_i), full_order)
+            for tau_i, l_i, m_i, _idx in iter_modes(lmax_out)
+        ),
+        dtype=np.int32,
+        count=nmodes_out,
+    )
+    in_mode_idx = np.fromiter(
+        (
+            index_vswf(int(l_i), int(m_i), int(tau_i), full_order)
+            for tau_i, l_i, m_i, _idx in iter_modes(lmax_in)
+        ),
+        dtype=np.int32,
+        count=nmodes_in,
+    )
+
+    compact_re_ab_raw, compact_im_ab_raw = _translation_ab5_compact_tables(
+        full_order, dtype=out_dtype
+    )
+    plm_coeffs_raw = _translation_plm_coeff_table(full_order, dtype=real_dtype).reshape(-1)
+    mode_m = _mode_metadata_tables(full_order)
+    pair_offset_raw, pair_pmin_raw, pair_pcount_raw = _mode_pair_tables(full_order)
+
+    lut_j = np.asarray(radial_lut_full.j, dtype=out_dtype)[: 2 * full_order + 1, :]
+    lut_j_rows = np.ascontiguousarray(lut_j.T)
+    re_j_raw = np.ascontiguousarray(lut_j_rows.real.reshape(-1), dtype=real_dtype)
+    im_j_raw = np.ascontiguousarray(lut_j_rows.imag.reshape(-1), dtype=real_dtype)
+    last_index = int(radial_lut_full._last_index)
+    inv_dr_scalar = (
+        np.float32(float(radial_lut_full._inv_dr))
+        if out_dtype == np.dtype(np.complex64)
+        else np.float64(float(radial_lut_full._inv_dr))
+    )
+
+    aggregation_by_id: list[np.ndarray | None] = [None] * n_leaves
+    pair_leaf_ids: list[int] = []
+    pair_local_ids: list[int] = []
+    pair_delta_parts: list[np.ndarray] = []
+    for leaf in leaves:
+        leaf_id = int(leaf.id)
+        if leaf_id < 0 or leaf_id >= n_leaves:
+            raise ValueError(
+                "Leaf ids must be contiguous in [0, n_leaves) for grouped apply indexing. "
+                f"Got leaf_id={leaf_id}, n_leaves={n_leaves}."
+            )
+        particle_indices = np.asarray(leaf.particle_indices, dtype=np.int64).reshape(-1)
+        occupancy = int(particle_indices.size)
+        if occupancy <= 0:
+            raise ValueError(f"leaf {leaf_id} has non-positive occupancy {occupancy}.")
+        aggregation_by_id[leaf_id] = np.empty(
+            (nmodes_out, occupancy * nmodes_in),
+            dtype=out_dtype,
+        )
+        leaf_center = np.asarray(leaf.center, dtype=float).reshape(1, 3)
+        deltas = np.ascontiguousarray(
+            leaf_center - positions_arr[particle_indices, :],
+            dtype=real_dtype,
+        )
+        pair_delta_parts.append(deltas)
+        pair_leaf_ids.extend([leaf_id] * occupancy)
+        pair_local_ids.extend(range(occupancy))
+
+    if not pair_delta_parts:
+        raise RuntimeError("Internal error: empty leaf-map pair schedule.")
+    pair_deltas = np.ascontiguousarray(np.vstack(pair_delta_parts), dtype=real_dtype)
+    pair_leaf_ids_arr = np.ascontiguousarray(np.asarray(pair_leaf_ids, dtype=np.int32).reshape(-1))
+    pair_local_ids_arr = np.ascontiguousarray(
+        np.asarray(pair_local_ids, dtype=np.int32).reshape(-1)
+    )
+    n_pairs = int(pair_deltas.shape[0])
+    if n_pairs != int(pair_leaf_ids_arr.size):
+        raise RuntimeError("Internal error: inconsistent pair schedule sizes.")
+
+    out_mode_idx_dev = cupy.asarray(np.ascontiguousarray(out_mode_idx), dtype=cupy.int32)
+    in_mode_idx_dev = cupy.asarray(np.ascontiguousarray(in_mode_idx), dtype=cupy.int32)
+    mode_m_dev = cupy.asarray(np.ascontiguousarray(mode_m), dtype=cupy.int32)
+    pair_offset_dev = cupy.asarray(
+        np.ascontiguousarray(pair_offset_raw.reshape(-1), dtype=np.int32), dtype=cupy.int32
+    )
+    pair_pmin_dev = cupy.asarray(
+        np.ascontiguousarray(pair_pmin_raw.reshape(-1), dtype=np.int32), dtype=cupy.int32
+    )
+    pair_pcount_dev = cupy.asarray(
+        np.ascontiguousarray(pair_pcount_raw.reshape(-1), dtype=np.int32), dtype=cupy.int32
+    )
+    plm_coeffs_dev = cupy.asarray(np.ascontiguousarray(plm_coeffs_raw), dtype=cupy_real_dtype)
+    re_ab_dev = cupy.asarray(np.ascontiguousarray(compact_re_ab_raw), dtype=cupy_real_dtype)
+    im_ab_dev = cupy.asarray(np.ascontiguousarray(compact_im_ab_raw), dtype=cupy_real_dtype)
+    re_j_dev = cupy.asarray(re_j_raw, dtype=cupy_real_dtype)
+    im_j_dev = cupy.asarray(im_j_raw, dtype=cupy_real_dtype)
+
+    kernel = _leaf_translation_blocks_rect_raw_kernel(full_order, out_dtype.str)
+    props = cupy.cuda.runtime.getDeviceProperties(cupy.cuda.runtime.getDevice())
+    max_grid_z = int(props["maxGridSize"][2])
+    max_threads = int(props["maxThreadsPerBlock"])
+    if max_threads >= 128:
+        threads_x, threads_y = 16, 8
+    elif max_threads >= 64:
+        threads_x, threads_y = 8, 8
+    else:
+        threads_x, threads_y = 8, 4
+    grid_x = max(1, (nmodes_out + threads_x - 1) // threads_x)
+    grid_y = max(1, (nmodes_in + threads_y - 1) // threads_y)
+
+    bytes_per_pair = max(1, nmodes_out * nmodes_in * out_dtype.itemsize)
+    target_chunk_bytes = 256 * 1024 * 1024
+    chunk_pairs = max(1, target_chunk_bytes // bytes_per_pair)
+    chunk_pairs = max(1, min(int(chunk_pairs), int(max_grid_z)))
+
+    for start in range(0, n_pairs, chunk_pairs):
+        end = min(n_pairs, start + chunk_pairs)
+        count = int(end - start)
+        deltas_dev = cupy.asarray(
+            np.ascontiguousarray(pair_deltas[start:end, :]),
+            dtype=cupy_real_dtype,
+            blocking=True,
+        )
+        blocks_dev = cupy.empty((count, nmodes_out, nmodes_in), dtype=cupy_complex_dtype)
+        kernel(
+            (int(grid_x), int(grid_y), count),
+            (threads_x, threads_y, 1),
+            (
+                np.int32(count),
+                np.int32(nmodes_out),
+                np.int32(nmodes_in),
+                np.int32(nmodes_full),
+                deltas_dev.reshape(-1),
+                out_mode_idx_dev,
+                in_mode_idx_dev,
+                re_j_dev,
+                im_j_dev,
+                inv_dr_scalar,
+                np.int32(last_index),
+                plm_coeffs_dev,
+                re_ab_dev,
+                im_ab_dev,
+                mode_m_dev,
+                pair_offset_dev,
+                pair_pmin_dev,
+                pair_pcount_dev,
+                blocks_dev.reshape(-1),
+            ),
+        )
+        blocks_host = np.asarray(cupy.asnumpy(blocks_dev), dtype=out_dtype)
+        leaf_chunk = pair_leaf_ids_arr[start:end]
+        local_chunk = pair_local_ids_arr[start:end]
+        for idx_local in range(count):
+            leaf_id = int(leaf_chunk[idx_local])
+            local_particle = int(local_chunk[idx_local])
+            col_start = local_particle * nmodes_in
+            col_stop = col_start + nmodes_in
+            agg_leaf = aggregation_by_id[leaf_id]
+            if agg_leaf is None:
+                raise RuntimeError(
+                    f"Internal error: missing aggregation buffer for leaf {leaf_id}."
+                )
+            agg_leaf[:, col_start:col_stop] = blocks_host[idx_local]
+
+    if any(agg is None for agg in aggregation_by_id):
+        raise RuntimeError("Internal error: incomplete CuPy leaf-map aggregation build.")
+    aggregation = tuple(
+        np.asarray(aggregation_by_id[leaf_id], dtype=out_dtype) for leaf_id in range(n_leaves)
+    )
+    receive = tuple(np.asarray(np.conjugate(agg).T, dtype=out_dtype) for agg in aggregation)
+    return aggregation, receive
+
+
 def _upload_directional_transforms(
     transforms: MLFMMDirectionalTransforms | CuPyHostDirectionalTransformsData, *, cupy: Any
 ) -> CuPyDirectionalTransformsData:
@@ -474,24 +897,36 @@ def _upload_directional_transforms(
     nscl = int(fth.shape[1])
     perm = np.asarray(reflection, dtype=np.int32)
     inv_perm = np.ascontiguousarray(np.argsort(perm), dtype=np.int32)
+    perm_gpu = cupy.asarray(perm, dtype=cupy.int32)
+    inv_perm_gpu = cupy.asarray(inv_perm, dtype=cupy.int32)
+
+    # Build packed directional operators on GPU so the prepare path avoids
+    # large host-side stack/hstack temporaries before upload.
+    fth_gpu = cupy.asarray(fth, dtype=cupy.complex128)
+    fph_gpu = cupy.asarray(fph, dtype=cupy.complex128)
+    gth_gpu = cupy.asarray(gth, dtype=cupy.complex128)
+    gph_gpu = cupy.asarray(gph, dtype=cupy.complex128)
 
     # Outgoing map: pre-fold reflection row permutation and stack theta/phi
     # into one (2*ndir, nscl) matrix for batched GEMM.
-    f_stack = np.ascontiguousarray(
-        np.vstack((fth[perm, :], fph[perm, :])),
-        dtype=np.complex128,
-    )
+    f_stack = cupy.concatenate((fth_gpu[perm_gpu, :], fph_gpu[perm_gpu, :]), axis=0)
 
     # Incoming map: pre-fold reflection on columns via A @ P equivalence
     # (implemented as column reindex by inverse permutation), then stack
     # [theta,phi] blocks for compact batched GEMM.
-    a_adj = np.ascontiguousarray(
-        np.hstack((np.conjugate(fth.T)[:, inv_perm], np.conjugate(fph.T)[:, inv_perm])),
-        dtype=np.complex128,
+    a_adj = cupy.concatenate(
+        (
+            cupy.conjugate(fth_gpu.T)[:, inv_perm_gpu],
+            cupy.conjugate(fph_gpu.T)[:, inv_perm_gpu],
+        ),
+        axis=1,
     )
-    g_adj = np.ascontiguousarray(
-        np.hstack((np.conjugate(gth.T)[:, inv_perm], np.conjugate(gph.T)[:, inv_perm])),
-        dtype=np.complex128,
+    g_adj = cupy.concatenate(
+        (
+            cupy.conjugate(gth_gpu.T)[:, inv_perm_gpu],
+            cupy.conjugate(gph_gpu.T)[:, inv_perm_gpu],
+        ),
+        axis=1,
     )
 
     return CuPyDirectionalTransformsData(
@@ -500,12 +935,12 @@ def _upload_directional_transforms(
         grid=CuPyDirectionalGridData(
             order=int(grid.order),
             n_directions=int(n_dir),
-            reflection_permutation=cupy.asarray(reflection, dtype=cupy.int32),
+            reflection_permutation=perm_gpu,
         ),
         nscl=nscl,
-        forward_F=cupy.asarray(f_stack, dtype=cupy.complex128),
-        inverse_A_adj=cupy.asarray(a_adj, dtype=cupy.complex128),
-        inverse_G_adj=cupy.asarray(g_adj, dtype=cupy.complex128),
+        forward_F=f_stack,
+        inverse_A_adj=a_adj,
+        inverse_G_adj=g_adj,
     )
 
 

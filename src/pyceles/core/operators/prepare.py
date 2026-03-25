@@ -230,7 +230,6 @@ def prepare_matvec(
     coupling_name = str(coupling_backend).lower()
     op_dtype = np.dtype(operator_dtype)
     k_f = float(k)
-    ab5 = translation_ab5_table(int(lmax), dtype=op_dtype)
 
     dr_user = float(radial_lut_dr)
     if dr_user < 0.0:
@@ -254,6 +253,7 @@ def prepare_matvec(
             group_factories=particle_t_group_factories,
         )
         if coupling_name == "pairwise":
+            ab5 = translation_ab5_table(int(lmax), dtype=op_dtype)
             coupling = PairwiseCouplingOperator(
                 lmax=int(lmax),
                 k=k_f,
@@ -270,11 +270,12 @@ def prepare_matvec(
                 positions=positions,
                 particle_circumscribing_radii=circumscribing_radii,
                 radial_lut=lut,
-                ab5=ab5,
+                ab5=None,
                 options=mlfmm_options,
                 dtype=op_dtype,
                 cache_translation_blocks=bool(cache_translation_blocks),
                 show_progress=bool(show_progress),
+                leaf_map_backend="numpy",
             )
         else:
             raise ValueError(
@@ -314,6 +315,7 @@ def prepare_matvec(
             ),
         )
         if coupling_name == "pairwise":
+            ab5 = translation_ab5_table(int(lmax), dtype=op_dtype)
             coupling = cast(
                 CouplingOperator,
                 CuPyPairwiseCouplingOperator(
@@ -332,13 +334,15 @@ def prepare_matvec(
                 positions=positions,
                 particle_circumscribing_radii=circumscribing_radii,
                 radial_lut=lut,
-                ab5=ab5,
+                ab5=None,
                 options=mlfmm_options,
                 dtype=op_dtype,
                 cache_translation_blocks=False,
                 show_progress=bool(show_progress),
+                leaf_map_backend="cupy",
             )
             if isinstance(cpu_mlfmm, PairwiseCouplingOperator):
+                ab5 = translation_ab5_table(int(lmax), dtype=op_dtype)
                 coupling = cast(
                     CouplingOperator,
                     CuPyPairwiseCouplingOperator(
