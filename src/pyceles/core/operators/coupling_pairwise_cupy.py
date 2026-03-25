@@ -37,6 +37,7 @@ def _translation_matvec_raw_kernel(lmax: int, dtype_str: str):
         raise TypeError(f"Unsupported CuPy raw-kernel dtype {dtype!r}.")
 
     real_type = "float" if dtype == np.dtype(np.complex64) else "double"
+    complex_type = "complex<float>" if dtype == np.dtype(np.complex64) else "complex<double>"
     math = {
         "atan2": "atan2f" if real_type == "float" else "atan2",
         "cos": "cosf" if real_type == "float" else "cos",
@@ -56,6 +57,7 @@ def _translation_matvec_raw_kernel(lmax: int, dtype_str: str):
     n_p_pdm = n_orders * (n_orders + 1) // 2
     n_phase = 2 * n_orders - 1
     source = f"""
+    #include <cupy/complex.cuh>
     // This kernel evaluates one direct many-body coupling matvec y = W x.
     //
     // Conventions:
@@ -136,10 +138,8 @@ def _translation_matvec_raw_kernel(lmax: int, dtype_str: str):
         const int* pair_offset,
         const int* pair_pmin,
         const int* pair_pcount,
-        const {real_type}* re_x,
-        const {real_type}* im_x,
-        {real_type}* re_wx,
-        {real_type}* im_wx
+        const {complex_type}* x,
+        {complex_type}* wx
     ) {{
         const int n1 = blockIdx.x * blockDim.x + threadIdx.x;
         if (n1 >= nmodes) {{
@@ -158,11 +158,8 @@ def _translation_matvec_raw_kernel(lmax: int, dtype_str: str):
         const int tau1 = mode_tau[n1];
         const int l1 = mode_l[n1];
         const int m1 = mode_m[n1];
-        const int rhs_stride = ns * nmodes;
 
         for (int rhs = blockIdx.z; rhs < nrhs; rhs += gridDim.z) {{
-            const int rhs_offset = rhs * rhs_stride;
-
             for (int s1 = blockIdx.y; s1 < ns; s1 += gridDim.y) {{
                 {real_type} re_incr = ({real_type})0;
                 {real_type} im_incr = ({real_type})0;
@@ -216,8 +213,10 @@ def _translation_matvec_raw_kernel(lmax: int, dtype_str: str):
                         // staging this small mode vector in shared memory did not
                         // produce a material end-to-end speedup, while it made the
                         // kernel more verbose and stateful.
-                        const {real_type} re_x_tmp = re_x[rhs_offset + s2 * nmodes + n2];
-                        const {real_type} im_x_tmp = im_x[rhs_offset + s2 * nmodes + n2];
+                        const int x_idx = ((s2 * nmodes + n2) * nrhs) + rhs;
+                        const {complex_type} x_tmp = x[x_idx];
+                        const {real_type} re_x_tmp = x_tmp.real();
+                        const {real_type} im_x_tmp = x_tmp.imag();
                         const int delta_m = mode_m[n2] - m1;
                         const int phase_idx = delta_m + 2 * {lmax};
                         const int pair_idx = n1 * nmodes + n2;
@@ -248,8 +247,8 @@ def _translation_matvec_raw_kernel(lmax: int, dtype_str: str):
                     __syncthreads();
                 }}
 
-                re_wx[rhs_offset + s1 * nmodes + n1] = re_incr;
-                im_wx[rhs_offset + s1 * nmodes + n1] = im_incr;
+                const int y_idx = ((s1 * nmodes + n1) * nrhs) + rhs;
+                wx[y_idx] = {complex_type}(re_incr, im_incr);
             }}
         }}
     }}
@@ -456,7 +455,6 @@ class CuPyPairwiseCouplingOperator:
 
     def _apply_gpu(self, x: np.ndarray | object):
         cupy, _ = import_cupy()
-        real_dtype = cupy.float32 if self.dtype == np.dtype(np.complex64) else cupy.float64
         (
             kernel,
             positions_gpu,
@@ -474,67 +472,30 @@ class CuPyPairwiseCouplingOperator:
         ) = self._raw_kernel_resources()
 
         arr_raw = coerce_array(x, dtype=self.dtype, prefer_cupy=True)
+        squeezed = False
         if int(arr_raw.ndim) == 1:
             if int(arr_raw.size) != self.n_particles * self.n_modes:
                 raise ValueError(
                     "Input length must match n_particles * n_modes. "
                     f"Got {int(arr_raw.size)} for {self.n_particles * self.n_modes}."
                 )
-            arr = arr_raw.reshape(self.n_particles, self.n_modes)
-            x_re = cupy.ascontiguousarray(arr.real.reshape(-1).astype(real_dtype, copy=False))
-            x_im = cupy.ascontiguousarray(arr.imag.reshape(-1).astype(real_dtype, copy=False))
-            y_re = cupy.zeros((self.n_particles * self.n_modes,), dtype=real_dtype)
-            y_im = cupy.zeros((self.n_particles * self.n_modes,), dtype=real_dtype)
-            blocks_x, threads_per_block, grid_y, _ = self._launch_config(nrhs=1)
-            inv_dr = self.real_dtype.type(self.radial_lut._inv_dr)
-            kernel(
-                (blocks_x, grid_y, 1),
-                (threads_per_block,),
-                (
-                    np.int32(self.n_particles),
-                    np.int32(self.n_modes),
-                    np.int32(1),
-                    positions_gpu,
-                    lut_re_gpu,
-                    lut_im_gpu,
-                    inv_dr,
-                    np.int32(self.radial_lut._last_index),
-                    plm_coeff_gpu,
-                    compact_re_ab_gpu,
-                    compact_im_ab_gpu,
-                    mode_tau_gpu,
-                    mode_l_gpu,
-                    mode_m_gpu,
-                    pair_offset_gpu,
-                    pair_pmin_gpu,
-                    pair_pcount_gpu,
-                    x_re,
-                    x_im,
-                    y_re,
-                    y_im,
-                ),
-            )
-            return (
-                (y_re + 1j * y_im)
-                .astype(self.dtype, copy=False)
-                .reshape(self.n_particles * self.n_modes)
-            )
+            arr = cupy.asarray(arr_raw, dtype=self.dtype).reshape(self.n_particles, self.n_modes, 1)
+            squeezed = True
         elif int(arr_raw.ndim) == 2:
             if int(arr_raw.shape[0]) != self.n_particles * self.n_modes:
                 raise ValueError(
                     "Input first dimension must match n_particles * n_modes. "
                     f"Got {int(arr_raw.shape[0])} for {self.n_particles * self.n_modes}."
                 )
-            arr = arr_raw.reshape(self.n_particles, self.n_modes, int(arr_raw.shape[1]))
+            arr = cupy.asarray(arr_raw, dtype=self.dtype).reshape(
+                self.n_particles, self.n_modes, int(arr_raw.shape[1])
+            )
         else:
             raise ValueError(f"Input must be 1D or 2D. Got shape {tuple(arr_raw.shape)}.")
 
+        arr = cupy.ascontiguousarray(arr)
         nrhs = int(arr.shape[2])
-        x_rhs_major = cupy.transpose(arr, (2, 0, 1))
-        x_re = cupy.ascontiguousarray(x_rhs_major.real.reshape(-1).astype(real_dtype, copy=False))
-        x_im = cupy.ascontiguousarray(x_rhs_major.imag.reshape(-1).astype(real_dtype, copy=False))
-        y_re = cupy.zeros((nrhs * self.n_particles * self.n_modes,), dtype=real_dtype)
-        y_im = cupy.zeros((nrhs * self.n_particles * self.n_modes,), dtype=real_dtype)
+        y = cupy.empty((self.n_particles, self.n_modes, nrhs), dtype=self.dtype)
 
         blocks_x, threads_per_block, grid_y, grid_z = self._launch_config(nrhs=nrhs)
         inv_dr = self.real_dtype.type(self.radial_lut._inv_dr)
@@ -559,21 +520,13 @@ class CuPyPairwiseCouplingOperator:
                 pair_offset_gpu,
                 pair_pmin_gpu,
                 pair_pcount_gpu,
-                x_re,
-                x_im,
-                y_re,
-                y_im,
+                arr.reshape(-1),
+                y.reshape(-1),
             ),
         )
-        out_rhs_major = (
-            (y_re + 1j * y_im)
-            .astype(self.dtype, copy=False)
-            .reshape(nrhs, self.n_particles, self.n_modes)
-        )
-        out = cupy.transpose(out_rhs_major, (1, 2, 0)).reshape(
-            self.n_particles * self.n_modes, nrhs
-        )
-        return out
+        if squeezed:
+            return y.reshape(self.n_particles * self.n_modes)
+        return y.reshape(self.n_particles * self.n_modes, nrhs)
 
     def apply(self, x: np.ndarray | object) -> np.ndarray | object:
         out = self._apply_gpu(x)

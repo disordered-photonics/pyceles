@@ -58,6 +58,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CuPy MLFMM exact-near apply now uses direct complex input/output in the
   device kernel, removing per-iteration real/imag marshaling and reassembly on
   the host-side orchestration path.
+- CuPy direct pairwise coupling now uses direct complex input/output in its
+  fused RawKernel apply path, removing per-call real/imag split-repack and
+  RHS-major transpose marshaling in the Python launch path.
 - CuPy MLFMM grouped far-offset accumulation now uses weighted device kernels
   in single-level and multilevel sampled far passes, reducing intermediate
   tensor traffic in repeated applies.
