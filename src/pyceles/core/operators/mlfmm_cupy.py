@@ -343,6 +343,50 @@ class CuPyMLFMMMultilevelWorkspace:
     y_states: Any
 
 
+@dataclass
+class CuPyMLFMMNearWorkspace:
+    """Reusable exact-near work buffers for one RHS width."""
+
+    nrhs: int
+    x_states: Any
+    y_states: Any
+
+
+@dataclass(frozen=True)
+class CuPyMLFMMSingleLevelWorkspaceKey:
+    """Cache key for reusable single-level far workspaces."""
+
+    nrhs: int
+    n_particles: int
+    nm: int
+    n_leaves: int
+    box_nm: int
+    n_directions: int
+
+
+@dataclass(frozen=True)
+class CuPyMLFMMMultilevelWorkspaceKey:
+    """Cache key for reusable multilevel far workspaces."""
+
+    nrhs: int
+    n_particles: int
+    nm: int
+    n_leaves: int
+    box_nm: int
+    level_shapes: tuple[tuple[int, int], ...]
+
+
+@dataclass(frozen=True)
+class CuPyMLFMMNearWorkspaceKey:
+    """Cache key for reusable exact-near workspaces."""
+
+    nrhs: int
+    n_particles: int
+    nm: int
+    n_leaf_pairs: int
+    near_dtype: str
+
+
 def _cupy_complex_dtype(dtype: np.dtype, *, cupy: Any) -> Any:
     dt = np.dtype(dtype)
     if dt == np.dtype(np.complex64):
@@ -2999,28 +3043,44 @@ def _ensure_single_level_workspace(
     n_particles: int,
     nm: int,
     nrhs: int,
-    cache: dict[int, CuPyMLFMMSingleLevelWorkspace],
+    cache: dict[CuPyMLFMMSingleLevelWorkspaceKey, CuPyMLFMMSingleLevelWorkspace],
     cupy: Any,
 ) -> CuPyMLFMMSingleLevelWorkspace:
-    """Return reusable single-level far workspace keyed by RHS count."""
+    """Return reusable single-level far workspace keyed by runtime shape metadata."""
 
     single = prepared.single_level
     if single is None:
         raise RuntimeError("Internal CuPy MLFMM error: missing single-level prepared data.")
-    key = int(nrhs)
+    key = CuPyMLFMMSingleLevelWorkspaceKey(
+        nrhs=int(nrhs),
+        n_particles=int(n_particles),
+        nm=int(nm),
+        n_leaves=int(single.n_leaves),
+        box_nm=int(single.box_nm),
+        n_directions=int(single.directional.grid.n_directions),
+    )
     ws = cache.get(key)
     if ws is not None:
         return ws
-    n_leaves = int(single.n_leaves)
-    box_nm = int(single.box_nm)
-    ndir = int(single.directional.grid.n_directions)
     ws = CuPyMLFMMSingleLevelWorkspace(
-        nrhs=key,
-        box_states=cupy.empty((n_leaves, box_nm, key), dtype=cupy.complex128),
-        outgoing=cupy.empty((n_leaves, 4, ndir, key), dtype=cupy.complex128),
-        incoming=cupy.empty((n_leaves, 4, ndir, key), dtype=cupy.complex128),
-        incoming_box=cupy.empty((n_leaves, box_nm, key), dtype=cupy.complex128),
-        y_states=cupy.empty((int(n_particles), int(nm), key), dtype=cupy.complex128),
+        nrhs=int(key.nrhs),
+        box_states=cupy.empty(
+            (int(key.n_leaves), int(key.box_nm), int(key.nrhs)), dtype=cupy.complex128
+        ),
+        outgoing=cupy.empty(
+            (int(key.n_leaves), 4, int(key.n_directions), int(key.nrhs)),
+            dtype=cupy.complex128,
+        ),
+        incoming=cupy.empty(
+            (int(key.n_leaves), 4, int(key.n_directions), int(key.nrhs)),
+            dtype=cupy.complex128,
+        ),
+        incoming_box=cupy.empty(
+            (int(key.n_leaves), int(key.box_nm), int(key.nrhs)), dtype=cupy.complex128
+        ),
+        y_states=cupy.empty(
+            (int(key.n_particles), int(key.nm), int(key.nrhs)), dtype=cupy.complex128
+        ),
     )
     cache[key] = ws
     return ws
@@ -3032,42 +3092,108 @@ def _ensure_multilevel_workspace(
     n_particles: int,
     nm: int,
     nrhs: int,
-    cache: dict[int, CuPyMLFMMMultilevelWorkspace],
+    cache: dict[CuPyMLFMMMultilevelWorkspaceKey, CuPyMLFMMMultilevelWorkspace],
     cupy: Any,
 ) -> CuPyMLFMMMultilevelWorkspace:
-    """Return reusable multilevel far workspace keyed by RHS count."""
+    """Return reusable multilevel far workspace keyed by runtime shape metadata."""
 
     multilevel = prepared.multilevel
     if multilevel is None:
         raise RuntimeError("Internal CuPy MLFMM error: missing multilevel prepared data.")
-    key = int(nrhs)
+    level_shapes = tuple(
+        (int(level.n_boxes), int(level.directional.grid.n_directions))
+        for level in multilevel.levels
+    )
+    key = CuPyMLFMMMultilevelWorkspaceKey(
+        nrhs=int(nrhs),
+        n_particles=int(n_particles),
+        nm=int(nm),
+        n_leaves=int(multilevel.n_leaves),
+        box_nm=int(multilevel.box_nm),
+        level_shapes=level_shapes,
+    )
     ws = cache.get(key)
     if ws is not None:
         return ws
     levels = multilevel.levels
     outgoing = [
         cupy.empty(
-            (int(level.n_boxes), 4, int(level.directional.grid.n_directions), key),
+            (int(level.n_boxes), 4, int(level.directional.grid.n_directions), int(key.nrhs)),
             dtype=cupy.complex128,
         )
         for level in levels
     ]
     incoming = [cupy.empty_like(values, dtype=cupy.complex128) for values in outgoing]
-    n_leaves = int(multilevel.n_leaves)
-    box_nm = int(multilevel.box_nm)
     ws = CuPyMLFMMMultilevelWorkspace(
-        nrhs=key,
+        nrhs=int(key.nrhs),
         outgoing=outgoing,
         incoming=incoming,
-        leaf_box_states=cupy.empty((n_leaves, box_nm, key), dtype=cupy.complex128),
-        incoming_box=cupy.empty((n_leaves, box_nm, key), dtype=cupy.complex128),
-        y_states=cupy.empty((int(n_particles), int(nm), key), dtype=cupy.complex128),
+        leaf_box_states=cupy.empty(
+            (int(key.n_leaves), int(key.box_nm), int(key.nrhs)), dtype=cupy.complex128
+        ),
+        incoming_box=cupy.empty(
+            (int(key.n_leaves), int(key.box_nm), int(key.nrhs)), dtype=cupy.complex128
+        ),
+        y_states=cupy.empty(
+            (int(key.n_particles), int(key.nm), int(key.nrhs)), dtype=cupy.complex128
+        ),
     )
     cache[key] = ws
     return ws
 
 
-def _apply_exact_near_pairs(prepared: CuPyMLFMMPreparedData, x_states: Any, *, cupy: Any) -> Any:
+def _ensure_exact_near_workspace(
+    prepared: CuPyMLFMMPreparedData,
+    *,
+    n_particles: int,
+    nm: int,
+    nrhs: int,
+    near_dtype: np.dtype,
+    cache: dict[CuPyMLFMMNearWorkspaceKey, CuPyMLFMMNearWorkspace],
+    cupy: Any,
+) -> CuPyMLFMMNearWorkspace:
+    """Return reusable exact-near workspace keyed by runtime shape and near dtype."""
+
+    near = prepared.near_pairs
+    key = CuPyMLFMMNearWorkspaceKey(
+        nrhs=int(nrhs),
+        n_particles=int(n_particles),
+        nm=int(nm),
+        n_leaf_pairs=int(near.dst_leaf_indices.size),
+        near_dtype=str(np.dtype(near_dtype).str),
+    )
+    ws = cache.get(key)
+    if ws is not None:
+        return ws
+    if np.dtype(near_dtype) == np.dtype(np.complex64):
+        cupy_near_dtype = cupy.complex64
+    elif np.dtype(near_dtype) == np.dtype(np.complex128):
+        cupy_near_dtype = cupy.complex128
+    else:
+        raise ValueError(
+            "CuPy MLFMM near workspace supports only complex64/complex128 near dtypes. "
+            f"Got {np.dtype(near_dtype)!r}."
+        )
+    ws = CuPyMLFMMNearWorkspace(
+        nrhs=int(key.nrhs),
+        x_states=cupy.empty(
+            (int(key.n_particles), int(key.nm), int(key.nrhs)), dtype=cupy_near_dtype
+        ),
+        y_states=cupy.empty(
+            (int(key.n_particles), int(key.nm), int(key.nrhs)), dtype=cupy_near_dtype
+        ),
+    )
+    cache[key] = ws
+    return ws
+
+
+def _apply_exact_near_pairs(
+    prepared: CuPyMLFMMPreparedData,
+    x_states: Any,
+    *,
+    workspace: CuPyMLFMMNearWorkspace | None,
+    cupy: Any,
+) -> Any:
     """Apply exact near interactions from directed near-pair indices on device."""
 
     near = prepared.near_pairs
@@ -3087,13 +3213,21 @@ def _apply_exact_near_pairs(prepared: CuPyMLFMMPreparedData, x_states: Any, *, c
     cupy_compute_dtype = cupy_out_dtype
     kernel = _exact_near_pairs_raw_kernel(int(prepared.lmax), near_dtype.str)
 
-    n_leaf_pairs = int(near.dst_leaf_indices.size)
-    y = cupy.zeros_like(x_states, dtype=cupy_out_dtype)
-    if n_leaf_pairs == 0:
-        return y
     n_particles, nm, nrhs = (int(v) for v in x_states.shape)
-    x_arr = cupy.ascontiguousarray(cupy.asarray(x_states, dtype=cupy_compute_dtype))
-    y_arr = cupy.zeros((n_particles, nm, nrhs), dtype=cupy_compute_dtype)
+    n_leaf_pairs = int(near.dst_leaf_indices.size)
+    if n_leaf_pairs == 0:
+        if workspace is not None:
+            workspace.y_states.fill(0)
+            return workspace.y_states
+        return cupy.zeros((n_particles, nm, nrhs), dtype=cupy_out_dtype)
+    if workspace is None:
+        x_arr = cupy.ascontiguousarray(cupy.asarray(x_states, dtype=cupy_compute_dtype))
+        y_arr = cupy.zeros((n_particles, nm, nrhs), dtype=cupy_compute_dtype)
+    else:
+        x_arr = workspace.x_states
+        y_arr = workspace.y_states
+        x_arr[...] = cupy.asarray(x_states, dtype=cupy_compute_dtype)
+        y_arr.fill(0)
 
     props = cupy.cuda.runtime.getDeviceProperties(cupy.cuda.runtime.getDevice())
     max_grid_y = int(props["maxGridSize"][1])
@@ -3390,12 +3524,15 @@ class CuPyMLFMMCouplingOperator:
     near_dtype: np.dtype = np.dtype(np.complex128)
     far_dtype: np.dtype = np.dtype(np.complex128)
     _receive_adjoint_cache: dict[int, Any] = field(default_factory=dict, init=False, repr=False)
-    _single_level_workspace_cache: dict[int, CuPyMLFMMSingleLevelWorkspace] = field(
+    _near_workspace_cache: dict[CuPyMLFMMNearWorkspaceKey, CuPyMLFMMNearWorkspace] = field(
         default_factory=dict, init=False, repr=False
     )
-    _multilevel_workspace_cache: dict[int, CuPyMLFMMMultilevelWorkspace] = field(
-        default_factory=dict, init=False, repr=False
-    )
+    _single_level_workspace_cache: dict[
+        CuPyMLFMMSingleLevelWorkspaceKey, CuPyMLFMMSingleLevelWorkspace
+    ] = field(default_factory=dict, init=False, repr=False)
+    _multilevel_workspace_cache: dict[
+        CuPyMLFMMMultilevelWorkspaceKey, CuPyMLFMMMultilevelWorkspace
+    ] = field(default_factory=dict, init=False, repr=False)
 
     def apply(self, x: Any) -> Any:
         cupy, _ = import_cupy()
@@ -3426,7 +3563,21 @@ class CuPyMLFMMCouplingOperator:
             dtype=out_dtype,
             cupy=cupy,
         )
-        y_near = _apply_exact_near_pairs(self.prepared_data, x_states, cupy=cupy)
+        near_ws = _ensure_exact_near_workspace(
+            self.prepared_data,
+            n_particles=n_particles,
+            nm=nm,
+            nrhs=int(x_states.shape[2]),
+            near_dtype=near_dtype,
+            cache=self._near_workspace_cache,
+            cupy=cupy,
+        )
+        y_near = _apply_exact_near_pairs(
+            self.prepared_data,
+            x_states,
+            workspace=near_ws,
+            cupy=cupy,
+        )
         stage = str(self.prepared_data.stage)
         if stage == "single_level":
             single_ws = _ensure_single_level_workspace(
