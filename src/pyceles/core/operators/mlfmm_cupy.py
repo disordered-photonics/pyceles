@@ -333,11 +333,19 @@ class CuPyMLFMMSingleLevelWorkspace:
 
 @dataclass
 class CuPyMLFMMMultilevelWorkspace:
-    """Reusable multilevel far-path work buffers for one RHS width."""
+    """Reusable multilevel far-path work buffers for one RHS width.
+
+    Multilevel incoming channels use a rolling two-buffer scheme keyed to
+    alternating hierarchy levels so repeated apply does not keep a full
+    incoming hierarchy resident in device workspace state. Buffers are stored
+    as flat contiguous arenas and reshaped per-level to avoid non-contiguous
+    directional slices in fused raw-kernel paths.
+    """
 
     nrhs: int
     outgoing: list[Any]
-    incoming: list[Any]
+    incoming_roll_even: Any
+    incoming_roll_odd: Any
     leaf_box_states: Any
     incoming_box: Any
     y_states: Any
@@ -3116,6 +3124,16 @@ def _ensure_multilevel_workspace(
     if ws is not None:
         return ws
     levels = multilevel.levels
+    hf_start = int(multilevel.hf_start_level)
+    hf_end = int(multilevel.hf_end_level)
+    max_elements_by_parity = [1, 1]
+    for level_idx in range(hf_start, hf_end + 1):
+        level = levels[level_idx]
+        parity = int((level_idx - hf_start) & 1)
+        level_elements = (
+            int(level.n_boxes) * 4 * int(level.directional.grid.n_directions) * int(key.nrhs)
+        )
+        max_elements_by_parity[parity] = max(max_elements_by_parity[parity], int(level_elements))
     outgoing = [
         cupy.empty(
             (int(level.n_boxes), 4, int(level.directional.grid.n_directions), int(key.nrhs)),
@@ -3123,11 +3141,11 @@ def _ensure_multilevel_workspace(
         )
         for level in levels
     ]
-    incoming = [cupy.empty_like(values, dtype=cupy.complex128) for values in outgoing]
     ws = CuPyMLFMMMultilevelWorkspace(
         nrhs=int(key.nrhs),
         outgoing=outgoing,
-        incoming=incoming,
+        incoming_roll_even=cupy.empty((int(max_elements_by_parity[0]),), dtype=cupy.complex128),
+        incoming_roll_odd=cupy.empty((int(max_elements_by_parity[1]),), dtype=cupy.complex128),
         leaf_box_states=cupy.empty(
             (int(key.n_leaves), int(key.box_nm), int(key.nrhs)), dtype=cupy.complex128
         ),
@@ -3332,6 +3350,43 @@ def _apply_single_level_far(
     )
 
 
+def _multilevel_incoming_roll_view(
+    *,
+    workspace: CuPyMLFMMMultilevelWorkspace | None,
+    hf_start: int,
+    level_idx: int,
+    level: CuPyMLFMMLevelData,
+    nrhs: int,
+    cupy: Any,
+) -> Any:
+    """Return one reusable rolling incoming buffer view for one hierarchy level."""
+
+    n_boxes = int(level.n_boxes)
+    n_dirs = int(level.directional.grid.n_directions)
+    n_rhs = int(nrhs)
+    required = int(n_boxes * 4 * n_dirs * n_rhs)
+    if workspace is None:
+        return cupy.zeros((n_boxes, 4, n_dirs, n_rhs), dtype=cupy.complex128)
+    parity = int((int(level_idx) - int(hf_start)) & 1)
+    backing = workspace.incoming_roll_even if parity == 0 else workspace.incoming_roll_odd
+    if int(backing.size) < required:
+        raise RuntimeError(
+            "Internal CuPy MLFMM error: rolling incoming buffer is undersized for "
+            f"level {int(level_idx)} (need elements={required}; "
+            f"have elements={int(backing.size)})."
+        )
+    # Fused transfer/gather kernels flatten directional tensors; reshaping from a
+    # 1D contiguous arena guarantees each per-level view is contiguous.
+    view = backing[:required].reshape(n_boxes, 4, n_dirs, n_rhs)
+    if not bool(view.flags.c_contiguous):
+        raise RuntimeError(
+            "Internal CuPy MLFMM error: rolling incoming view must be contiguous. "
+            f"Got shape={tuple(int(v) for v in view.shape)}."
+        )
+    view.fill(0)
+    return view
+
+
 def _apply_multilevel_far(
     prepared: CuPyMLFMMPreparedData,
     x_states: Any,
@@ -3366,13 +3421,9 @@ def _apply_multilevel_far(
             )
             for level in levels
         ]
-        incoming = [cupy.zeros_like(values, dtype=cupy.complex128) for values in outgoing]
     else:
         outgoing = ws.outgoing
-        incoming = ws.incoming
         for arr in outgoing:
-            arr.fill(0)
-        for arr in incoming:
             arr.fill(0)
     leaf_level = int(multilevel.leaf_level)
     box_nm = int(multilevel.box_nm)
@@ -3431,61 +3482,106 @@ def _apply_multilevel_far(
                     cupy=cupy,
                 )
 
-    for level_idx in range(int(multilevel.hf_start_level), int(multilevel.hf_end_level) + 1):
+    hf_start = int(multilevel.hf_start_level)
+    hf_end = int(multilevel.hf_end_level)
+    transfer_by_parent: dict[int, CuPyMLFMMTransferData] = {}
+    for transfer in multilevel.transfers:
+        parent_level = int(transfer.parent_level)
+        if parent_level in transfer_by_parent:
+            raise RuntimeError(
+                "Internal CuPy MLFMM error: duplicate multilevel transfer parent level "
+                f"{parent_level}."
+            )
+        transfer_by_parent[parent_level] = transfer
+
+    current_level = hf_start
+    current_incoming = _multilevel_incoming_roll_view(
+        workspace=ws,
+        hf_start=hf_start,
+        level_idx=current_level,
+        level=levels[current_level],
+        nrhs=nrhs,
+        cupy=cupy,
+    )
+    for level_idx in range(hf_start, hf_end + 1):
+        if level_idx != current_level:
+            raise RuntimeError(
+                "Internal CuPy MLFMM error: inconsistent downward traversal state "
+                f"(expected level {current_level}, got {level_idx})."
+            )
         level = levels[level_idx]
         for offset, batch in level.far_offset_batches.items():
             _weighted_gather_add_complex128(
-                incoming[level_idx],
+                current_incoming,
                 batch.dst_indices,
                 outgoing[level_idx],
                 batch.src_indices,
                 level.offset_diagonals[offset],
                 cupy=cupy,
             )
-
-    for transfer in multilevel.transfers:
-        child_level = int(transfer.child_level)
-        parent_level = int(transfer.parent_level)
-        parent_values = incoming[parent_level]
-        child_values = incoming[child_level]
-        for shift, batch in transfer.batches_by_shift.items():
-            if str(transfer.map_down.storage) == "packed_stencil":
+        if level_idx >= hf_end:
+            continue
+        transfer_down = transfer_by_parent.get(level_idx)
+        if transfer_down is None:
+            raise RuntimeError(
+                "Internal CuPy MLFMM error: missing multilevel transfer for parent level "
+                f"{level_idx}."
+            )
+        child_level = int(transfer_down.child_level)
+        child_values = _multilevel_incoming_roll_view(
+            workspace=ws,
+            hf_start=hf_start,
+            level_idx=child_level,
+            level=levels[child_level],
+            nrhs=nrhs,
+            cupy=cupy,
+        )
+        for shift, batch in transfer_down.batches_by_shift.items():
+            if str(transfer_down.map_down.storage) == "packed_stencil":
                 _transfer_down_packed_unique_complex128(
                     child_values,
                     batch.src_indices,
-                    parent_values,
+                    current_incoming,
                     batch.dst_indices,
-                    transfer.map_down,
-                    transfer.phase_down_by_shift[shift],
+                    transfer_down.map_down,
+                    transfer_down.phase_down_by_shift[shift],
                     cupy=cupy,
                 )
-            elif str(transfer.map_down.storage) == "sparse":
+            elif str(transfer_down.map_down.storage) == "sparse":
                 _transfer_down_sparse_unique_complex128(
                     child_values,
                     batch.src_indices,
-                    parent_values,
+                    current_incoming,
                     batch.dst_indices,
-                    transfer.map_down,
-                    transfer.phase_down_by_shift[shift],
+                    transfer_down.map_down,
+                    transfer_down.phase_down_by_shift[shift],
                     cupy=cupy,
                 )
             else:
                 # Internal fallback for unsupported map storage variants.
                 shifted = (
-                    parent_values[batch.dst_indices]
-                    * transfer.phase_down_by_shift[shift][None, None, :, None]
+                    current_incoming[batch.dst_indices]
+                    * transfer_down.phase_down_by_shift[shift][None, None, :, None]
                 )
-                mapped = _apply_directional_map(shifted, transfer.map_down, cupy=cupy)
+                mapped = _apply_directional_map(shifted, transfer_down.map_down, cupy=cupy)
                 _add_at_complex128(
                     child_values,
                     batch.src_indices,
                     mapped,
                     cupy=cupy,
                 )
+        current_level = child_level
+        current_incoming = child_values
+
+    if current_level != leaf_level:
+        raise RuntimeError(
+            "Internal CuPy MLFMM error: downward traversal did not end at leaf level "
+            f"(current={current_level}, leaf={leaf_level})."
+        )
 
     incoming_box = _directional_to_box_regular_cupy(
         levels[leaf_level].directional,
-        incoming[leaf_level],
+        current_incoming,
         out=(ws.incoming_box if ws is not None else None),
         cupy=cupy,
     )
