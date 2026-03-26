@@ -19,10 +19,12 @@ from pyceles.core.operators import (
     MLFMMOptions,
     build_mlfmm_cupy_host_cache,
     prepare_matvec,
+    prepare_mlfmm_coupling,
     prepare_mlfmm_cupy_data,
 )
 from pyceles.core.operators.mlfmm_cupy import _upload_offset_batches
 from pyceles.core.particles import Particle, spheres_from_arrays
+from pyceles.core.translation import RadialLUT
 from pyceles.io import far_field_intensity
 
 
@@ -184,6 +186,49 @@ def test_cupy_mlfmm_host_cache_policy_low_host_memory_recomputes_static_tables()
     assert prepared.stage in {"single_level", "multilevel"}
     assert int(prepared.near_pairs.mode_m.size) > 0
     assert int(prepared.near_pairs.pair_offset.size) > 0
+
+
+def test_cupy_host_cache_build_supports_sparse_cpu_staging_without_dense_leaf_maps() -> None:
+    particles = _mlfmm_transition_particles()
+    positions = np.asarray([np.asarray(p.position, dtype=float) for p in particles], dtype=float)
+    radii = np.asarray([float(p.circumscribing_radius()) for p in particles], dtype=float)
+    k = 2.0 * np.pi / 550.0
+    radial_lut = RadialLUT(
+        lmax=3,
+        k=k,
+        r_max=float(np.max(np.linalg.norm(positions[:, None, :] - positions[None, :, :], axis=2))),
+        dr=0.5,
+        dtype=np.complex128,
+    )
+    coupling = prepare_mlfmm_coupling(
+        lmax=3,
+        k=k,
+        positions=positions,
+        particle_circumscribing_radii=radii,
+        radial_lut=radial_lut,
+        options=MLFMMOptions(max_leaf_particles=4, max_depth=8),
+        dtype=np.complex128,
+        cache_translation_blocks=False,
+        leaf_map_backend="cupy",
+        build_leaf_maps=False,
+    )
+    if not isinstance(coupling, MLFMMCouplingOperator):
+        raise AssertionError("Transition fixture unexpectedly resolved to direct stage.")
+    if coupling.single_level is not None:
+        assert len(coupling.single_level.aggregation) == 0
+        assert len(coupling.single_level.receive) == 0
+    if coupling.multilevel is not None:
+        assert len(coupling.multilevel.aggregation) == 0
+        assert len(coupling.multilevel.receive) == 0
+
+    policy = CuPyMLFMMHostCachePolicy(leaf_apply_mode="on_the_fly")
+    host_cache = build_mlfmm_cupy_host_cache(coupling, host_cache_policy=policy)
+    if host_cache.single_level is not None:
+        assert host_cache.single_level.aggregation is None
+    if host_cache.multilevel is not None:
+        assert host_cache.multilevel.aggregation is None
+    prepared = prepare_mlfmm_cupy_data(host_cache)
+    assert prepared.stage in {"single_level", "multilevel"}
 
 
 def test_cupy_mlfmm_runtime_operator_is_non_picklable() -> None:

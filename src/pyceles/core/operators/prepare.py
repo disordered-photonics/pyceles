@@ -340,6 +340,10 @@ def prepare_matvec(
                 cache_translation_blocks=False,
                 show_progress=bool(show_progress),
                 leaf_map_backend="cupy",
+                # CuPy repeated-apply defaults to on-the-fly leaf translation blocks.
+                # Skip dense CPU leaf-map materialization during the staging build to
+                # avoid pathological host-RAM blow-ups at shallow/high-order trees.
+                build_leaf_maps=False,
             )
             if isinstance(cpu_mlfmm, PairwiseCouplingOperator):
                 ab5 = translation_ab5_table(int(lmax), dtype=op_dtype)

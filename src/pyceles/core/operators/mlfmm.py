@@ -876,6 +876,7 @@ def build_single_level_mlfmm_operators(
     order_additive: int = 2,
     dtype: np.dtype | type[np.complexfloating] | type[np.complex128] = np.complex128,
     leaf_map_backend: Literal["numpy", "cupy"] = "numpy",
+    build_leaf_maps: bool = True,
 ) -> MLFMMSingleLevelOperators:
     """Build the sampled single-level HF far operator over one occupied leaf level.
 
@@ -904,16 +905,20 @@ def build_single_level_mlfmm_operators(
     shared_grid_order = max(int(shared_box_order), int(shared_translator_order))
     out_dtype = np.dtype(dtype)
     directional = directional_transforms(int(shared_box_order), grid_order=int(shared_grid_order))
-    aggregation, receive = _build_leaf_box_maps(
-        lmax=int(lmax),
-        box_order=int(shared_box_order),
-        k=float(k),
-        positions=np.asarray(positions, dtype=float),
-        partition=partition,
-        radial_lut=radial_lut,
-        dtype=out_dtype,
-        leaf_map_backend=leaf_map_backend,
-    )
+    if bool(build_leaf_maps):
+        aggregation, receive = _build_leaf_box_maps(
+            lmax=int(lmax),
+            box_order=int(shared_box_order),
+            k=float(k),
+            positions=np.asarray(positions, dtype=float),
+            partition=partition,
+            radial_lut=radial_lut,
+            dtype=out_dtype,
+            leaf_map_backend=leaf_map_backend,
+        )
+    else:
+        aggregation = tuple()
+        receive = tuple()
     leaf_cell_coords = _leaf_cell_coords(partition)
     far_offset_batches = _leaf_offset_batches(partition, leaf_cell_coords)
     offset_diagonals: dict[tuple[int, int, int], np.ndarray] = {}
@@ -962,6 +967,11 @@ def apply_single_level_mlfmm(
     """
 
     out_dtype = np.dtype(dtype)
+    if len(operators.aggregation) == 0 or len(operators.receive) == 0:
+        raise RuntimeError(
+            "single-level MLFMM operators are missing leaf aggregation/receive maps. "
+            "This operator was likely prepared for CuPy host-cache conversion only."
+        )
     near_out_dtype = np.dtype(out_dtype if near_dtype is None else near_dtype)
     far_out_dtype = np.dtype(out_dtype if far_dtype is None else far_dtype)
     y_near = _exact_leaf_near_apply(
@@ -1026,6 +1036,7 @@ def build_multilevel_mlfmm_operators(
     order_additive: int = 2,
     dtype: np.dtype | type[np.complexfloating] | type[np.complex128] = np.complex128,
     leaf_map_backend: Literal["numpy", "cupy"] = "numpy",
+    build_leaf_maps: bool = True,
 ) -> MLFMMMultilevelOperators:
     """Build multilevel sampled HF operators over occupied boxes only.
 
@@ -1217,16 +1228,20 @@ def build_multilevel_mlfmm_operators(
             )
         )
 
-    aggregation, receive = _build_leaf_box_maps(
-        lmax=int(lmax),
-        box_order=int(levels[leaf_level].box_order),
-        k=float(k),
-        positions=np.asarray(positions, dtype=float),
-        partition=partition,
-        radial_lut=radial_lut,
-        dtype=out_dtype,
-        leaf_map_backend=leaf_map_backend,
-    )
+    if bool(build_leaf_maps):
+        aggregation, receive = _build_leaf_box_maps(
+            lmax=int(lmax),
+            box_order=int(levels[leaf_level].box_order),
+            k=float(k),
+            positions=np.asarray(positions, dtype=float),
+            partition=partition,
+            radial_lut=radial_lut,
+            dtype=out_dtype,
+            leaf_map_backend=leaf_map_backend,
+        )
+    else:
+        aggregation = tuple()
+        receive = tuple()
     return MLFMMMultilevelOperators(
         partition=partition,
         levels=tuple(levels),
@@ -1277,6 +1292,11 @@ def apply_multilevel_mlfmm(
     """
 
     out_dtype = np.dtype(dtype)
+    if len(operators.aggregation) == 0 or len(operators.receive) == 0:
+        raise RuntimeError(
+            "multilevel MLFMM operators are missing leaf aggregation/receive maps. "
+            "This operator was likely prepared for CuPy host-cache conversion only."
+        )
     near_out_dtype = np.dtype(out_dtype if near_dtype is None else near_dtype)
     far_out_dtype = np.dtype(out_dtype if far_dtype is None else far_dtype)
     y_near = _exact_leaf_near_apply(
@@ -1416,6 +1436,7 @@ def prepare_mlfmm_coupling(
     cache_translation_blocks: bool = False,
     show_progress: bool = False,
     leaf_map_backend: Literal["numpy", "cupy"] = "numpy",
+    build_leaf_maps: bool = True,
 ) -> CouplingOperator:
     """Prepare the native NumPy MLFMM coupling operator or direct fallback.
 
@@ -1509,6 +1530,7 @@ def prepare_mlfmm_coupling(
             order_additive=int(resolved_options.order_additive),
             dtype=far_out_dtype,
             leaf_map_backend=leaf_backend_lit,
+            build_leaf_maps=bool(build_leaf_maps),
         )
         out = MLFMMCouplingOperator(
             lmax=int(lmax),
@@ -1539,6 +1561,7 @@ def prepare_mlfmm_coupling(
         order_additive=int(resolved_options.order_additive),
         dtype=far_out_dtype,
         leaf_map_backend=leaf_backend_lit,
+        build_leaf_maps=bool(build_leaf_maps),
     )
     out = MLFMMCouplingOperator(
         lmax=int(lmax),

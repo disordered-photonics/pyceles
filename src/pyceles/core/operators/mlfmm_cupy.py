@@ -9,7 +9,7 @@ This module validates and uploads repeated-apply structures to device memory.
 from dataclasses import dataclass, field
 from functools import cache
 from importlib import import_module
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -21,6 +21,7 @@ from pyceles.core.translation import (
     _translation_ab5_compact_tables,
     _translation_plm_coeff_table,
 )
+from pyceles.core.wigner import wigner_3j
 
 from .mlfmm import (
     MLFMMCouplingOperator,
@@ -34,6 +35,7 @@ from .mlfmm_partition import MLFMMPartition
 
 Offset3 = tuple[int, int, int]
 CuPyMLFMMHostMemoryBudget = Literal["balanced", "low_host_memory"]
+CuPyMLFMMLeafApplyMode = Literal["dense", "on_the_fly"]
 
 
 @dataclass(frozen=True)
@@ -43,9 +45,51 @@ class CuPyMLFMMHostCachePolicy:
     `balanced` keeps static exact-near tables in host RAM to minimize rebuild
     overhead. `low_host_memory` drops those static tables from host cache and
     recomputes them during device upload.
+
+    `leaf_apply_mode` controls how leaf aggregation/disaggregation is represented
+    in the reusable host cache:
+    - `dense`: keep grouped dense aggregation maps,
+    - `on_the_fly`: keep compact schedules + translation ingredients and
+      regenerate leaf translation blocks during repeated apply.
     """
 
     memory_budget: CuPyMLFMMHostMemoryBudget = "balanced"
+    leaf_apply_mode: CuPyMLFMMLeafApplyMode = "on_the_fly"
+
+
+@dataclass(frozen=True)
+class CuPyHostLeafOnTheFlyGroupData:
+    """Compact host grouped leaf schedule for on-the-fly translations."""
+
+    occupancy: int
+    nmodes: int
+    leaf_ids: np.ndarray
+    particle_indices: np.ndarray
+    pair_deltas: np.ndarray
+
+
+@dataclass(frozen=True)
+class CuPyHostLeafTranslationTablesData:
+    """Compact host translation ingredients shared by on-the-fly leaf groups."""
+
+    full_order: int
+    nmodes_in: int
+    nmodes_out: int
+    nmodes_full: int
+    out_mode_indices: np.ndarray
+    in_mode_indices: np.ndarray
+    mode_m_out: np.ndarray
+    mode_m_in: np.ndarray
+    pair_offset: np.ndarray
+    pair_pmin: np.ndarray
+    pair_pcount: np.ndarray
+    plm_coeffs: np.ndarray
+    compact_re_ab: np.ndarray
+    compact_im_ab: np.ndarray
+    re_j: np.ndarray
+    im_j: np.ndarray
+    inv_dr: float
+    last_index: int
 
 
 @dataclass(frozen=True)
@@ -113,9 +157,12 @@ class CuPyHostSingleLevelData:
     translator_order: int
     grid_order: int
     directional: CuPyHostDirectionalTransformsData
-    aggregation: tuple[np.ndarray, ...]
+    aggregation: tuple[np.ndarray, ...] | None
     far_offset_batches: dict[Offset3, tuple[np.ndarray, np.ndarray]]
     offset_diagonals: dict[Offset3, np.ndarray]
+    leaf_groups_otf: tuple[CuPyHostLeafOnTheFlyGroupData, ...] | None = None
+    leaf_translation_tables: CuPyHostLeafTranslationTablesData | None = None
+    leaf_apply_mode: CuPyMLFMMLeafApplyMode = "dense"
 
 
 @dataclass(frozen=True)
@@ -127,7 +174,10 @@ class CuPyHostMultilevelData:
     leaf_level: int
     hf_start_level: int
     hf_end_level: int
-    aggregation: tuple[np.ndarray, ...]
+    aggregation: tuple[np.ndarray, ...] | None
+    leaf_groups_otf: tuple[CuPyHostLeafOnTheFlyGroupData, ...] | None = None
+    leaf_translation_tables: CuPyHostLeafTranslationTablesData | None = None
+    leaf_apply_mode: CuPyMLFMMLeafApplyMode = "dense"
 
 
 @dataclass(frozen=True)
@@ -220,13 +270,42 @@ class CuPyOffsetBatchData:
 
 @dataclass(frozen=True)
 class CuPyLeafApplyGroupData:
-    """Grouped leaf data with uniform occupancy for batched leaf GEMMs."""
+    """Grouped leaf data with uniform occupancy for dense or on-the-fly apply.
+
+    Exactly one of `aggregation` (dense mode) or `pair_deltas`
+    (on-the-fly mode) must be populated.
+    """
 
     occupancy: int
     nmodes: int
     leaf_ids: Any
     particle_indices: Any
-    aggregation: Any
+    aggregation: Any | None = None
+    pair_deltas: Any | None = None
+
+
+@dataclass(frozen=True)
+class CuPyLeafTranslationTablesData:
+    """Device translation ingredients shared by on-the-fly leaf groups."""
+
+    full_order: int
+    nmodes_in: int
+    nmodes_out: int
+    nmodes_full: int
+    out_mode_indices: Any
+    in_mode_indices: Any
+    mode_m_out: Any
+    mode_m_in: Any
+    pair_offset: Any
+    pair_pmin: Any
+    pair_pcount: Any
+    plm_coeffs: Any
+    compact_re_ab: Any
+    compact_im_ab: Any
+    re_j: Any
+    im_j: Any
+    inv_dr: float
+    last_index: int
 
 
 @dataclass(frozen=True)
@@ -269,6 +348,8 @@ class CuPyMLFMMSingleLevelData:
     leaf_groups: tuple[CuPyLeafApplyGroupData, ...]
     far_offset_batches: dict[Offset3, CuPyOffsetBatchData]
     offset_diagonals: dict[Offset3, Any]
+    leaf_apply_mode: CuPyMLFMMLeafApplyMode = "dense"
+    leaf_translation_tables: CuPyLeafTranslationTablesData | None = None
 
 
 @dataclass(frozen=True)
@@ -306,6 +387,8 @@ class CuPyMLFMMMultilevelData:
     box_nm: int
     n_leaves: int
     leaf_groups: tuple[CuPyLeafApplyGroupData, ...]
+    leaf_apply_mode: CuPyMLFMMLeafApplyMode = "dense"
+    leaf_translation_tables: CuPyLeafTranslationTablesData | None = None
 
 
 @dataclass(frozen=True)
@@ -454,16 +537,26 @@ def _mode_metadata_tables(lmax: int) -> np.ndarray:
 
 
 @cache
+def _mode_tau_l_tables(lmax: int) -> tuple[np.ndarray, np.ndarray]:
+    """Return CELES/SMUTHI `tau` and `l` mode metadata indexed by flattened mode id."""
+
+    mode_tau = np.zeros((n_modes(lmax),), dtype=np.int32)
+    mode_l = np.zeros((n_modes(lmax),), dtype=np.int32)
+    for tau_i, l_i, _m_i, idx in iter_modes(lmax):
+        mode_tau[idx] = tau_i
+        mode_l[idx] = l_i
+    mode_tau.setflags(write=False)
+    mode_l.setflags(write=False)
+    return mode_tau, mode_l
+
+
+@cache
 def _mode_pair_tables(lmax: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Return compact p-range metadata for each `(n1, n2)` mode pair."""
 
     nmodes_total = n_modes(lmax)
     mode_m = _mode_metadata_tables(lmax)
-    mode_tau = np.zeros((nmodes_total,), dtype=np.int32)
-    mode_l = np.zeros((nmodes_total,), dtype=np.int32)
-    for tau_i, l_i, _m_i, idx in iter_modes(lmax):
-        mode_tau[idx] = tau_i
-        mode_l[idx] = l_i
+    mode_tau, mode_l = _mode_tau_l_tables(lmax)
     pair_offset = np.zeros((nmodes_total, nmodes_total), dtype=np.int32)
     pair_pmin = np.zeros_like(pair_offset)
     pair_pcount = np.zeros_like(pair_offset)
@@ -485,9 +578,111 @@ def _mode_pair_tables(lmax: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     return pair_offset, pair_pmin, pair_pcount
 
 
+def _leaf_rect_pair_tables_and_ab(
+    *,
+    full_order: int,
+    out_mode_indices: np.ndarray,
+    in_mode_indices: np.ndarray,
+    out_dtype: np.dtype,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Return compact rectangular `(out_mode, in_mode)` translation metadata.
+
+    Unlike the full square CELES tables, this helper builds only the mode-pair
+    subset needed by leaf on-the-fly aggregation/disaggregation:
+    `n_modes(box_order) x n_modes(particle_lmax)`.
+    """
+
+    full = int(full_order)
+    out_idx = np.ascontiguousarray(np.asarray(out_mode_indices, dtype=np.int32).reshape(-1))
+    in_idx = np.ascontiguousarray(np.asarray(in_mode_indices, dtype=np.int32).reshape(-1))
+    n_out = int(out_idx.size)
+    n_in = int(in_idx.size)
+    if n_out <= 0 or n_in <= 0:
+        raise ValueError("Rectangular leaf translation tables require non-empty mode index sets.")
+
+    mode_m_full = _mode_metadata_tables(full)
+    mode_tau_full, mode_l_full = _mode_tau_l_tables(full)
+    mode_m_out = np.ascontiguousarray(mode_m_full[out_idx], dtype=np.int32)
+    mode_m_in = np.ascontiguousarray(mode_m_full[in_idx], dtype=np.int32)
+
+    pair_offset = np.zeros((n_out * n_in,), dtype=np.int32)
+    pair_pmin = np.zeros_like(pair_offset)
+    pair_pcount = np.zeros_like(pair_offset)
+    re_entries: list[float] = []
+    im_entries: list[float] = []
+    offset = 0
+
+    for out_local, n_out_mode in enumerate(out_idx.tolist()):
+        tau2 = int(mode_tau_full[n_out_mode])
+        l2 = int(mode_l_full[n_out_mode])
+        m2 = int(mode_m_full[n_out_mode])
+        for in_local, n_in_mode in enumerate(in_idx.tolist()):
+            tau1 = int(mode_tau_full[n_in_mode])
+            l1 = int(mode_l_full[n_in_mode])
+            m1 = int(mode_m_full[n_in_mode])
+
+            p_min = max(abs(m1 - m2), abs(l1 - l2) + abs(tau1 - tau2))
+            p_max = l1 + l2
+            p_count = p_max - p_min + 1
+            pair_meta_idx = out_local * n_in + in_local
+            pair_offset[pair_meta_idx] = offset
+            pair_pmin[pair_meta_idx] = p_min
+            pair_pcount[pair_meta_idx] = p_count
+
+            phase_exp_base = abs(m1 - m2) - abs(m1) - abs(m2) + l2 - l1
+            sign_dm = -1.0 if ((m1 - m2) % 2) else 1.0
+            pref = np.sqrt((2 * l1 + 1) * (2 * l2 + 1) / (2 * l1 * (l1 + 1) * l2 * (l2 + 1)))
+
+            for p in range(p_min, p_max + 1):
+                if tau1 == tau2:
+                    i_phase = (1j) ** (phase_exp_base + p)
+                    factor = (l1 * (l1 + 1) + l2 * (l2 + 1) - p * (p + 1)) * np.sqrt(2 * p + 1)
+                    w = wigner_3j(l1, l2, p, m1, -m2, -m1 + m2) * wigner_3j(l1, l2, p, 0, 0, 0)
+                    entry = i_phase * sign_dm * pref * factor * w
+                else:
+                    if p == 0:
+                        entry = 0.0 + 0.0j
+                    else:
+                        inside = (
+                            (l1 + l2 + 1 + p)
+                            * (l1 + l2 + 1 - p)
+                            * (p + l1 - l2)
+                            * (p - l1 + l2)
+                            * (2 * p + 1)
+                        )
+                        if inside < 0:
+                            entry = 0.0 + 0.0j
+                        else:
+                            i_phase = (1j) ** (phase_exp_base + p)
+                            factor = np.sqrt(inside)
+                            w = wigner_3j(l1, l2, p, m1, -m2, -m1 + m2) * wigner_3j(
+                                l1, l2, p - 1, 0, 0, 0
+                            )
+                            entry = i_phase * sign_dm * pref * factor * w
+                re_entries.append(float(np.real(entry)))
+                im_entries.append(float(np.imag(entry)))
+                offset += 1
+
+    real_dtype = np.float32 if out_dtype == np.dtype(np.complex64) else np.float64
+    return (
+        np.ascontiguousarray(np.asarray(re_entries, dtype=real_dtype)),
+        np.ascontiguousarray(np.asarray(im_entries, dtype=real_dtype)),
+        np.ascontiguousarray(pair_offset, dtype=np.int32),
+        np.ascontiguousarray(pair_pmin, dtype=np.int32),
+        np.ascontiguousarray(pair_pcount, dtype=np.int32),
+        mode_m_out,
+        mode_m_in,
+    )
+
+
 @cache
 def _leaf_translation_blocks_rect_raw_kernel(full_order: int, dtype_name: str) -> Any:
-    """Return a cached RawKernel for batched interior rectangular translation blocks."""
+    """Return a cached RawKernel for batched interior rectangular translation blocks.
+
+    Launch policy is one CUDA block per particle-to-leaf pair. This keeps the
+    expensive spherical precompute (`j_p`, `P_p^m`, `exp(i m phi)`) shared once
+    per pair instead of duplicating it across `(out_mode, in_mode)` tiles.
+    """
 
     cupy, _ = import_cupy()
     order = int(full_order)
@@ -559,10 +754,11 @@ def _leaf_translation_blocks_rect_raw_kernel(full_order: int, dtype_name: str) -
         const int n_pairs,
         const int n_out_modes,
         const int n_in_modes,
-        const int nmodes_full,
         const {real_t}* pair_deltas,
         const int* out_mode_indices,
         const int* in_mode_indices,
+        const int* mode_m_out,
+        const int* mode_m_in,
         const {real_t}* re_j,
         const {real_t}* im_j,
         const {real_t} inv_dr,
@@ -570,20 +766,18 @@ def _leaf_translation_blocks_rect_raw_kernel(full_order: int, dtype_name: str) -
         const {real_t}* plm_coeffs,
         const {real_t}* re_ab,
         const {real_t}* im_ab,
-        const int* mode_m,
         const int* pair_offset,
         const int* pair_pmin,
         const int* pair_pcount,
         {complex_t}* out_blocks
     ) {{
-        const int out_idx = blockIdx.x * blockDim.x + threadIdx.x;
-        const int in_idx = blockIdx.y * blockDim.y + threadIdx.y;
-        const int pair_idx = blockIdx.z;
+        const int pair_idx = blockIdx.x;
         if (pair_idx >= n_pairs) {{
             return;
         }}
-        const int tid_flat = threadIdx.y * blockDim.x + threadIdx.x;
-        const int n_threads = blockDim.x * blockDim.y;
+        const int tid = threadIdx.x;
+        const int n_threads = blockDim.x;
+        const int n_mode_pairs = n_out_modes * n_in_modes;
 
         __shared__ {real_t} r_shared;
         __shared__ {real_t} ct_shared;
@@ -595,7 +789,7 @@ def _leaf_translation_blocks_rect_raw_kernel(full_order: int, dtype_name: str) -
         __shared__ {real_t} cos_mphi_shared[{n_phase}];
         __shared__ {real_t} sin_mphi_shared[{n_phase}];
 
-        if (tid_flat == 0) {{
+        if (tid == 0) {{
             const {real_t} dx = pair_deltas[3 * pair_idx + 0];
             const {real_t} dy = pair_deltas[3 * pair_idx + 1];
             const {real_t} dz = pair_deltas[3 * pair_idx + 2];
@@ -614,10 +808,12 @@ def _leaf_translation_blocks_rect_raw_kernel(full_order: int, dtype_name: str) -
         __syncthreads();
 
         if (r_shared <= ({real_t})0.0) {{
-            if (out_idx < n_out_modes && in_idx < n_in_modes) {{
+            for (int flat = tid; flat < n_mode_pairs; flat += n_threads) {{
+                const int out_idx = flat / n_in_modes;
+                const int in_idx = flat - out_idx * n_in_modes;
                 const int n1_zero = out_mode_indices[out_idx];
                 const int n2_zero = in_mode_indices[in_idx];
-                const long long flat_idx = ((long long)pair_idx * n_out_modes + out_idx) * n_in_modes + in_idx;
+                const long long flat_idx = (long long)pair_idx * (long long)n_mode_pairs + (long long)flat;
                 if (n1_zero == n2_zero) {{
                     out_blocks[flat_idx] = {complex_t}(({real_t})1.0, ({real_t})0.0);
                 }} else {{
@@ -627,7 +823,7 @@ def _leaf_translation_blocks_rect_raw_kernel(full_order: int, dtype_name: str) -
             return;
         }}
 
-        for (int p = tid_flat; p < {n_orders}; p += n_threads) {{
+        for (int p = tid; p < {n_orders}; p += n_threads) {{
             const {complex_t} radial = bessel_lookup_linear(p, r_shared, re_j, im_j, inv_dr, last_index);
             re_j_shared[p] = radial.real();
             im_j_shared[p] = radial.imag();
@@ -636,7 +832,7 @@ def _leaf_translation_blocks_rect_raw_kernel(full_order: int, dtype_name: str) -
                     assoc_legendre_function(p, absdm, ct_shared, st_shared, plm_coeffs);
             }}
         }}
-        if (tid_flat == 0) {{
+        if (tid == 0) {{
             for (int dm = -2 * {order}; dm <= 2 * {order}; ++dm) {{
                 const int phase_idx = dm + 2 * {order};
                 cos_mphi_shared[phase_idx] = cos(({real_t})dm * phi_shared);
@@ -645,38 +841,35 @@ def _leaf_translation_blocks_rect_raw_kernel(full_order: int, dtype_name: str) -
         }}
         __syncthreads();
 
-        if (out_idx >= n_out_modes || in_idx >= n_in_modes) {{
-            return;
+        for (int flat = tid; flat < n_mode_pairs; flat += n_threads) {{
+            const int out_idx = flat / n_in_modes;
+            const int in_idx = flat - out_idx * n_in_modes;
+            const int delta_m = mode_m_in[in_idx] - mode_m_out[out_idx];
+            const int phase_idx = delta_m + 2 * {order};
+            const int table_idx = flat;
+            const int base = pair_offset[table_idx];
+            const int p_min = pair_pmin[table_idx];
+            const int p_count = pair_pcount[table_idx];
+            {real_t} re_acc = ({real_t})0.0;
+            {real_t} im_acc = ({real_t})0.0;
+            for (int ip = 0; ip < p_count; ++ip) {{
+                const int p = p_min + ip;
+                const int ab_idx = base + ip;
+                const {real_t} plm = p_pdm_shared[p * (p + 1) / 2 + abs(delta_m)];
+                const {real_t} re_abp = re_ab[ab_idx] * plm;
+                const {real_t} im_abp = im_ab[ab_idx] * plm;
+                const {real_t} re_abpr = re_abp * re_j_shared[p] - im_abp * im_j_shared[p];
+                const {real_t} im_abpr = re_abp * im_j_shared[p] + im_abp * re_j_shared[p];
+                const {real_t} re_phase =
+                    re_abpr * cos_mphi_shared[phase_idx] - im_abpr * sin_mphi_shared[phase_idx];
+                const {real_t} im_phase =
+                    re_abpr * sin_mphi_shared[phase_idx] + im_abpr * cos_mphi_shared[phase_idx];
+                re_acc += re_phase;
+                im_acc += im_phase;
+            }}
+            const long long flat_idx = (long long)pair_idx * (long long)n_mode_pairs + (long long)flat;
+            out_blocks[flat_idx] = {complex_t}(re_acc, im_acc);
         }}
-
-        const int n1 = out_mode_indices[out_idx];
-        const int n2 = in_mode_indices[in_idx];
-        const int delta_m = mode_m[n2] - mode_m[n1];
-        const int phase_idx = delta_m + 2 * {order};
-        const int table_idx = n1 * nmodes_full + n2;
-        const int base = pair_offset[table_idx];
-        const int p_min = pair_pmin[table_idx];
-        const int p_count = pair_pcount[table_idx];
-        {real_t} re_acc = ({real_t})0.0;
-        {real_t} im_acc = ({real_t})0.0;
-        for (int ip = 0; ip < p_count; ++ip) {{
-            const int p = p_min + ip;
-            const int ab_idx = base + ip;
-            const {real_t} plm = p_pdm_shared[p * (p + 1) / 2 + abs(delta_m)];
-            const {real_t} re_abp = re_ab[ab_idx] * plm;
-            const {real_t} im_abp = im_ab[ab_idx] * plm;
-            const {real_t} re_abpr = re_abp * re_j_shared[p] - im_abp * im_j_shared[p];
-            const {real_t} im_abpr = re_abp * im_j_shared[p] + im_abp * re_j_shared[p];
-            const {real_t} re_phase =
-                re_abpr * cos_mphi_shared[phase_idx] - im_abpr * sin_mphi_shared[phase_idx];
-            const {real_t} im_phase =
-                re_abpr * sin_mphi_shared[phase_idx] + im_abpr * cos_mphi_shared[phase_idx];
-            re_acc += re_phase;
-            im_acc += im_phase;
-        }}
-
-        const long long flat_idx = ((long long)pair_idx * n_out_modes + out_idx) * n_in_modes + in_idx;
-        out_blocks[flat_idx] = {complex_t}(re_acc, im_acc);
     }}
     """
     return cupy.RawKernel(source, "mlfmm_leaf_translation_blocks_rect")
@@ -718,7 +911,6 @@ def build_leaf_box_maps_cupy(
     full_order = max(lmax_in, lmax_out)
     nmodes_in = int(n_modes(lmax_in))
     nmodes_out = int(n_modes(lmax_out))
-    nmodes_full = int(n_modes(full_order))
     leaves = tuple(sorted(partition.leaves, key=lambda leaf: int(leaf.id)))
     n_leaves = int(len(leaves))
     if n_leaves == 0:
@@ -753,12 +945,21 @@ def build_leaf_box_maps_cupy(
         count=nmodes_in,
     )
 
-    compact_re_ab_raw, compact_im_ab_raw = _translation_ab5_compact_tables(
-        full_order, dtype=out_dtype
+    (
+        compact_re_ab_raw,
+        compact_im_ab_raw,
+        pair_offset_raw,
+        pair_pmin_raw,
+        pair_pcount_raw,
+        mode_m_out_raw,
+        mode_m_in_raw,
+    ) = _leaf_rect_pair_tables_and_ab(
+        full_order=int(full_order),
+        out_mode_indices=out_mode_idx,
+        in_mode_indices=in_mode_idx,
+        out_dtype=np.dtype(out_dtype),
     )
     plm_coeffs_raw = _translation_plm_coeff_table(full_order, dtype=real_dtype).reshape(-1)
-    mode_m = _mode_metadata_tables(full_order)
-    pair_offset_raw, pair_pmin_raw, pair_pcount_raw = _mode_pair_tables(full_order)
 
     lut_j = np.asarray(radial_lut_full.j, dtype=out_dtype)[: 2 * full_order + 1, :]
     lut_j_rows = np.ascontiguousarray(lut_j.T)
@@ -812,15 +1013,16 @@ def build_leaf_box_maps_cupy(
 
     out_mode_idx_dev = cupy.asarray(np.ascontiguousarray(out_mode_idx), dtype=cupy.int32)
     in_mode_idx_dev = cupy.asarray(np.ascontiguousarray(in_mode_idx), dtype=cupy.int32)
-    mode_m_dev = cupy.asarray(np.ascontiguousarray(mode_m), dtype=cupy.int32)
+    mode_m_out_dev = cupy.asarray(np.ascontiguousarray(mode_m_out_raw), dtype=cupy.int32)
+    mode_m_in_dev = cupy.asarray(np.ascontiguousarray(mode_m_in_raw), dtype=cupy.int32)
     pair_offset_dev = cupy.asarray(
-        np.ascontiguousarray(pair_offset_raw.reshape(-1), dtype=np.int32), dtype=cupy.int32
+        np.ascontiguousarray(pair_offset_raw, dtype=np.int32), dtype=cupy.int32
     )
     pair_pmin_dev = cupy.asarray(
-        np.ascontiguousarray(pair_pmin_raw.reshape(-1), dtype=np.int32), dtype=cupy.int32
+        np.ascontiguousarray(pair_pmin_raw, dtype=np.int32), dtype=cupy.int32
     )
     pair_pcount_dev = cupy.asarray(
-        np.ascontiguousarray(pair_pcount_raw.reshape(-1), dtype=np.int32), dtype=cupy.int32
+        np.ascontiguousarray(pair_pcount_raw, dtype=np.int32), dtype=cupy.int32
     )
     plm_coeffs_dev = cupy.asarray(np.ascontiguousarray(plm_coeffs_raw), dtype=cupy_real_dtype)
     re_ab_dev = cupy.asarray(np.ascontiguousarray(compact_re_ab_raw), dtype=cupy_real_dtype)
@@ -830,21 +1032,19 @@ def build_leaf_box_maps_cupy(
 
     kernel = _leaf_translation_blocks_rect_raw_kernel(full_order, out_dtype.str)
     props = cupy.cuda.runtime.getDeviceProperties(cupy.cuda.runtime.getDevice())
-    max_grid_z = int(props["maxGridSize"][2])
+    max_grid_pairs = int(props["maxGridSize"][0])
     max_threads = int(props["maxThreadsPerBlock"])
-    if max_threads >= 128:
-        threads_x, threads_y = 16, 8
-    elif max_threads >= 64:
-        threads_x, threads_y = 8, 8
+    if max_threads >= 256:
+        threads = 256
+    elif max_threads >= 128:
+        threads = 128
     else:
-        threads_x, threads_y = 8, 4
-    grid_x = max(1, (nmodes_out + threads_x - 1) // threads_x)
-    grid_y = max(1, (nmodes_in + threads_y - 1) // threads_y)
+        threads = 64
 
     bytes_per_pair = max(1, nmodes_out * nmodes_in * out_dtype.itemsize)
     target_chunk_bytes = 256 * 1024 * 1024
     chunk_pairs = max(1, target_chunk_bytes // bytes_per_pair)
-    chunk_pairs = max(1, min(int(chunk_pairs), int(max_grid_z)))
+    chunk_pairs = max(1, min(int(chunk_pairs), int(max_grid_pairs)))
 
     for start in range(0, n_pairs, chunk_pairs):
         end = min(n_pairs, start + chunk_pairs)
@@ -856,16 +1056,17 @@ def build_leaf_box_maps_cupy(
         )
         blocks_dev = cupy.empty((count, nmodes_out, nmodes_in), dtype=cupy_complex_dtype)
         kernel(
-            (int(grid_x), int(grid_y), count),
-            (threads_x, threads_y, 1),
+            (int(count),),
+            (int(threads),),
             (
                 np.int32(count),
                 np.int32(nmodes_out),
                 np.int32(nmodes_in),
-                np.int32(nmodes_full),
                 deltas_dev.reshape(-1),
                 out_mode_idx_dev,
                 in_mode_idx_dev,
+                mode_m_out_dev,
+                mode_m_in_dev,
                 re_j_dev,
                 im_j_dev,
                 inv_dr_scalar,
@@ -873,7 +1074,6 @@ def build_leaf_box_maps_cupy(
                 plm_coeffs_dev,
                 re_ab_dev,
                 im_ab_dev,
-                mode_m_dev,
                 pair_offset_dev,
                 pair_pmin_dev,
                 pair_pcount_dev,
@@ -1150,27 +1350,199 @@ def _copy_directional_host(
     )
 
 
-def _build_host_single_level(single: MLFMMSingleLevelOperators) -> CuPyHostSingleLevelData:
+def _build_host_leaf_otf_payload(
+    *,
+    lmax: int,
+    box_order: int,
+    k: float,
+    positions: np.ndarray,
+    partition: MLFMMPartition,
+    radial_lut: RadialLUT,
+    out_dtype: np.dtype,
+) -> tuple[tuple[CuPyHostLeafOnTheFlyGroupData, ...], CuPyHostLeafTranslationTablesData]:
+    """Build compact grouped leaf schedules and translation tables for on-the-fly apply."""
+
+    lmax_in = int(lmax)
+    lmax_out = int(box_order)
+    full_order = max(lmax_in, lmax_out)
+    nmodes_in = int(n_modes(lmax_in))
+    nmodes_out = int(n_modes(lmax_out))
+    nmodes_full = int(n_modes(full_order))
+
+    positions_arr = np.asarray(positions, dtype=float).reshape(-1, 3)
+    leaves = tuple(sorted(partition.leaves, key=lambda leaf: int(leaf.id)))
+    n_leaves = int(len(leaves))
+    leaf_by_id = {int(leaf.id): leaf for leaf in leaves}
+    for leaf_id in range(n_leaves):
+        if leaf_id not in leaf_by_id:
+            raise ValueError(
+                "Leaf ids must be contiguous in [0, n_leaves) for on-the-fly CuPy leaf schedules. "
+                f"Missing leaf id {leaf_id}."
+            )
+
+    grouped_ids: dict[int, list[int]] = {}
+    for leaf_id in range(n_leaves):
+        leaf = leaf_by_id[leaf_id]
+        occupancy = int(np.asarray(leaf.particle_indices, dtype=np.int64).reshape(-1).size)
+        if occupancy <= 0:
+            raise ValueError(f"leaf {leaf_id} has non-positive occupancy {occupancy}.")
+        grouped_ids.setdefault(occupancy, []).append(leaf_id)
+
+    groups: list[CuPyHostLeafOnTheFlyGroupData] = []
+    for occupancy in sorted(grouped_ids):
+        leaf_ids_np = np.asarray(grouped_ids[occupancy], dtype=np.int32)
+        n_group = int(leaf_ids_np.size)
+        particle_indices_np = np.empty((n_group, occupancy), dtype=np.int32)
+        pair_deltas_np = np.empty((n_group * occupancy, 3), dtype=np.float64)
+        for local_idx, leaf_id in enumerate(leaf_ids_np.tolist()):
+            leaf = leaf_by_id[int(leaf_id)]
+            particle_idx = np.asarray(leaf.particle_indices, dtype=np.int32).reshape(-1)
+            if int(particle_idx.size) != occupancy:
+                raise RuntimeError(
+                    "Internal CuPy MLFMM error: occupancy grouping mismatch while building "
+                    f"on-the-fly leaf schedule for leaf {leaf_id}."
+                )
+            particle_indices_np[local_idx] = particle_idx
+            leaf_center = np.asarray(leaf.center, dtype=np.float64).reshape(1, 3)
+            start = local_idx * occupancy
+            stop = start + occupancy
+            pair_deltas_np[start:stop, :] = leaf_center - positions_arr[particle_idx, :]
+        groups.append(
+            CuPyHostLeafOnTheFlyGroupData(
+                occupancy=int(occupancy),
+                nmodes=int(nmodes_in),
+                leaf_ids=np.ascontiguousarray(leaf_ids_np, dtype=np.int32),
+                particle_indices=np.ascontiguousarray(particle_indices_np, dtype=np.int32),
+                pair_deltas=np.ascontiguousarray(pair_deltas_np, dtype=np.float64),
+            )
+        )
+
+    out_mode_indices = np.fromiter(
+        (
+            index_vswf(int(l_i), int(m_i), int(tau_i), full_order)
+            for tau_i, l_i, m_i, _idx in iter_modes(lmax_out)
+        ),
+        dtype=np.int32,
+        count=nmodes_out,
+    )
+    in_mode_indices = np.fromiter(
+        (
+            index_vswf(int(l_i), int(m_i), int(tau_i), full_order)
+            for tau_i, l_i, m_i, _idx in iter_modes(lmax_in)
+        ),
+        dtype=np.int32,
+        count=nmodes_in,
+    )
+    (
+        compact_re_ab_raw,
+        compact_im_ab_raw,
+        pair_offset_raw,
+        pair_pmin_raw,
+        pair_pcount_raw,
+        mode_m_out_raw,
+        mode_m_in_raw,
+    ) = _leaf_rect_pair_tables_and_ab(
+        full_order=int(full_order),
+        out_mode_indices=out_mode_indices,
+        in_mode_indices=in_mode_indices,
+        out_dtype=np.dtype(np.complex128),
+    )
+    plm_coeffs_raw = _translation_plm_coeff_table(full_order, dtype=np.float64).reshape(-1)
+
+    if int(radial_lut.lmax) < full_order:
+        radial_lut_full = RadialLUT(
+            lmax=full_order,
+            k=float(k),
+            r_max=float(radial_lut.r_grid[-1]),
+            dr=float(radial_lut.dr),
+            dtype=out_dtype,
+        )
+    else:
+        radial_lut_full = radial_lut
+    lut_j = np.asarray(radial_lut_full.j, dtype=out_dtype)[: 2 * full_order + 1, :]
+    lut_j_rows = np.ascontiguousarray(lut_j.T)
+    tables = CuPyHostLeafTranslationTablesData(
+        full_order=int(full_order),
+        nmodes_in=int(nmodes_in),
+        nmodes_out=int(nmodes_out),
+        nmodes_full=int(nmodes_full),
+        out_mode_indices=np.ascontiguousarray(out_mode_indices, dtype=np.int32),
+        in_mode_indices=np.ascontiguousarray(in_mode_indices, dtype=np.int32),
+        mode_m_out=np.ascontiguousarray(mode_m_out_raw, dtype=np.int32),
+        mode_m_in=np.ascontiguousarray(mode_m_in_raw, dtype=np.int32),
+        pair_offset=np.ascontiguousarray(pair_offset_raw, dtype=np.int32),
+        pair_pmin=np.ascontiguousarray(pair_pmin_raw, dtype=np.int32),
+        pair_pcount=np.ascontiguousarray(pair_pcount_raw, dtype=np.int32),
+        plm_coeffs=np.ascontiguousarray(plm_coeffs_raw, dtype=np.float64),
+        compact_re_ab=np.ascontiguousarray(compact_re_ab_raw, dtype=np.float64),
+        compact_im_ab=np.ascontiguousarray(compact_im_ab_raw, dtype=np.float64),
+        re_j=np.ascontiguousarray(lut_j_rows.real.reshape(-1), dtype=np.float64),
+        im_j=np.ascontiguousarray(lut_j_rows.imag.reshape(-1), dtype=np.float64),
+        inv_dr=float(radial_lut_full._inv_dr),
+        last_index=int(radial_lut_full._last_index),
+    )
+    return tuple(groups), tables
+
+
+def _build_host_single_level(
+    single: MLFMMSingleLevelOperators,
+    *,
+    lmax: int,
+    k: float,
+    positions: np.ndarray,
+    partition: MLFMMPartition,
+    radial_lut: RadialLUT,
+    out_dtype: np.dtype,
+    leaf_apply_mode: CuPyMLFMMLeafApplyMode,
+) -> CuPyHostSingleLevelData:
     """Build compact host cache payload for one single-level sampled-far stage."""
 
+    if str(leaf_apply_mode) == "on_the_fly":
+        leaf_groups_otf, leaf_tables = _build_host_leaf_otf_payload(
+            lmax=int(lmax),
+            box_order=int(single.box_order),
+            k=float(k),
+            positions=np.asarray(positions, dtype=float),
+            partition=partition,
+            radial_lut=radial_lut,
+            out_dtype=np.dtype(out_dtype),
+        )
+        aggregation_payload: tuple[np.ndarray, ...] | None = None
+    else:
+        leaf_groups_otf = None
+        leaf_tables = None
+        aggregation_payload = tuple(
+            np.ascontiguousarray(np.asarray(block, dtype=np.complex128))
+            for block in single.aggregation
+        )
     return CuPyHostSingleLevelData(
         box_order=int(single.box_order),
         translator_order=int(single.translator_order),
         grid_order=int(single.grid_order),
         directional=_copy_directional_host(single.directional),
-        aggregation=tuple(
-            np.ascontiguousarray(np.asarray(block, dtype=np.complex128))
-            for block in single.aggregation
-        ),
+        aggregation=aggregation_payload,
         far_offset_batches=_copy_batches_host(single.far_offset_batches),
         offset_diagonals={
             key: np.ascontiguousarray(np.asarray(values, dtype=np.complex128).reshape(-1))
             for key, values in single.offset_diagonals.items()
         },
+        leaf_groups_otf=leaf_groups_otf,
+        leaf_translation_tables=leaf_tables,
+        leaf_apply_mode=leaf_apply_mode,
     )
 
 
-def _build_host_multilevel(multilevel: MLFMMMultilevelOperators) -> CuPyHostMultilevelData:
+def _build_host_multilevel(
+    multilevel: MLFMMMultilevelOperators,
+    *,
+    lmax: int,
+    k: float,
+    positions: np.ndarray,
+    partition: MLFMMPartition,
+    radial_lut: RadialLUT,
+    out_dtype: np.dtype,
+    leaf_apply_mode: CuPyMLFMMLeafApplyMode,
+) -> CuPyHostMultilevelData:
     """Build compact host cache payload for one multilevel sampled-far stage."""
 
     levels = tuple(
@@ -1206,23 +1578,48 @@ def _build_host_multilevel(multilevel: MLFMMMultilevelOperators) -> CuPyHostMult
         )
         for transfer in multilevel.transfers
     )
+    if str(leaf_apply_mode) == "on_the_fly":
+        leaf_groups_otf, leaf_tables = _build_host_leaf_otf_payload(
+            lmax=int(lmax),
+            box_order=int(levels[int(multilevel.leaf_level)].box_order),
+            k=float(k),
+            positions=np.asarray(positions, dtype=float),
+            partition=partition,
+            radial_lut=radial_lut,
+            out_dtype=np.dtype(out_dtype),
+        )
+        aggregation_payload: tuple[np.ndarray, ...] | None = None
+    else:
+        leaf_groups_otf = None
+        leaf_tables = None
+        aggregation_payload = tuple(
+            np.ascontiguousarray(np.asarray(block, dtype=np.complex128))
+            for block in multilevel.aggregation
+        )
     return CuPyHostMultilevelData(
         levels=levels,
         transfers=transfers,
         leaf_level=int(multilevel.leaf_level),
         hf_start_level=int(multilevel.hf_start_level),
         hf_end_level=int(multilevel.hf_end_level),
-        aggregation=tuple(
-            np.ascontiguousarray(np.asarray(block, dtype=np.complex128))
-            for block in multilevel.aggregation
-        ),
+        aggregation=aggregation_payload,
+        leaf_groups_otf=leaf_groups_otf,
+        leaf_translation_tables=leaf_tables,
+        leaf_apply_mode=leaf_apply_mode,
     )
 
 
 def _resolve_host_cache_policy(
     policy: CuPyMLFMMHostCachePolicy | None,
 ) -> CuPyMLFMMHostCachePolicy:
-    return CuPyMLFMMHostCachePolicy() if policy is None else policy
+    resolved = CuPyMLFMMHostCachePolicy() if policy is None else policy
+    mode = str(resolved.leaf_apply_mode)
+    if mode not in {"dense", "on_the_fly"}:
+        raise ValueError(
+            f"Unsupported CuPy MLFMM leaf_apply_mode={resolved.leaf_apply_mode!r}. "
+            "Use 'dense' or 'on_the_fly'."
+        )
+    return resolved
 
 
 def _build_mlfmm_cupy_host_cache(
@@ -1326,18 +1723,38 @@ def _build_mlfmm_cupy_host_cache(
         ),
         host_memory_budget=policy.memory_budget,
         single_level=(
-            _build_host_single_level(coupling.single_level)
+            _build_host_single_level(
+                coupling.single_level,
+                lmax=int(coupling.lmax),
+                k=float(coupling.k),
+                positions=np.asarray(coupling.positions, dtype=float),
+                partition=partition,
+                radial_lut=coupling.radial_lut,
+                out_dtype=np.dtype(coupling.far_dtype),
+                leaf_apply_mode=policy.leaf_apply_mode,
+            )
             if coupling.single_level is not None
             else None
         ),
         multilevel=(
-            _build_host_multilevel(coupling.multilevel) if coupling.multilevel is not None else None
+            _build_host_multilevel(
+                coupling.multilevel,
+                lmax=int(coupling.lmax),
+                k=float(coupling.k),
+                positions=np.asarray(coupling.positions, dtype=float),
+                partition=partition,
+                radial_lut=coupling.radial_lut,
+                out_dtype=np.dtype(coupling.far_dtype),
+                leaf_apply_mode=policy.leaf_apply_mode,
+            )
+            if coupling.multilevel is not None
+            else None
         ),
         plan_summary=plan_summary,
     )
 
 
-def _upload_leaf_apply_groups(
+def _upload_leaf_apply_groups_dense(
     *,
     aggregation: tuple[np.ndarray, ...],
     partition: CuPyMLFMMPartitionData,
@@ -1408,9 +1825,128 @@ def _upload_leaf_apply_groups(
                     dtype=cupy.complex128,
                     blocking=True,
                 ),
+                pair_deltas=None,
             )
         )
     return box_nm, tuple(grouped)
+
+
+def _upload_leaf_translation_tables(
+    tables: CuPyHostLeafTranslationTablesData,
+    *,
+    cupy: Any,
+) -> CuPyLeafTranslationTablesData:
+    """Upload compact on-the-fly leaf translation ingredients to device memory."""
+
+    return CuPyLeafTranslationTablesData(
+        full_order=int(tables.full_order),
+        nmodes_in=int(tables.nmodes_in),
+        nmodes_out=int(tables.nmodes_out),
+        nmodes_full=int(tables.nmodes_full),
+        out_mode_indices=cupy.asarray(
+            np.ascontiguousarray(tables.out_mode_indices, dtype=np.int32), dtype=cupy.int32
+        ),
+        in_mode_indices=cupy.asarray(
+            np.ascontiguousarray(tables.in_mode_indices, dtype=np.int32), dtype=cupy.int32
+        ),
+        mode_m_out=cupy.asarray(
+            np.ascontiguousarray(tables.mode_m_out, dtype=np.int32), dtype=cupy.int32
+        ),
+        mode_m_in=cupy.asarray(
+            np.ascontiguousarray(tables.mode_m_in, dtype=np.int32), dtype=cupy.int32
+        ),
+        pair_offset=cupy.asarray(
+            np.ascontiguousarray(tables.pair_offset, dtype=np.int32), dtype=cupy.int32
+        ),
+        pair_pmin=cupy.asarray(
+            np.ascontiguousarray(tables.pair_pmin, dtype=np.int32), dtype=cupy.int32
+        ),
+        pair_pcount=cupy.asarray(
+            np.ascontiguousarray(tables.pair_pcount, dtype=np.int32), dtype=cupy.int32
+        ),
+        plm_coeffs=cupy.asarray(
+            np.ascontiguousarray(tables.plm_coeffs, dtype=np.float64), dtype=cupy.float64
+        ),
+        compact_re_ab=cupy.asarray(
+            np.ascontiguousarray(tables.compact_re_ab, dtype=np.float64), dtype=cupy.float64
+        ),
+        compact_im_ab=cupy.asarray(
+            np.ascontiguousarray(tables.compact_im_ab, dtype=np.float64), dtype=cupy.float64
+        ),
+        re_j=cupy.asarray(np.ascontiguousarray(tables.re_j, dtype=np.float64), dtype=cupy.float64),
+        im_j=cupy.asarray(np.ascontiguousarray(tables.im_j, dtype=np.float64), dtype=cupy.float64),
+        inv_dr=float(tables.inv_dr),
+        last_index=int(tables.last_index),
+    )
+
+
+def _upload_leaf_apply_groups_otf(
+    *,
+    groups: tuple[CuPyHostLeafOnTheFlyGroupData, ...],
+    n_leaves: int,
+    box_nm: int,
+    cupy: Any,
+    name: str,
+) -> tuple[int, tuple[CuPyLeafApplyGroupData, ...]]:
+    """Upload grouped on-the-fly leaf schedules with compact pair-delta tables."""
+
+    if n_leaves < 0:
+        raise ValueError(f"{name} n_leaves must be non-negative, got {n_leaves}.")
+    if box_nm <= 0 and n_leaves > 0:
+        raise ValueError(f"{name} box_nm must be positive when leaves are present.")
+    uploaded: list[CuPyLeafApplyGroupData] = []
+    seen_leaf_ids: set[int] = set()
+    for group in groups:
+        occupancy = int(group.occupancy)
+        nmodes = int(group.nmodes)
+        if occupancy <= 0 or nmodes <= 0:
+            raise ValueError(
+                f"{name} invalid on-the-fly group metadata occupancy={occupancy}, nmodes={nmodes}."
+            )
+        leaf_ids_np = np.ascontiguousarray(np.asarray(group.leaf_ids, dtype=np.int32).reshape(-1))
+        part_idx_np = np.ascontiguousarray(
+            np.asarray(group.particle_indices, dtype=np.int32).reshape(-1, occupancy)
+        )
+        n_group = int(leaf_ids_np.size)
+        if int(part_idx_np.shape[0]) != n_group:
+            raise ValueError(
+                f"{name} on-the-fly particle index row count mismatch: {int(part_idx_np.shape[0])} vs {n_group}."
+            )
+        deltas_np = np.ascontiguousarray(
+            np.asarray(group.pair_deltas, dtype=np.float64).reshape(-1, 3), dtype=np.float64
+        )
+        expected_pairs = n_group * occupancy
+        if int(deltas_np.shape[0]) != expected_pairs:
+            raise ValueError(
+                f"{name} on-the-fly pair-delta size mismatch: {int(deltas_np.shape[0])} vs {expected_pairs}."
+            )
+        for leaf_id in leaf_ids_np.tolist():
+            leaf_id_i = int(leaf_id)
+            if leaf_id_i < 0 or leaf_id_i >= int(n_leaves):
+                raise ValueError(
+                    f"{name} on-the-fly leaf id {leaf_id_i} out of range [0, {int(n_leaves)})."
+                )
+            if leaf_id_i in seen_leaf_ids:
+                raise ValueError(
+                    f"{name} on-the-fly leaf id {leaf_id_i} appears in multiple groups."
+                )
+            seen_leaf_ids.add(leaf_id_i)
+        uploaded.append(
+            CuPyLeafApplyGroupData(
+                occupancy=occupancy,
+                nmodes=nmodes,
+                leaf_ids=cupy.asarray(leaf_ids_np, dtype=cupy.int32),
+                particle_indices=cupy.asarray(part_idx_np, dtype=cupy.int32),
+                aggregation=None,
+                pair_deltas=cupy.asarray(deltas_np, dtype=cupy.float64),
+            )
+        )
+    if len(seen_leaf_ids) != int(n_leaves):
+        raise ValueError(
+            f"{name} on-the-fly groups do not cover all leaves exactly once "
+            f"(covered={len(seen_leaf_ids)}, expected={int(n_leaves)})."
+        )
+    return int(box_nm), tuple(uploaded)
 
 
 def _upload_single_level(
@@ -1435,18 +1971,40 @@ def _upload_single_level(
             )
         offset_diagonals[offset] = cupy.asarray(diag_arr, dtype=cupy.complex128)
 
-    box_nm, leaf_groups = _upload_leaf_apply_groups(
-        aggregation=single.aggregation,
-        partition=partition,
-        cupy=cupy,
-        name="single_level",
-    )
+    leaf_apply_mode = str(single.leaf_apply_mode) if hasattr(single, "leaf_apply_mode") else "dense"
+    leaf_tables_dev: CuPyLeafTranslationTablesData | None = None
+    if leaf_apply_mode == "on_the_fly":
+        groups_host = getattr(single, "leaf_groups_otf", None)
+        tables_host = getattr(single, "leaf_translation_tables", None)
+        if groups_host is None or tables_host is None:
+            raise ValueError(
+                "single-level on-the-fly leaf apply mode requires host leaf groups and translation tables."
+            )
+        n_leaves = int(partition.leaf_particle_offsets_host.size - 1)
+        box_nm = int(n_modes(int(single.box_order)))
+        box_nm, leaf_groups = _upload_leaf_apply_groups_otf(
+            groups=groups_host,
+            n_leaves=n_leaves,
+            box_nm=box_nm,
+            cupy=cupy,
+            name="single_level",
+        )
+        leaf_tables_dev = _upload_leaf_translation_tables(tables_host, cupy=cupy)
+    else:
+        if single.aggregation is None:
+            raise ValueError("single-level dense leaf apply mode requires aggregation payload.")
+        box_nm, leaf_groups = _upload_leaf_apply_groups_dense(
+            aggregation=single.aggregation,
+            partition=partition,
+            cupy=cupy,
+            name="single_level",
+        )
     return CuPyMLFMMSingleLevelData(
         box_order=int(single.box_order),
         translator_order=int(single.translator_order),
         grid_order=int(single.grid_order),
         box_nm=box_nm,
-        n_leaves=int(len(single.aggregation)),
+        n_leaves=int(partition.leaf_particle_offsets_host.size - 1),
         directional=directional,
         leaf_groups=leaf_groups,
         far_offset_batches=_upload_offset_batches(
@@ -1455,6 +2013,8 @@ def _upload_single_level(
             name="single_level.far_offset_batches",
         ),
         offset_diagonals=offset_diagonals,
+        leaf_apply_mode=cast(CuPyMLFMMLeafApplyMode, leaf_apply_mode),
+        leaf_translation_tables=leaf_tables_dev,
     )
 
 
@@ -1573,12 +2133,41 @@ def _upload_multilevel(
     cupy: Any,
     cupyx_sparse: Any,
 ) -> CuPyMLFMMMultilevelData:
-    box_nm, leaf_groups = _upload_leaf_apply_groups(
-        aggregation=multilevel.aggregation,
-        partition=partition,
-        cupy=cupy,
-        name="multilevel",
+    leaf_apply_mode = (
+        str(multilevel.leaf_apply_mode) if hasattr(multilevel, "leaf_apply_mode") else "dense"
     )
+    leaf_tables_dev: CuPyLeafTranslationTablesData | None = None
+    if leaf_apply_mode == "on_the_fly":
+        groups_host = getattr(multilevel, "leaf_groups_otf", None)
+        tables_host = getattr(multilevel, "leaf_translation_tables", None)
+        if groups_host is None or tables_host is None:
+            raise ValueError(
+                "multilevel on-the-fly leaf apply mode requires host leaf groups and translation tables."
+            )
+        n_leaves = int(partition.leaf_particle_offsets_host.size - 1)
+        leaf_level_idx = int(multilevel.leaf_level)
+        if leaf_level_idx < 0 or leaf_level_idx >= int(len(multilevel.levels)):
+            raise ValueError(
+                f"multilevel leaf_level index {leaf_level_idx} out of bounds for levels payload."
+            )
+        box_nm = int(n_modes(int(multilevel.levels[leaf_level_idx].box_order)))
+        box_nm, leaf_groups = _upload_leaf_apply_groups_otf(
+            groups=groups_host,
+            n_leaves=n_leaves,
+            box_nm=box_nm,
+            cupy=cupy,
+            name="multilevel",
+        )
+        leaf_tables_dev = _upload_leaf_translation_tables(tables_host, cupy=cupy)
+    else:
+        if multilevel.aggregation is None:
+            raise ValueError("multilevel dense leaf apply mode requires aggregation payload.")
+        box_nm, leaf_groups = _upload_leaf_apply_groups_dense(
+            aggregation=multilevel.aggregation,
+            partition=partition,
+            cupy=cupy,
+            name="multilevel",
+        )
     cpu_level_by_index = {int(level.level): level for level in multilevel.levels}
     levels = tuple(_upload_level(level, cupy=cupy) for level in multilevel.levels)
     return CuPyMLFMMMultilevelData(
@@ -1607,8 +2196,10 @@ def _upload_multilevel(
         hf_start_level=int(multilevel.hf_start_level),
         hf_end_level=int(multilevel.hf_end_level),
         box_nm=box_nm,
-        n_leaves=int(len(multilevel.aggregation)),
+        n_leaves=int(partition.leaf_particle_offsets_host.size - 1),
         leaf_groups=leaf_groups,
+        leaf_apply_mode=cast(CuPyMLFMMLeafApplyMode, leaf_apply_mode),
+        leaf_translation_tables=leaf_tables_dev,
     )
 
 
@@ -2972,10 +3563,82 @@ def _directional_to_box_regular_cupy(
     return out_arr
 
 
+def _leaf_translation_blocks_from_pair_deltas(
+    pair_deltas: Any,
+    *,
+    tables: CuPyLeafTranslationTablesData,
+    pair_blocks_scratch: dict[str, Any] | None,
+    cupy: Any,
+) -> Any:
+    """Build on-the-fly leaf translation blocks for one grouped pair schedule."""
+
+    deltas = cupy.asarray(pair_deltas, dtype=cupy.float64).reshape(-1, 3)
+    n_pairs = int(deltas.shape[0])
+    if n_pairs == 0:
+        return cupy.empty((0, int(tables.nmodes_out), int(tables.nmodes_in)), dtype=cupy.complex128)
+    nmodes_out = int(tables.nmodes_out)
+    nmodes_in = int(tables.nmodes_in)
+    required = int(n_pairs * nmodes_out * nmodes_in)
+    if pair_blocks_scratch is not None:
+        backing = pair_blocks_scratch.get("buffer")
+        if backing is None or int(backing.size) < required:
+            backing = cupy.empty((required,), dtype=cupy.complex128)
+            pair_blocks_scratch["buffer"] = backing
+        blocks = backing[:required].reshape(n_pairs, nmodes_out, nmodes_in)
+    else:
+        blocks = cupy.empty((n_pairs, nmodes_out, nmodes_in), dtype=cupy.complex128)
+
+    kernel = _leaf_translation_blocks_rect_raw_kernel(
+        int(tables.full_order), np.dtype(np.complex128).str
+    )
+    props = cupy.cuda.runtime.getDeviceProperties(cupy.cuda.runtime.getDevice())
+    max_grid_pairs = int(props["maxGridSize"][0])
+    max_threads = int(props["maxThreadsPerBlock"])
+    if max_threads >= 256:
+        threads = 256
+    elif max_threads >= 128:
+        threads = 128
+    else:
+        threads = 64
+    chunk_pairs = max(1, min(int(max_grid_pairs), n_pairs))
+    for start in range(0, n_pairs, chunk_pairs):
+        end = min(n_pairs, start + chunk_pairs)
+        count = int(end - start)
+        kernel(
+            (int(count),),
+            (int(threads),),
+            (
+                np.int32(count),
+                np.int32(nmodes_out),
+                np.int32(nmodes_in),
+                deltas[start:end].reshape(-1),
+                tables.out_mode_indices,
+                tables.in_mode_indices,
+                tables.mode_m_out,
+                tables.mode_m_in,
+                tables.re_j,
+                tables.im_j,
+                np.float64(float(tables.inv_dr)),
+                np.int32(int(tables.last_index)),
+                tables.plm_coeffs,
+                tables.compact_re_ab,
+                tables.compact_im_ab,
+                tables.pair_offset,
+                tables.pair_pmin,
+                tables.pair_pcount,
+                blocks[start:end].reshape(-1),
+            ),
+        )
+    return blocks
+
+
 def _aggregate_leaf_box_states(
     x_states: Any,
     *,
     leaf_groups: tuple[CuPyLeafApplyGroupData, ...],
+    leaf_apply_mode: CuPyMLFMMLeafApplyMode,
+    leaf_translation_tables: CuPyLeafTranslationTablesData | None,
+    pair_blocks_scratch: dict[str, Any] | None,
     n_leaves: int,
     box_nm: int,
     nrhs: int,
@@ -2996,7 +3659,29 @@ def _aggregate_leaf_box_states(
         occupancy = int(group.occupancy)
         nmodes = int(group.nmodes)
         coeffs = x_states[idx].reshape(n_group, occupancy * nmodes, int(nrhs))
-        box_states[group.leaf_ids] = cupy.matmul(group.aggregation, coeffs)
+        if str(leaf_apply_mode) == "on_the_fly":
+            if leaf_translation_tables is None or group.pair_deltas is None:
+                raise RuntimeError(
+                    "Internal CuPy MLFMM error: on-the-fly leaf aggregation requires translation "
+                    "tables and pair-delta schedules."
+                )
+            pair_blocks = _leaf_translation_blocks_from_pair_deltas(
+                group.pair_deltas,
+                tables=leaf_translation_tables,
+                pair_blocks_scratch=pair_blocks_scratch,
+                cupy=cupy,
+            )
+            agg = cupy.transpose(
+                pair_blocks.reshape(n_group, occupancy, int(box_nm), nmodes),
+                (0, 2, 1, 3),
+            ).reshape(n_group, int(box_nm), occupancy * nmodes)
+            box_states[group.leaf_ids] = cupy.matmul(agg, coeffs)
+        else:
+            if group.aggregation is None:
+                raise RuntimeError(
+                    "Internal CuPy MLFMM error: dense leaf aggregation mode requires aggregation tensors."
+                )
+            box_states[group.leaf_ids] = cupy.matmul(group.aggregation, coeffs)
     return box_states
 
 
@@ -3004,6 +3689,9 @@ def _receive_leaf_boxes_to_particles(
     incoming_box: Any,
     *,
     leaf_groups: tuple[CuPyLeafApplyGroupData, ...],
+    leaf_apply_mode: CuPyMLFMMLeafApplyMode,
+    leaf_translation_tables: CuPyLeafTranslationTablesData | None,
+    pair_blocks_scratch: dict[str, Any] | None,
     receive_adjoint_cache: dict[int, Any] | None,
     nm: int,
     n_particles: int,
@@ -3029,18 +3717,36 @@ def _receive_leaf_boxes_to_particles(
         idx = group.particle_indices
         n_group = int(idx.shape[0])
         occupancy = int(group.occupancy)
-        receive_adj: Any
-        if receive_adjoint_cache is not None:
-            cache_key = int(group.aggregation.data.ptr)
-            receive_adj = receive_adjoint_cache.get(cache_key)
-            if receive_adj is None:
-                receive_adj = cupy.swapaxes(group.aggregation, 1, 2).conj()
-                receive_adjoint_cache[cache_key] = receive_adj
+        if str(leaf_apply_mode) == "on_the_fly":
+            if leaf_translation_tables is None or group.pair_deltas is None:
+                raise RuntimeError(
+                    "Internal CuPy MLFMM error: on-the-fly leaf receive requires translation "
+                    "tables and pair-delta schedules."
+                )
+            pair_blocks = _leaf_translation_blocks_from_pair_deltas(
+                group.pair_deltas,
+                tables=leaf_translation_tables,
+                pair_blocks_scratch=pair_blocks_scratch,
+                cupy=cupy,
+            ).reshape(n_group, occupancy, int(leaf_translation_tables.nmodes_out), int(nm))
+            receive_adj = cupy.swapaxes(pair_blocks, 2, 3).conj()
+            contribution = cupy.matmul(receive_adj, incoming_box[leaf_ids][:, None, :, :])
         else:
-            receive_adj = cupy.swapaxes(group.aggregation, 1, 2).conj()
-        contribution = cupy.matmul(receive_adj, incoming_box[leaf_ids]).reshape(
-            n_group, occupancy, int(nm), int(nrhs)
-        )
+            if group.aggregation is None:
+                raise RuntimeError(
+                    "Internal CuPy MLFMM error: dense leaf receive mode requires aggregation tensors."
+                )
+            if receive_adjoint_cache is not None:
+                cache_key = int(group.aggregation.data.ptr)
+                receive_adj = receive_adjoint_cache.get(cache_key)
+                if receive_adj is None:
+                    receive_adj = cupy.swapaxes(group.aggregation, 1, 2).conj()
+                    receive_adjoint_cache[cache_key] = receive_adj
+            else:
+                receive_adj = cupy.swapaxes(group.aggregation, 1, 2).conj()
+            contribution = cupy.matmul(receive_adj, incoming_box[leaf_ids]).reshape(
+                n_group, occupancy, int(nm), int(nrhs)
+            )
         y[idx] += contribution
     return y
 
@@ -3291,6 +3997,7 @@ def _apply_single_level_far(
     x_states: Any,
     *,
     receive_adjoint_cache: dict[int, Any] | None,
+    pair_blocks_scratch: dict[str, Any] | None,
     workspace: CuPyMLFMMSingleLevelWorkspace | None,
     cupy: Any,
 ) -> Any:
@@ -3309,6 +4016,9 @@ def _apply_single_level_far(
     box_states = _aggregate_leaf_box_states(
         x_states,
         leaf_groups=single.leaf_groups,
+        leaf_apply_mode=single.leaf_apply_mode,
+        leaf_translation_tables=single.leaf_translation_tables,
+        pair_blocks_scratch=pair_blocks_scratch,
         n_leaves=int(single.n_leaves),
         box_nm=box_nm,
         nrhs=nrhs,
@@ -3341,6 +4051,9 @@ def _apply_single_level_far(
     return _receive_leaf_boxes_to_particles(
         incoming_box,
         leaf_groups=single.leaf_groups,
+        leaf_apply_mode=single.leaf_apply_mode,
+        leaf_translation_tables=single.leaf_translation_tables,
+        pair_blocks_scratch=pair_blocks_scratch,
         receive_adjoint_cache=receive_adjoint_cache,
         nm=nm,
         n_particles=n_particles,
@@ -3392,6 +4105,7 @@ def _apply_multilevel_far(
     x_states: Any,
     *,
     receive_adjoint_cache: dict[int, Any] | None,
+    pair_blocks_scratch: dict[str, Any] | None,
     workspace: CuPyMLFMMMultilevelWorkspace | None,
     cupy: Any,
 ) -> Any:
@@ -3430,6 +4144,9 @@ def _apply_multilevel_far(
     leaf_box_states = _aggregate_leaf_box_states(
         x_states,
         leaf_groups=multilevel.leaf_groups,
+        leaf_apply_mode=multilevel.leaf_apply_mode,
+        leaf_translation_tables=multilevel.leaf_translation_tables,
+        pair_blocks_scratch=pair_blocks_scratch,
         n_leaves=int(multilevel.n_leaves),
         box_nm=box_nm,
         nrhs=nrhs,
@@ -3588,6 +4305,9 @@ def _apply_multilevel_far(
     return _receive_leaf_boxes_to_particles(
         incoming_box,
         leaf_groups=multilevel.leaf_groups,
+        leaf_apply_mode=multilevel.leaf_apply_mode,
+        leaf_translation_tables=multilevel.leaf_translation_tables,
+        pair_blocks_scratch=pair_blocks_scratch,
         receive_adjoint_cache=receive_adjoint_cache,
         nm=nm,
         n_particles=n_particles,
@@ -3595,6 +4315,75 @@ def _apply_multilevel_far(
         out=(ws.y_states if ws is not None else None),
         cupy=cupy,
     )
+
+
+def _device_array_nbytes(arr: Any) -> int:
+    """Return device-array byte size when available, otherwise zero."""
+
+    if arr is None:
+        return 0
+    nbytes = getattr(arr, "nbytes", None)
+    if nbytes is None:
+        return 0
+    return int(nbytes)
+
+
+def _multilevel_full_incoming_bytes(
+    multilevel: CuPyMLFMMMultilevelData,
+    *,
+    nrhs: int,
+) -> int:
+    """Return bytes for a fully materialized incoming hierarchy."""
+
+    total = 0
+    for level_idx in range(int(multilevel.hf_start_level), int(multilevel.hf_end_level) + 1):
+        level = multilevel.levels[level_idx]
+        total += (
+            int(level.n_boxes)
+            * 4
+            * int(level.directional.grid.n_directions)
+            * int(nrhs)
+            * np.dtype(np.complex128).itemsize
+        )
+    return int(total)
+
+
+def _multilevel_rolling_incoming_bytes_theoretical(
+    multilevel: CuPyMLFMMMultilevelData,
+    *,
+    nrhs: int,
+) -> int:
+    """Return bytes for the two-parity rolling incoming hierarchy arenas."""
+
+    hf_start = int(multilevel.hf_start_level)
+    hf_end = int(multilevel.hf_end_level)
+    max_elements_by_parity = [1, 1]
+    for level_idx in range(hf_start, hf_end + 1):
+        level = multilevel.levels[level_idx]
+        parity = int((level_idx - hf_start) & 1)
+        elements = int(level.n_boxes) * 4 * int(level.directional.grid.n_directions) * int(nrhs)
+        max_elements_by_parity[parity] = max(max_elements_by_parity[parity], int(elements))
+    bytes_per_complex = np.dtype(np.complex128).itemsize
+    return int((max_elements_by_parity[0] + max_elements_by_parity[1]) * bytes_per_complex)
+
+
+def _multilevel_outgoing_hierarchy_bytes(
+    multilevel: CuPyMLFMMMultilevelData,
+    *,
+    nrhs: int,
+) -> int:
+    """Return bytes for the fully resident outgoing hierarchy buffers."""
+
+    total = 0
+    for level in multilevel.levels:
+        total += (
+            int(level.n_boxes)
+            * 4
+            * int(level.directional.grid.n_directions)
+            * int(nrhs)
+            * np.dtype(np.complex128).itemsize
+        )
+    return int(total)
 
 
 @dataclass
@@ -3620,6 +4409,10 @@ class CuPyMLFMMCouplingOperator:
     near_dtype: np.dtype = np.dtype(np.complex128)
     far_dtype: np.dtype = np.dtype(np.complex128)
     _receive_adjoint_cache: dict[int, Any] = field(default_factory=dict, init=False, repr=False)
+    _leaf_otf_pair_blocks_scratch: dict[str, Any] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _device_pool_peak_total_bytes: int = field(default=0, init=False, repr=False)
     _near_workspace_cache: dict[CuPyMLFMMNearWorkspaceKey, CuPyMLFMMNearWorkspace] = field(
         default_factory=dict, init=False, repr=False
     )
@@ -3630,8 +4423,120 @@ class CuPyMLFMMCouplingOperator:
         CuPyMLFMMMultilevelWorkspaceKey, CuPyMLFMMMultilevelWorkspace
     ] = field(default_factory=dict, init=False, repr=False)
 
+    def _update_device_pool_peak(self, *, cupy: Any) -> None:
+        """Track high-watermark device-pool bytes observed by this runtime object."""
+
+        pool_total = int(cupy.get_default_memory_pool().total_bytes())
+        if pool_total > int(self._device_pool_peak_total_bytes):
+            self._device_pool_peak_total_bytes = int(pool_total)
+
+    def memory_diagnostics(self) -> dict[str, object]:
+        """Return runtime memory diagnostics for Phase-D/Phase-E benchmark logging."""
+
+        cupy, _ = import_cupy()
+        pool = cupy.get_default_memory_pool()
+        pinned_pool = cupy.get_default_pinned_memory_pool()
+        free_bytes, total_bytes = cupy.cuda.runtime.memGetInfo()
+
+        near_ws_total = int(
+            sum(
+                _device_array_nbytes(ws.x_states) + _device_array_nbytes(ws.y_states)
+                for ws in self._near_workspace_cache.values()
+            )
+        )
+        single_ws_total = int(
+            sum(
+                _device_array_nbytes(ws.box_states)
+                + _device_array_nbytes(ws.outgoing)
+                + _device_array_nbytes(ws.incoming)
+                + _device_array_nbytes(ws.incoming_box)
+                + _device_array_nbytes(ws.y_states)
+                for ws in self._single_level_workspace_cache.values()
+            )
+        )
+        multilevel_ws_total = int(
+            sum(
+                int(sum(_device_array_nbytes(arr) for arr in ws.outgoing))
+                + _device_array_nbytes(ws.incoming_roll_even)
+                + _device_array_nbytes(ws.incoming_roll_odd)
+                + _device_array_nbytes(ws.leaf_box_states)
+                + _device_array_nbytes(ws.incoming_box)
+                + _device_array_nbytes(ws.y_states)
+                for ws in self._multilevel_workspace_cache.values()
+            )
+        )
+        leaf_otf_scratch_bytes = _device_array_nbytes(
+            self._leaf_otf_pair_blocks_scratch.get("buffer")
+        )
+
+        multilevel = self.prepared_data.multilevel
+        rolling_diag: dict[str, object] | None = None
+        if multilevel is not None:
+            if self._multilevel_workspace_cache:
+                nrhs_ref = int(next(iter(self._multilevel_workspace_cache.values())).nrhs)
+                rolling_actual = int(
+                    max(
+                        _device_array_nbytes(ws.incoming_roll_even)
+                        + _device_array_nbytes(ws.incoming_roll_odd)
+                        for ws in self._multilevel_workspace_cache.values()
+                    )
+                )
+            else:
+                nrhs_ref = 1
+                rolling_actual = None
+            full_incoming = _multilevel_full_incoming_bytes(multilevel, nrhs=nrhs_ref)
+            rolling_theoretical = _multilevel_rolling_incoming_bytes_theoretical(
+                multilevel, nrhs=nrhs_ref
+            )
+            outgoing_hierarchy = _multilevel_outgoing_hierarchy_bytes(multilevel, nrhs=nrhs_ref)
+            rolling_used = rolling_theoretical if rolling_actual is None else int(rolling_actual)
+            rolling_diag = {
+                "nrhs_reference": int(nrhs_ref),
+                "full_incoming_hierarchy_bytes": int(full_incoming),
+                "rolling_incoming_bytes_theoretical": int(rolling_theoretical),
+                "rolling_incoming_bytes_actual_peak": (
+                    None if rolling_actual is None else int(rolling_actual)
+                ),
+                "incoming_reduction_ratio": (
+                    float(rolling_used) / float(full_incoming) if full_incoming > 0 else None
+                ),
+                "outgoing_hierarchy_bytes": int(outgoing_hierarchy),
+                "full_far_hierarchy_bytes": int(full_incoming + outgoing_hierarchy),
+                "rolling_far_hierarchy_bytes": int(rolling_used + outgoing_hierarchy),
+            }
+
+        return {
+            "host_cache_leaf_apply_mode": str(self.host_cache_policy.leaf_apply_mode),
+            "device_pool": {
+                "used_bytes": int(pool.used_bytes()),
+                "total_bytes": int(pool.total_bytes()),
+                "peak_total_bytes_seen_by_operator": int(self._device_pool_peak_total_bytes),
+                "pinned_free_blocks": int(pinned_pool.n_free_blocks()),
+            },
+            "device_mem_info": {
+                "free_bytes": int(free_bytes),
+                "total_bytes": int(total_bytes),
+            },
+            "workspace_cache_entries": {
+                "near": int(len(self._near_workspace_cache)),
+                "single_level": int(len(self._single_level_workspace_cache)),
+                "multilevel": int(len(self._multilevel_workspace_cache)),
+            },
+            "workspace_bytes": {
+                "near_total_bytes": int(near_ws_total),
+                "single_level_total_bytes": int(single_ws_total),
+                "multilevel_total_bytes": int(multilevel_ws_total),
+                "leaf_otf_pair_blocks_scratch_bytes": int(leaf_otf_scratch_bytes),
+                "total_bytes": int(
+                    near_ws_total + single_ws_total + multilevel_ws_total + leaf_otf_scratch_bytes
+                ),
+            },
+            "multilevel_rolling": rolling_diag,
+        }
+
     def apply(self, x: Any) -> Any:
         cupy, _ = import_cupy()
+        self._update_device_pool_peak(cupy=cupy)
         out_dtype = np.dtype(self.dtype)
         near_dtype = np.dtype(self.near_dtype)
         far_dtype = np.dtype(self.far_dtype)
@@ -3688,6 +4593,7 @@ class CuPyMLFMMCouplingOperator:
                 self.prepared_data,
                 x_states,
                 receive_adjoint_cache=self._receive_adjoint_cache,
+                pair_blocks_scratch=self._leaf_otf_pair_blocks_scratch,
                 workspace=single_ws,
                 cupy=cupy,
             )
@@ -3704,6 +4610,7 @@ class CuPyMLFMMCouplingOperator:
                 self.prepared_data,
                 x_states,
                 receive_adjoint_cache=self._receive_adjoint_cache,
+                pair_blocks_scratch=self._leaf_otf_pair_blocks_scratch,
                 workspace=multi_ws,
                 cupy=cupy,
             )
@@ -3712,6 +4619,7 @@ class CuPyMLFMMCouplingOperator:
         y_total = cupy.asarray(y_near, dtype=cupy.complex128) + cupy.asarray(
             y_far, dtype=cupy.complex128
         )
+        self._update_device_pool_peak(cupy=cupy)
         return _restore_unknown_shape(
             y_total.astype(_cupy_complex_dtype(out_dtype, cupy=cupy), copy=False),
             squeezed=squeezed,
