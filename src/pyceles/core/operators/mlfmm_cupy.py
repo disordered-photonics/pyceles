@@ -6,7 +6,7 @@ CPU build/planning remains the single source of truth in `mlfmm.py`.
 This module validates and uploads repeated-apply structures to device memory.
 """
 
-from dataclasses import dataclass, field, fields, is_dataclass
+from dataclasses import dataclass, field, fields, is_dataclass, replace
 from functools import cache
 from importlib import import_module
 from typing import Any, Literal, cast
@@ -34,33 +34,34 @@ from .mlfmm_directional import MLFMMDirectionalTransforms
 from .mlfmm_partition import MLFMMPartition
 
 Offset3 = tuple[int, int, int]
-CuPyMLFMMHostMemoryBudget = Literal["balanced", "low_host_memory"]
 CuPyMLFMMLeafApplyMode = Literal["dense", "on_the_fly"]
+CuPyMLFMMHostCacheRetention = Literal["full", "summary", "none"]
 
 
 @dataclass(frozen=True)
 class CuPyMLFMMHostCachePolicy:
     """Memory-tier policy for compact host cache retention vs recomputation.
 
-    `balanced` keeps static exact-near tables in host RAM to minimize rebuild
-    overhead. `low_host_memory` drops those static tables from host cache and
-    recomputes them during device upload.
-
     `leaf_apply_mode` controls how leaf aggregation/disaggregation is represented
     in the reusable host cache:
-    - `dense`: keep grouped dense aggregation maps,
+    - `dense`: keep grouped dense aggregation maps (transitional reference/debug path),
     - `on_the_fly`: keep compact schedules + translation ingredients and
       regenerate leaf translation blocks during repeated apply.
 
-    `retain_host_cache` controls whether the full compact host cache artifact is
-    attached to the runtime coupling object after upload. Keeping it detached by
-    default avoids pinning large host-RAM payloads that repeated apply does not
-    consume.
+    `host_cache_retention` controls what stays attached to the runtime coupling
+    object after upload:
+    - `full`: retain full compact host cache + summary,
+    - `summary`: retain only lightweight diagnostics summary (default),
+    - `none`: retain no host-cache diagnostics payload.
+
+    `leaf_otf_chunk_leaves` caps how many leaves of one occupancy-grouped batch
+    are processed per on-the-fly translation substep. This is an MLFMM-native
+    control knob (leaf-group chunking), avoiding byte-budget tuning.
     """
 
-    memory_budget: CuPyMLFMMHostMemoryBudget = "balanced"
     leaf_apply_mode: CuPyMLFMMLeafApplyMode = "on_the_fly"
-    retain_host_cache: bool = False
+    host_cache_retention: CuPyMLFMMHostCacheRetention = "summary"
+    leaf_otf_chunk_leaves: int | None = 1
 
 
 @dataclass(frozen=True)
@@ -213,7 +214,6 @@ class CuPyMLFMMHostCacheData:
     near_pair_offset: np.ndarray | None
     near_pair_pmin: np.ndarray | None
     near_pair_pcount: np.ndarray | None
-    host_memory_budget: CuPyMLFMMHostMemoryBudget = "balanced"
     single_level: CuPyHostSingleLevelData | None = None
     multilevel: CuPyHostMultilevelData | None = None
     plan_summary: dict[str, int | float | str] | None = None
@@ -1625,12 +1625,23 @@ def _resolve_host_cache_policy(
             f"Unsupported CuPy MLFMM leaf_apply_mode={resolved.leaf_apply_mode!r}. "
             "Use 'dense' or 'on_the_fly'."
         )
-    if not isinstance(resolved.retain_host_cache, bool):
+    retention = str(resolved.host_cache_retention)
+    if retention not in {"full", "summary", "none"}:
         raise ValueError(
-            f"Unsupported CuPy MLFMM retain_host_cache={resolved.retain_host_cache!r}. "
-            "Use True or False."
+            "Unsupported CuPy MLFMM host_cache_retention="
+            f"{resolved.host_cache_retention!r}. Use 'full', 'summary', or 'none'."
         )
-    return resolved
+    chunk_leaves = resolved.leaf_otf_chunk_leaves
+    if chunk_leaves is not None and int(chunk_leaves) <= 0:
+        raise ValueError(
+            "CuPy MLFMM leaf_otf_chunk_leaves must be positive when set. "
+            f"Got {resolved.leaf_otf_chunk_leaves!r}."
+        )
+    return replace(
+        resolved,
+        host_cache_retention=cast(CuPyMLFMMHostCacheRetention, retention),
+        leaf_otf_chunk_leaves=(None if chunk_leaves is None else int(chunk_leaves)),
+    )
 
 
 def _estimate_numpy_payload_bytes(obj: object) -> int:
@@ -1680,9 +1691,12 @@ def _runtime_host_cache_summary(
     """Build a compact diagnostic summary before optional host-cache detachment."""
 
     return {
-        "retained": bool(policy.retain_host_cache),
-        "memory_budget": str(cache.host_memory_budget),
+        "retention": str(policy.host_cache_retention),
+        "retained": str(policy.host_cache_retention) == "full",
         "leaf_apply_mode": str(policy.leaf_apply_mode),
+        "leaf_otf_chunk_leaves": (
+            None if policy.leaf_otf_chunk_leaves is None else int(policy.leaf_otf_chunk_leaves)
+        ),
         "stage": str(cache.stage),
         "near_static_tables_cached": bool(cache.near_plm_coeffs is not None),
         "numpy_payload_bytes_estimate": int(_estimate_numpy_payload_bytes(cache)),
@@ -1713,22 +1727,13 @@ def _build_mlfmm_cupy_host_cache(
     )
     dst_leaf_indices, src_leaf_indices = _build_exact_near_leaf_pair_schedule(partition)
     lut = np.asarray(coupling.radial_lut.h, dtype=np.complex128).T.astype(lut_dtype, copy=False)
-    keep_static_near_tables = policy.memory_budget == "balanced"
-    if keep_static_near_tables:
-        compact_re_ab, compact_im_ab = _translation_ab5_compact_tables(
-            int(coupling.lmax), dtype=np.complex128
-        )
-        plm_coeffs = _translation_plm_coeff_table(int(coupling.lmax), dtype=np.float64).reshape(-1)
-        mode_m = _mode_metadata_tables(int(coupling.lmax))
-        pair_offset, pair_pmin, pair_pcount = _mode_pair_tables(int(coupling.lmax))
-    else:
-        compact_re_ab = None
-        compact_im_ab = None
-        plm_coeffs = None
-        mode_m = None
-        pair_offset = None
-        pair_pmin = None
-        pair_pcount = None
+    compact_re_ab = None
+    compact_im_ab = None
+    plm_coeffs = None
+    mode_m = None
+    pair_offset = None
+    pair_pmin = None
+    pair_pcount = None
     plan = coupling.resolved_plan
     plan_summary: dict[str, int | float | str] = {
         "stage": str(plan.stage),
@@ -1789,7 +1794,6 @@ def _build_mlfmm_cupy_host_cache(
             if pair_pcount is not None
             else None
         ),
-        host_memory_budget=policy.memory_budget,
         single_level=(
             _build_host_single_level(
                 coupling.single_level,
@@ -2332,8 +2336,8 @@ def _resolve_exact_near_static_tables_from_host_cache(
             np.ascontiguousarray(pair_pcount, dtype=np.int32),
         )
 
-    # Under `low_host_memory`, static tables are intentionally omitted from the
-    # host cache and rebuilt on demand during upload.
+    # Static exact-near tables are intentionally omitted from host cache and
+    # rebuilt on demand during upload.
     lmax = int(cache.lmax)
     compact_re_ab_raw, compact_im_ab_raw = _translation_ab5_compact_tables(
         lmax, dtype=np.complex128
@@ -3700,6 +3704,20 @@ def _leaf_translation_blocks_from_pair_deltas(
     return blocks
 
 
+def _leaf_otf_group_chunk_leaves(
+    *,
+    n_group: int,
+    chunk_leaves: int | None,
+) -> int:
+    """Choose grouped on-the-fly leaf chunk size from policy leaf units."""
+
+    if int(n_group) <= 0:
+        return 1
+    if chunk_leaves is None:
+        return int(n_group)
+    return max(1, min(int(n_group), int(chunk_leaves)))
+
+
 def _aggregate_leaf_box_states(
     x_states: Any,
     *,
@@ -3707,6 +3725,7 @@ def _aggregate_leaf_box_states(
     leaf_apply_mode: CuPyMLFMMLeafApplyMode,
     leaf_translation_tables: CuPyLeafTranslationTablesData | None,
     pair_blocks_scratch: dict[str, Any] | None,
+    leaf_otf_chunk_leaves: int | None,
     n_leaves: int,
     box_nm: int,
     nrhs: int,
@@ -3733,17 +3752,26 @@ def _aggregate_leaf_box_states(
                     "Internal CuPy MLFMM error: on-the-fly leaf aggregation requires translation "
                     "tables and pair-delta schedules."
                 )
-            pair_blocks = _leaf_translation_blocks_from_pair_deltas(
-                group.pair_deltas,
-                tables=leaf_translation_tables,
-                pair_blocks_scratch=pair_blocks_scratch,
-                cupy=cupy,
+            chunk_leaves = _leaf_otf_group_chunk_leaves(
+                n_group=n_group,
+                chunk_leaves=leaf_otf_chunk_leaves,
             )
-            agg = cupy.transpose(
-                pair_blocks.reshape(n_group, occupancy, int(box_nm), nmodes),
-                (0, 2, 1, 3),
-            ).reshape(n_group, int(box_nm), occupancy * nmodes)
-            box_states[group.leaf_ids] = cupy.matmul(agg, coeffs)
+            for start in range(0, n_group, chunk_leaves):
+                end = min(n_group, start + chunk_leaves)
+                count = int(end - start)
+                pair_start = int(start * occupancy)
+                pair_end = int(end * occupancy)
+                pair_blocks = _leaf_translation_blocks_from_pair_deltas(
+                    group.pair_deltas[pair_start:pair_end],
+                    tables=leaf_translation_tables,
+                    pair_blocks_scratch=pair_blocks_scratch,
+                    cupy=cupy,
+                )
+                agg = cupy.transpose(
+                    pair_blocks.reshape(count, occupancy, int(box_nm), nmodes),
+                    (0, 2, 1, 3),
+                ).reshape(count, int(box_nm), occupancy * nmodes)
+                box_states[group.leaf_ids[start:end]] = cupy.matmul(agg, coeffs[start:end])
         else:
             if group.aggregation is None:
                 raise RuntimeError(
@@ -3760,6 +3788,7 @@ def _receive_leaf_boxes_to_particles(
     leaf_apply_mode: CuPyMLFMMLeafApplyMode,
     leaf_translation_tables: CuPyLeafTranslationTablesData | None,
     pair_blocks_scratch: dict[str, Any] | None,
+    leaf_otf_chunk_leaves: int | None,
     receive_adjoint_cache: dict[int, Any] | None,
     nm: int,
     n_particles: int,
@@ -3791,14 +3820,27 @@ def _receive_leaf_boxes_to_particles(
                     "Internal CuPy MLFMM error: on-the-fly leaf receive requires translation "
                     "tables and pair-delta schedules."
                 )
-            pair_blocks = _leaf_translation_blocks_from_pair_deltas(
-                group.pair_deltas,
-                tables=leaf_translation_tables,
-                pair_blocks_scratch=pair_blocks_scratch,
-                cupy=cupy,
-            ).reshape(n_group, occupancy, int(leaf_translation_tables.nmodes_out), int(nm))
-            receive_adj = cupy.swapaxes(pair_blocks, 2, 3).conj()
-            contribution = cupy.matmul(receive_adj, incoming_box[leaf_ids][:, None, :, :])
+            chunk_leaves = _leaf_otf_group_chunk_leaves(
+                n_group=n_group,
+                chunk_leaves=leaf_otf_chunk_leaves,
+            )
+            for start in range(0, n_group, chunk_leaves):
+                end = min(n_group, start + chunk_leaves)
+                count = int(end - start)
+                pair_start = int(start * occupancy)
+                pair_end = int(end * occupancy)
+                pair_blocks = _leaf_translation_blocks_from_pair_deltas(
+                    group.pair_deltas[pair_start:pair_end],
+                    tables=leaf_translation_tables,
+                    pair_blocks_scratch=pair_blocks_scratch,
+                    cupy=cupy,
+                ).reshape(count, occupancy, int(leaf_translation_tables.nmodes_out), int(nm))
+                receive_adj = cupy.swapaxes(pair_blocks, 2, 3).conj()
+                contribution = cupy.matmul(
+                    receive_adj,
+                    incoming_box[leaf_ids[start:end]][:, None, :, :],
+                )
+                y[idx[start:end]] += contribution
         else:
             if group.aggregation is None:
                 raise RuntimeError(
@@ -3815,7 +3857,7 @@ def _receive_leaf_boxes_to_particles(
             contribution = cupy.matmul(receive_adj, incoming_box[leaf_ids]).reshape(
                 n_group, occupancy, int(nm), int(nrhs)
             )
-        y[idx] += contribution
+            y[idx] += contribution
     return y
 
 
@@ -4066,6 +4108,7 @@ def _apply_single_level_far(
     *,
     receive_adjoint_cache: dict[int, Any] | None,
     pair_blocks_scratch: dict[str, Any] | None,
+    leaf_otf_chunk_leaves: int | None,
     workspace: CuPyMLFMMSingleLevelWorkspace | None,
     cupy: Any,
 ) -> Any:
@@ -4087,6 +4130,7 @@ def _apply_single_level_far(
         leaf_apply_mode=single.leaf_apply_mode,
         leaf_translation_tables=single.leaf_translation_tables,
         pair_blocks_scratch=pair_blocks_scratch,
+        leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
         n_leaves=int(single.n_leaves),
         box_nm=box_nm,
         nrhs=nrhs,
@@ -4122,6 +4166,7 @@ def _apply_single_level_far(
         leaf_apply_mode=single.leaf_apply_mode,
         leaf_translation_tables=single.leaf_translation_tables,
         pair_blocks_scratch=pair_blocks_scratch,
+        leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
         receive_adjoint_cache=receive_adjoint_cache,
         nm=nm,
         n_particles=n_particles,
@@ -4174,6 +4219,7 @@ def _apply_multilevel_far(
     *,
     receive_adjoint_cache: dict[int, Any] | None,
     pair_blocks_scratch: dict[str, Any] | None,
+    leaf_otf_chunk_leaves: int | None,
     workspace: CuPyMLFMMMultilevelWorkspace | None,
     cupy: Any,
 ) -> Any:
@@ -4215,6 +4261,7 @@ def _apply_multilevel_far(
         leaf_apply_mode=multilevel.leaf_apply_mode,
         leaf_translation_tables=multilevel.leaf_translation_tables,
         pair_blocks_scratch=pair_blocks_scratch,
+        leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
         n_leaves=int(multilevel.n_leaves),
         box_nm=box_nm,
         nrhs=nrhs,
@@ -4376,6 +4423,7 @@ def _apply_multilevel_far(
         leaf_apply_mode=multilevel.leaf_apply_mode,
         leaf_translation_tables=multilevel.leaf_translation_tables,
         pair_blocks_scratch=pair_blocks_scratch,
+        leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
         receive_adjoint_cache=receive_adjoint_cache,
         nm=nm,
         n_particles=n_particles,
@@ -4576,9 +4624,15 @@ class CuPyMLFMMCouplingOperator:
 
         return {
             "host_cache_leaf_apply_mode": str(self.host_cache_policy.leaf_apply_mode),
+            "host_cache_retention": str(self.host_cache_policy.host_cache_retention),
             "host_cache_retained": bool(self.host_cache is not None),
             "host_cache_summary": (
                 None if self.host_cache_summary is None else dict(self.host_cache_summary)
+            ),
+            "leaf_otf_chunk_leaves": (
+                None
+                if self.host_cache_policy.leaf_otf_chunk_leaves is None
+                else int(self.host_cache_policy.leaf_otf_chunk_leaves)
             ),
             "device_pool": {
                 "used_bytes": int(pool.used_bytes()),
@@ -4667,6 +4721,7 @@ class CuPyMLFMMCouplingOperator:
                 x_states,
                 receive_adjoint_cache=self._receive_adjoint_cache,
                 pair_blocks_scratch=self._leaf_otf_pair_blocks_scratch,
+                leaf_otf_chunk_leaves=self.host_cache_policy.leaf_otf_chunk_leaves,
                 workspace=single_ws,
                 cupy=cupy,
             )
@@ -4684,6 +4739,7 @@ class CuPyMLFMMCouplingOperator:
                 x_states,
                 receive_adjoint_cache=self._receive_adjoint_cache,
                 pair_blocks_scratch=self._leaf_otf_pair_blocks_scratch,
+                leaf_otf_chunk_leaves=self.host_cache_policy.leaf_otf_chunk_leaves,
                 workspace=multi_ws,
                 cupy=cupy,
             )
@@ -4721,12 +4777,15 @@ def prepare_mlfmm_cupy_coupling(
     policy = _resolve_host_cache_policy(host_cache_policy)
     host_cache = _build_mlfmm_cupy_host_cache(coupling, host_cache_policy=policy)
     prepared = prepare_mlfmm_cupy_data(host_cache, host_cache_policy=policy)
-    host_cache_summary = _runtime_host_cache_summary(host_cache, policy=policy)
+    retention = str(policy.host_cache_retention)
+    host_cache_summary = (
+        None if retention == "none" else _runtime_host_cache_summary(host_cache, policy=policy)
+    )
     return CuPyMLFMMCouplingOperator(
         lmax=int(coupling.lmax),
         n_particles=int(np.asarray(coupling.positions).shape[0]),
         prepared_data=prepared,
-        host_cache=(host_cache if bool(policy.retain_host_cache) else None),
+        host_cache=(host_cache if retention == "full" else None),
         host_cache_summary=host_cache_summary,
         host_cache_policy=policy,
         dtype=np.dtype(coupling.dtype),

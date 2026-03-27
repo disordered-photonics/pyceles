@@ -170,11 +170,10 @@ def _transition_numpy_mlfmm_coupling() -> MLFMMCouplingOperator:
     return coupling
 
 
-def test_cupy_mlfmm_host_cache_policy_low_host_memory_recomputes_static_tables() -> None:
+def test_cupy_mlfmm_host_cache_recomputes_static_tables_during_upload() -> None:
     coupling = _transition_numpy_mlfmm_coupling()
-    policy = CuPyMLFMMHostCachePolicy(memory_budget="low_host_memory")
+    policy = CuPyMLFMMHostCachePolicy()
     host_cache = build_mlfmm_cupy_host_cache(coupling, host_cache_policy=policy)
-    assert host_cache.host_memory_budget == "low_host_memory"
     assert host_cache.near_plm_coeffs is None
     assert host_cache.near_compact_re_ab is None
     assert host_cache.near_compact_im_ab is None
@@ -267,11 +266,30 @@ def test_cupy_prepare_coupling_can_retain_host_cache_when_requested() -> None:
     coupling = _transition_numpy_mlfmm_coupling()
     runtime = prepare_mlfmm_cupy_coupling(
         coupling,
-        host_cache_policy=CuPyMLFMMHostCachePolicy(retain_host_cache=True),
+        host_cache_policy=CuPyMLFMMHostCachePolicy(host_cache_retention="full"),
     )
     assert runtime.host_cache is not None
     assert runtime.host_cache_summary is not None
     assert runtime.host_cache_summary.get("retained") is True
+
+
+def test_cupy_prepare_coupling_can_drop_host_cache_summary_when_requested() -> None:
+    coupling = _transition_numpy_mlfmm_coupling()
+    runtime = prepare_mlfmm_cupy_coupling(
+        coupling,
+        host_cache_policy=CuPyMLFMMHostCachePolicy(host_cache_retention="none"),
+    )
+    assert runtime.host_cache is None
+    assert runtime.host_cache_summary is None
+
+
+def test_cupy_prepare_coupling_rejects_nonpositive_leaf_otf_chunk_leaves() -> None:
+    coupling = _transition_numpy_mlfmm_coupling()
+    with pytest.raises(ValueError, match="leaf_otf_chunk_leaves must be positive"):
+        _ = prepare_mlfmm_cupy_coupling(
+            coupling,
+            host_cache_policy=CuPyMLFMMHostCachePolicy(leaf_otf_chunk_leaves=0),
+        )
 
 
 def _mlfmm_transition_particles() -> tuple[Particle, ...]:
