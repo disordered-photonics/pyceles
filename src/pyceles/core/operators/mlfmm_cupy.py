@@ -6,7 +6,7 @@ CPU build/planning remains the single source of truth in `mlfmm.py`.
 This module validates and uploads repeated-apply structures to device memory.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, is_dataclass
 from functools import cache
 from importlib import import_module
 from typing import Any, Literal, cast
@@ -51,10 +51,16 @@ class CuPyMLFMMHostCachePolicy:
     - `dense`: keep grouped dense aggregation maps,
     - `on_the_fly`: keep compact schedules + translation ingredients and
       regenerate leaf translation blocks during repeated apply.
+
+    `retain_host_cache` controls whether the full compact host cache artifact is
+    attached to the runtime coupling object after upload. Keeping it detached by
+    default avoids pinning large host-RAM payloads that repeated apply does not
+    consume.
     """
 
     memory_budget: CuPyMLFMMHostMemoryBudget = "balanced"
     leaf_apply_mode: CuPyMLFMMLeafApplyMode = "on_the_fly"
+    retain_host_cache: bool = False
 
 
 @dataclass(frozen=True)
@@ -1619,7 +1625,69 @@ def _resolve_host_cache_policy(
             f"Unsupported CuPy MLFMM leaf_apply_mode={resolved.leaf_apply_mode!r}. "
             "Use 'dense' or 'on_the_fly'."
         )
+    if not isinstance(resolved.retain_host_cache, bool):
+        raise ValueError(
+            f"Unsupported CuPy MLFMM retain_host_cache={resolved.retain_host_cache!r}. "
+            "Use True or False."
+        )
     return resolved
+
+
+def _estimate_numpy_payload_bytes(obj: object) -> int:
+    """Estimate bytes from NumPy payloads stored inside nested dataclasses/containers."""
+
+    seen: set[int] = set()
+
+    def _walk(value: object) -> int:
+        if isinstance(value, np.ndarray):
+            ident = id(value)
+            if ident in seen:
+                return 0
+            seen.add(ident)
+            return int(value.nbytes)
+        if is_dataclass(value):
+            ident = id(value)
+            if ident in seen:
+                return 0
+            seen.add(ident)
+            return int(sum(_walk(getattr(value, f.name)) for f in fields(value)))
+        if isinstance(value, dict):
+            ident = id(value)
+            if ident in seen:
+                return 0
+            seen.add(ident)
+            total = 0
+            for key, item in value.items():
+                total += _walk(key)
+                total += _walk(item)
+            return int(total)
+        if isinstance(value, (tuple, list)):
+            ident = id(value)
+            if ident in seen:
+                return 0
+            seen.add(ident)
+            return int(sum(_walk(item) for item in value))
+        return 0
+
+    return int(_walk(obj))
+
+
+def _runtime_host_cache_summary(
+    cache: CuPyMLFMMHostCacheData,
+    *,
+    policy: CuPyMLFMMHostCachePolicy,
+) -> dict[str, object]:
+    """Build a compact diagnostic summary before optional host-cache detachment."""
+
+    return {
+        "retained": bool(policy.retain_host_cache),
+        "memory_budget": str(cache.host_memory_budget),
+        "leaf_apply_mode": str(policy.leaf_apply_mode),
+        "stage": str(cache.stage),
+        "near_static_tables_cached": bool(cache.near_plm_coeffs is not None),
+        "numpy_payload_bytes_estimate": int(_estimate_numpy_payload_bytes(cache)),
+        "plan_summary": None if cache.plan_summary is None else dict(cache.plan_summary),
+    }
 
 
 def _build_mlfmm_cupy_host_cache(
@@ -4403,7 +4471,8 @@ class CuPyMLFMMCouplingOperator:
     lmax: int
     n_particles: int
     prepared_data: CuPyMLFMMPreparedData
-    host_cache: CuPyMLFMMHostCacheData
+    host_cache: CuPyMLFMMHostCacheData | None = field(default=None, repr=False)
+    host_cache_summary: dict[str, object] | None = field(default=None, repr=False)
     host_cache_policy: CuPyMLFMMHostCachePolicy = field(default_factory=CuPyMLFMMHostCachePolicy)
     dtype: np.dtype = np.dtype(np.complex128)
     near_dtype: np.dtype = np.dtype(np.complex128)
@@ -4507,6 +4576,10 @@ class CuPyMLFMMCouplingOperator:
 
         return {
             "host_cache_leaf_apply_mode": str(self.host_cache_policy.leaf_apply_mode),
+            "host_cache_retained": bool(self.host_cache is not None),
+            "host_cache_summary": (
+                None if self.host_cache_summary is None else dict(self.host_cache_summary)
+            ),
             "device_pool": {
                 "used_bytes": int(pool.used_bytes()),
                 "total_bytes": int(pool.total_bytes()),
@@ -4648,11 +4721,13 @@ def prepare_mlfmm_cupy_coupling(
     policy = _resolve_host_cache_policy(host_cache_policy)
     host_cache = _build_mlfmm_cupy_host_cache(coupling, host_cache_policy=policy)
     prepared = prepare_mlfmm_cupy_data(host_cache, host_cache_policy=policy)
+    host_cache_summary = _runtime_host_cache_summary(host_cache, policy=policy)
     return CuPyMLFMMCouplingOperator(
         lmax=int(coupling.lmax),
         n_particles=int(np.asarray(coupling.positions).shape[0]),
         prepared_data=prepared,
-        host_cache=host_cache,
+        host_cache=(host_cache if bool(policy.retain_host_cache) else None),
+        host_cache_summary=host_cache_summary,
         host_cache_policy=policy,
         dtype=np.dtype(coupling.dtype),
         near_dtype=np.dtype(coupling.near_dtype),

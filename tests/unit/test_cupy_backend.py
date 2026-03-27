@@ -20,6 +20,7 @@ from pyceles.core.operators import (
     build_mlfmm_cupy_host_cache,
     prepare_matvec,
     prepare_mlfmm_coupling,
+    prepare_mlfmm_cupy_coupling,
     prepare_mlfmm_cupy_data,
 )
 from pyceles.core.operators.mlfmm_cupy import _upload_offset_batches
@@ -248,6 +249,29 @@ def test_cupy_mlfmm_runtime_operator_is_non_picklable() -> None:
         raise AssertionError("Transition fixture unexpectedly resolved to direct CuPy fallback.")
     with pytest.raises(TypeError, match="non-picklable"):
         _ = pickle.dumps(coupling)
+
+
+def test_cupy_prepare_coupling_detaches_host_cache_by_default() -> None:
+    coupling = _transition_numpy_mlfmm_coupling()
+    runtime = prepare_mlfmm_cupy_coupling(coupling)
+    assert runtime.host_cache is None
+    assert runtime.host_cache_summary is not None
+    assert runtime.host_cache_summary.get("retained") is False
+    payload_obj = runtime.host_cache_summary.get("numpy_payload_bytes_estimate", 0)
+    assert isinstance(payload_obj, (int, np.integer))
+    payload = int(payload_obj)
+    assert payload > 0
+
+
+def test_cupy_prepare_coupling_can_retain_host_cache_when_requested() -> None:
+    coupling = _transition_numpy_mlfmm_coupling()
+    runtime = prepare_mlfmm_cupy_coupling(
+        coupling,
+        host_cache_policy=CuPyMLFMMHostCachePolicy(retain_host_cache=True),
+    )
+    assert runtime.host_cache is not None
+    assert runtime.host_cache_summary is not None
+    assert runtime.host_cache_summary.get("retained") is True
 
 
 def _mlfmm_transition_particles() -> tuple[Particle, ...]:
