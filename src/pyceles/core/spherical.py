@@ -28,27 +28,23 @@ from typing import Any
 import numpy as np
 
 
-def _factorial_int(n: int) -> int:
-    """Small integer factorial used in normalized Legendre precompute tables."""
-    if n <= 1:
-        return 1
-    out = 1
-    for k in range(2, int(n) + 1):
-        out *= k
-    return out
-
-
 @cache
 def _legendre_scalar_tables(
     lmax: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Precompute scalar recurrence coefficients for normalized Legendre values."""
+    """Precompute scalar recurrence coefficients for normalized Legendre values.
+
+    The `c_mm` diagonal normalization is built through an overflow-safe
+    recurrence, avoiding factorial/double-factorial intermediates that overflow
+    when translation tables request high angular orders.
+    """
     lmax = int(lmax)
     a0 = np.zeros((lmax + 1,), dtype=np.float64)
     b0 = np.zeros((lmax + 1,), dtype=np.float64)
     c_mm = np.zeros((lmax + 1,), dtype=np.float64)
     a_lm = np.zeros((lmax + 1, lmax + 1), dtype=np.float64)
     b_lm = np.zeros((lmax + 1, lmax + 1), dtype=np.float64)
+    c_mm[0] = np.sqrt(2.0) / 2.0
 
     if lmax >= 1:
         for l in range(1, lmax):
@@ -56,10 +52,10 @@ def _legendre_scalar_tables(
             a0[l] = (1.0 / lp1) * np.sqrt((2 * l + 1.0) * (2 * l + 3.0))
             b0[l] = (l / lp1) * np.sqrt((2 * l + 3.0) / (2 * l - 1.0))
 
-    odd_prod = 1.0
+    c_prev = c_mm[0]
     for m in range(1, lmax + 1):
-        odd_prod *= float(2 * m - 1)
-        c_mm[m] = np.sqrt((2 * m + 1.0) / 2.0 / _factorial_int(2 * m)) * odd_prod
+        c_prev *= np.sqrt((2 * m + 1.0) / (2.0 * m))
+        c_mm[m] = c_prev
         for l in range(m, lmax):
             lp1 = l + 1
             den = (lp1 - m) * (lp1 + m)
@@ -120,6 +116,12 @@ def legendre_normalized_trigon(ct: Any, st: Any, lmax: int, xp=None):
     ct = xp.asarray(ct)
     st = xp.asarray(st)
     lmax = int(lmax)
+    a0_np, b0_np, c_mm_np, a_lm_np, b_lm_np = _legendre_scalar_tables(lmax)
+    a0 = xp.asarray(a0_np, dtype=ct.dtype)
+    b0 = xp.asarray(b0_np, dtype=ct.dtype)
+    c_mm = xp.asarray(c_mm_np, dtype=ct.dtype)
+    a_lm = xp.asarray(a_lm_np, dtype=ct.dtype)
+    b_lm = xp.asarray(b_lm_np, dtype=ct.dtype)
 
     plm = xp.zeros((lmax + 1, lmax + 1) + ct.shape, dtype=ct.dtype)
 
@@ -130,23 +132,16 @@ def legendre_normalized_trigon(ct: Any, st: Any, lmax: int, xp=None):
 
     # m=0 recurrence for l>=2
     for l in range(1, lmax):
-        plm[l + 1, 0] = (1.0 / (l + 1.0)) * xp.sqrt((2 * l + 1.0) * (2 * l + 3.0)) * ct * plm[
-            l, 0
-        ] - (l / (l + 1.0)) * xp.sqrt((2 * l + 3.0) / (2 * l - 1.0)) * plm[l - 1, 0]
+        plm[l + 1, 0] = a0[l] * ct * plm[l, 0] - b0[l] * plm[l - 1, 0]
 
     # m>=1
+    st_pow = st
     for m in range(1, lmax + 1):
-        # base (m,m)
-        prod = 1.0
-        for k in range(2 * m - 1, 0, -2):
-            prod *= k
-        plm[m, m] = xp.sqrt((2 * m + 1.0) / 2.0 / _factorial_int(2 * m)) * prod * (st**m)
-
+        plm[m, m] = c_mm[m] * st_pow
         for l in range(m, lmax):
             lp1 = l + 1
-            a = xp.sqrt((2 * l + 1.0) * (2 * l + 3.0) / ((lp1 - m) * (lp1 + m)))
-            b = xp.sqrt((2 * l + 3.0) * (l - m) * (l + m) / ((2 * l - 1.0) * (lp1 - m) * (lp1 + m)))
-            plm[lp1, m] = a * ct * plm[l, m] - b * plm[l - 1, m]
+            plm[lp1, m] = a_lm[l, m] * ct * plm[l, m] - b_lm[l, m] * plm[l - 1, m]
+        st_pow = st_pow * st
 
     return plm
 
@@ -167,6 +162,12 @@ def spherical_functions_trigon(ct: Any, st: Any, lmax: int, xp=None, *, return_p
     ct = xp.asarray(ct)
     st = xp.asarray(st)
     lmax = int(lmax)
+    a0_np, b0_np, c_mm_np, a_lm_np, b_lm_np = _legendre_scalar_tables(lmax)
+    a0 = xp.asarray(a0_np, dtype=ct.dtype)
+    b0 = xp.asarray(b0_np, dtype=ct.dtype)
+    c_mm = xp.asarray(c_mm_np, dtype=ct.dtype)
+    a_lm = xp.asarray(a_lm_np, dtype=ct.dtype)
+    b_lm = xp.asarray(b_lm_np, dtype=ct.dtype)
 
     plm = xp.zeros((lmax + 1, lmax + 1) + ct.shape, dtype=ct.dtype)
     pi = xp.zeros_like(plm)
@@ -189,30 +190,25 @@ def spherical_functions_trigon(ct: Any, st: Any, lmax: int, xp=None, *, return_p
     # m=0 recurrence for l>=2
     for l in range(1, lmax):
         lp1 = l + 1
-        plm[lp1, 0] = (1.0 / lp1) * xp.sqrt((2 * l + 1.0) * (2 * l + 3.0)) * ct * plm[l, 0] - (
-            l / lp1
-        ) * xp.sqrt((2 * l + 3.0) / (2 * l - 1.0)) * plm[l - 1, 0]
+        plm[lp1, 0] = a0[l] * ct * plm[l, 0] - b0[l] * plm[l - 1, 0]
         coeff = xp.sqrt((2 * lp1 + 1.0) / (2 * lp1 - 1.0))
         pprimel0[lp1] = lp1 * coeff * plm[l, 0] + coeff * ct * pprimel0[l]
         tau[lp1, 0] = -st * pprimel0[lp1]
 
     # m>=1
+    st_pow_prev = xp.ones_like(st)
+    st_pow = st
     for m in range(1, lmax + 1):
-        prod = 1.0
-        for k in range(2 * m - 1, 0, -2):
-            prod *= k
-        coeff = xp.sqrt((2 * m + 1.0) / 2.0 / _factorial_int(2 * m)) * prod
+        coeff = c_mm[m]
 
-        plm[m, m] = coeff * (st**m)
-        pi[m, m] = coeff * (st ** (m - 1))
+        plm[m, m] = coeff * st_pow
+        pi[m, m] = coeff * st_pow_prev
         tau[m, m] = m * ct * pi[m, m]
 
         for l in range(m, lmax):
             lp1 = l + 1
-            coeff1 = xp.sqrt((2 * l + 1.0) * (2 * l + 3.0) / ((lp1 - m) * (lp1 + m))) * ct
-            coeff2 = xp.sqrt(
-                (2 * l + 3.0) * (l - m) * (l + m) / ((2 * l - 1.0) * (lp1 - m) * (lp1 + m))
-            )
+            coeff1 = a_lm[l, m] * ct
+            coeff2 = b_lm[l, m]
 
             plm[lp1, m] = coeff1 * plm[l, m] - coeff2 * plm[l - 1, m]
             pi[lp1, m] = coeff1 * pi[l, m] - coeff2 * pi[l - 1, m]
@@ -223,6 +219,8 @@ def spherical_functions_trigon(ct: Any, st: Any, lmax: int, xp=None, *, return_p
                 * xp.sqrt((2 * lp1 + 1.0) * (lp1 - m) / ((2 * lp1 - 1.0) * (lp1 + m)))
                 * pi[l, m]
             )
+        st_pow_prev = st_pow
+        st_pow = st_pow * st
 
     if return_plm:
         return pi, tau, plm

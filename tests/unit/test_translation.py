@@ -105,6 +105,15 @@ def test_translation_plm_coeff_table_matches_scalar_legendre_values():
                 np.testing.assert_allclose(got, float(plm[l, m]), rtol=rtol, atol=atol)
 
 
+def test_translation_plm_coeff_table_high_order_remains_finite() -> None:
+    """Regression: high-order table build should avoid factorial-overflow paths."""
+
+    lmax = 64
+    coeff_tab = _translation_plm_coeff_table(lmax, dtype=np.float64)
+    assert coeff_tab.shape == (lmax + 1, 2 * lmax + 1, 2 * lmax + 1)
+    assert np.isfinite(coeff_tab).all()
+
+
 def test_translation_compact_ab5_tables_follow_requested_precision():
     re64, im64 = _translation_ab5_compact_tables(3, dtype=np.complex64)
     re128, im128 = _translation_ab5_compact_tables(3, dtype=np.complex128)
