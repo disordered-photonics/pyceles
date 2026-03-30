@@ -35,6 +35,22 @@ from .single_body_cupy import wrap_particle_t_groups_cupy
 Array = np.ndarray
 
 
+_CUPY_MLFMM_DEFAULT_OPTIONS = MLFMMOptions(
+    max_leaf_particles=256,
+    max_depth=12,
+    leaf_size_radius_factor=4.0,
+    accuracy_level=3,
+    order_additive=2,
+)
+"""CuPy-oriented MLFMM defaults.
+
+These defaults intentionally target a higher leaf occupancy than the NumPy
+reference baseline so the resolved tree lands in a shallower (GPU-friendlier)
+regime on large workloads, while still honoring the leaf-size floor and max
+depth safety cap.
+"""
+
+
 def build_T_mode_diagonal(lmax: int, T_M: Array, T_N: Array) -> Array:
     """Expand per-(sphere,l) diagonal entries to per-(sphere,mode) factors."""
     lmax = int(lmax)
@@ -328,6 +344,9 @@ def prepare_matvec(
                 ),
             )
         elif coupling_name == "mlfmm":
+            resolved_mlfmm_options = (
+                _CUPY_MLFMM_DEFAULT_OPTIONS if mlfmm_options is None else mlfmm_options
+            )
             cpu_mlfmm = prepare_mlfmm_coupling(
                 lmax=int(lmax),
                 k=k_f,
@@ -335,7 +354,7 @@ def prepare_matvec(
                 particle_circumscribing_radii=circumscribing_radii,
                 radial_lut=lut,
                 ab5=None,
-                options=mlfmm_options,
+                options=resolved_mlfmm_options,
                 dtype=op_dtype,
                 cache_translation_blocks=False,
                 show_progress=bool(show_progress),

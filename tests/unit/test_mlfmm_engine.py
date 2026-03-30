@@ -371,11 +371,73 @@ def test_multilevel_build_produces_sensible_levels_and_offset_batches() -> None:
     )
 
     assert operators.leaf_level == 3
-    assert operators.hf_start_level == 2
+    assert operators.hf_start_level == 3
     assert operators.hf_end_level == 3
     assert [level.coords.shape[0] for level in operators.levels] == [1, 8, 8, 8]
-    assert len(operators.transfers) == 1
-    assert any(len(level.far_offset_batches) > 0 for level in operators.levels[1:])
+    assert len(operators.transfers) == 0
+    assert all(
+        len(level.far_offset_batches) == 0 for level in operators.levels[: operators.hf_start_level]
+    )
+
+
+def test_multilevel_auto_hf_start_uses_wavelength_threshold() -> None:
+    positions, radii, lmax, k = _multilevel_fixture()
+    partition = build_uniform_mlfmm_partition(
+        positions,
+        particle_circumscribing_radii=radii,
+        depth=3,
+    )
+    operators = build_multilevel_mlfmm_operators(
+        lmax=lmax,
+        k=k,
+        positions=positions,
+        partition=partition,
+        radial_lut=None,
+        accuracy_level=3,
+        order_additive=2,
+    )
+
+    assert operators.hf_start_level == 3
+    assert operators.hf_end_level == 3
+
+
+def test_multilevel_auto_hf_start_falls_back_to_two_finest_levels() -> None:
+    positions, radii, lmax, _k = _multilevel_fixture()
+    k_small_wavelength = 2.0 * np.pi / 150.0
+    partition = build_uniform_mlfmm_partition(
+        positions,
+        particle_circumscribing_radii=radii,
+        depth=3,
+    )
+    operators = build_multilevel_mlfmm_operators(
+        lmax=lmax,
+        k=k_small_wavelength,
+        positions=positions,
+        partition=partition,
+        radial_lut=None,
+        accuracy_level=3,
+        order_additive=2,
+    )
+    assert operators.hf_start_level == 2
+    assert operators.hf_end_level == 3
+
+
+def test_multilevel_explicit_hf_start_overrides_auto_policy() -> None:
+    positions, radii, lmax, k = _multilevel_fixture()
+    partition = build_uniform_mlfmm_partition(
+        positions,
+        particle_circumscribing_radii=radii,
+        depth=3,
+    )
+    operators = build_multilevel_mlfmm_operators(
+        lmax=lmax,
+        k=k,
+        positions=positions,
+        partition=partition,
+        radial_lut=None,
+        hf_start_level=2,
+    )
+    assert operators.hf_start_level == 2
 
 
 def test_single_level_full_apply_stays_in_expected_small_fixture_ballpark() -> None:
@@ -536,6 +598,14 @@ def test_multilevel_transfer_anterpolation_is_interpolation_transpose() -> None:
     lhs = np.vdot(matrix @ u, v)
     rhs = np.vdot(u, anterpolation.matrix @ v)
     np.testing.assert_allclose(lhs, rhs, rtol=1.0e-12, atol=1.0e-12)
+
+
+def test_directional_g_operators_are_derived_from_f_basis() -> None:
+    transforms = directional_transforms(8, grid_order=8)
+    np.testing.assert_allclose(transforms.Gth, 1j * transforms.Fph, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(transforms.Gph, -1j * transforms.Fth, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(transforms.Gth_adj, -1j * transforms.Fph_adj, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(transforms.Gph_adj, 1j * transforms.Fth_adj, rtol=0.0, atol=0.0)
 
 
 def test_multilevel_upward_transfer_matches_exact_recenter_oracle(transfer_scaffold) -> None:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from functools import cache
+from functools import cache, cached_property
 
 import numpy as np
 import scipy.sparse
@@ -35,18 +35,40 @@ class MLFMMDirectionalGrid:
 
 @dataclass(frozen=True)
 class MLFMMDirectionalTransforms:
-    """SVWF <-> sampled-direction transform operators for one shared grid."""
+    """SVWF <-> sampled-direction transform operators for one shared grid.
+
+    Canonical storage keeps only `Fth/Fph`. `G` operators and all adjoints are
+    derived lazily from directional-basis identities when needed.
+    """
 
     box_order: int
     grid: MLFMMDirectionalGrid
     Fth: Array
     Fph: Array
-    Gth: Array
-    Gph: Array
-    Fth_adj: Array
-    Fph_adj: Array
-    Gth_adj: Array
-    Gph_adj: Array
+
+    @cached_property
+    def Gth(self) -> Array:
+        return np.asarray(1j * self.Fph, dtype=np.complex128)
+
+    @cached_property
+    def Gph(self) -> Array:
+        return np.asarray(-1j * self.Fth, dtype=np.complex128)
+
+    @cached_property
+    def Fth_adj(self) -> Array:
+        return np.asarray(np.conjugate(self.Fth.T), dtype=np.complex128)
+
+    @cached_property
+    def Fph_adj(self) -> Array:
+        return np.asarray(np.conjugate(self.Fph.T), dtype=np.complex128)
+
+    @cached_property
+    def Gth_adj(self) -> Array:
+        return np.asarray(-1j * self.Fph_adj, dtype=np.complex128)
+
+    @cached_property
+    def Gph_adj(self) -> Array:
+        return np.asarray(1j * self.Fth_adj, dtype=np.complex128)
 
 
 @dataclass(frozen=True)
@@ -229,8 +251,6 @@ def _cached_directional_transforms(
     nscl = n_scalar(int(box_order))
     fth = np.zeros((ndir, nscl), dtype=np.complex128)
     fph = np.zeros_like(fth)
-    gth = np.zeros_like(fth)
-    gph = np.zeros_like(fth)
 
     for idir, direction in enumerate(np.asarray(grid.directions, dtype=float)):
         theta = float(np.arccos(np.clip(direction[2], -1.0, 1.0)))
@@ -265,25 +285,15 @@ def _cached_directional_transforms(
                 y2 *= (l + mm) / l
                 b_theta = (y1 - y2) * q
                 b_phi = (1j * m * (2.0 * l + 1.0) / (l * (l + 1.0)) * y) * q
-                c_theta = b_phi
-                c_phi = -b_theta
                 idx = scalar_index(l, m)
                 fth[idir, idx] = 1j * cc * b_theta
                 fph[idir, idx] = 1j * cc * b_phi
-                gth[idir, idx] = -cc * c_theta
-                gph[idir, idx] = -cc * c_phi
 
     return MLFMMDirectionalTransforms(
         box_order=int(box_order),
         grid=grid,
         Fth=fth,
         Fph=fph,
-        Gth=gth,
-        Gph=gph,
-        Fth_adj=np.conjugate(fth.T),
-        Fph_adj=np.conjugate(fph.T),
-        Gth_adj=np.conjugate(gth.T),
-        Gph_adj=np.conjugate(gph.T),
     )
 
 
@@ -346,17 +356,19 @@ def directional_to_box_regular(
         np.asarray(b_theta, dtype=np.complex128).reshape(-1),
         np.asarray(b_phi, dtype=np.complex128).reshape(-1),
     )
+    fth_adj = transforms.Fth_adj
+    fph_adj = transforms.Fph_adj
     top = (
-        transforms.Fth_adj @ a_theta_arr
-        + transforms.Fph_adj @ a_phi_arr
-        + transforms.Gth_adj @ b_theta_arr
-        + transforms.Gph_adj @ b_phi_arr
+        fth_adj @ a_theta_arr
+        + fph_adj @ a_phi_arr
+        - 1j * (fph_adj @ b_theta_arr)
+        + 1j * (fth_adj @ b_phi_arr)
     )
     bottom = (
-        transforms.Fth_adj @ b_theta_arr
-        + transforms.Fph_adj @ b_phi_arr
-        + transforms.Gth_adj @ a_theta_arr
-        + transforms.Gph_adj @ a_phi_arr
+        fth_adj @ b_theta_arr
+        + fph_adj @ b_phi_arr
+        - 1j * (fph_adj @ a_theta_arr)
+        + 1j * (fth_adj @ a_phi_arr)
     )
     return np.concatenate((top, bottom)).astype(np.complex128, copy=False)
 

@@ -56,8 +56,8 @@ class MLFMMOptions:
     These options cover the current public MLFMM policy surface: how many
     particles are allowed in one leaf, how deep the occupied tree may grow,
     how large a leaf box must remain relative to the largest circumscribing
-    radius it contains, and how aggressively the Rokhlin-style box-order
-    estimate is padded.
+    radius it contains, how aggressively the Rokhlin-style box-order estimate
+    is padded, and where sampled high-frequency multilevel staging starts.
     """
 
     max_leaf_particles: int = 8
@@ -65,6 +65,8 @@ class MLFMMOptions:
     leaf_size_radius_factor: float = 4.0
     accuracy_level: int = 3
     order_additive: int = 2
+    hf_start_level: int | None = None
+    hf_wavelength_divisor: float = 5.0
 
 
 @dataclass(frozen=True)
@@ -621,6 +623,57 @@ def _build_multilevel_far_offset_batches(
     }
 
 
+def _resolve_multilevel_hf_start_level(
+    *,
+    partition: MLFMMPartition,
+    k: float,
+    leaf_level: int,
+    hf_start_level: int | None,
+    hf_wavelength_divisor: float,
+) -> int:
+    """Resolve sampled HF start level from a box-size versus wavelength rule.
+
+    Policy:
+    - explicit `hf_start_level` wins when provided;
+    - otherwise select the first level whose box side is below `lambda/divisor`,
+      which keeps sampled directional operators out of very large coarse boxes;
+    - if no level satisfies the threshold (very large-box regime), keep only
+      the two finest sampled levels by default (`leaf_level - 1` to `leaf`).
+    """
+
+    leaf = int(leaf_level)
+    if leaf <= 1:
+        return leaf
+    min_level = 2
+    if hf_start_level is not None:
+        explicit = int(hf_start_level)
+        if explicit < min_level or explicit > leaf:
+            raise ValueError(
+                "mlfmm_options.hf_start_level must satisfy "
+                f"{min_level} <= hf_start_level <= {leaf} for this partition depth. "
+                f"Got {explicit}."
+            )
+        return explicit
+
+    divisor = float(hf_wavelength_divisor)
+    if not np.isfinite(divisor) or divisor <= 0.0:
+        raise ValueError(
+            "mlfmm_options.hf_wavelength_divisor must be finite and > 0. "
+            f"Got {hf_wavelength_divisor!r}."
+        )
+    k_abs = float(abs(complex(k)))
+    if k_abs > 0.0:
+        wavelength = (2.0 * np.pi) / k_abs
+        threshold = wavelength / divisor
+        root_side = 2.0 * float(partition.root_half_size)
+        for level in range(min_level, leaf + 1):
+            box_side = root_side / float(1 << level)
+            if box_side <= threshold:
+                return int(level)
+
+    return int(max(min_level, leaf - 1))
+
+
 def _offset_delta_from_half_size(half_size: float, offset: tuple[int, int, int]) -> np.ndarray:
     """Return the physical center shift for one relative box offset."""
 
@@ -1075,12 +1128,17 @@ def build_multilevel_mlfmm_operators(
     leaf_map_backend: Literal["numpy", "cupy"] = "numpy",
     build_leaf_maps: bool = True,
     show_progress: bool = False,
+    hf_start_level: int | None = None,
+    hf_wavelength_divisor: float = 5.0,
 ) -> MLFMMMultilevelOperators:
     """Build multilevel sampled HF operators over occupied boxes only.
 
     The hierarchy stores only occupied boxes, together with same-level far
     batches and parent/child transfer operators for the upward and downward
-    sampled passes.
+    sampled passes. Sampled start level is either explicitly forced via
+    `hf_start_level` or chosen where box size becomes small enough compared to
+    wavelength (`box_side <= wavelength / hf_wavelength_divisor`), which avoids
+    activating expensive sampled transforms on overly coarse boxes.
     """
 
     if not partition.leaves:
@@ -1088,7 +1146,13 @@ def build_multilevel_mlfmm_operators(
     out_dtype = np.dtype(dtype)
     leaf_level = int(partition.depth)
     hf_end_level = int(leaf_level)
-    hf_start_level = 2 if int(leaf_level) >= 2 else int(leaf_level)
+    hf_start_level = _resolve_multilevel_hf_start_level(
+        partition=partition,
+        k=float(k),
+        leaf_level=leaf_level,
+        hf_start_level=hf_start_level,
+        hf_wavelength_divisor=float(hf_wavelength_divisor),
+    )
     leaf_coords = _leaf_cell_coords(partition)
     coords_by_level: list[np.ndarray] = [
         np.zeros((0, 3), dtype=np.int64) for _ in range(leaf_level + 1)
@@ -1621,6 +1685,8 @@ def prepare_mlfmm_coupling(
         leaf_map_backend=leaf_backend_lit,
         build_leaf_maps=bool(build_leaf_maps),
         show_progress=bool(show_progress),
+        hf_start_level=resolved_options.hf_start_level,
+        hf_wavelength_divisor=float(resolved_options.hf_wavelength_divisor),
     )
     out = MLFMMCouplingOperator(
         lmax=int(lmax),
