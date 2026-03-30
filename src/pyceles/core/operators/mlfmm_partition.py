@@ -169,20 +169,37 @@ def build_uniform_mlfmm_partition(
 def classify_leaf_pairs(
     leaves: tuple[MLFMMBox, ...] | list[MLFMMBox],
 ) -> tuple[tuple[tuple[int, int], ...], tuple[tuple[int, int], ...]]:
-    """Split leaf pairs into touching-near and separated-far box pairs."""
+    """Return sparse leaf-near pairs and omit explicit far-pair materialization.
+
+    For large occupied trees, storing all separated leaf pairs is quadratic in
+    occupied-leaf count and can dominate host memory before preparation starts.
+    We therefore enumerate only Chebyshev-near pairs via a 27-neighbor stencil
+    over occupied grid keys and keep `leaf_far_pairs` empty by design.
+    """
+
+    leaves_seq = tuple(leaves)
+    if not leaves_seq:
+        return tuple(), tuple()
+
+    coord_to_leaf: dict[tuple[int, int, int], int] = {}
+    for i, leaf in enumerate(leaves_seq):
+        coord_to_leaf[leaf.grid_index] = int(i)
 
     near_pairs: list[tuple[int, int]] = []
-    far_pairs: list[tuple[int, int]] = []
-    for i, leaf_i in enumerate(leaves):
+    for i, leaf in enumerate(leaves_seq):
+        xi, yi, zi = leaf.grid_index
         near_pairs.append((i, i))
-        coord_i = np.asarray(leaf_i.grid_index, dtype=np.int64)
-        for j in range(i + 1, len(leaves)):
-            coord_j = np.asarray(leaves[j].grid_index, dtype=np.int64)
-            if np.max(np.abs(coord_i - coord_j)) <= 1:
-                near_pairs.append((i, j))
-            else:
-                far_pairs.append((i, j))
-    return tuple(near_pairs), tuple(far_pairs)
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for dz in (-1, 0, 1):
+                    j = coord_to_leaf.get((xi + dx, yi + dy, zi + dz))
+                    if j is None or int(j) <= i:
+                        continue
+                    near_pairs.append((i, int(j)))
+
+    # Far pairs are grouped later where needed (single-level only), avoiding
+    # global quadratic pair storage in the partition object.
+    return tuple(near_pairs), tuple()
 
 
 def validate_leaf_size_floor(

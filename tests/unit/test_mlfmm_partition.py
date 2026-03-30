@@ -10,6 +10,7 @@ from pyceles.core.operators.mlfmm import (
 )
 from pyceles.core.operators.mlfmm_partition import (
     build_uniform_mlfmm_partition,
+    classify_leaf_pairs,
     validate_leaf_size_floor,
 )
 
@@ -94,3 +95,24 @@ def test_validate_leaf_size_floor_rejects_too_small_occupied_leaf() -> None:
 
     with pytest.raises(ValueError, match="leaf size floor violated"):
         validate_leaf_size_floor(partition, leaf_size_radius_factor=4.0)
+
+
+def test_classify_leaf_pairs_omits_global_far_storage() -> None:
+    positions = np.asarray(
+        [
+            [-4.0, -4.0, -4.0],
+            [4.0, 4.0, 4.0],
+        ],
+        dtype=float,
+    )
+    radii = np.full((positions.shape[0],), 0.1, dtype=float)
+    partition = build_uniform_mlfmm_partition(
+        positions,
+        particle_circumscribing_radii=radii,
+        depth=2,
+    )
+
+    near_pairs, far_pairs = classify_leaf_pairs(partition.leaves)
+    assert far_pairs == tuple()
+    assert (0, 0) in near_pairs
+    assert (1, 1) in near_pairs

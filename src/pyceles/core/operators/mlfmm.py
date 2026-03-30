@@ -459,24 +459,25 @@ def _leaf_offset_batches(
     partition: MLFMMPartition,
     cell_coords: dict[int, tuple[int, int, int]],
 ) -> dict[tuple[int, int, int], tuple[np.ndarray, np.ndarray]]:
-    """Group directed far leaf interactions by relative offset."""
+    """Group directed far leaf interactions by relative offset.
 
-    grouped: dict[tuple[int, int, int], list[tuple[int, int]]] = {}
-    for a, b in partition.leaf_far_pairs:
-        offset = (
-            int(cell_coords[b][0] - cell_coords[a][0]),
-            int(cell_coords[b][1] - cell_coords[a][1]),
-            int(cell_coords[b][2] - cell_coords[a][2]),
-        )
-        grouped.setdefault(offset, []).append((a, b))
-        reverse_offset = (-offset[0], -offset[1], -offset[2])
-        grouped.setdefault(reverse_offset, []).append((b, a))
+    Partition construction intentionally omits explicit global far-pair storage
+    to avoid quadratic host memory. Single-level plans have at most 64 leaves,
+    so we rebuild far offsets locally from leaf coordinates here.
+    """
+
+    if not partition.leaves:
+        return {}
+
+    leaf_ids = np.asarray([int(leaf.id) for leaf in partition.leaves], dtype=np.int64)
+    coords = np.asarray([cell_coords[int(leaf_id)] for leaf_id in leaf_ids], dtype=np.int64)
+    local_batches = _coords_far_offset_batches(coords)
     return {
         offset: (
-            np.asarray([pair[0] for pair in pairs], dtype=np.int64),
-            np.asarray([pair[1] for pair in pairs], dtype=np.int64),
+            np.ascontiguousarray(leaf_ids[np.asarray(src_local, dtype=np.int64)], dtype=np.int64),
+            np.ascontiguousarray(leaf_ids[np.asarray(dst_local, dtype=np.int64)], dtype=np.int64),
         )
-        for offset, pairs in grouped.items()
+        for offset, (src_local, dst_local) in local_batches.items()
     }
 
 
@@ -519,27 +520,52 @@ def _coords_far_offset_batches(
     }
 
 
-def _coords_near_neighbors(coords: np.ndarray) -> tuple[np.ndarray, ...]:
-    """Return same-level occupied-box neighbors within one Chebyshev cell."""
+def _coords_near_neighbors(coords: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return packed same-level occupied-box neighbors within one Chebyshev cell.
+
+    The output is `(offsets, flat_indices)` where neighbors for destination box
+    `i` are stored in `flat_indices[offsets[i]:offsets[i+1]]`.
+    """
 
     coords_arr = np.asarray(coords, dtype=np.int64).reshape(-1, 3)
-    neighbors: list[np.ndarray] = []
-    for dst in range(coords_arr.shape[0]):
+    n_boxes = int(coords_arr.shape[0])
+    offsets = np.zeros((n_boxes + 1,), dtype=np.int32)
+    if n_boxes == 0:
+        return offsets, np.zeros((0,), dtype=np.int32)
+
+    lookup = {
+        (int(coord[0]), int(coord[1]), int(coord[2])): int(idx)
+        for idx, coord in enumerate(coords_arr)
+    }
+    flat_rows: list[np.ndarray] = []
+    cursor = 0
+    for dst, coord in enumerate(coords_arr):
+        cx, cy, cz = int(coord[0]), int(coord[1]), int(coord[2])
         row: list[int] = []
-        for src in range(coords_arr.shape[0]):
-            if int(np.max(np.abs(coords_arr[src] - coords_arr[dst]))) <= 1:
-                row.append(int(src))
-        neighbors.append(np.asarray(row, dtype=np.int64))
-    return tuple(neighbors)
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for dz in (-1, 0, 1):
+                    src = lookup.get((cx + dx, cy + dy, cz + dz))
+                    if src is not None:
+                        row.append(int(src))
+        row_arr = np.asarray(sorted(row), dtype=np.int32)
+        flat_rows.append(row_arr)
+        cursor += int(row_arr.size)
+        offsets[dst + 1] = int(cursor)
+    flat = (
+        np.concatenate(flat_rows, dtype=np.int32) if flat_rows else np.zeros((0,), dtype=np.int32)
+    )
+    return offsets, flat
 
 
 def _build_multilevel_far_offset_batches(
     *,
     coords: np.ndarray,
     parent_indices: np.ndarray,
-    near_neighbors: tuple[np.ndarray, ...],
-    parent_near_neighbors: tuple[np.ndarray, ...],
+    near_neighbors: tuple[np.ndarray, np.ndarray],
+    parent_near_neighbors: tuple[np.ndarray, np.ndarray],
     children_by_parent: tuple[np.ndarray, ...],
+    progress_desc: str | None = None,
 ) -> dict[tuple[int, int, int], tuple[np.ndarray, np.ndarray]]:
     """Group multilevel far pairs owned by this level only.
 
@@ -553,17 +579,28 @@ def _build_multilevel_far_offset_batches(
     if coords_arr.shape[0] == 0:
         return {}
 
-    near_sets = [set(int(v) for v in row.tolist()) for row in near_neighbors]
+    near_offsets, near_flat = near_neighbors
+    parent_near_offsets, parent_near_flat = parent_near_neighbors
     grouped: dict[tuple[int, int, int], list[list[int]]] = {}
-    for dst in range(coords_arr.shape[0]):
+    dst_iter = (
+        tqdm(range(coords_arr.shape[0]), desc=progress_desc, unit="box")
+        if progress_desc is not None
+        else range(coords_arr.shape[0])
+    )
+    for dst in dst_iter:
         parent = int(parent_indices[dst])
         if parent < 0:
             continue
+        near_set = set(
+            int(v) for v in near_flat[int(near_offsets[dst]) : int(near_offsets[dst + 1])].tolist()
+        )
         candidates: set[int] = set()
-        for near_parent in parent_near_neighbors[parent]:
+        for near_parent in parent_near_flat[
+            int(parent_near_offsets[parent]) : int(parent_near_offsets[parent + 1])
+        ]:
             for src in children_by_parent[int(near_parent)]:
                 src_i = int(src)
-                if src_i == dst or src_i in near_sets[dst]:
+                if src_i == dst or src_i in near_set:
                     continue
                 candidates.add(src_i)
         for src in sorted(candidates):
@@ -1037,6 +1074,7 @@ def build_multilevel_mlfmm_operators(
     dtype: np.dtype | type[np.complexfloating] | type[np.complex128] = np.complex128,
     leaf_map_backend: Literal["numpy", "cupy"] = "numpy",
     build_leaf_maps: bool = True,
+    show_progress: bool = False,
 ) -> MLFMMMultilevelOperators:
     """Build multilevel sampled HF operators over occupied boxes only.
 
@@ -1065,13 +1103,23 @@ def build_multilevel_mlfmm_operators(
             dtype=np.int64,
         ).reshape(-1, 3)
 
-    near_neighbors_by_level: list[tuple[np.ndarray, ...]] = []
-    for coords in coords_by_level:
-        near_neighbors_by_level.append(_coords_near_neighbors(coords))
+    near_neighbors_by_level: list[tuple[np.ndarray, np.ndarray]] = []
+    near_levels_iter = (
+        tqdm(range(len(coords_by_level)), desc="[MLFMM] near-neighbor levels", unit="level")
+        if show_progress
+        else range(len(coords_by_level))
+    )
+    for level in near_levels_iter:
+        near_neighbors_by_level.append(_coords_near_neighbors(coords_by_level[level]))
 
     levels: list[MLFMMLevelOperators] = []
     dummy_directional = directional_transforms(1, grid_order=1)
-    for level in range(leaf_level + 1):
+    level_iter = (
+        tqdm(range(leaf_level + 1), desc="[MLFMM] build levels", unit="level")
+        if show_progress
+        else range(leaf_level + 1)
+    )
+    for level in level_iter:
         coords = coords_by_level[level]
         if level == 0:
             parent_indices = np.full((coords.shape[0],), -1, dtype=np.int64)
@@ -1140,6 +1188,7 @@ def build_multilevel_mlfmm_operators(
                 near_neighbors=near_neighbors_by_level[level],
                 parent_near_neighbors=near_neighbors_by_level[level - 1],
                 children_by_parent=children_by_parent_current,
+                progress_desc=f"[MLFMM] far-batches L{level}" if show_progress else None,
             )
         offset_diagonals = (
             {
@@ -1180,7 +1229,16 @@ def build_multilevel_mlfmm_operators(
         )
 
     transfers: list[MLFMMTransferOperators] = []
-    for child_level in range(max(1, hf_start_level + 1), hf_end_level + 1):
+    transfer_iter = (
+        tqdm(
+            range(max(1, hf_start_level + 1), hf_end_level + 1),
+            desc="[MLFMM] build transfers",
+            unit="level",
+        )
+        if show_progress
+        else range(max(1, hf_start_level + 1), hf_end_level + 1)
+    )
+    for child_level in transfer_iter:
         parent_level = child_level - 1
         child = levels[child_level]
         parent = levels[parent_level]
@@ -1562,6 +1620,7 @@ def prepare_mlfmm_coupling(
         dtype=far_out_dtype,
         leaf_map_backend=leaf_backend_lit,
         build_leaf_maps=bool(build_leaf_maps),
+        show_progress=bool(show_progress),
     )
     out = MLFMMCouplingOperator(
         lmax=int(lmax),
