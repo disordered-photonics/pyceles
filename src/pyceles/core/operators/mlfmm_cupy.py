@@ -55,8 +55,9 @@ class CuPyMLFMMHostCachePolicy:
     - `none`: retain no host-cache diagnostics payload.
 
     `leaf_otf_chunk_leaves` caps how many leaves of one occupancy-grouped batch
-    are processed per on-the-fly translation substep. This is an MLFMM-native
-    control knob (leaf-group chunking), avoiding byte-budget tuning.
+    are processed per on-the-fly translation substep. This is a simple
+    leaf-count limiter; it does not directly bound the largest temporary bytes
+    when one leaf has very high occupancy.
     """
 
     leaf_apply_mode: CuPyMLFMMLeafApplyMode = "on_the_fly"
@@ -119,15 +120,13 @@ class CuPyHostDirectionalGridData:
 
 @dataclass(frozen=True)
 class CuPyHostDirectionalTransformsData:
-    """Compact host directional transform payload with canonical operators only."""
+    """Compact host directional transform payload with canonical F operators only."""
 
     box_order: int
     grid_order: int
     grid: CuPyHostDirectionalGridData
     Fth: np.ndarray
     Fph: np.ndarray
-    Gth: np.ndarray
-    Gph: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -424,15 +423,16 @@ class CuPyMLFMMSingleLevelWorkspace:
 class CuPyMLFMMMultilevelWorkspace:
     """Reusable multilevel far-path work buffers for one RHS width.
 
-    Multilevel incoming channels use a rolling two-buffer scheme keyed to
-    alternating hierarchy levels so repeated apply does not keep a full
-    incoming hierarchy resident in device workspace state. Buffers are stored
-    as flat contiguous arenas and reshaped per-level to avoid non-contiguous
+    Multilevel incoming and outgoing channels use rolling two-buffer schemes
+    keyed to alternating hierarchy levels so repeated apply does not keep full
+    far hierarchies resident in device workspace state. Buffers are stored as
+    flat contiguous arenas and reshaped per-level to avoid non-contiguous
     directional slices in fused raw-kernel paths.
     """
 
     nrhs: int
-    outgoing: list[Any]
+    outgoing_roll_even: Any
+    outgoing_roll_odd: Any
     incoming_roll_even: Any
     incoming_roll_odd: Any
     leaf_box_states: Any
@@ -1141,14 +1141,7 @@ def _upload_directional_transforms(
     # Directional transforms are complex128 reference operators; keep them exact.
     fth = _as_numpy_2d(transforms.Fth, dtype=np.complex128, name="directional.Fth")
     fph = _as_numpy_2d(transforms.Fph, dtype=np.complex128, name="directional.Fph")
-    gth = _as_numpy_2d(transforms.Gth, dtype=np.complex128, name="directional.Gth")
-    gph = _as_numpy_2d(transforms.Gph, dtype=np.complex128, name="directional.Gph")
-    if (
-        fth.shape[0] != n_dir
-        or fph.shape[0] != n_dir
-        or gth.shape[0] != n_dir
-        or gph.shape[0] != n_dir
-    ):
+    if fth.shape[0] != n_dir or fph.shape[0] != n_dir:
         raise ValueError(
             "Directional forward transform row count must match sampled direction count."
         )
@@ -1162,8 +1155,6 @@ def _upload_directional_transforms(
     # large host-side stack/hstack temporaries before upload.
     fth_gpu = cupy.asarray(fth, dtype=cupy.complex128)
     fph_gpu = cupy.asarray(fph, dtype=cupy.complex128)
-    gth_gpu = cupy.asarray(gth, dtype=cupy.complex128)
-    gph_gpu = cupy.asarray(gph, dtype=cupy.complex128)
 
     # Outgoing map: pre-fold reflection row permutation and stack theta/phi
     # into one (2*ndir, nscl) matrix for batched GEMM.
@@ -1172,17 +1163,21 @@ def _upload_directional_transforms(
     # Incoming map: pre-fold reflection on columns via A @ P equivalence
     # (implemented as column reindex by inverse permutation), then stack
     # [theta,phi] blocks for compact batched GEMM.
+    fth_adj_perm = cupy.conjugate(fth_gpu.T)[:, inv_perm_gpu]
+    fph_adj_perm = cupy.conjugate(fph_gpu.T)[:, inv_perm_gpu]
     a_adj = cupy.concatenate(
         (
-            cupy.conjugate(fth_gpu.T)[:, inv_perm_gpu],
-            cupy.conjugate(fph_gpu.T)[:, inv_perm_gpu],
+            fth_adj_perm,
+            fph_adj_perm,
         ),
         axis=1,
     )
+    # G operators are analytically linked to F operators by the directional
+    # basis convention: Gth_adj=-1j*Fph_adj and Gph_adj=+1j*Fth_adj.
     g_adj = cupy.concatenate(
         (
-            cupy.conjugate(gth_gpu.T)[:, inv_perm_gpu],
-            cupy.conjugate(gph_gpu.T)[:, inv_perm_gpu],
+            -1j * fph_adj_perm,
+            1j * fth_adj_perm,
         ),
         axis=1,
     )
@@ -1351,8 +1346,6 @@ def _copy_directional_host(
         ),
         Fth=np.ascontiguousarray(np.asarray(transforms.Fth, dtype=np.complex128)),
         Fph=np.ascontiguousarray(np.asarray(transforms.Fph, dtype=np.complex128)),
-        Gth=np.ascontiguousarray(np.asarray(transforms.Gth, dtype=np.complex128)),
-        Gph=np.ascontiguousarray(np.asarray(transforms.Gph, dtype=np.complex128)),
     )
 
 
@@ -3642,7 +3635,11 @@ def _leaf_translation_blocks_from_pair_deltas(
     pair_blocks_scratch: dict[str, Any] | None,
     cupy: Any,
 ) -> Any:
-    """Build on-the-fly leaf translation blocks for one grouped pair schedule."""
+    """Build on-the-fly leaf translation blocks for one grouped pair schedule.
+
+    This helper currently materializes a dense `(n_pairs, nmodes_out, nmodes_in)`
+    tensor, so peak temporary memory scales with `n_pairs * nmodes_out * nmodes_in`.
+    """
 
     deltas = cupy.asarray(pair_deltas, dtype=cupy.float64).reshape(-1, 3)
     n_pairs = int(deltas.shape[0])
@@ -3709,7 +3706,12 @@ def _leaf_otf_group_chunk_leaves(
     n_group: int,
     chunk_leaves: int | None,
 ) -> int:
-    """Choose grouped on-the-fly leaf chunk size from policy leaf units."""
+    """Choose grouped on-the-fly leaf chunk size from policy leaf units.
+
+    The chunk unit is leaves, not pair-block bytes. One large-occupancy leaf can
+    still yield a large pair-block temporary; this is intentionally simple and
+    should be replaced by work/byte-derived chunking when scaling requires it.
+    """
 
     if int(n_group) <= 0:
         return 1
@@ -3950,16 +3952,10 @@ def _ensure_multilevel_workspace(
             int(level.n_boxes) * 4 * int(level.directional.grid.n_directions) * int(key.nrhs)
         )
         max_elements_by_parity[parity] = max(max_elements_by_parity[parity], int(level_elements))
-    outgoing = [
-        cupy.empty(
-            (int(level.n_boxes), 4, int(level.directional.grid.n_directions), int(key.nrhs)),
-            dtype=cupy.complex128,
-        )
-        for level in levels
-    ]
     ws = CuPyMLFMMMultilevelWorkspace(
         nrhs=int(key.nrhs),
-        outgoing=outgoing,
+        outgoing_roll_even=cupy.empty((int(max_elements_by_parity[0]),), dtype=cupy.complex128),
+        outgoing_roll_odd=cupy.empty((int(max_elements_by_parity[1]),), dtype=cupy.complex128),
         incoming_roll_even=cupy.empty((int(max_elements_by_parity[0]),), dtype=cupy.complex128),
         incoming_roll_odd=cupy.empty((int(max_elements_by_parity[1]),), dtype=cupy.complex128),
         leaf_box_states=cupy.empty(
@@ -4213,73 +4209,111 @@ def _multilevel_incoming_roll_view(
     return view
 
 
-def _apply_multilevel_far(
-    prepared: CuPyMLFMMPreparedData,
-    x_states: Any,
+def _multilevel_outgoing_roll_view(
     *,
-    receive_adjoint_cache: dict[int, Any] | None,
-    pair_blocks_scratch: dict[str, Any] | None,
-    leaf_otf_chunk_leaves: int | None,
+    workspace: CuPyMLFMMMultilevelWorkspace | None,
+    hf_start: int,
+    level_idx: int,
+    level: CuPyMLFMMLevelData,
+    nrhs: int,
+    cupy: Any,
+    zero: bool,
+) -> Any:
+    """Return one reusable rolling outgoing buffer view for one hierarchy level."""
+
+    shape = (int(level.n_boxes), 4, int(level.directional.grid.n_directions), int(nrhs))
+    if workspace is None:
+        arr = cupy.empty(shape, dtype=cupy.complex128)
+        if zero:
+            arr.fill(0)
+        return arr
+    parity = int((int(level_idx) - int(hf_start)) & 1)
+    backing = workspace.outgoing_roll_even if parity == 0 else workspace.outgoing_roll_odd
+    needed = int(np.prod(shape, dtype=np.int64))
+    if int(backing.size) < needed:
+        raise RuntimeError(
+            "Internal CuPy MLFMM error: rolling outgoing buffer is undersized for "
+            f"level {level_idx} (need {needed}, have {int(backing.size)})."
+        )
+    view = backing[:needed].reshape(shape)
+    if not bool(getattr(view.flags, "c_contiguous", False)):
+        raise RuntimeError(
+            "Internal CuPy MLFMM error: rolling outgoing view must be contiguous. "
+            f"Got shape={tuple(int(v) for v in view.shape)}."
+        )
+    if zero:
+        view.fill(0)
+    return view
+
+
+def _build_multilevel_outgoing_level_rolling(
+    *,
+    levels: tuple[CuPyMLFMMLevelData, ...],
+    transfer_by_parent: dict[int, CuPyMLFMMTransferData],
+    leaf_box_states: Any,
+    hf_start: int,
+    leaf_level: int,
+    target_level: int,
+    nrhs: int,
     workspace: CuPyMLFMMMultilevelWorkspace | None,
     cupy: Any,
 ) -> Any:
-    """Apply sampled multilevel far interactions on device.
+    """Build one outgoing hierarchy level into rolling buffers.
 
-    Grouped source/target schedules are validated as unique during upload.
-    Transfer loops run unique-index kernels and keep a high-level fallback only
-    for map-storage variants that do not have a fused kernel yet.
+    This function intentionally recomputes outgoing channels from leaf box
+    states for the requested level so apply can avoid keeping a full outgoing
+    hierarchy resident in device workspace.
     """
 
-    multilevel = prepared.multilevel
-    if multilevel is None:
-        raise RuntimeError("Internal CuPy MLFMM error: missing multilevel prepared data.")
-    n_particles, nm, nrhs = (int(v) for v in x_states.shape)
-    levels = multilevel.levels
-    ws = workspace
-    if ws is None:
-        outgoing = [
-            cupy.zeros(
-                (
-                    int(level.n_boxes),
-                    4,
-                    int(level.directional.grid.n_directions),
-                    nrhs,
-                ),
-                dtype=cupy.complex128,
-            )
-            for level in levels
-        ]
-    else:
-        outgoing = ws.outgoing
-        for arr in outgoing:
-            arr.fill(0)
-    leaf_level = int(multilevel.leaf_level)
-    box_nm = int(multilevel.box_nm)
-    leaf_box_states = _aggregate_leaf_box_states(
-        x_states,
-        leaf_groups=multilevel.leaf_groups,
-        leaf_apply_mode=multilevel.leaf_apply_mode,
-        leaf_translation_tables=multilevel.leaf_translation_tables,
-        pair_blocks_scratch=pair_blocks_scratch,
-        leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
-        n_leaves=int(multilevel.n_leaves),
-        box_nm=box_nm,
+    if not (int(hf_start) <= int(target_level) <= int(leaf_level)):
+        raise RuntimeError(
+            "Internal CuPy MLFMM error: outgoing target level outside sampled hierarchy "
+            f"(target={target_level}, hf_start={hf_start}, leaf={leaf_level})."
+        )
+    leaf_values = _multilevel_outgoing_roll_view(
+        workspace=workspace,
+        hf_start=hf_start,
+        level_idx=leaf_level,
+        level=levels[leaf_level],
         nrhs=nrhs,
-        out=(ws.leaf_box_states if ws is not None else None),
         cupy=cupy,
+        zero=True,
     )
     _box_outgoing_to_directional_cupy(
         levels[leaf_level].directional,
         leaf_box_states,
-        out=outgoing[leaf_level],
+        out=leaf_values,
         cupy=cupy,
     )
+    if int(target_level) == int(leaf_level):
+        return leaf_values
 
-    for transfer in reversed(multilevel.transfers):
+    for parent_level in range(int(leaf_level) - 1, int(target_level) - 1, -1):
+        transfer = transfer_by_parent.get(int(parent_level))
+        if transfer is None:
+            raise RuntimeError(
+                "Internal CuPy MLFMM error: missing transfer while building outgoing level "
+                f"{target_level} (parent level {parent_level})."
+            )
         child_level = int(transfer.child_level)
-        parent_level = int(transfer.parent_level)
-        child_values = outgoing[child_level]
-        parent_values = outgoing[parent_level]
+        child_values = _multilevel_outgoing_roll_view(
+            workspace=workspace,
+            hf_start=hf_start,
+            level_idx=child_level,
+            level=levels[child_level],
+            nrhs=nrhs,
+            cupy=cupy,
+            zero=False,
+        )
+        parent_values = _multilevel_outgoing_roll_view(
+            workspace=workspace,
+            hf_start=hf_start,
+            level_idx=parent_level,
+            level=levels[parent_level],
+            nrhs=nrhs,
+            cupy=cupy,
+            zero=True,
+        )
         for shift, batch in transfer.batches_by_shift.items():
             if str(transfer.map_up.storage) == "packed_stencil":
                 _transfer_up_packed_unique_complex128(
@@ -4314,6 +4348,56 @@ def _apply_multilevel_far(
                     cupy=cupy,
                 )
 
+    return _multilevel_outgoing_roll_view(
+        workspace=workspace,
+        hf_start=hf_start,
+        level_idx=target_level,
+        level=levels[target_level],
+        nrhs=nrhs,
+        cupy=cupy,
+        zero=False,
+    )
+
+
+def _apply_multilevel_far(
+    prepared: CuPyMLFMMPreparedData,
+    x_states: Any,
+    *,
+    receive_adjoint_cache: dict[int, Any] | None,
+    pair_blocks_scratch: dict[str, Any] | None,
+    leaf_otf_chunk_leaves: int | None,
+    workspace: CuPyMLFMMMultilevelWorkspace | None,
+    cupy: Any,
+) -> Any:
+    """Apply sampled multilevel far interactions on device.
+
+    Grouped source/target schedules are validated as unique during upload.
+    Transfer loops run unique-index kernels and keep a high-level fallback only
+    for map-storage variants that do not have a fused kernel yet.
+    """
+
+    multilevel = prepared.multilevel
+    if multilevel is None:
+        raise RuntimeError("Internal CuPy MLFMM error: missing multilevel prepared data.")
+    n_particles, nm, nrhs = (int(v) for v in x_states.shape)
+    levels = multilevel.levels
+    ws = workspace
+    leaf_level = int(multilevel.leaf_level)
+    box_nm = int(multilevel.box_nm)
+    leaf_box_states = _aggregate_leaf_box_states(
+        x_states,
+        leaf_groups=multilevel.leaf_groups,
+        leaf_apply_mode=multilevel.leaf_apply_mode,
+        leaf_translation_tables=multilevel.leaf_translation_tables,
+        pair_blocks_scratch=pair_blocks_scratch,
+        leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
+        n_leaves=int(multilevel.n_leaves),
+        box_nm=box_nm,
+        nrhs=nrhs,
+        out=(ws.leaf_box_states if ws is not None else None),
+        cupy=cupy,
+    )
+
     hf_start = int(multilevel.hf_start_level)
     hf_end = int(multilevel.hf_end_level)
     transfer_by_parent: dict[int, CuPyMLFMMTransferData] = {}
@@ -4342,11 +4426,22 @@ def _apply_multilevel_far(
                 f"(expected level {current_level}, got {level_idx})."
             )
         level = levels[level_idx]
+        outgoing_level = _build_multilevel_outgoing_level_rolling(
+            levels=levels,
+            transfer_by_parent=transfer_by_parent,
+            leaf_box_states=leaf_box_states,
+            hf_start=hf_start,
+            leaf_level=leaf_level,
+            target_level=level_idx,
+            nrhs=nrhs,
+            workspace=ws,
+            cupy=cupy,
+        )
         for offset, batch in level.far_offset_batches.items():
             _weighted_gather_add_complex128(
                 current_incoming,
                 batch.dst_indices,
-                outgoing[level_idx],
+                outgoing_level,
                 batch.src_indices,
                 level.offset_diagonals[offset],
                 cupy=cupy,
@@ -4502,6 +4597,25 @@ def _multilevel_outgoing_hierarchy_bytes(
     return int(total)
 
 
+def _multilevel_rolling_outgoing_bytes_theoretical(
+    multilevel: CuPyMLFMMMultilevelData,
+    *,
+    nrhs: int,
+) -> int:
+    """Return bytes for two-parity rolling outgoing hierarchy arenas."""
+
+    hf_start = int(multilevel.hf_start_level)
+    hf_end = int(multilevel.hf_end_level)
+    max_elements_by_parity = [1, 1]
+    for level_idx in range(hf_start, hf_end + 1):
+        level = multilevel.levels[level_idx]
+        parity = int((level_idx - hf_start) & 1)
+        elements = int(level.n_boxes) * 4 * int(level.directional.grid.n_directions) * int(nrhs)
+        max_elements_by_parity[parity] = max(max_elements_by_parity[parity], int(elements))
+    bytes_per_complex = np.dtype(np.complex128).itemsize
+    return int((max_elements_by_parity[0] + max_elements_by_parity[1]) * bytes_per_complex)
+
+
 @dataclass
 class CuPyMLFMMCouplingOperator:
     """CuPy-backed repeated-apply MLFMM coupling operator.
@@ -4573,7 +4687,8 @@ class CuPyMLFMMCouplingOperator:
         )
         multilevel_ws_total = int(
             sum(
-                int(sum(_device_array_nbytes(arr) for arr in ws.outgoing))
+                _device_array_nbytes(ws.outgoing_roll_even)
+                + _device_array_nbytes(ws.outgoing_roll_odd)
                 + _device_array_nbytes(ws.incoming_roll_even)
                 + _device_array_nbytes(ws.incoming_roll_odd)
                 + _device_array_nbytes(ws.leaf_box_states)
@@ -4598,15 +4713,31 @@ class CuPyMLFMMCouplingOperator:
                         for ws in self._multilevel_workspace_cache.values()
                     )
                 )
+                rolling_outgoing_actual = int(
+                    max(
+                        _device_array_nbytes(ws.outgoing_roll_even)
+                        + _device_array_nbytes(ws.outgoing_roll_odd)
+                        for ws in self._multilevel_workspace_cache.values()
+                    )
+                )
             else:
                 nrhs_ref = 1
                 rolling_actual = None
+                rolling_outgoing_actual = None
             full_incoming = _multilevel_full_incoming_bytes(multilevel, nrhs=nrhs_ref)
             rolling_theoretical = _multilevel_rolling_incoming_bytes_theoretical(
                 multilevel, nrhs=nrhs_ref
             )
             outgoing_hierarchy = _multilevel_outgoing_hierarchy_bytes(multilevel, nrhs=nrhs_ref)
+            rolling_outgoing_theoretical = _multilevel_rolling_outgoing_bytes_theoretical(
+                multilevel, nrhs=nrhs_ref
+            )
             rolling_used = rolling_theoretical if rolling_actual is None else int(rolling_actual)
+            rolling_outgoing_used = (
+                rolling_outgoing_theoretical
+                if rolling_outgoing_actual is None
+                else int(rolling_outgoing_actual)
+            )
             rolling_diag = {
                 "nrhs_reference": int(nrhs_ref),
                 "full_incoming_hierarchy_bytes": int(full_incoming),
@@ -4618,8 +4749,17 @@ class CuPyMLFMMCouplingOperator:
                     float(rolling_used) / float(full_incoming) if full_incoming > 0 else None
                 ),
                 "outgoing_hierarchy_bytes": int(outgoing_hierarchy),
+                "rolling_outgoing_bytes_theoretical": int(rolling_outgoing_theoretical),
+                "rolling_outgoing_bytes_actual_peak": (
+                    None if rolling_outgoing_actual is None else int(rolling_outgoing_actual)
+                ),
+                "outgoing_reduction_ratio": (
+                    float(rolling_outgoing_used) / float(outgoing_hierarchy)
+                    if outgoing_hierarchy > 0
+                    else None
+                ),
                 "full_far_hierarchy_bytes": int(full_incoming + outgoing_hierarchy),
-                "rolling_far_hierarchy_bytes": int(rolling_used + outgoing_hierarchy),
+                "rolling_far_hierarchy_bytes": int(rolling_used + rolling_outgoing_used),
             }
 
         return {
