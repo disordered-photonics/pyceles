@@ -45,5 +45,5 @@ def test_lossless_cluster_plane_wave_has_negligible_absorption():
     assert c_ext > 0.0
     assert c_sca > 0.0
     assert c_abs >= -1e-8
-    assert abs(c_abs) / c_ext < 2e-2
-    np.testing.assert_allclose(c_ext, c_sca, rtol=2e-2, atol=0.0)
+    assert abs(c_abs) / c_ext < 1e-3
+    np.testing.assert_allclose(c_ext, c_sca, rtol=1e-3, atol=0.0)

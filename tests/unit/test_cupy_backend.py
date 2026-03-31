@@ -103,6 +103,20 @@ def _small_cluster_particles() -> tuple[Particle, ...]:
     )
 
 
+def _random_uniform_sphere_particles(*, n_particles: int, seed: int = 4) -> tuple[Particle, ...]:
+    rng = np.random.default_rng(seed)
+    positions = rng.uniform(-1000.0, 1000.0, size=(int(n_particles), 3))
+    radii = np.full((positions.shape[0],), 20.0, dtype=float)
+    n_particle = np.full((positions.shape[0],), 1.59 + 0.0j, dtype=np.complex128)
+    return tuple(
+        spheres_from_arrays(
+            positions=positions,
+            radii=radii,
+            refractive_indices=n_particle,
+        )
+    )
+
+
 def _plane_wave_source(wavelength: float, n_medium: complex) -> pcl.PlaneWave:
     return pcl.PlaneWave(
         wavelength=wavelength,
@@ -152,16 +166,16 @@ def test_cupy_mlfmm_upload_offset_batches_rejects_nonunique() -> None:
         )
 
 
-def _transition_numpy_mlfmm_coupling() -> MLFMMCouplingOperator:
+def _policy_numpy_mlfmm_coupling() -> MLFMMCouplingOperator:
     prepared = prepare_matvec(
         lmax=3,
         k=2.0 * np.pi / 550.0,
-        particles=list(_mlfmm_transition_particles()),
+        particles=list(_mlfmm_policy_particles()),
         n_medium=1.0 + 0j,
         radial_lut_dr=0.5,
         cache_translation_blocks=False,
         coupling_backend="mlfmm",
-        mlfmm_options=MLFMMOptions(max_leaf_particles=4, max_depth=8),
+        mlfmm_options=MLFMMOptions(max_leaf_particles=4, max_depth=4),
         backend="numpy",
     )
     coupling = prepared.coupling
@@ -170,8 +184,15 @@ def _transition_numpy_mlfmm_coupling() -> MLFMMCouplingOperator:
     return coupling
 
 
-def test_cupy_mlfmm_host_cache_recomputes_static_tables_during_upload() -> None:
-    coupling = _transition_numpy_mlfmm_coupling()
+@pytest.fixture(scope="module")
+def _policy_coupling_fixture() -> MLFMMCouplingOperator:
+    return _policy_numpy_mlfmm_coupling()
+
+
+def test_cupy_mlfmm_host_cache_recomputes_static_tables_during_upload(
+    _policy_coupling_fixture: MLFMMCouplingOperator,
+) -> None:
+    coupling = _policy_coupling_fixture
     policy = CuPyMLFMMHostCachePolicy()
     host_cache = build_mlfmm_cupy_host_cache(coupling, host_cache_policy=policy)
     assert host_cache.near_plm_coeffs is None
@@ -189,7 +210,7 @@ def test_cupy_mlfmm_host_cache_recomputes_static_tables_during_upload() -> None:
 
 
 def test_cupy_host_cache_build_supports_sparse_cpu_staging_without_dense_leaf_maps() -> None:
-    particles = _mlfmm_transition_particles()
+    particles = _mlfmm_policy_particles()
     positions = np.asarray([np.asarray(p.position, dtype=float) for p in particles], dtype=float)
     radii = np.asarray([float(p.circumscribing_radius()) for p in particles], dtype=float)
     k = 2.0 * np.pi / 550.0
@@ -206,7 +227,7 @@ def test_cupy_host_cache_build_supports_sparse_cpu_staging_without_dense_leaf_ma
         positions=positions,
         particle_circumscribing_radii=radii,
         radial_lut=radial_lut,
-        options=MLFMMOptions(max_leaf_particles=4, max_depth=8),
+        options=MLFMMOptions(max_leaf_particles=4, max_depth=4),
         dtype=np.complex128,
         cache_translation_blocks=False,
         leaf_map_backend="cupy",
@@ -235,12 +256,12 @@ def test_cupy_mlfmm_runtime_operator_is_non_picklable() -> None:
     prepared = prepare_matvec(
         lmax=3,
         k=2.0 * np.pi / 550.0,
-        particles=list(_mlfmm_transition_particles()),
+        particles=list(_mlfmm_policy_particles()),
         n_medium=1.0 + 0j,
         radial_lut_dr=0.5,
         cache_translation_blocks=False,
         coupling_backend="mlfmm",
-        mlfmm_options=MLFMMOptions(max_leaf_particles=4, max_depth=8),
+        mlfmm_options=MLFMMOptions(max_leaf_particles=4, max_depth=4),
         backend="cupy",
     )
     coupling = prepared.coupling
@@ -250,8 +271,10 @@ def test_cupy_mlfmm_runtime_operator_is_non_picklable() -> None:
         _ = pickle.dumps(coupling)
 
 
-def test_cupy_prepare_coupling_detaches_host_cache_by_default() -> None:
-    coupling = _transition_numpy_mlfmm_coupling()
+def test_cupy_prepare_coupling_detaches_host_cache_by_default(
+    _policy_coupling_fixture: MLFMMCouplingOperator,
+) -> None:
+    coupling = _policy_coupling_fixture
     runtime = prepare_mlfmm_cupy_coupling(coupling)
     assert runtime.host_cache is None
     assert runtime.host_cache_summary is not None
@@ -262,8 +285,10 @@ def test_cupy_prepare_coupling_detaches_host_cache_by_default() -> None:
     assert payload > 0
 
 
-def test_cupy_prepare_coupling_can_retain_host_cache_when_requested() -> None:
-    coupling = _transition_numpy_mlfmm_coupling()
+def test_cupy_prepare_coupling_can_retain_host_cache_when_requested(
+    _policy_coupling_fixture: MLFMMCouplingOperator,
+) -> None:
+    coupling = _policy_coupling_fixture
     runtime = prepare_mlfmm_cupy_coupling(
         coupling,
         host_cache_policy=CuPyMLFMMHostCachePolicy(host_cache_retention="full"),
@@ -273,8 +298,10 @@ def test_cupy_prepare_coupling_can_retain_host_cache_when_requested() -> None:
     assert runtime.host_cache_summary.get("retained") is True
 
 
-def test_cupy_prepare_coupling_can_drop_host_cache_summary_when_requested() -> None:
-    coupling = _transition_numpy_mlfmm_coupling()
+def test_cupy_prepare_coupling_can_drop_host_cache_summary_when_requested(
+    _policy_coupling_fixture: MLFMMCouplingOperator,
+) -> None:
+    coupling = _policy_coupling_fixture
     runtime = prepare_mlfmm_cupy_coupling(
         coupling,
         host_cache_policy=CuPyMLFMMHostCachePolicy(host_cache_retention="none"),
@@ -283,8 +310,10 @@ def test_cupy_prepare_coupling_can_drop_host_cache_summary_when_requested() -> N
     assert runtime.host_cache_summary is None
 
 
-def test_cupy_prepare_coupling_rejects_nonpositive_leaf_otf_chunk_leaves() -> None:
-    coupling = _transition_numpy_mlfmm_coupling()
+def test_cupy_prepare_coupling_rejects_nonpositive_leaf_otf_chunk_leaves(
+    _policy_coupling_fixture: MLFMMCouplingOperator,
+) -> None:
+    coupling = _policy_coupling_fixture
     with pytest.raises(ValueError, match="leaf_otf_chunk_leaves must be positive"):
         _ = prepare_mlfmm_cupy_coupling(
             coupling,
@@ -292,8 +321,10 @@ def test_cupy_prepare_coupling_rejects_nonpositive_leaf_otf_chunk_leaves() -> No
         )
 
 
-def test_cupy_prepare_coupling_rejects_nonpositive_leaf_otf_bytes_budget() -> None:
-    coupling = _transition_numpy_mlfmm_coupling()
+def test_cupy_prepare_coupling_rejects_nonpositive_leaf_otf_bytes_budget(
+    _policy_coupling_fixture: MLFMMCouplingOperator,
+) -> None:
+    coupling = _policy_coupling_fixture
     with pytest.raises(ValueError, match="leaf_otf_bytes_budget must be positive"):
         _ = prepare_mlfmm_cupy_coupling(
             coupling,
@@ -301,8 +332,10 @@ def test_cupy_prepare_coupling_rejects_nonpositive_leaf_otf_bytes_budget() -> No
         )
 
 
-def test_cupy_prepare_coupling_rejects_nonpositive_streamed_far_chunk_bytes_budget() -> None:
-    coupling = _transition_numpy_mlfmm_coupling()
+def test_cupy_prepare_coupling_rejects_nonpositive_streamed_far_chunk_bytes_budget(
+    _policy_coupling_fixture: MLFMMCouplingOperator,
+) -> None:
+    coupling = _policy_coupling_fixture
     with pytest.raises(ValueError, match="streamed_far_chunk_bytes_budget must be positive"):
         _ = prepare_mlfmm_cupy_coupling(
             coupling,
@@ -311,17 +344,17 @@ def test_cupy_prepare_coupling_rejects_nonpositive_streamed_far_chunk_bytes_budg
 
 
 def _mlfmm_transition_particles() -> tuple[Particle, ...]:
-    rng = np.random.default_rng(4)
-    positions = rng.uniform(-1000.0, 1000.0, size=(60, 3))
-    radii = np.full((positions.shape[0],), 20.0, dtype=float)
-    n_particle = np.full((positions.shape[0],), 1.59 + 0.0j, dtype=np.complex128)
-    return tuple(
-        spheres_from_arrays(
-            positions=positions,
-            radii=radii,
-            refractive_indices=n_particle,
-        )
-    )
+    # 27 particles (seed=50) is the smallest deterministic fixture we found that
+    # gives the intended stage split for this test surface:
+    # - max_leaf_particles=8 -> single_level
+    # - max_leaf_particles=4 -> multilevel
+    return _random_uniform_sphere_particles(n_particles=27, seed=50)
+
+
+def _mlfmm_policy_particles() -> tuple[Particle, ...]:
+    # Policy/retention tests do not require a stage split; keep this fixture
+    # small so host-cache/policy tests stay lightweight.
+    return _random_uniform_sphere_particles(n_particles=24, seed=4)
 
 
 def _sim_cfg(
@@ -630,7 +663,7 @@ def test_cupy_mlfmm_complex64_request_matches_numpy_with_far_complex128() -> Non
     y_numpy = np.asarray(prepared_numpy.apply_W(x), dtype=np.complex64)
     y_cupy = np.asarray(asnumpy(prepared_cupy.apply_W(x)), dtype=np.complex64)
     assert y_cupy.dtype == np.dtype(np.complex64)
-    np.testing.assert_allclose(y_cupy, y_numpy, rtol=3e-4, atol=3e-5)
+    np.testing.assert_allclose(y_cupy, y_numpy, rtol=1e-4, atol=1e-5)
 
 
 @pytest.mark.parametrize(

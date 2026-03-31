@@ -61,8 +61,8 @@ def test_scattered_field_far_zone_obeys_inverse_radius_scaling():
 
     assert e1 > 0.0 and e2 > 0.0
     assert h1 > 0.0 and h2 > 0.0
-    np.testing.assert_allclose(e1 * r1, e2 * r2, rtol=2e-2, atol=0.0)
-    np.testing.assert_allclose(h1 * r1, h2 * r2, rtol=2e-2, atol=0.0)
+    np.testing.assert_allclose(e1 * r1, e2 * r2, rtol=1e-3, atol=0.0)
+    np.testing.assert_allclose(h1 * r1, h2 * r2, rtol=1e-3, atol=0.0)
 
 
 def test_single_sphere_normal_incidence_unpolarized_scattering_is_azimuthally_symmetric():
@@ -109,7 +109,7 @@ def test_single_sphere_normal_incidence_unpolarized_scattering_is_azimuthally_sy
 
     # For a sphere under normal incidence, unpolarized intensity is azimuth-independent.
     variation = np.max(np.abs(I[:, active] - mean_beta[None, active])) / global_scale
-    assert variation < 5e-3
+    assert variation < 1e-3
 
 
 def test_global_z_rotation_covariance_for_plane_wave_cluster():
@@ -173,12 +173,12 @@ def test_global_z_rotation_covariance_for_plane_wave_cluster():
 
     I1 = _scattered_intensity(run_1)
     I2 = _scattered_intensity(run_2)
-    np.testing.assert_allclose(I2, np.roll(I1, shift=shift, axis=0), rtol=3e-2, atol=0.0)
+    np.testing.assert_allclose(I2, np.roll(I1, shift=shift, axis=0), rtol=1e-3, atol=0.0)
 
     cs1 = run_1.cross_sections
     cs2 = run_2.cross_sections
     if cs1 is None or cs2 is None:
         raise AssertionError("Plane-wave runs must expose cross sections.")
-    np.testing.assert_allclose(cs1["C_sca"], cs2["C_sca"], rtol=5e-3, atol=0.0)
-    np.testing.assert_allclose(cs1["C_ext"], cs2["C_ext"], rtol=5e-3, atol=0.0)
-    np.testing.assert_allclose(cs1["C_abs"], cs2["C_abs"], rtol=5e-3, atol=0.0)
+    np.testing.assert_allclose(cs1["C_sca"], cs2["C_sca"], rtol=1e-3, atol=0.0)
+    np.testing.assert_allclose(cs1["C_ext"], cs2["C_ext"], rtol=1e-3, atol=0.0)
+    np.testing.assert_allclose(cs1["C_abs"], cs2["C_abs"], rtol=1e-3, atol=0.0)

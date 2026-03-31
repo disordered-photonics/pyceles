@@ -67,5 +67,5 @@ def test_source_only_plane_wave_satisfies_local_maxwell_identities():
 
     assert abs(div_e) / e_scale < 2e-3
     assert abs(div_h) / h_scale < 2e-3
-    np.testing.assert_allclose(curl_e, 1j * k0 * h_mean, rtol=2e-3, atol=1e-6)
-    np.testing.assert_allclose(curl_h, -1j * k0 * e_mean, rtol=2e-3, atol=1e-6)
+    np.testing.assert_allclose(curl_e, 1j * k0 * h_mean, rtol=1e-3, atol=1e-6)
+    np.testing.assert_allclose(curl_h, -1j * k0 * e_mean, rtol=1e-3, atol=1e-6)

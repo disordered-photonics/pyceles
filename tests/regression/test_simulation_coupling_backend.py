@@ -44,11 +44,13 @@ def _mlfmm_multilevel_problem() -> tuple[int, float, tuple[Particle, ...]]:
     lmax = 1
     k = 2 * np.pi / 550.0
     gx, gy, gz = np.meshgrid(np.arange(8), np.arange(8), np.arange(8), indexing="ij")
-    positions = (300.0 * np.stack((gx.ravel(), gy.ravel(), gz.ravel()), axis=1)[:9]).astype(float)
+    # Keep the fixture geometry compact so far-order table setup stays fast
+    # while preserving a true multilevel partition with max_leaf_particles=1.
+    positions = (40.0 * np.stack((gx.ravel(), gy.ravel(), gz.ravel()), axis=1)[:9]).astype(float)
     particles = tuple(
         spheres_from_arrays(
             positions=positions,
-            radii=np.full((positions.shape[0],), 60.0, dtype=float),
+            radii=np.full((positions.shape[0],), 8.0, dtype=float),
             refractive_indices=np.full((positions.shape[0],), 1.59 + 0.0j, dtype=np.complex128),
         )
     )

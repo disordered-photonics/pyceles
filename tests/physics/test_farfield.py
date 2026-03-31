@@ -480,8 +480,10 @@ def test_plane_wave_cross_sections_from_coefficients_match_single_sphere_mie():
         n_medium=n_medium,
         lmax=8,
         source=source,
-        polar_angles=np.linspace(0.0, np.pi, 61),
-        azimuthal_angles=np.linspace(0.0, 2.0 * np.pi, 91, endpoint=False),
+        # Tighten cross-section regression tolerance by using a finer
+        # integration grid for the scattered-power estimate.
+        polar_angles=np.linspace(0.0, np.pi, 121),
+        azimuthal_angles=np.linspace(0.0, 2.0 * np.pi, 181, endpoint=False),
         solver_method="direct",
         verbose=False,
         compute_dtype="complex128",
@@ -512,8 +514,8 @@ def test_plane_wave_cross_sections_from_coefficients_match_single_sphere_mie():
     )
 
     np.testing.assert_allclose(cs["C_ext"], mie["C_ext"], rtol=2e-11, atol=1e-11)
-    np.testing.assert_allclose(cs["C_sca"], mie["C_sca"], rtol=5e-3, atol=5e-2)
-    np.testing.assert_allclose(cs["C_abs"], mie["C_abs"], rtol=5e-3, atol=5e-2)
+    np.testing.assert_allclose(cs["C_sca"], mie["C_sca"], rtol=1e-3, atol=1e-3)
+    np.testing.assert_allclose(cs["C_abs"], mie["C_abs"], rtol=1e-3, atol=1e-3)
 
     c_ext = extinction_cross_section(
         source,

@@ -100,14 +100,14 @@ def _assert_reference_samples(
         i_str, j_str = key.split(",")
         i = int(i_str)
         j = int(j_str)
-        np.testing.assert_allclose(I_initial[i, j], values["initial"], rtol=5e-3, atol=0.0)
-        np.testing.assert_allclose(I_scattered[i, j], values["scattered"], rtol=5e-3, atol=0.0)
-        np.testing.assert_allclose(I_total[i, j], values["total"], rtol=5e-3, atol=0.0)
+        np.testing.assert_allclose(I_initial[i, j], values["initial"], rtol=1e-3, atol=0.0)
+        np.testing.assert_allclose(I_scattered[i, j], values["scattered"], rtol=1e-3, atol=0.0)
+        np.testing.assert_allclose(I_total[i, j], values["total"], rtol=1e-3, atol=0.0)
 
     E_ref = np.asarray(
         [[complex(re, im) for (re, im) in row] for row in expected_probe_E], dtype=np.complex128
     )
-    np.testing.assert_allclose(np.asarray(E_total), E_ref, rtol=5e-3, atol=0.0)
+    np.testing.assert_allclose(np.asarray(E_total), E_ref, rtol=1e-3, atol=0.0)
     np.testing.assert_allclose(P0, expected_P0, rtol=1e-12, atol=0.0)
 
 
