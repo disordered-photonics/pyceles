@@ -47,6 +47,19 @@ class CuPyBlockGMRESNativeResult:
     preconditioner_supports_block: bool
 
 
+@dataclass(frozen=True)
+class CuPyBiCGSTABNativeResult:
+    """Result payload for native CuPy BiCGSTAB solves."""
+
+    x: Any
+    info: int
+    iterations: int
+    residual_norm: float
+    relative_residual: float
+    converged_reason: str
+    true_history: np.ndarray
+
+
 def _dtype_complex(dtype: npt.DTypeLike, *, name: str) -> np.dtype:
     out = np.dtype(dtype)
     if out.kind != "c":
@@ -1112,6 +1125,211 @@ def lgmres_cupy_native(
     )
 
 
+def bicgstab_cupy_native(
+    A_mv: Callable[[Any], Any],
+    b: Any,
+    *,
+    cupy: Any,
+    x0: Any | None = None,
+    preconditioner: Callable[[Any], Any] | None = None,
+    rtol: float = 1e-6,
+    atol: float = 0.0,
+    maxiter: int | None = None,
+    operator_dtype: npt.DTypeLike | None = None,
+    accum_dtype: npt.DTypeLike | None = None,
+    callback: Callable[[float], None] | None = None,
+    breakdown_tol: float = 1e-30,
+) -> CuPyBiCGSTABNativeResult:
+    """Run right-preconditioned BiCGSTAB fully on CuPy arrays.
+
+    The update order follows the canonical stabilized BiCG recursion used in
+    PETSc's BCGS implementation:
+    ``rho, beta, p, v, alpha, s, t, omega, x, r``.
+    """
+    b_dtype_obj = getattr(b, "dtype", None)
+    b_dtype = np.dtype(np.asarray(b).dtype if b_dtype_obj is None else b_dtype_obj)
+    op_dtype = _dtype_complex(
+        operator_dtype if operator_dtype is not None else np.result_type(b_dtype, np.complex64),
+        name="operator_dtype",
+    )
+    acc_dtype = _dtype_complex(
+        accum_dtype if accum_dtype is not None else np.result_type(op_dtype, np.complex128),
+        name="accum_dtype",
+    )
+    b_vec = _as_device_vector(b, cupy=cupy, dtype=op_dtype, name="b")
+    n = int(b_vec.size)
+    maxiter_total = int(maxiter) if maxiter is not None else n * 10
+    if maxiter_total < 1:
+        raise ValueError("`maxiter` must be >= 1 when provided.")
+    x_vec = (
+        cupy.zeros_like(b_vec, dtype=op_dtype)
+        if x0 is None
+        else _as_device_vector(x0, cupy=cupy, dtype=op_dtype, name="x0")
+    )
+    if int(x_vec.size) != n:
+        raise ValueError(f"`x0` size {int(x_vec.size)} does not match `b` size {n}.")
+    x0_is_zero = x0 is None
+    if not x0_is_zero and n > 0:
+        x0_is_zero = bool(float(cupy.max(cupy.abs(x_vec))) == 0.0)
+
+    def _apply(op: Callable[[Any], Any], vec: Any) -> Any:
+        return _as_device_vector(
+            op(cupy.asarray(vec, dtype=op_dtype)), cupy=cupy, dtype=op_dtype, name="op(x)"
+        )
+
+    def _apply_minv(vec: Any) -> Any:
+        if preconditioner is None:
+            return cupy.asarray(vec, dtype=op_dtype)
+        return _as_device_vector(
+            preconditioner(cupy.asarray(vec, dtype=op_dtype)),
+            cupy=cupy,
+            dtype=op_dtype,
+            name="M^-1(x)",
+        )
+
+    def _true_residual_stats(x_curr: Any) -> tuple[float, float, Any]:
+        r_true = b_vec - _apply(A_mv, x_curr)
+        abs_norm = _norm(r_true, cupy=cupy, accum_dtype=acc_dtype)
+        rel_norm = abs_norm / b_norm if b_norm > 0 else abs_norm
+        return abs_norm, rel_norm, r_true
+
+    b_norm = _norm(b_vec, cupy=cupy, accum_dtype=acc_dtype)
+    target_abs = max(float(atol), float(rtol) * b_norm)
+    breakdown_tol_f = float(max(0.0, breakdown_tol))
+    true_hist: list[float] = []
+    iterations = 0
+    info = maxiter_total
+    converged_reason = "maxiter_reached"
+
+    if x0_is_zero:
+        r_vec = cupy.asarray(b_vec, dtype=op_dtype)
+        residual_norm = float(b_norm)
+        relative_residual = 1.0 if b_norm > 0 else 0.0
+    else:
+        residual_norm, relative_residual, r_vec = _true_residual_stats(x_vec)
+    true_hist.append(relative_residual)
+    if residual_norm <= target_abs:
+        return CuPyBiCGSTABNativeResult(
+            x=x_vec,
+            info=0,
+            iterations=0,
+            residual_norm=float(residual_norm),
+            relative_residual=float(relative_residual),
+            converged_reason="converged",
+            true_history=np.asarray(true_hist, dtype=float),
+        )
+
+    r_hat = cupy.asarray(r_vec, dtype=op_dtype)
+    p_vec = cupy.zeros_like(r_vec, dtype=op_dtype)
+    v_vec = cupy.zeros_like(r_vec, dtype=op_dtype)
+    rho_old = cupy.asarray(1.0 + 0.0j, dtype=acc_dtype)
+    alpha = cupy.asarray(1.0 + 0.0j, dtype=acc_dtype)
+    omega = cupy.asarray(1.0 + 0.0j, dtype=acc_dtype)
+
+    for k in range(maxiter_total):
+        rho = _dot(r_hat, r_vec, cupy=cupy, accum_dtype=acc_dtype)
+        if float(cupy.abs(rho)) <= breakdown_tol_f:
+            iterations = k + 1
+            info = k + 1
+            converged_reason = "breakdown_rho"
+            break
+
+        if k == 0:
+            p_vec = cupy.asarray(r_vec, dtype=op_dtype)
+        else:
+            if float(cupy.abs(omega)) <= breakdown_tol_f:
+                iterations = k + 1
+                info = k + 1
+                converged_reason = "breakdown_omega"
+                break
+            beta = (rho / rho_old) * (alpha / omega)
+            p_vec = r_vec + cupy.asarray(beta, dtype=op_dtype) * (
+                p_vec - cupy.asarray(omega, dtype=op_dtype) * v_vec
+            )
+
+        phat = _apply_minv(p_vec)
+        v_vec = _apply(A_mv, phat)
+        d1 = _dot(r_hat, v_vec, cupy=cupy, accum_dtype=acc_dtype)
+        if float(cupy.abs(d1)) <= breakdown_tol_f:
+            iterations = k + 1
+            info = k + 1
+            converged_reason = "breakdown_alpha"
+            break
+
+        alpha = rho / d1
+        s_vec = r_vec - cupy.asarray(alpha, dtype=op_dtype) * v_vec
+        s_norm = _norm(s_vec, cupy=cupy, accum_dtype=acc_dtype)
+        if s_norm <= target_abs:
+            x_vec = x_vec + cupy.asarray(alpha, dtype=op_dtype) * phat
+            residual_norm = float(s_norm)
+            relative_residual = residual_norm / b_norm if b_norm > 0 else residual_norm
+            iterations = k + 1
+            true_hist.append(relative_residual)
+            if callback is not None:
+                callback(relative_residual)
+            info = 0
+            converged_reason = "converged"
+            break
+
+        shat = _apply_minv(s_vec)
+        t_vec = _apply(A_mv, shat)
+        tt = _dot(t_vec, t_vec, cupy=cupy, accum_dtype=acc_dtype)
+        if float(cupy.abs(tt)) <= breakdown_tol_f:
+            iterations = k + 1
+            info = k + 1
+            converged_reason = "breakdown_tt"
+            break
+
+        omega = _dot(t_vec, s_vec, cupy=cupy, accum_dtype=acc_dtype) / tt
+        x_vec = (
+            x_vec
+            + cupy.asarray(alpha, dtype=op_dtype) * phat
+            + cupy.asarray(omega, dtype=op_dtype) * shat
+        )
+        r_vec = s_vec - cupy.asarray(omega, dtype=op_dtype) * t_vec
+        residual_norm = _norm(r_vec, cupy=cupy, accum_dtype=acc_dtype)
+        relative_residual = residual_norm / b_norm if b_norm > 0 else residual_norm
+        iterations = k + 1
+        true_hist.append(relative_residual)
+        if callback is not None:
+            callback(relative_residual)
+        if residual_norm <= target_abs:
+            info = 0
+            converged_reason = "converged"
+            break
+        if float(cupy.abs(omega)) <= breakdown_tol_f:
+            iterations = k + 1
+            info = k + 1
+            converged_reason = "breakdown_omega"
+            break
+
+        rho_old = rho
+        info = iterations
+    else:
+        residual_norm, relative_residual, _ = _true_residual_stats(x_vec)
+        info = maxiter_total
+        converged_reason = "maxiter_reached"
+        return CuPyBiCGSTABNativeResult(
+            x=x_vec,
+            info=int(info),
+            iterations=int(maxiter_total),
+            residual_norm=float(residual_norm),
+            relative_residual=float(relative_residual),
+            converged_reason=str(converged_reason),
+            true_history=np.asarray(true_hist, dtype=float),
+        )
+
+    return CuPyBiCGSTABNativeResult(
+        x=x_vec,
+        info=int(info),
+        iterations=int(iterations),
+        residual_norm=float(residual_norm),
+        relative_residual=float(relative_residual),
+        converged_reason=str(converged_reason),
+        true_history=np.asarray(true_hist, dtype=float),
+    )
+
+
 def block_gmres_cupy_native(
     A_mv: Callable[[Any], Any],
     b: Any,
@@ -1472,8 +1690,10 @@ def block_gmres_cupy_native(
 __all__ = [
     "CuPyGMRESNativeResult",
     "CuPyBlockGMRESNativeResult",
+    "CuPyBiCGSTABNativeResult",
     "block_gmres_cupy_native",
     "gmres_cupy_native",
     "fgmres_cupy_native",
     "lgmres_cupy_native",
+    "bicgstab_cupy_native",
 ]

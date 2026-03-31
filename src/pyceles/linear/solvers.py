@@ -27,6 +27,7 @@ from tqdm.auto import tqdm
 from pyceles._optional import asnumpy, import_cupy
 
 from .krylov_cupy import (
+    bicgstab_cupy_native,
     block_gmres_cupy_native,
     fgmres_cupy_native,
     gmres_cupy_native,
@@ -1147,6 +1148,88 @@ def lgmres_cupy(
     )
 
 
+def bicgstab_cupy(
+    A_mv: Callable[[np.ndarray], np.ndarray],
+    b: np.ndarray,
+    *,
+    x0: Optional[np.ndarray] = None,
+    preconditioner: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+    rtol: float = 1e-6,
+    atol: float = 0.0,
+    maxiter: Optional[int] = None,
+    callback: Optional[Callable[[float], None]] = None,
+    show_progress: bool = True,
+    compute_final_residual: bool = True,
+) -> LinearSolveResult:
+    """Solve Ax=b via native CuPy BiCGSTAB.
+
+    This path keeps BiCGSTAB state vectors on device and reports true-residual
+    progress each iteration. It is intentionally lighter than restarted GMRES
+    because it does not store an explicit Krylov basis.
+    """
+
+    cupy, _ = import_cupy()
+    b_arr = np.asarray(b)
+    if b_arr.ndim != 1:
+        raise ValueError(
+            "`bicgstab_cupy` expects a 1D RHS. Multi-RHS runs should use "
+            "`solve_linear_system(..., method='bicgstab', backend='cupy')`."
+        )
+    n = int(b_arr.size)
+    op_dtype = np.dtype(np.result_type(b_arr.dtype, np.complex64))
+    maxiter_total = int(maxiter) if maxiter is not None else n * 10
+
+    progress_update, progress_close, _ = _make_progress_tracker(
+        "bicgstab[cupy]",
+        show_progress=show_progress,
+        target_rel=float(rtol),
+        residual_label="true_rel_res",
+        max_iters=maxiter_total,
+    )
+
+    def _native_callback(true_rel: float) -> None:
+        progress_update(float(true_rel))
+        if callback is not None:
+            callback(float(true_rel))
+
+    native = bicgstab_cupy_native(
+        A_mv,
+        b,
+        cupy=cupy,
+        x0=x0,
+        preconditioner=preconditioner,
+        rtol=rtol,
+        atol=atol,
+        maxiter=maxiter_total,
+        operator_dtype=op_dtype,
+        callback=_native_callback if (show_progress or callback is not None) else None,
+    )
+    progress_close()
+
+    x_np = asnumpy(native.x)
+    if compute_final_residual:
+        residual_norm = float(native.residual_norm)
+        relative_residual = float(native.relative_residual)
+    else:
+        residual_norm = float("nan")
+        relative_residual = float("nan")
+
+    true_hist = np.asarray(native.true_history, dtype=float)
+    return LinearSolveResult(
+        x=x_np,
+        info=int(native.info),
+        residual_norm=residual_norm,
+        relative_residual=relative_residual,
+        iterations=int(native.iterations),
+        method="bicgstab[cupy]",
+        residual_history=true_hist,
+        rhs_count=1,
+        preconditioned_residual_history=None,
+        true_residual_history=true_hist,
+        converged_reason=str(native.converged_reason),
+    )
+
+
 def bicgstab_scipy(
     A_mv: Callable[[np.ndarray], np.ndarray],
     b: np.ndarray,
@@ -1618,9 +1701,9 @@ def solve_linear_system(
     backend_name = backend
     if m == "auto":
         m = "direct" if n <= int(direct_max_n) else "gmres"
-    if backend_name == "cupy" and m not in {"gmres", "fgmres", "lgmres", "direct"}:
+    if backend_name == "cupy" and m not in {"gmres", "fgmres", "bicgstab", "lgmres", "direct"}:
         raise ValueError(
-            "The CuPy linear-solver backend currently supports only GMRES, FGMRES, LGMRES, or direct solves."
+            "The CuPy linear-solver backend currently supports only GMRES, FGMRES, BiCGSTAB, LGMRES, or direct solves."
         )
 
     x0_mat: np.ndarray | None = None
@@ -1780,6 +1863,18 @@ def solve_linear_system(
             compute_final_residual=compute_final_residual,
         )
     if m == "bicgstab":
+        if backend_name == "cupy":
+            return bicgstab_cupy(
+                A_mv,
+                b_vec,
+                x0=x0_vec,
+                preconditioner=preconditioner,
+                rtol=rtol,
+                atol=atol,
+                maxiter=maxiter,
+                show_progress=show_progress,
+                compute_final_residual=compute_final_residual,
+            )
         return bicgstab_scipy(
             A_mv,
             b_vec,

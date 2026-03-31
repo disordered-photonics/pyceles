@@ -280,16 +280,22 @@ def test_solve_linear_system_direct_can_skip_final_residual_with_lu_only():
     assert np.isnan(float(out.relative_residual))
 
 
-def test_solve_linear_system_cupy_backend_rejects_bicgstab():
+def test_solve_linear_system_cupy_backend_supports_bicgstab(monkeypatch):
+    monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
     b = np.array([1.0 + 0j, 2.0 + 0j])
-    with pytest.raises(ValueError, match="supports only GMRES, FGMRES, LGMRES, or direct"):
-        solve_linear_system(
-            lambda x: x,
-            b,
-            method="bicgstab",
-            backend="cupy",
-            show_progress=False,
-        )
+    out = solve_linear_system(
+        lambda x: np.asarray(x),
+        b,
+        method="bicgstab",
+        backend="cupy",
+        rtol=1e-12,
+        atol=0.0,
+        maxiter=10,
+        show_progress=False,
+    )
+    assert int(out.info) == 0
+    assert str(out.method) == "bicgstab[cupy]"
+    np.testing.assert_allclose(np.asarray(out.x), b, atol=1e-10, rtol=1e-10)
 
 
 def test_factorize_dense_matrix_cupy_requests_inplace_overwrite(monkeypatch):
@@ -356,6 +362,16 @@ def test_lgmres_cupy_reports_clear_import_failure(monkeypatch):
     b = np.array([1.0 + 0j, 2.0 + 0j], dtype=np.complex128)
     with pytest.raises(RuntimeError, match="broken cuda path"):
         solvers.lgmres_cupy(lambda x: x, b, show_progress=False)
+
+
+def test_bicgstab_cupy_reports_clear_import_failure(monkeypatch):
+    def fail_import():
+        raise RuntimeError("broken cuda path")
+
+    monkeypatch.setattr(solvers, "import_cupy", fail_import)
+    b = np.array([1.0 + 0j, 2.0 + 0j], dtype=np.complex128)
+    with pytest.raises(RuntimeError, match="broken cuda path"):
+        solvers.bicgstab_cupy(lambda x: x, b, show_progress=False)
 
 
 def test_gmres_cupy_native_reports_inner_iteration_progress(monkeypatch):
@@ -474,6 +490,54 @@ def test_lgmres_cupy_matches_gmres_on_toy_system(monkeypatch):
     assert int(out_g.info) == 0
     assert int(out_l.info) == 0
     np.testing.assert_allclose(np.asarray(out_l.x), np.asarray(out_g.x), atol=1e-8, rtol=1e-8)
+
+
+def test_bicgstab_cupy_matches_gmres_on_toy_system(monkeypatch):
+    monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
+    rng = np.random.default_rng(23)
+    n = 10
+    M = rng.standard_normal((n, n)) + 1j * rng.standard_normal((n, n))
+    A = M.conj().T @ M + (0.5 + 0j) * np.eye(n)
+    b = rng.standard_normal(n) + 1j * rng.standard_normal(n)
+
+    out_g = solvers.gmres_cupy(
+        lambda x: A @ np.asarray(x),
+        b,
+        rtol=1e-10,
+        atol=0.0,
+        restart=10,
+        maxiter=60,
+        show_progress=False,
+    )
+    out_b = solvers.bicgstab_cupy(
+        lambda x: A @ np.asarray(x),
+        b,
+        rtol=1e-10,
+        atol=0.0,
+        maxiter=80,
+        show_progress=False,
+    )
+    assert int(out_g.info) == 0
+    assert int(out_b.info) == 0
+    np.testing.assert_allclose(np.asarray(out_b.x), np.asarray(out_g.x), atol=1e-8, rtol=1e-8)
+
+
+def test_bicgstab_cupy_breakdown_path_returns_failure_without_crash(monkeypatch):
+    monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
+    b = np.array([1.0 + 0j, -2.0 + 0j], dtype=np.complex128)
+
+    out = solvers.bicgstab_cupy(
+        lambda x: np.zeros_like(np.asarray(x)),
+        b,
+        rtol=1e-12,
+        atol=0.0,
+        maxiter=6,
+        show_progress=False,
+    )
+
+    assert int(out.info) > 0
+    assert int(out.iterations) >= 1
+    assert np.isfinite(float(out.relative_residual))
 
 
 def test_gmres_cupy_native_breakdown_path_returns_failure_without_crash(monkeypatch):
@@ -1001,6 +1065,25 @@ def test_solve_linear_system_lgmres_cupy_smoke(monkeypatch):
     assert int(out.info) == 0
     assert str(out.method) == "lgmres[cupy]"
     np.testing.assert_allclose(np.asarray(out.x), b, atol=1e-10, rtol=1e-10)
+
+
+def test_solve_linear_system_bicgstab_cupy_multi_rhs_smoke(monkeypatch):
+    monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
+    A = np.array([[3.0 + 0j, 1.0 + 0j], [0.5 + 0j, 2.0 + 0j]], dtype=np.complex128)
+    B = np.array([[1.0 + 0j, -0.5 + 0j], [2.0 + 0j, 1.5 + 0j]], dtype=np.complex128)
+    out = solve_linear_system(
+        lambda x: A @ np.asarray(x),
+        B,
+        method="bicgstab",
+        backend="cupy",
+        rtol=1e-11,
+        atol=0.0,
+        maxiter=40,
+        show_progress=False,
+    )
+    assert out.rhs_count == 2
+    assert np.all(np.asarray(out.info, dtype=int) == 0)
+    np.testing.assert_allclose(A @ np.asarray(out.x), B, atol=1e-8, rtol=1e-8)
 
 
 @pytest.mark.skipif(not _cupy_available(), reason="CuPy runtime unavailable")
