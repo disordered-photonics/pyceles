@@ -9,7 +9,7 @@ This module validates and uploads repeated-apply structures to device memory.
 from dataclasses import dataclass, field, fields, is_dataclass, replace
 from functools import cache
 from importlib import import_module
-from typing import Any, Literal, cast
+from typing import Any, Iterator, Literal, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -58,11 +58,19 @@ class CuPyMLFMMHostCachePolicy:
     are processed per on-the-fly translation substep. This is a simple
     leaf-count limiter; it does not directly bound the largest temporary bytes
     when one leaf has very high occupancy.
+
+    `leaf_otf_bytes_budget` bounds one on-the-fly leaf translation contraction
+    substep by estimated dense pair-block bytes. `streamed_far_chunk_bytes_budget`
+    bounds one sampled-far directional chunk by estimated directional-state
+    bytes. When omitted, both budgets are derived conservatively from currently
+    available device memory during apply.
     """
 
     leaf_apply_mode: CuPyMLFMMLeafApplyMode = "on_the_fly"
     host_cache_retention: CuPyMLFMMHostCacheRetention = "summary"
-    leaf_otf_chunk_leaves: int | None = 1
+    leaf_otf_chunk_leaves: int | None = None
+    leaf_otf_bytes_budget: int | None = None
+    streamed_far_chunk_bytes_budget: int | None = None
 
 
 @dataclass(frozen=True)
@@ -421,23 +429,21 @@ class CuPyMLFMMSingleLevelWorkspace:
 
 @dataclass
 class CuPyMLFMMMultilevelWorkspace:
-    """Reusable multilevel far-path work buffers for one RHS width.
+    """Reusable multilevel far-path buffers for one RHS width.
 
-    Multilevel incoming and outgoing channels use rolling two-buffer schemes
-    keyed to alternating hierarchy levels so repeated apply does not keep full
-    far hierarchies resident in device workspace state. Buffers are stored as
-    flat contiguous arenas and reshaped per-level to avoid non-contiguous
-    directional slices in fused raw-kernel paths.
+    The sampled-far multilevel path now streams selected box chunks instead of
+    keeping full per-level directional hierarchies resident, so the reusable
+    workspace retains only the final particle-sized accumulator.
     """
 
     nrhs: int
-    outgoing_roll_even: Any
-    outgoing_roll_odd: Any
-    incoming_roll_even: Any
-    incoming_roll_odd: Any
-    leaf_box_states: Any
-    incoming_box: Any
     y_states: Any
+    outgoing_roll_even: Any | None = None
+    outgoing_roll_odd: Any | None = None
+    incoming_roll_even: Any | None = None
+    incoming_roll_odd: Any | None = None
+    leaf_box_states: Any | None = None
+    incoming_box: Any | None = None
 
 
 @dataclass
@@ -468,9 +474,6 @@ class CuPyMLFMMMultilevelWorkspaceKey:
     nrhs: int
     n_particles: int
     nm: int
-    n_leaves: int
-    box_nm: int
-    level_shapes: tuple[tuple[int, int], ...]
 
 
 @dataclass(frozen=True)
@@ -1630,10 +1633,30 @@ def _resolve_host_cache_policy(
             "CuPy MLFMM leaf_otf_chunk_leaves must be positive when set. "
             f"Got {resolved.leaf_otf_chunk_leaves!r}."
         )
+    leaf_otf_bytes_budget = resolved.leaf_otf_bytes_budget
+    if leaf_otf_bytes_budget is not None and int(leaf_otf_bytes_budget) <= 0:
+        raise ValueError(
+            "CuPy MLFMM leaf_otf_bytes_budget must be positive when set. "
+            f"Got {resolved.leaf_otf_bytes_budget!r}."
+        )
+    streamed_far_chunk_bytes_budget = resolved.streamed_far_chunk_bytes_budget
+    if streamed_far_chunk_bytes_budget is not None and int(streamed_far_chunk_bytes_budget) <= 0:
+        raise ValueError(
+            "CuPy MLFMM streamed_far_chunk_bytes_budget must be positive when set. "
+            f"Got {resolved.streamed_far_chunk_bytes_budget!r}."
+        )
     return replace(
         resolved,
         host_cache_retention=cast(CuPyMLFMMHostCacheRetention, retention),
         leaf_otf_chunk_leaves=(None if chunk_leaves is None else int(chunk_leaves)),
+        leaf_otf_bytes_budget=(
+            None if leaf_otf_bytes_budget is None else int(leaf_otf_bytes_budget)
+        ),
+        streamed_far_chunk_bytes_budget=(
+            None
+            if streamed_far_chunk_bytes_budget is None
+            else int(streamed_far_chunk_bytes_budget)
+        ),
     )
 
 
@@ -1689,6 +1712,14 @@ def _runtime_host_cache_summary(
         "leaf_apply_mode": str(policy.leaf_apply_mode),
         "leaf_otf_chunk_leaves": (
             None if policy.leaf_otf_chunk_leaves is None else int(policy.leaf_otf_chunk_leaves)
+        ),
+        "leaf_otf_bytes_budget": (
+            None if policy.leaf_otf_bytes_budget is None else int(policy.leaf_otf_bytes_budget)
+        ),
+        "streamed_far_chunk_bytes_budget": (
+            None
+            if policy.streamed_far_chunk_bytes_budget is None
+            else int(policy.streamed_far_chunk_bytes_budget)
         ),
         "stage": str(cache.stage),
         "near_static_tables_cached": bool(cache.near_plm_coeffs is not None),
@@ -3705,19 +3736,220 @@ def _leaf_otf_group_chunk_leaves(
     *,
     n_group: int,
     chunk_leaves: int | None,
+    occupancy: int,
+    box_nm: int,
+    nmodes: int,
+    nrhs: int,
+    bytes_budget: int | None,
 ) -> int:
-    """Choose grouped on-the-fly leaf chunk size from policy leaf units.
-
-    The chunk unit is leaves, not pair-block bytes. One large-occupancy leaf can
-    still yield a large pair-block temporary; this is intentionally simple and
-    should be replaced by work/byte-derived chunking when scaling requires it.
-    """
+    """Choose grouped on-the-fly leaf chunk size from leaf units and live bytes."""
 
     if int(n_group) <= 0:
         return 1
-    if chunk_leaves is None:
-        return int(n_group)
-    return max(1, min(int(n_group), int(chunk_leaves)))
+    by_leaves = (
+        int(n_group) if chunk_leaves is None else max(1, min(int(n_group), int(chunk_leaves)))
+    )
+    if bytes_budget is None:
+        return int(by_leaves)
+    pair_block_bytes_per_leaf = (
+        int(occupancy) * int(box_nm) * int(nmodes) * np.dtype(np.complex128).itemsize
+    )
+    coeff_bytes_per_leaf = (
+        int(occupancy) * int(nmodes) * int(nrhs) * np.dtype(np.complex128).itemsize
+    )
+    out_bytes_per_leaf = int(box_nm) * int(nrhs) * np.dtype(np.complex128).itemsize
+    live_bytes_per_leaf = int(pair_block_bytes_per_leaf + coeff_bytes_per_leaf + out_bytes_per_leaf)
+    by_bytes = max(1, int(bytes_budget) // max(1, live_bytes_per_leaf))
+    return max(1, min(int(n_group), int(by_leaves), int(by_bytes)))
+
+
+def _matched_sorted_rows(
+    *,
+    container_ids: Any,
+    selected_ids: Any,
+    cupy: Any,
+) -> tuple[Any, Any] | None:
+    """Return `(selected_rows, container_rows)` for sorted integer ids."""
+
+    selected = cupy.asarray(selected_ids, dtype=cupy.int32).reshape(-1)
+    container = cupy.asarray(container_ids, dtype=cupy.int32).reshape(-1)
+    if int(selected.size) == 0 or int(container.size) == 0:
+        return None
+    positions = cupy.searchsorted(container, selected)
+    max_index = int(container.size) - 1
+    clamped = cupy.minimum(positions, max_index)
+    valid = (positions < int(container.size)) & (container[clamped] == selected)
+    if int(cupy.count_nonzero(valid)) == 0:
+        return None
+    return cupy.nonzero(valid)[0].astype(cupy.int32), positions[valid].astype(cupy.int32)
+
+
+def _aggregate_selected_leaf_box_states(
+    x_states: Any,
+    *,
+    selected_leaf_ids: Any,
+    leaf_groups: tuple[CuPyLeafApplyGroupData, ...],
+    leaf_apply_mode: CuPyMLFMMLeafApplyMode,
+    leaf_translation_tables: CuPyLeafTranslationTablesData | None,
+    pair_blocks_scratch: dict[str, Any] | None,
+    leaf_otf_chunk_leaves: int | None,
+    leaf_otf_bytes_budget: int | None,
+    box_nm: int,
+    nrhs: int,
+    cupy: Any,
+) -> Any:
+    """Aggregate one selected leaf subset into regular box states."""
+
+    selected_ids = cupy.asarray(selected_leaf_ids, dtype=cupy.int32).reshape(-1)
+    n_selected = int(selected_ids.size)
+    out = cupy.empty((n_selected, int(box_nm), int(nrhs)), dtype=cupy.complex128)
+    if n_selected == 0:
+        return out
+    for group in leaf_groups:
+        matched = _matched_sorted_rows(
+            container_ids=group.leaf_ids,
+            selected_ids=selected_ids,
+            cupy=cupy,
+        )
+        if matched is None:
+            continue
+        selected_rows, group_rows = matched
+        occupancy = int(group.occupancy)
+        nmodes = int(group.nmodes)
+        n_group_rows = int(group_rows.size)
+        if str(leaf_apply_mode) == "on_the_fly":
+            if leaf_translation_tables is None or group.pair_deltas is None:
+                raise RuntimeError(
+                    "Internal CuPy MLFMM error: on-the-fly leaf aggregation requires translation "
+                    "tables and pair-delta schedules."
+                )
+            pair_rows = group.pair_deltas.reshape(-1, occupancy, 3)[group_rows]
+            idx_rows = group.particle_indices[group_rows]
+            chunk_leaves = _leaf_otf_group_chunk_leaves(
+                n_group=n_group_rows,
+                chunk_leaves=leaf_otf_chunk_leaves,
+                occupancy=occupancy,
+                box_nm=int(box_nm),
+                nmodes=nmodes,
+                nrhs=int(nrhs),
+                bytes_budget=leaf_otf_bytes_budget,
+            )
+            for start in range(0, n_group_rows, chunk_leaves):
+                end = min(n_group_rows, start + chunk_leaves)
+                count = int(end - start)
+                pair_blocks = _leaf_translation_blocks_from_pair_deltas(
+                    pair_rows[start:end].reshape(-1, 3),
+                    tables=leaf_translation_tables,
+                    pair_blocks_scratch=pair_blocks_scratch,
+                    cupy=cupy,
+                ).reshape(count, occupancy, int(box_nm), nmodes)
+                coeffs = x_states[idx_rows[start:end]].reshape(count, occupancy, nmodes, int(nrhs))
+                out[selected_rows[start:end]] = cupy.einsum(
+                    "cobm,comr->cbr",
+                    pair_blocks,
+                    coeffs,
+                )
+        else:
+            if group.aggregation is None:
+                raise RuntimeError(
+                    "Internal CuPy MLFMM error: dense leaf aggregation mode requires aggregation tensors."
+                )
+            coeffs = x_states[group.particle_indices[group_rows]].reshape(
+                n_group_rows,
+                occupancy * nmodes,
+                int(nrhs),
+            )
+            out[selected_rows] = cupy.matmul(group.aggregation[group_rows], coeffs)
+    return out
+
+
+def _receive_selected_leaf_boxes_to_particles(
+    incoming_box: Any,
+    *,
+    selected_leaf_ids: Any,
+    leaf_groups: tuple[CuPyLeafApplyGroupData, ...],
+    leaf_apply_mode: CuPyMLFMMLeafApplyMode,
+    leaf_translation_tables: CuPyLeafTranslationTablesData | None,
+    pair_blocks_scratch: dict[str, Any] | None,
+    leaf_otf_chunk_leaves: int | None,
+    leaf_otf_bytes_budget: int | None,
+    receive_adjoint_cache: dict[int, Any] | None,
+    nm: int,
+    out: Any,
+    cupy: Any,
+) -> None:
+    """Accumulate one selected leaf subset from regular box states to particles."""
+
+    selected_ids = cupy.asarray(selected_leaf_ids, dtype=cupy.int32).reshape(-1)
+    incoming = cupy.asarray(incoming_box, dtype=cupy.complex128)
+    if int(selected_ids.size) != int(incoming.shape[0]):
+        raise ValueError(
+            "Selected leaf receive row count mismatch: "
+            f"{int(selected_ids.size)} vs {int(incoming.shape[0])}."
+        )
+    y = cupy.asarray(out, dtype=cupy.complex128)
+    for group in leaf_groups:
+        matched = _matched_sorted_rows(
+            container_ids=group.leaf_ids,
+            selected_ids=selected_ids,
+            cupy=cupy,
+        )
+        if matched is None:
+            continue
+        selected_rows, group_rows = matched
+        occupancy = int(group.occupancy)
+        n_group_rows = int(group_rows.size)
+        idx_rows = group.particle_indices[group_rows]
+        if str(leaf_apply_mode) == "on_the_fly":
+            if leaf_translation_tables is None or group.pair_deltas is None:
+                raise RuntimeError(
+                    "Internal CuPy MLFMM error: on-the-fly leaf receive requires translation "
+                    "tables and pair-delta schedules."
+                )
+            chunk_leaves = _leaf_otf_group_chunk_leaves(
+                n_group=n_group_rows,
+                chunk_leaves=leaf_otf_chunk_leaves,
+                occupancy=occupancy,
+                box_nm=int(leaf_translation_tables.nmodes_out),
+                nmodes=int(nm),
+                nrhs=int(incoming.shape[2]),
+                bytes_budget=leaf_otf_bytes_budget,
+            )
+            pair_rows = group.pair_deltas.reshape(-1, occupancy, 3)[group_rows]
+            for start in range(0, n_group_rows, chunk_leaves):
+                end = min(n_group_rows, start + chunk_leaves)
+                count = int(end - start)
+                pair_blocks = _leaf_translation_blocks_from_pair_deltas(
+                    pair_rows[start:end].reshape(-1, 3),
+                    tables=leaf_translation_tables,
+                    pair_blocks_scratch=pair_blocks_scratch,
+                    cupy=cupy,
+                ).reshape(count, occupancy, int(leaf_translation_tables.nmodes_out), int(nm))
+                contribution = cupy.einsum(
+                    "cobm,cbr->comr",
+                    pair_blocks.conj(),
+                    incoming[selected_rows[start:end]],
+                )
+                y[idx_rows[start:end]] += contribution
+        else:
+            if group.aggregation is None:
+                raise RuntimeError(
+                    "Internal CuPy MLFMM error: dense leaf receive mode requires aggregation tensors."
+                )
+            agg_group = group.aggregation[group_rows]
+            if receive_adjoint_cache is not None:
+                cache_key = int(agg_group.data.ptr)
+                receive_adj = receive_adjoint_cache.get(cache_key)
+                if receive_adj is None:
+                    receive_adj = cupy.swapaxes(agg_group, 1, 2).conj()
+                    receive_adjoint_cache[cache_key] = receive_adj
+            else:
+                receive_adj = cupy.swapaxes(agg_group, 1, 2).conj()
+            contribution = cupy.matmul(
+                receive_adj,
+                incoming[selected_rows],
+            ).reshape(n_group_rows, occupancy, int(nm), int(incoming.shape[2]))
+            y[idx_rows] += contribution
 
 
 def _aggregate_leaf_box_states(
@@ -3728,6 +3960,7 @@ def _aggregate_leaf_box_states(
     leaf_translation_tables: CuPyLeafTranslationTablesData | None,
     pair_blocks_scratch: dict[str, Any] | None,
     leaf_otf_chunk_leaves: int | None,
+    leaf_otf_bytes_budget: int | None,
     n_leaves: int,
     box_nm: int,
     nrhs: int,
@@ -3757,6 +3990,11 @@ def _aggregate_leaf_box_states(
             chunk_leaves = _leaf_otf_group_chunk_leaves(
                 n_group=n_group,
                 chunk_leaves=leaf_otf_chunk_leaves,
+                occupancy=occupancy,
+                box_nm=int(box_nm),
+                nmodes=nmodes,
+                nrhs=int(nrhs),
+                bytes_budget=leaf_otf_bytes_budget,
             )
             for start in range(0, n_group, chunk_leaves):
                 end = min(n_group, start + chunk_leaves)
@@ -3768,12 +4006,12 @@ def _aggregate_leaf_box_states(
                     tables=leaf_translation_tables,
                     pair_blocks_scratch=pair_blocks_scratch,
                     cupy=cupy,
+                ).reshape(count, occupancy, int(box_nm), nmodes)
+                box_states[group.leaf_ids[start:end]] = cupy.einsum(
+                    "cobm,comr->cbr",
+                    pair_blocks,
+                    coeffs[start:end].reshape(count, occupancy, nmodes, int(nrhs)),
                 )
-                agg = cupy.transpose(
-                    pair_blocks.reshape(count, occupancy, int(box_nm), nmodes),
-                    (0, 2, 1, 3),
-                ).reshape(count, int(box_nm), occupancy * nmodes)
-                box_states[group.leaf_ids[start:end]] = cupy.matmul(agg, coeffs[start:end])
         else:
             if group.aggregation is None:
                 raise RuntimeError(
@@ -3791,6 +4029,7 @@ def _receive_leaf_boxes_to_particles(
     leaf_translation_tables: CuPyLeafTranslationTablesData | None,
     pair_blocks_scratch: dict[str, Any] | None,
     leaf_otf_chunk_leaves: int | None,
+    leaf_otf_bytes_budget: int | None,
     receive_adjoint_cache: dict[int, Any] | None,
     nm: int,
     n_particles: int,
@@ -3825,6 +4064,11 @@ def _receive_leaf_boxes_to_particles(
             chunk_leaves = _leaf_otf_group_chunk_leaves(
                 n_group=n_group,
                 chunk_leaves=leaf_otf_chunk_leaves,
+                occupancy=occupancy,
+                box_nm=int(leaf_translation_tables.nmodes_out),
+                nmodes=int(nm),
+                nrhs=int(nrhs),
+                bytes_budget=leaf_otf_bytes_budget,
             )
             for start in range(0, n_group, chunk_leaves):
                 end = min(n_group, start + chunk_leaves)
@@ -3837,10 +4081,10 @@ def _receive_leaf_boxes_to_particles(
                     pair_blocks_scratch=pair_blocks_scratch,
                     cupy=cupy,
                 ).reshape(count, occupancy, int(leaf_translation_tables.nmodes_out), int(nm))
-                receive_adj = cupy.swapaxes(pair_blocks, 2, 3).conj()
-                contribution = cupy.matmul(
-                    receive_adj,
-                    incoming_box[leaf_ids[start:end]][:, None, :, :],
+                contribution = cupy.einsum(
+                    "cobm,cbr->comr",
+                    pair_blocks.conj(),
+                    incoming_box[leaf_ids[start:end]],
                 )
                 y[idx[start:end]] += contribution
         else:
@@ -3926,48 +4170,53 @@ def _ensure_multilevel_workspace(
     multilevel = prepared.multilevel
     if multilevel is None:
         raise RuntimeError("Internal CuPy MLFMM error: missing multilevel prepared data.")
-    level_shapes = tuple(
-        (int(level.n_boxes), int(level.directional.grid.n_directions))
-        for level in multilevel.levels
-    )
     key = CuPyMLFMMMultilevelWorkspaceKey(
         nrhs=int(nrhs),
         n_particles=int(n_particles),
         nm=int(nm),
-        n_leaves=int(multilevel.n_leaves),
-        box_nm=int(multilevel.box_nm),
-        level_shapes=level_shapes,
     )
     ws = cache.get(key)
     if ws is not None:
         return ws
-    levels = multilevel.levels
-    hf_start = int(multilevel.hf_start_level)
-    hf_end = int(multilevel.hf_end_level)
-    max_elements_by_parity = [1, 1]
-    for level_idx in range(hf_start, hf_end + 1):
-        level = levels[level_idx]
-        parity = int((level_idx - hf_start) & 1)
-        level_elements = (
-            int(level.n_boxes) * 4 * int(level.directional.grid.n_directions) * int(key.nrhs)
+    if str(multilevel.leaf_apply_mode) == "on_the_fly":
+        ws = CuPyMLFMMMultilevelWorkspace(
+            nrhs=int(key.nrhs),
+            y_states=cupy.empty(
+                (int(key.n_particles), int(key.nm), int(key.nrhs)), dtype=cupy.complex128
+            ),
         )
-        max_elements_by_parity[parity] = max(max_elements_by_parity[parity], int(level_elements))
-    ws = CuPyMLFMMMultilevelWorkspace(
-        nrhs=int(key.nrhs),
-        outgoing_roll_even=cupy.empty((int(max_elements_by_parity[0]),), dtype=cupy.complex128),
-        outgoing_roll_odd=cupy.empty((int(max_elements_by_parity[1]),), dtype=cupy.complex128),
-        incoming_roll_even=cupy.empty((int(max_elements_by_parity[0]),), dtype=cupy.complex128),
-        incoming_roll_odd=cupy.empty((int(max_elements_by_parity[1]),), dtype=cupy.complex128),
-        leaf_box_states=cupy.empty(
-            (int(key.n_leaves), int(key.box_nm), int(key.nrhs)), dtype=cupy.complex128
-        ),
-        incoming_box=cupy.empty(
-            (int(key.n_leaves), int(key.box_nm), int(key.nrhs)), dtype=cupy.complex128
-        ),
-        y_states=cupy.empty(
-            (int(key.n_particles), int(key.nm), int(key.nrhs)), dtype=cupy.complex128
-        ),
-    )
+    else:
+        levels = multilevel.levels
+        hf_start = int(multilevel.hf_start_level)
+        hf_end = int(multilevel.hf_end_level)
+        max_elements_by_parity = [1, 1]
+        for level_idx in range(hf_start, hf_end + 1):
+            level = levels[level_idx]
+            parity = int((level_idx - hf_start) & 1)
+            level_elements = (
+                int(level.n_boxes) * 4 * int(level.directional.grid.n_directions) * int(key.nrhs)
+            )
+            max_elements_by_parity[parity] = max(
+                max_elements_by_parity[parity], int(level_elements)
+            )
+        ws = CuPyMLFMMMultilevelWorkspace(
+            nrhs=int(key.nrhs),
+            y_states=cupy.empty(
+                (int(key.n_particles), int(key.nm), int(key.nrhs)), dtype=cupy.complex128
+            ),
+            outgoing_roll_even=cupy.empty((int(max_elements_by_parity[0]),), dtype=cupy.complex128),
+            outgoing_roll_odd=cupy.empty((int(max_elements_by_parity[1]),), dtype=cupy.complex128),
+            incoming_roll_even=cupy.empty((int(max_elements_by_parity[0]),), dtype=cupy.complex128),
+            incoming_roll_odd=cupy.empty((int(max_elements_by_parity[1]),), dtype=cupy.complex128),
+            leaf_box_states=cupy.empty(
+                (int(multilevel.n_leaves), int(multilevel.box_nm), int(key.nrhs)),
+                dtype=cupy.complex128,
+            ),
+            incoming_box=cupy.empty(
+                (int(multilevel.n_leaves), int(multilevel.box_nm), int(key.nrhs)),
+                dtype=cupy.complex128,
+            ),
+        )
     cache[key] = ws
     return ws
 
@@ -4105,6 +4354,7 @@ def _apply_single_level_far(
     receive_adjoint_cache: dict[int, Any] | None,
     pair_blocks_scratch: dict[str, Any] | None,
     leaf_otf_chunk_leaves: int | None,
+    leaf_otf_bytes_budget: int | None,
     workspace: CuPyMLFMMSingleLevelWorkspace | None,
     cupy: Any,
 ) -> Any:
@@ -4127,6 +4377,7 @@ def _apply_single_level_far(
         leaf_translation_tables=single.leaf_translation_tables,
         pair_blocks_scratch=pair_blocks_scratch,
         leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
+        leaf_otf_bytes_budget=leaf_otf_bytes_budget,
         n_leaves=int(single.n_leaves),
         box_nm=box_nm,
         nrhs=nrhs,
@@ -4163,6 +4414,7 @@ def _apply_single_level_far(
         leaf_translation_tables=single.leaf_translation_tables,
         pair_blocks_scratch=pair_blocks_scratch,
         leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
+        leaf_otf_bytes_budget=leaf_otf_bytes_budget,
         receive_adjoint_cache=receive_adjoint_cache,
         nm=nm,
         n_particles=n_particles,
@@ -4191,6 +4443,11 @@ def _multilevel_incoming_roll_view(
         return cupy.zeros((n_boxes, 4, n_dirs, n_rhs), dtype=cupy.complex128)
     parity = int((int(level_idx) - int(hf_start)) & 1)
     backing = workspace.incoming_roll_even if parity == 0 else workspace.incoming_roll_odd
+    if backing is None:
+        raise RuntimeError(
+            "Internal CuPy MLFMM error: rolling incoming backing buffer is missing for "
+            f"level {int(level_idx)}."
+        )
     if int(backing.size) < required:
         raise RuntimeError(
             "Internal CuPy MLFMM error: rolling incoming buffer is undersized for "
@@ -4229,6 +4486,11 @@ def _multilevel_outgoing_roll_view(
         return arr
     parity = int((int(level_idx) - int(hf_start)) & 1)
     backing = workspace.outgoing_roll_even if parity == 0 else workspace.outgoing_roll_odd
+    if backing is None:
+        raise RuntimeError(
+            "Internal CuPy MLFMM error: rolling outgoing backing buffer is missing for "
+            f"level {int(level_idx)}."
+        )
     needed = int(np.prod(shape, dtype=np.int64))
     if int(backing.size) < needed:
         raise RuntimeError(
@@ -4359,6 +4621,683 @@ def _build_multilevel_outgoing_level_rolling(
     )
 
 
+def _resolve_stream_bytes_budget(
+    *,
+    explicit_budget: int | None,
+    free_bytes: int,
+    fraction: float,
+    minimum_bytes: int,
+    maximum_bytes: int,
+) -> int:
+    """Resolve one conservative streamed runtime budget in bytes."""
+
+    if explicit_budget is not None:
+        return max(1, int(explicit_budget))
+    derived = int(max(float(minimum_bytes), float(free_bytes) * float(fraction)))
+    return max(int(minimum_bytes), min(int(maximum_bytes), int(derived)))
+
+
+def _level_chunk_box_cap(
+    *,
+    level: CuPyMLFMMLevelData,
+    nrhs: int,
+    bytes_budget: int,
+) -> int:
+    """Return a conservative chunk-box cap for one directional level."""
+
+    per_box_bytes = (
+        3
+        * 4
+        * int(level.directional.grid.n_directions)
+        * int(nrhs)
+        * np.dtype(np.complex128).itemsize
+    )
+    return max(1, int(bytes_budget) // max(1, int(per_box_bytes)))
+
+
+def _iter_id_chunks(ids: Any, *, chunk_size: int) -> Iterator[Any]:
+    """Yield chunk-sized views of one sorted id vector."""
+
+    n_total = int(ids.shape[0])
+    if n_total == 0:
+        return
+    for start in range(0, n_total, int(chunk_size)):
+        yield ids[start : min(n_total, start + int(chunk_size))]
+
+
+def _filter_batch_for_sorted_dst_ids(
+    *,
+    src_indices: Any,
+    dst_indices: Any,
+    dst_ids_sorted: Any,
+    cupy: Any,
+) -> tuple[Any, Any] | None:
+    """Filter one `(src,dst)` batch to a sorted destination-id subset.
+
+    Returns `(src_filtered_global, dst_filtered_local)` where destination rows
+    are mapped into the local chunk order given by `dst_ids_sorted`.
+    """
+
+    dst_ids = cupy.asarray(dst_ids_sorted, dtype=cupy.int32).reshape(-1)
+    if int(dst_ids.size) == 0:
+        return None
+    dst_all = cupy.asarray(dst_indices, dtype=cupy.int32).reshape(-1)
+    if int(dst_all.size) == 0:
+        return None
+    src_all = cupy.asarray(src_indices, dtype=cupy.int32).reshape(-1)
+    positions = cupy.searchsorted(dst_ids, dst_all)
+    max_index = int(dst_ids.size) - 1
+    clamped = cupy.minimum(positions, max_index)
+    valid = (positions < int(dst_ids.size)) & (dst_ids[clamped] == dst_all)
+    if int(cupy.count_nonzero(valid)) == 0:
+        return None
+    return src_all[valid], positions[valid].astype(cupy.int32)
+
+
+def _filter_query_ids_to_sorted_chunk(
+    *,
+    chunk_ids_sorted: Any,
+    query_ids: Any,
+    cupy: Any,
+) -> tuple[Any, Any] | None:
+    """Return `(valid_mask, local_rows)` for arbitrary queries against sorted ids."""
+
+    chunk_ids = cupy.asarray(chunk_ids_sorted, dtype=cupy.int32).reshape(-1)
+    queries = cupy.asarray(query_ids, dtype=cupy.int32).reshape(-1)
+    if int(chunk_ids.size) == 0 or int(queries.size) == 0:
+        return None
+    positions = cupy.searchsorted(chunk_ids, queries)
+    max_index = int(chunk_ids.size) - 1
+    clamped = cupy.minimum(positions, max_index)
+    valid = (positions < int(chunk_ids.size)) & (chunk_ids[clamped] == queries)
+    if int(cupy.count_nonzero(valid)) == 0:
+        return None
+    return valid, positions[valid].astype(cupy.int32)
+
+
+def _build_outgoing_subset_streamed(
+    *,
+    levels: tuple[CuPyMLFMMLevelData, ...],
+    transfer_by_parent: dict[int, CuPyMLFMMTransferData],
+    leaf_groups: tuple[CuPyLeafApplyGroupData, ...],
+    leaf_apply_mode: CuPyMLFMMLeafApplyMode,
+    leaf_translation_tables: CuPyLeafTranslationTablesData | None,
+    pair_blocks_scratch: dict[str, Any] | None,
+    leaf_otf_chunk_leaves: int | None,
+    leaf_otf_bytes_budget: int | None,
+    streamed_far_chunk_bytes_budget: int,
+    level_idx: int,
+    leaf_level: int,
+    box_ids_sorted: Any,
+    box_nm_leaf: int,
+    x_states: Any,
+    nrhs: int,
+    cupy: Any,
+    stream_stats: dict[str, object] | None,
+) -> Any:
+    """Build outgoing directional channels for one selected box subset."""
+
+    box_ids = cupy.asarray(box_ids_sorted, dtype=cupy.int32).reshape(-1)
+    level = levels[int(level_idx)]
+    n_boxes_sel = int(box_ids.size)
+    if stream_stats is not None:
+        build_counts = cast(dict[str, int], stream_stats.setdefault("outgoing_build_count", {}))
+        build_counts[str(level_idx)] = int(build_counts.get(str(level_idx), 0) + 1)
+        peak_boxes = cast(dict[str, int], stream_stats.setdefault("outgoing_build_peak_boxes", {}))
+        peak_boxes[str(level_idx)] = max(
+            int(peak_boxes.get(str(level_idx), 0)),
+            int(n_boxes_sel),
+        )
+    outgoing = cupy.empty(
+        (n_boxes_sel, 4, int(level.directional.grid.n_directions), int(nrhs)),
+        dtype=cupy.complex128,
+    )
+    if n_boxes_sel == 0:
+        return outgoing
+    if int(level_idx) == int(leaf_level):
+        leaf_box_states = _aggregate_selected_leaf_box_states(
+            x_states,
+            selected_leaf_ids=box_ids,
+            leaf_groups=leaf_groups,
+            leaf_apply_mode=leaf_apply_mode,
+            leaf_translation_tables=leaf_translation_tables,
+            pair_blocks_scratch=pair_blocks_scratch,
+            leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
+            leaf_otf_bytes_budget=leaf_otf_bytes_budget,
+            box_nm=int(box_nm_leaf),
+            nrhs=int(nrhs),
+            cupy=cupy,
+        )
+        return _box_outgoing_to_directional_cupy(
+            levels[int(leaf_level)].directional,
+            leaf_box_states,
+            out=outgoing,
+            cupy=cupy,
+        )
+
+    outgoing.fill(0)
+    transfer = transfer_by_parent.get(int(level_idx))
+    if transfer is None:
+        raise RuntimeError(
+            "Internal CuPy MLFMM error: missing transfer while streaming outgoing level "
+            f"{int(level_idx)}."
+        )
+    child_level = int(transfer.child_level)
+    child_box_cap = _level_chunk_box_cap(
+        level=levels[child_level],
+        nrhs=int(nrhs),
+        bytes_budget=int(streamed_far_chunk_bytes_budget),
+    )
+    if stream_stats is not None:
+        caps = cast(dict[str, int], stream_stats.setdefault("level_chunk_box_cap", {}))
+        caps[str(child_level)] = int(child_box_cap)
+    full_child_ids: Any | None = None
+    full_child_outgoing: Any | None = None
+    if int(child_box_cap) >= int(levels[child_level].n_boxes):
+        full_child_ids = cupy.arange(int(levels[child_level].n_boxes), dtype=cupy.int32)
+        full_child_outgoing = _build_outgoing_subset_streamed(
+            levels=levels,
+            transfer_by_parent=transfer_by_parent,
+            leaf_groups=leaf_groups,
+            leaf_apply_mode=leaf_apply_mode,
+            leaf_translation_tables=leaf_translation_tables,
+            pair_blocks_scratch=pair_blocks_scratch,
+            leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
+            leaf_otf_bytes_budget=leaf_otf_bytes_budget,
+            streamed_far_chunk_bytes_budget=int(streamed_far_chunk_bytes_budget),
+            level_idx=child_level,
+            leaf_level=int(leaf_level),
+            box_ids_sorted=full_child_ids,
+            box_nm_leaf=int(box_nm_leaf),
+            x_states=x_states,
+            nrhs=int(nrhs),
+            cupy=cupy,
+            stream_stats=stream_stats,
+        )
+        if stream_stats is not None:
+            fast_counts = cast(
+                dict[str, int], stream_stats.setdefault("full_level_outgoing_reuse_count", {})
+            )
+            fast_counts[str(child_level)] = int(fast_counts.get(str(child_level), 0) + 1)
+    for shift, batch in transfer.batches_by_shift.items():
+        filtered = _filter_batch_for_sorted_dst_ids(
+            src_indices=batch.src_indices,
+            dst_indices=batch.dst_indices,
+            dst_ids_sorted=box_ids,
+            cupy=cupy,
+        )
+        if filtered is None:
+            continue
+        child_ids_all, parent_local_all = filtered
+        if full_child_outgoing is not None and full_child_ids is not None:
+            matched = _filter_query_ids_to_sorted_chunk(
+                chunk_ids_sorted=full_child_ids,
+                query_ids=child_ids_all,
+                cupy=cupy,
+            )
+            if matched is None:
+                continue
+            child_valid_mask, child_local = matched
+            child_outgoing = full_child_outgoing
+            if str(transfer.map_up.storage) == "packed_stencil":
+                _transfer_up_packed_unique_complex128(
+                    outgoing,
+                    parent_local_all[child_valid_mask],
+                    child_outgoing,
+                    child_local,
+                    transfer.map_up,
+                    transfer.phase_up_by_shift[shift],
+                    cupy=cupy,
+                )
+            elif str(transfer.map_up.storage) == "sparse":
+                _transfer_up_sparse_unique_complex128(
+                    outgoing,
+                    parent_local_all[child_valid_mask],
+                    child_outgoing,
+                    child_local,
+                    transfer.map_up,
+                    transfer.phase_up_by_shift[shift],
+                    cupy=cupy,
+                )
+            else:
+                mapped = _apply_directional_map(
+                    child_outgoing[child_local],
+                    transfer.map_up,
+                    cupy=cupy,
+                )
+                _weighted_add_at_complex128(
+                    outgoing,
+                    parent_local_all[child_valid_mask],
+                    mapped,
+                    transfer.phase_up_by_shift[shift],
+                    cupy=cupy,
+                )
+            continue
+        child_ids_unique = cupy.unique(child_ids_all).astype(cupy.int32)
+        for child_chunk_ids in _iter_id_chunks(child_ids_unique, chunk_size=int(child_box_cap)):
+            matched = _filter_query_ids_to_sorted_chunk(
+                chunk_ids_sorted=child_chunk_ids,
+                query_ids=child_ids_all,
+                cupy=cupy,
+            )
+            if matched is None:
+                continue
+            child_valid_mask, child_local = matched
+            child_outgoing = _build_outgoing_subset_streamed(
+                levels=levels,
+                transfer_by_parent=transfer_by_parent,
+                leaf_groups=leaf_groups,
+                leaf_apply_mode=leaf_apply_mode,
+                leaf_translation_tables=leaf_translation_tables,
+                pair_blocks_scratch=pair_blocks_scratch,
+                leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
+                leaf_otf_bytes_budget=leaf_otf_bytes_budget,
+                streamed_far_chunk_bytes_budget=int(streamed_far_chunk_bytes_budget),
+                level_idx=child_level,
+                leaf_level=int(leaf_level),
+                box_ids_sorted=child_chunk_ids,
+                box_nm_leaf=int(box_nm_leaf),
+                x_states=x_states,
+                nrhs=int(nrhs),
+                cupy=cupy,
+                stream_stats=stream_stats,
+            )
+            if str(transfer.map_up.storage) == "packed_stencil":
+                _transfer_up_packed_unique_complex128(
+                    outgoing,
+                    parent_local_all[child_valid_mask],
+                    child_outgoing,
+                    child_local,
+                    transfer.map_up,
+                    transfer.phase_up_by_shift[shift],
+                    cupy=cupy,
+                )
+            elif str(transfer.map_up.storage) == "sparse":
+                _transfer_up_sparse_unique_complex128(
+                    outgoing,
+                    parent_local_all[child_valid_mask],
+                    child_outgoing,
+                    child_local,
+                    transfer.map_up,
+                    transfer.phase_up_by_shift[shift],
+                    cupy=cupy,
+                )
+            else:
+                mapped = _apply_directional_map(
+                    child_outgoing[child_local],
+                    transfer.map_up,
+                    cupy=cupy,
+                )
+                _weighted_add_at_complex128(
+                    outgoing,
+                    parent_local_all[child_valid_mask],
+                    mapped,
+                    transfer.phase_up_by_shift[shift],
+                    cupy=cupy,
+                )
+    return outgoing
+
+
+def _apply_multilevel_level_streamed(
+    *,
+    levels: tuple[CuPyMLFMMLevelData, ...],
+    transfer_by_parent: dict[int, CuPyMLFMMTransferData],
+    leaf_groups: tuple[CuPyLeafApplyGroupData, ...],
+    leaf_apply_mode: CuPyMLFMMLeafApplyMode,
+    leaf_translation_tables: CuPyLeafTranslationTablesData | None,
+    receive_adjoint_cache: dict[int, Any] | None,
+    pair_blocks_scratch: dict[str, Any] | None,
+    leaf_otf_chunk_leaves: int | None,
+    leaf_otf_bytes_budget: int | None,
+    streamed_far_chunk_bytes_budget: int,
+    level_idx: int,
+    leaf_level: int,
+    box_ids_sorted: Any,
+    incoming_chunk: Any,
+    box_nm_leaf: int,
+    x_states: Any,
+    y_out: Any,
+    nm: int,
+    nrhs: int,
+    cupy: Any,
+    stream_stats: dict[str, object] | None,
+) -> None:
+    """Apply one streamed multilevel destination chunk recursively."""
+
+    box_ids = cupy.asarray(box_ids_sorted, dtype=cupy.int32).reshape(-1)
+    level = levels[int(level_idx)]
+    current_incoming = cupy.asarray(incoming_chunk, dtype=cupy.complex128)
+    if int(box_ids.size) != int(current_incoming.shape[0]):
+        raise ValueError(
+            "Streamed multilevel incoming chunk row count mismatch: "
+            f"{int(box_ids.size)} vs {int(current_incoming.shape[0])}."
+        )
+    if stream_stats is not None:
+        level_counts = cast(dict[str, int], stream_stats.setdefault("processed_chunk_count", {}))
+        level_counts[str(level_idx)] = int(level_counts.get(str(level_idx), 0) + 1)
+        peak_boxes = cast(dict[str, int], stream_stats.setdefault("processed_chunk_peak_boxes", {}))
+        peak_boxes[str(level_idx)] = max(int(peak_boxes.get(str(level_idx), 0)), int(box_ids.size))
+    source_box_cap = _level_chunk_box_cap(
+        level=level,
+        nrhs=int(nrhs),
+        bytes_budget=int(streamed_far_chunk_bytes_budget),
+    )
+    if stream_stats is not None:
+        caps = cast(dict[str, int], stream_stats.setdefault("level_chunk_box_cap", {}))
+        caps[str(level_idx)] = int(source_box_cap)
+    full_source_ids: Any | None = None
+    full_source_outgoing: Any | None = None
+    if int(source_box_cap) >= int(level.n_boxes):
+        full_source_ids = cupy.arange(int(level.n_boxes), dtype=cupy.int32)
+        full_source_outgoing = _build_outgoing_subset_streamed(
+            levels=levels,
+            transfer_by_parent=transfer_by_parent,
+            leaf_groups=leaf_groups,
+            leaf_apply_mode=leaf_apply_mode,
+            leaf_translation_tables=leaf_translation_tables,
+            pair_blocks_scratch=pair_blocks_scratch,
+            leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
+            leaf_otf_bytes_budget=leaf_otf_bytes_budget,
+            streamed_far_chunk_bytes_budget=int(streamed_far_chunk_bytes_budget),
+            level_idx=int(level_idx),
+            leaf_level=int(leaf_level),
+            box_ids_sorted=full_source_ids,
+            box_nm_leaf=int(box_nm_leaf),
+            x_states=x_states,
+            nrhs=int(nrhs),
+            cupy=cupy,
+            stream_stats=stream_stats,
+        )
+        if stream_stats is not None:
+            fast_counts = cast(
+                dict[str, int], stream_stats.setdefault("full_level_outgoing_reuse_count", {})
+            )
+            fast_counts[str(level_idx)] = int(fast_counts.get(str(level_idx), 0) + 1)
+    for offset, batch in level.far_offset_batches.items():
+        filtered = _filter_batch_for_sorted_dst_ids(
+            src_indices=batch.src_indices,
+            dst_indices=batch.dst_indices,
+            dst_ids_sorted=box_ids,
+            cupy=cupy,
+        )
+        if filtered is None:
+            continue
+        source_ids_all, dst_local_all = filtered
+        if full_source_outgoing is not None and full_source_ids is not None:
+            matched = _filter_query_ids_to_sorted_chunk(
+                chunk_ids_sorted=full_source_ids,
+                query_ids=source_ids_all,
+                cupy=cupy,
+            )
+            if matched is None:
+                continue
+            source_valid_mask, source_local = matched
+            _weighted_gather_add_complex128(
+                current_incoming,
+                dst_local_all[source_valid_mask],
+                full_source_outgoing,
+                source_local,
+                level.offset_diagonals[offset],
+                cupy=cupy,
+            )
+            continue
+        source_ids_unique = cupy.unique(source_ids_all).astype(cupy.int32)
+        for source_chunk_ids in _iter_id_chunks(source_ids_unique, chunk_size=int(source_box_cap)):
+            matched = _filter_query_ids_to_sorted_chunk(
+                chunk_ids_sorted=source_chunk_ids,
+                query_ids=source_ids_all,
+                cupy=cupy,
+            )
+            if matched is None:
+                continue
+            source_valid_mask, source_local = matched
+            source_outgoing = _build_outgoing_subset_streamed(
+                levels=levels,
+                transfer_by_parent=transfer_by_parent,
+                leaf_groups=leaf_groups,
+                leaf_apply_mode=leaf_apply_mode,
+                leaf_translation_tables=leaf_translation_tables,
+                pair_blocks_scratch=pair_blocks_scratch,
+                leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
+                leaf_otf_bytes_budget=leaf_otf_bytes_budget,
+                streamed_far_chunk_bytes_budget=int(streamed_far_chunk_bytes_budget),
+                level_idx=int(level_idx),
+                leaf_level=int(leaf_level),
+                box_ids_sorted=source_chunk_ids,
+                box_nm_leaf=int(box_nm_leaf),
+                x_states=x_states,
+                nrhs=int(nrhs),
+                cupy=cupy,
+                stream_stats=stream_stats,
+            )
+            _weighted_gather_add_complex128(
+                current_incoming,
+                dst_local_all[source_valid_mask],
+                source_outgoing,
+                source_local,
+                level.offset_diagonals[offset],
+                cupy=cupy,
+            )
+
+    if int(level_idx) >= int(leaf_level):
+        incoming_box = _directional_to_box_regular_cupy(
+            levels[int(leaf_level)].directional,
+            current_incoming,
+            cupy=cupy,
+        )
+        _receive_selected_leaf_boxes_to_particles(
+            incoming_box,
+            selected_leaf_ids=box_ids,
+            leaf_groups=leaf_groups,
+            leaf_apply_mode=leaf_apply_mode,
+            leaf_translation_tables=leaf_translation_tables,
+            pair_blocks_scratch=pair_blocks_scratch,
+            leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
+            leaf_otf_bytes_budget=leaf_otf_bytes_budget,
+            receive_adjoint_cache=receive_adjoint_cache,
+            nm=int(nm),
+            out=y_out,
+            cupy=cupy,
+        )
+        return
+
+    transfer_down = transfer_by_parent.get(int(level_idx))
+    if transfer_down is None:
+        raise RuntimeError(
+            "Internal CuPy MLFMM error: missing multilevel transfer for streamed parent level "
+            f"{int(level_idx)}."
+        )
+    child_level = int(transfer_down.child_level)
+    child_batches: list[Any] = []
+    for batch in transfer_down.batches_by_shift.values():
+        filtered = _filter_batch_for_sorted_dst_ids(
+            src_indices=batch.src_indices,
+            dst_indices=batch.dst_indices,
+            dst_ids_sorted=box_ids,
+            cupy=cupy,
+        )
+        if filtered is None:
+            continue
+        child_batches.append(filtered[0])
+    if not child_batches:
+        return
+    child_ids_unique = cupy.unique(cupy.concatenate(child_batches, axis=0)).astype(cupy.int32)
+    child_chunk_box_cap = _level_chunk_box_cap(
+        level=levels[child_level],
+        nrhs=int(nrhs),
+        bytes_budget=int(streamed_far_chunk_bytes_budget),
+    )
+    if stream_stats is not None:
+        caps = cast(dict[str, int], stream_stats.setdefault("level_chunk_box_cap", {}))
+        caps[str(child_level)] = int(child_chunk_box_cap)
+    for child_chunk_ids in _iter_id_chunks(child_ids_unique, chunk_size=int(child_chunk_box_cap)):
+        child_incoming = cupy.zeros(
+            (
+                int(child_chunk_ids.shape[0]),
+                4,
+                int(levels[child_level].directional.grid.n_directions),
+                int(nrhs),
+            ),
+            dtype=cupy.complex128,
+        )
+        for shift, batch in transfer_down.batches_by_shift.items():
+            filtered = _filter_batch_for_sorted_dst_ids(
+                src_indices=batch.src_indices,
+                dst_indices=batch.dst_indices,
+                dst_ids_sorted=box_ids,
+                cupy=cupy,
+            )
+            if filtered is None:
+                continue
+            child_ids_all, parent_local_all = filtered
+            matched = _filter_query_ids_to_sorted_chunk(
+                chunk_ids_sorted=child_chunk_ids,
+                query_ids=child_ids_all,
+                cupy=cupy,
+            )
+            if matched is None:
+                continue
+            child_valid_mask, child_local = matched
+            if str(transfer_down.map_down.storage) == "packed_stencil":
+                _transfer_down_packed_unique_complex128(
+                    child_incoming,
+                    child_local,
+                    current_incoming,
+                    parent_local_all[child_valid_mask],
+                    transfer_down.map_down,
+                    transfer_down.phase_down_by_shift[shift],
+                    cupy=cupy,
+                )
+            elif str(transfer_down.map_down.storage) == "sparse":
+                _transfer_down_sparse_unique_complex128(
+                    child_incoming,
+                    child_local,
+                    current_incoming,
+                    parent_local_all[child_valid_mask],
+                    transfer_down.map_down,
+                    transfer_down.phase_down_by_shift[shift],
+                    cupy=cupy,
+                )
+            else:
+                shifted = (
+                    current_incoming[parent_local_all[child_valid_mask]]
+                    * transfer_down.phase_down_by_shift[shift][None, None, :, None]
+                )
+                mapped = _apply_directional_map(shifted, transfer_down.map_down, cupy=cupy)
+                _add_at_complex128(
+                    child_incoming,
+                    child_local,
+                    mapped,
+                    cupy=cupy,
+                )
+        _apply_multilevel_level_streamed(
+            levels=levels,
+            transfer_by_parent=transfer_by_parent,
+            leaf_groups=leaf_groups,
+            leaf_apply_mode=leaf_apply_mode,
+            leaf_translation_tables=leaf_translation_tables,
+            receive_adjoint_cache=receive_adjoint_cache,
+            pair_blocks_scratch=pair_blocks_scratch,
+            leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
+            leaf_otf_bytes_budget=leaf_otf_bytes_budget,
+            streamed_far_chunk_bytes_budget=int(streamed_far_chunk_bytes_budget),
+            level_idx=child_level,
+            leaf_level=int(leaf_level),
+            box_ids_sorted=child_chunk_ids,
+            incoming_chunk=child_incoming,
+            box_nm_leaf=int(box_nm_leaf),
+            x_states=x_states,
+            y_out=y_out,
+            nm=int(nm),
+            nrhs=int(nrhs),
+            cupy=cupy,
+            stream_stats=stream_stats,
+        )
+
+
+def _apply_multilevel_far_streamed(
+    prepared: CuPyMLFMMPreparedData,
+    x_states: Any,
+    *,
+    receive_adjoint_cache: dict[int, Any] | None,
+    pair_blocks_scratch: dict[str, Any] | None,
+    leaf_otf_chunk_leaves: int | None,
+    leaf_otf_bytes_budget: int | None,
+    streamed_far_chunk_bytes_budget: int,
+    workspace: CuPyMLFMMMultilevelWorkspace | None,
+    cupy: Any,
+    stream_stats: dict[str, object] | None,
+) -> Any:
+    """Apply multilevel far interactions by streaming selected destination chunks."""
+
+    multilevel = prepared.multilevel
+    if multilevel is None:
+        raise RuntimeError("Internal CuPy MLFMM error: missing multilevel prepared data.")
+    n_particles, nm, nrhs = (int(v) for v in x_states.shape)
+    y_far = (
+        workspace.y_states
+        if workspace is not None
+        else cupy.zeros((n_particles, int(nm), int(nrhs)), dtype=cupy.complex128)
+    )
+    y_far.fill(0)
+    levels = multilevel.levels
+    transfer_by_parent: dict[int, CuPyMLFMMTransferData] = {}
+    for transfer in multilevel.transfers:
+        parent_level = int(transfer.parent_level)
+        if parent_level in transfer_by_parent:
+            raise RuntimeError(
+                "Internal CuPy MLFMM error: duplicate multilevel transfer parent level "
+                f"{parent_level}."
+            )
+        transfer_by_parent[parent_level] = transfer
+    hf_start = int(multilevel.hf_start_level)
+    leaf_level = int(multilevel.leaf_level)
+    start_level = levels[hf_start]
+    top_box_ids = cupy.arange(int(start_level.n_boxes), dtype=cupy.int32)
+    top_chunk_box_cap = _level_chunk_box_cap(
+        level=start_level,
+        nrhs=int(nrhs),
+        bytes_budget=int(streamed_far_chunk_bytes_budget),
+    )
+    if stream_stats is not None:
+        caps = cast(dict[str, int], stream_stats.setdefault("level_chunk_box_cap", {}))
+        caps[str(hf_start)] = int(top_chunk_box_cap)
+    for top_chunk_ids in _iter_id_chunks(top_box_ids, chunk_size=int(top_chunk_box_cap)):
+        top_incoming = cupy.zeros(
+            (
+                int(top_chunk_ids.shape[0]),
+                4,
+                int(start_level.directional.grid.n_directions),
+                int(nrhs),
+            ),
+            dtype=cupy.complex128,
+        )
+        _apply_multilevel_level_streamed(
+            levels=levels,
+            transfer_by_parent=transfer_by_parent,
+            leaf_groups=multilevel.leaf_groups,
+            leaf_apply_mode=multilevel.leaf_apply_mode,
+            leaf_translation_tables=multilevel.leaf_translation_tables,
+            receive_adjoint_cache=receive_adjoint_cache,
+            pair_blocks_scratch=pair_blocks_scratch,
+            leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
+            leaf_otf_bytes_budget=leaf_otf_bytes_budget,
+            streamed_far_chunk_bytes_budget=int(streamed_far_chunk_bytes_budget),
+            level_idx=hf_start,
+            leaf_level=leaf_level,
+            box_ids_sorted=top_chunk_ids,
+            incoming_chunk=top_incoming,
+            box_nm_leaf=int(multilevel.box_nm),
+            x_states=x_states,
+            y_out=y_far,
+            nm=int(nm),
+            nrhs=int(nrhs),
+            cupy=cupy,
+            stream_stats=stream_stats,
+        )
+    return y_far
+
+
 def _apply_multilevel_far(
     prepared: CuPyMLFMMPreparedData,
     x_states: Any,
@@ -4366,8 +5305,11 @@ def _apply_multilevel_far(
     receive_adjoint_cache: dict[int, Any] | None,
     pair_blocks_scratch: dict[str, Any] | None,
     leaf_otf_chunk_leaves: int | None,
+    leaf_otf_bytes_budget: int | None,
+    streamed_far_chunk_bytes_budget: int,
     workspace: CuPyMLFMMMultilevelWorkspace | None,
     cupy: Any,
+    stream_stats: dict[str, object] | None,
 ) -> Any:
     """Apply sampled multilevel far interactions on device.
 
@@ -4379,6 +5321,19 @@ def _apply_multilevel_far(
     multilevel = prepared.multilevel
     if multilevel is None:
         raise RuntimeError("Internal CuPy MLFMM error: missing multilevel prepared data.")
+    if str(multilevel.leaf_apply_mode) == "on_the_fly":
+        return _apply_multilevel_far_streamed(
+            prepared,
+            x_states,
+            receive_adjoint_cache=receive_adjoint_cache,
+            pair_blocks_scratch=pair_blocks_scratch,
+            leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
+            leaf_otf_bytes_budget=leaf_otf_bytes_budget,
+            streamed_far_chunk_bytes_budget=int(streamed_far_chunk_bytes_budget),
+            workspace=workspace,
+            cupy=cupy,
+            stream_stats=stream_stats,
+        )
     n_particles, nm, nrhs = (int(v) for v in x_states.shape)
     levels = multilevel.levels
     ws = workspace
@@ -4391,6 +5346,7 @@ def _apply_multilevel_far(
         leaf_translation_tables=multilevel.leaf_translation_tables,
         pair_blocks_scratch=pair_blocks_scratch,
         leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
+        leaf_otf_bytes_budget=leaf_otf_bytes_budget,
         n_leaves=int(multilevel.n_leaves),
         box_nm=box_nm,
         nrhs=nrhs,
@@ -4519,6 +5475,7 @@ def _apply_multilevel_far(
         leaf_translation_tables=multilevel.leaf_translation_tables,
         pair_blocks_scratch=pair_blocks_scratch,
         leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
+        leaf_otf_bytes_budget=leaf_otf_bytes_budget,
         receive_adjoint_cache=receive_adjoint_cache,
         nm=nm,
         n_particles=n_particles,
@@ -4597,6 +5554,28 @@ def _multilevel_outgoing_hierarchy_bytes(
     return int(total)
 
 
+def _multilevel_stream_full_level_live_bytes_theoretical(
+    multilevel: CuPyMLFMMMultilevelData,
+    *,
+    nrhs: int,
+) -> int:
+    """Return bytes needed to stream one full sampled level as a single chunk."""
+
+    peak = 0
+    for level_idx in range(int(multilevel.hf_start_level), int(multilevel.hf_end_level) + 1):
+        level = multilevel.levels[level_idx]
+        live_bytes = (
+            3
+            * int(level.n_boxes)
+            * 4
+            * int(level.directional.grid.n_directions)
+            * int(nrhs)
+            * np.dtype(np.complex128).itemsize
+        )
+        peak = max(int(peak), int(live_bytes))
+    return int(peak)
+
+
 def _multilevel_rolling_outgoing_bytes_theoretical(
     multilevel: CuPyMLFMMMultilevelData,
     *,
@@ -4643,6 +5622,11 @@ class CuPyMLFMMCouplingOperator:
     _leaf_otf_pair_blocks_scratch: dict[str, Any] = field(
         default_factory=dict, init=False, repr=False
     )
+    _last_resolved_leaf_otf_bytes_budget: int | None = field(default=None, init=False, repr=False)
+    _last_resolved_streamed_far_chunk_bytes_budget: int | None = field(
+        default=None, init=False, repr=False
+    )
+    _last_stream_stats: dict[str, object] | None = field(default=None, init=False, repr=False)
     _device_pool_peak_total_bytes: int = field(default=0, init=False, repr=False)
     _near_workspace_cache: dict[CuPyMLFMMNearWorkspaceKey, CuPyMLFMMNearWorkspace] = field(
         default_factory=dict, init=False, repr=False
@@ -4703,6 +5687,7 @@ class CuPyMLFMMCouplingOperator:
 
         multilevel = self.prepared_data.multilevel
         rolling_diag: dict[str, object] | None = None
+        streaming_diag: dict[str, object] | None = None
         if multilevel is not None:
             if self._multilevel_workspace_cache:
                 nrhs_ref = int(next(iter(self._multilevel_workspace_cache.values())).nrhs)
@@ -4739,6 +5724,11 @@ class CuPyMLFMMCouplingOperator:
                 else int(rolling_outgoing_actual)
             )
             rolling_diag = {
+                "execution_mode": (
+                    "streamed_chunk_local"
+                    if str(multilevel.leaf_apply_mode) == "on_the_fly"
+                    else "rolling_resident"
+                ),
                 "nrhs_reference": int(nrhs_ref),
                 "full_incoming_hierarchy_bytes": int(full_incoming),
                 "rolling_incoming_bytes_theoretical": int(rolling_theoretical),
@@ -4761,6 +5751,22 @@ class CuPyMLFMMCouplingOperator:
                 "full_far_hierarchy_bytes": int(full_incoming + outgoing_hierarchy),
                 "rolling_far_hierarchy_bytes": int(rolling_used + rolling_outgoing_used),
             }
+            streaming_diag = {
+                "leaf_apply_mode": str(multilevel.leaf_apply_mode),
+                "resolved_leaf_otf_bytes_budget": (
+                    None
+                    if self._last_resolved_leaf_otf_bytes_budget is None
+                    else int(self._last_resolved_leaf_otf_bytes_budget)
+                ),
+                "resolved_streamed_far_chunk_bytes_budget": (
+                    None
+                    if self._last_resolved_streamed_far_chunk_bytes_budget is None
+                    else int(self._last_resolved_streamed_far_chunk_bytes_budget)
+                ),
+                "last_apply_stats": (
+                    None if self._last_stream_stats is None else dict(self._last_stream_stats)
+                ),
+            }
 
         return {
             "host_cache_leaf_apply_mode": str(self.host_cache_policy.leaf_apply_mode),
@@ -4773,6 +5779,16 @@ class CuPyMLFMMCouplingOperator:
                 None
                 if self.host_cache_policy.leaf_otf_chunk_leaves is None
                 else int(self.host_cache_policy.leaf_otf_chunk_leaves)
+            ),
+            "leaf_otf_bytes_budget": (
+                None
+                if self.host_cache_policy.leaf_otf_bytes_budget is None
+                else int(self.host_cache_policy.leaf_otf_bytes_budget)
+            ),
+            "streamed_far_chunk_bytes_budget": (
+                None
+                if self.host_cache_policy.streamed_far_chunk_bytes_budget is None
+                else int(self.host_cache_policy.streamed_far_chunk_bytes_budget)
             ),
             "device_pool": {
                 "used_bytes": int(pool.used_bytes()),
@@ -4799,6 +5815,7 @@ class CuPyMLFMMCouplingOperator:
                 ),
             },
             "multilevel_rolling": rolling_diag,
+            "multilevel_streaming": streaming_diag,
         }
 
     def apply(self, x: Any) -> Any:
@@ -4847,6 +5864,9 @@ class CuPyMLFMMCouplingOperator:
             cupy=cupy,
         )
         stage = str(self.prepared_data.stage)
+        resolved_leaf_otf_bytes_budget: int | None = None
+        resolved_streamed_far_chunk_bytes_budget: int | None = None
+        stream_stats: dict[str, object] | None = None
         if stage == "single_level":
             single_ws = _ensure_single_level_workspace(
                 self.prepared_data,
@@ -4856,12 +5876,25 @@ class CuPyMLFMMCouplingOperator:
                 cache=self._single_level_workspace_cache,
                 cupy=cupy,
             )
+            single = self.prepared_data.single_level
+            if single is None:
+                raise RuntimeError("Internal CuPy MLFMM error: missing single-level prepared data.")
+            if str(single.leaf_apply_mode) == "on_the_fly":
+                free_bytes, _ = cupy.cuda.runtime.memGetInfo()
+                resolved_leaf_otf_bytes_budget = _resolve_stream_bytes_budget(
+                    explicit_budget=self.host_cache_policy.leaf_otf_bytes_budget,
+                    free_bytes=int(free_bytes),
+                    fraction=0.05,
+                    minimum_bytes=8 * 1024**2,
+                    maximum_bytes=256 * 1024**2,
+                )
             y_far = _apply_single_level_far(
                 self.prepared_data,
                 x_states,
                 receive_adjoint_cache=self._receive_adjoint_cache,
                 pair_blocks_scratch=self._leaf_otf_pair_blocks_scratch,
                 leaf_otf_chunk_leaves=self.host_cache_policy.leaf_otf_chunk_leaves,
+                leaf_otf_bytes_budget=resolved_leaf_otf_bytes_budget,
                 workspace=single_ws,
                 cupy=cupy,
             )
@@ -4874,17 +5907,57 @@ class CuPyMLFMMCouplingOperator:
                 cache=self._multilevel_workspace_cache,
                 cupy=cupy,
             )
+            multilevel = self.prepared_data.multilevel
+            if multilevel is None:
+                raise RuntimeError("Internal CuPy MLFMM error: missing multilevel prepared data.")
+            if str(multilevel.leaf_apply_mode) == "on_the_fly":
+                free_bytes, _ = cupy.cuda.runtime.memGetInfo()
+                full_level_live_bytes = _multilevel_stream_full_level_live_bytes_theoretical(
+                    multilevel,
+                    nrhs=int(x_states.shape[2]),
+                )
+                resolved_leaf_otf_bytes_budget = _resolve_stream_bytes_budget(
+                    explicit_budget=self.host_cache_policy.leaf_otf_bytes_budget,
+                    free_bytes=int(free_bytes),
+                    fraction=0.05,
+                    minimum_bytes=8 * 1024**2,
+                    maximum_bytes=256 * 1024**2,
+                )
+                resolved_streamed_far_chunk_bytes_budget = _resolve_stream_bytes_budget(
+                    explicit_budget=self.host_cache_policy.streamed_far_chunk_bytes_budget,
+                    free_bytes=int(free_bytes),
+                    fraction=0.08,
+                    minimum_bytes=(
+                        int(full_level_live_bytes)
+                        if int(full_level_live_bytes) <= max(16 * 1024**2, int(free_bytes) // 2)
+                        else 16 * 1024**2
+                    ),
+                    maximum_bytes=max(256 * 1024**2, min(1024 * 1024**2, int(free_bytes))),
+                )
+                stream_stats = {}
             y_far = _apply_multilevel_far(
                 self.prepared_data,
                 x_states,
                 receive_adjoint_cache=self._receive_adjoint_cache,
                 pair_blocks_scratch=self._leaf_otf_pair_blocks_scratch,
                 leaf_otf_chunk_leaves=self.host_cache_policy.leaf_otf_chunk_leaves,
+                leaf_otf_bytes_budget=resolved_leaf_otf_bytes_budget,
+                streamed_far_chunk_bytes_budget=(
+                    0
+                    if resolved_streamed_far_chunk_bytes_budget is None
+                    else int(resolved_streamed_far_chunk_bytes_budget)
+                ),
                 workspace=multi_ws,
                 cupy=cupy,
+                stream_stats=stream_stats,
             )
         else:
             raise RuntimeError(f"Unsupported CuPy MLFMM stage {stage!r}.")
+        self._last_resolved_leaf_otf_bytes_budget = resolved_leaf_otf_bytes_budget
+        self._last_resolved_streamed_far_chunk_bytes_budget = (
+            resolved_streamed_far_chunk_bytes_budget
+        )
+        self._last_stream_stats = None if stream_stats is None else dict(stream_stats)
         y_total = cupy.asarray(y_near, dtype=cupy.complex128) + cupy.asarray(
             y_far, dtype=cupy.complex128
         )

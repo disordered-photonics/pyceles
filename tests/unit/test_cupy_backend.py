@@ -292,6 +292,24 @@ def test_cupy_prepare_coupling_rejects_nonpositive_leaf_otf_chunk_leaves() -> No
         )
 
 
+def test_cupy_prepare_coupling_rejects_nonpositive_leaf_otf_bytes_budget() -> None:
+    coupling = _transition_numpy_mlfmm_coupling()
+    with pytest.raises(ValueError, match="leaf_otf_bytes_budget must be positive"):
+        _ = prepare_mlfmm_cupy_coupling(
+            coupling,
+            host_cache_policy=CuPyMLFMMHostCachePolicy(leaf_otf_bytes_budget=0),
+        )
+
+
+def test_cupy_prepare_coupling_rejects_nonpositive_streamed_far_chunk_bytes_budget() -> None:
+    coupling = _transition_numpy_mlfmm_coupling()
+    with pytest.raises(ValueError, match="streamed_far_chunk_bytes_budget must be positive"):
+        _ = prepare_mlfmm_cupy_coupling(
+            coupling,
+            host_cache_policy=CuPyMLFMMHostCachePolicy(streamed_far_chunk_bytes_budget=0),
+        )
+
+
 def _mlfmm_transition_particles() -> tuple[Particle, ...]:
     rng = np.random.default_rng(4)
     positions = rng.uniform(-1000.0, 1000.0, size=(60, 3))
