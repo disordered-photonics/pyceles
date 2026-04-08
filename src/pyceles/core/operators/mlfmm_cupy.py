@@ -367,7 +367,7 @@ class CuPyMLFMMSingleLevelData:
 
 @dataclass(frozen=True)
 class CuPyMLFMMNearPairData:
-    """Device-ready directed exact-near leaf schedule and translation tables."""
+    """Device-ready exact-near schedule and translation tables."""
 
     near_dtype: np.dtype
     positions: Any
@@ -2521,7 +2521,7 @@ def _restore_unknown_shape(y: Any, *, squeezed: bool) -> Any:
 
 
 @cache
-def _exact_near_pairs_raw_kernel(lmax: int, near_dtype_name: str) -> Any:
+def _exact_near_pairs_leafpair_raw_kernel(lmax: int, near_dtype_name: str) -> Any:
     cupy, _ = import_cupy()
     lmax = int(lmax)
     near_dtype = np.dtype(near_dtype_name)
@@ -2536,6 +2536,15 @@ def _exact_near_pairs_raw_kernel(lmax: int, near_dtype_name: str) -> Any:
             "CuPy MLFMM near kernel supports only complex64/complex128 near dtypes. "
             f"Got {near_dtype!r}."
         )
+    math = {
+        "atan2": "atan2f" if real_t == "float" else "atan2",
+        "cos": "cosf" if real_t == "float" else "cos",
+        "floor": "floorf" if real_t == "float" else "floor",
+        "max": "fmaxf" if real_t == "float" else "fmax",
+        "pow": "powf" if real_t == "float" else "pow",
+        "sin": "sinf" if real_t == "float" else "sin",
+        "sqrt": "sqrtf" if real_t == "float" else "sqrt",
+    }
     n_orders = 2 * lmax + 1
     n_p_pdm = n_orders * (n_orders + 1) // 2
     n_phase = 2 * n_orders - 1
@@ -2549,11 +2558,11 @@ def _exact_near_pairs_raw_kernel(lmax: int, near_dtype_name: str) -> Any:
         const {real_t}* plm_coeffs
     ) {{
         {real_t} plm = ({real_t})0.0;
-        const {real_t} st_pow = (m == 0) ? ({real_t})1.0 : pow(st, ({real_t})m);
+        const {real_t} st_pow = (m == 0) ? ({real_t})1.0 : {math["pow"]}(st, ({real_t})m);
         int jj = 0;
         for (int lambda = l - m; lambda >= 0; lambda -= 2) {{
             const int idx = jj * ({n_orders} * {n_orders}) + m * {n_orders} + l;
-            plm += st_pow * pow(ct, ({real_t})lambda) * plm_coeffs[idx];
+            plm += st_pow * {math["pow"]}(ct, ({real_t})lambda) * plm_coeffs[idx];
             jj += 1;
         }}
         return plm;
@@ -2570,7 +2579,7 @@ def _exact_near_pairs_raw_kernel(lmax: int, near_dtype_name: str) -> Any:
             return table[p];
         }}
         {real_t} t = r * inv_dr;
-        int i0 = (int)floor(t);
+        int i0 = (int){math["floor"]}(t);
         {real_t} frac = t - ({real_t})i0;
         if (i0 < 0) {{
             i0 = 0;
@@ -2585,7 +2594,7 @@ def _exact_near_pairs_raw_kernel(lmax: int, near_dtype_name: str) -> Any:
         return (({real_t})1.0 - frac) * table[base0] + frac * table[base1];
     }}
 
-    extern "C" __global__ void mlfmm_exact_near_pairs(
+    extern "C" __global__ void mlfmm_exact_near_pairs_leafpair(
         const int n_leaf_pairs,
         const int nmodes,
         const int nrhs,
@@ -2655,10 +2664,12 @@ def _exact_near_pairs_raw_kernel(lmax: int, near_dtype_name: str) -> Any:
                                 positions[3 * dst_particle_shared + 1] - positions[3 * src_particle_shared + 1];
                             const {real_t} z21 =
                                 positions[3 * dst_particle_shared + 2] - positions[3 * src_particle_shared + 2];
-                            r_shared = sqrt(x21 * x21 + y21 * y21 + z21 * z21);
+                            r_shared = {math["sqrt"]}(x21 * x21 + y21 * y21 + z21 * z21);
                             ct_shared = z21 / r_shared;
-                            st_shared = sqrt(fmax(({real_t})0.0, ({real_t})1.0 - ct_shared * ct_shared));
-                            phi_shared = atan2(y21, x21);
+                            st_shared = {math["sqrt"]}(
+                                {math["max"]}(({real_t})0.0, ({real_t})1.0 - ct_shared * ct_shared)
+                            );
+                            phi_shared = {math["atan2"]}(y21, x21);
                         }}
                         __syncthreads();
 
@@ -2673,8 +2684,8 @@ def _exact_near_pairs_raw_kernel(lmax: int, near_dtype_name: str) -> Any:
                         if (threadIdx.x == 0) {{
                             for (int dm = -2 * {lmax}; dm <= 2 * {lmax}; ++dm) {{
                                 const int idx = dm + 2 * {lmax};
-                                cos_mphi_shared[idx] = cos(({real_t})dm * phi_shared);
-                                sin_mphi_shared[idx] = sin(({real_t})dm * phi_shared);
+                                cos_mphi_shared[idx] = {math["cos"]}(({real_t})dm * phi_shared);
+                                sin_mphi_shared[idx] = {math["sin"]}(({real_t})dm * phi_shared);
                             }}
                         }}
                         __syncthreads();
@@ -2727,7 +2738,7 @@ def _exact_near_pairs_raw_kernel(lmax: int, near_dtype_name: str) -> Any:
         }}
     }}
     """
-    return cupy.RawKernel(source, "mlfmm_exact_near_pairs")
+    return cupy.RawKernel(source, "mlfmm_exact_near_pairs_leafpair")
 
 
 @cache
@@ -3779,9 +3790,10 @@ def _matched_sorted_rows(
     max_index = int(container.size) - 1
     clamped = cupy.minimum(positions, max_index)
     valid = (positions < int(container.size)) & (container[clamped] == selected)
-    if int(cupy.count_nonzero(valid)) == 0:
+    selected_rows = cupy.nonzero(valid)[0].astype(cupy.int32, copy=False)
+    if int(selected_rows.size) == 0:
         return None
-    return cupy.nonzero(valid)[0].astype(cupy.int32), positions[valid].astype(cupy.int32)
+    return selected_rows, positions[selected_rows].astype(cupy.int32, copy=False)
 
 
 def _aggregate_selected_leaf_box_states(
@@ -4273,7 +4285,7 @@ def _apply_exact_near_pairs(
     workspace: CuPyMLFMMNearWorkspace | None,
     cupy: Any,
 ) -> Any:
-    """Apply exact near interactions from directed near-pair indices on device."""
+    """Apply exact near interactions on device using the directed leaf-pair schedule."""
 
     near = prepared.near_pairs
     near_dtype = np.dtype(near.near_dtype)
@@ -4290,11 +4302,10 @@ def _apply_exact_near_pairs(
             f"Got {near_dtype!r}."
         )
     cupy_compute_dtype = cupy_out_dtype
-    kernel = _exact_near_pairs_raw_kernel(int(prepared.lmax), near_dtype.str)
 
     n_particles, nm, nrhs = (int(v) for v in x_states.shape)
     n_leaf_pairs = int(near.dst_leaf_indices.size)
-    if n_leaf_pairs == 0:
+    if n_leaf_pairs == 0 or n_particles == 0:
         if workspace is not None:
             workspace.y_states.fill(0)
             return workspace.y_states
@@ -4312,38 +4323,37 @@ def _apply_exact_near_pairs(
     max_grid_y = int(props["maxGridSize"][1])
     max_grid_z = int(props["maxGridSize"][2])
     warp_size = int(props["warpSize"])
+    kernel = _exact_near_pairs_leafpair_raw_kernel(int(prepared.lmax), near_dtype.str)
     threads = max(warp_size, min(int(props["maxThreadsPerBlock"]), nm))
-    blocks_x = max(1, (nm + threads - 1) // threads)
     grid_y = min(n_leaf_pairs, max_grid_y)
+    blocks_x = max(1, (nm + threads - 1) // threads)
     grid_z = min(max(1, nrhs), max_grid_z)
 
-    kernel(
-        (int(blocks_x), int(grid_y), int(grid_z)),
-        (int(threads),),
-        (
-            np.int32(n_leaf_pairs),
-            np.int32(nm),
-            np.int32(nrhs),
-            near.positions,
-            near.dst_leaf_indices,
-            near.src_leaf_indices,
-            near.leaf_particle_offsets,
-            near.leaf_particle_indices,
-            near.lut_re,
-            near.lut_im,
-            np_real_type(float(near.inv_dr)),
-            np.int32(int(near.last_index)),
-            near.plm_coeffs,
-            near.compact_re_ab,
-            near.compact_im_ab,
-            near.mode_m,
-            near.pair_offset,
-            near.pair_pmin,
-            near.pair_pcount,
-            x_arr.reshape(-1),
-            y_arr.reshape(-1),
-        ),
+    args = (
+        np.int32(n_leaf_pairs),
+        np.int32(nm),
+        np.int32(nrhs),
+        near.positions,
+        near.dst_leaf_indices,
+        near.src_leaf_indices,
+        near.leaf_particle_offsets,
+        near.leaf_particle_indices,
+        near.lut_re,
+        near.lut_im,
+        np_real_type(float(near.inv_dr)),
+        np.int32(int(near.last_index)),
+        near.plm_coeffs,
+        near.compact_re_ab,
+        near.compact_im_ab,
+        near.mode_m,
+        near.pair_offset,
+        near.pair_pmin,
+        near.pair_pcount,
+        x_arr.reshape(-1),
+        y_arr.reshape(-1),
     )
+
+    kernel((int(blocks_x), int(grid_y), int(grid_z)), (int(threads),), args)
     return y_arr.astype(cupy_out_dtype, copy=False)
 
 
@@ -4689,9 +4699,10 @@ def _filter_batch_for_sorted_dst_ids(
     max_index = int(dst_ids.size) - 1
     clamped = cupy.minimum(positions, max_index)
     valid = (positions < int(dst_ids.size)) & (dst_ids[clamped] == dst_all)
-    if int(cupy.count_nonzero(valid)) == 0:
+    matched_rows = cupy.nonzero(valid)[0].astype(cupy.int32, copy=False)
+    if int(matched_rows.size) == 0:
         return None
-    return src_all[valid], positions[valid].astype(cupy.int32)
+    return src_all[matched_rows], positions[matched_rows].astype(cupy.int32, copy=False)
 
 
 def _filter_query_ids_to_sorted_chunk(
@@ -4700,7 +4711,7 @@ def _filter_query_ids_to_sorted_chunk(
     query_ids: Any,
     cupy: Any,
 ) -> tuple[Any, Any] | None:
-    """Return `(valid_mask, local_rows)` for arbitrary queries against sorted ids."""
+    """Return `(query_rows, local_rows)` for arbitrary queries against sorted ids."""
 
     chunk_ids = cupy.asarray(chunk_ids_sorted, dtype=cupy.int32).reshape(-1)
     queries = cupy.asarray(query_ids, dtype=cupy.int32).reshape(-1)
@@ -4710,9 +4721,55 @@ def _filter_query_ids_to_sorted_chunk(
     max_index = int(chunk_ids.size) - 1
     clamped = cupy.minimum(positions, max_index)
     valid = (positions < int(chunk_ids.size)) & (chunk_ids[clamped] == queries)
-    if int(cupy.count_nonzero(valid)) == 0:
+    query_rows = cupy.nonzero(valid)[0].astype(cupy.int32, copy=False)
+    if int(query_rows.size) == 0:
         return None
-    return valid, positions[valid].astype(cupy.int32)
+    return query_rows, positions[query_rows].astype(cupy.int32, copy=False)
+
+
+def _partition_query_rows_by_compact_unique_chunks(
+    *,
+    unique_ids_sorted: Any,
+    query_ids: Any,
+    chunk_size: int,
+    cupy: Any,
+) -> dict[int, tuple[Any, Any]]:
+    """Bucket arbitrary query ids by contiguous chunks of one compact unique-id superset."""
+
+    matched = _filter_query_ids_to_sorted_chunk(
+        chunk_ids_sorted=unique_ids_sorted,
+        query_ids=query_ids,
+        cupy=cupy,
+    )
+    if matched is None:
+        return {}
+    query_rows, unique_local_rows = matched
+    chunk_size = int(chunk_size)
+    chunk_indices = unique_local_rows // chunk_size
+    order = cupy.argsort(chunk_indices)
+    chunk_indices_sorted = chunk_indices[order]
+    query_rows_sorted = query_rows[order]
+    unique_local_rows_sorted = unique_local_rows[order]
+    chunk_ids, start_rows, counts = cupy.unique(
+        chunk_indices_sorted,
+        return_index=True,
+        return_counts=True,
+    )
+    partitions: dict[int, tuple[Any, Any]] = {}
+    for chunk_idx, start, count in zip(
+        cupy.asnumpy(chunk_ids).tolist(),
+        cupy.asnumpy(start_rows).tolist(),
+        cupy.asnumpy(counts).tolist(),
+    ):
+        row_slice = slice(int(start), int(start) + int(count))
+        chunk_row_offset = int(chunk_idx) * chunk_size
+        partitions[int(chunk_idx)] = (
+            query_rows_sorted[row_slice].astype(cupy.int32, copy=False),
+            (unique_local_rows_sorted[row_slice] - int(chunk_row_offset)).astype(
+                cupy.int32, copy=False
+            ),
+        )
+    return partitions
 
 
 def _build_outgoing_subset_streamed(
@@ -4819,6 +4876,8 @@ def _build_outgoing_subset_streamed(
                 dict[str, int], stream_stats.setdefault("full_level_outgoing_reuse_count", {})
             )
             fast_counts[str(child_level)] = int(fast_counts.get(str(child_level), 0) + 1)
+    filtered_by_shift: list[tuple[Offset3, Any, Any]] = []
+    child_batches: list[Any] = []
     for shift, batch in transfer.batches_by_shift.items():
         filtered = _filter_batch_for_sorted_dst_ids(
             src_indices=batch.src_indices,
@@ -4829,7 +4888,12 @@ def _build_outgoing_subset_streamed(
         if filtered is None:
             continue
         child_ids_all, parent_local_all = filtered
-        if full_child_outgoing is not None and full_child_ids is not None:
+        filtered_by_shift.append((shift, child_ids_all, parent_local_all))
+        child_batches.append(child_ids_all)
+    if not filtered_by_shift:
+        return outgoing
+    if full_child_outgoing is not None and full_child_ids is not None:
+        for shift, child_ids_all, parent_local_all in filtered_by_shift:
             matched = _filter_query_ids_to_sorted_chunk(
                 chunk_ids_sorted=full_child_ids,
                 query_ids=child_ids_all,
@@ -4837,13 +4901,13 @@ def _build_outgoing_subset_streamed(
             )
             if matched is None:
                 continue
-            child_valid_mask, child_local = matched
-            child_outgoing = full_child_outgoing
+            child_query_rows, child_local = matched
+            parent_rows = parent_local_all[child_query_rows]
             if str(transfer.map_up.storage) == "packed_stencil":
                 _transfer_up_packed_unique_complex128(
                     outgoing,
-                    parent_local_all[child_valid_mask],
-                    child_outgoing,
+                    parent_rows,
+                    full_child_outgoing,
                     child_local,
                     transfer.map_up,
                     transfer.phase_up_by_shift[shift],
@@ -4852,8 +4916,8 @@ def _build_outgoing_subset_streamed(
             elif str(transfer.map_up.storage) == "sparse":
                 _transfer_up_sparse_unique_complex128(
                     outgoing,
-                    parent_local_all[child_valid_mask],
-                    child_outgoing,
+                    parent_rows,
+                    full_child_outgoing,
                     child_local,
                     transfer.map_up,
                     transfer.phase_up_by_shift[shift],
@@ -4861,51 +4925,71 @@ def _build_outgoing_subset_streamed(
                 )
             else:
                 mapped = _apply_directional_map(
-                    child_outgoing[child_local],
+                    full_child_outgoing[child_local],
                     transfer.map_up,
                     cupy=cupy,
                 )
                 _weighted_add_at_complex128(
                     outgoing,
-                    parent_local_all[child_valid_mask],
+                    parent_rows,
                     mapped,
                     transfer.phase_up_by_shift[shift],
                     cupy=cupy,
                 )
-            continue
-        child_ids_unique = cupy.unique(child_ids_all).astype(cupy.int32)
-        for child_chunk_ids in _iter_id_chunks(child_ids_unique, chunk_size=int(child_box_cap)):
-            matched = _filter_query_ids_to_sorted_chunk(
-                chunk_ids_sorted=child_chunk_ids,
-                query_ids=child_ids_all,
-                cupy=cupy,
+        return outgoing
+    child_ids_unique = cupy.unique(cupy.concatenate(child_batches, axis=0)).astype(
+        cupy.int32, copy=False
+    )
+    child_matches_by_shift: list[tuple[Offset3, Any, dict[int, tuple[Any, Any]]]] = []
+    for shift, child_ids_all, parent_local_all in filtered_by_shift:
+        child_matches_by_shift.append(
+            (
+                shift,
+                parent_local_all,
+                _partition_query_rows_by_compact_unique_chunks(
+                    unique_ids_sorted=child_ids_unique,
+                    query_ids=child_ids_all,
+                    chunk_size=int(child_box_cap),
+                    cupy=cupy,
+                ),
             )
+        )
+    # Keep chunks aligned to this call's compact unique-id order. A previous
+    # fixed-global-chunk cache regressed the 1M benchmark by increasing
+    # outgoing rebuild counts, so do not reintroduce global chunk ranges here
+    # unless the whole streamed traversal is redesigned around them.
+    for child_chunk_idx, child_chunk_ids in enumerate(
+        _iter_id_chunks(child_ids_unique, chunk_size=int(child_box_cap))
+    ):
+        child_outgoing = _build_outgoing_subset_streamed(
+            levels=levels,
+            transfer_by_parent=transfer_by_parent,
+            leaf_groups=leaf_groups,
+            leaf_apply_mode=leaf_apply_mode,
+            leaf_translation_tables=leaf_translation_tables,
+            pair_blocks_scratch=pair_blocks_scratch,
+            leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
+            leaf_otf_bytes_budget=leaf_otf_bytes_budget,
+            streamed_far_chunk_bytes_budget=int(streamed_far_chunk_bytes_budget),
+            level_idx=child_level,
+            leaf_level=int(leaf_level),
+            box_ids_sorted=child_chunk_ids,
+            box_nm_leaf=int(box_nm_leaf),
+            x_states=x_states,
+            nrhs=int(nrhs),
+            cupy=cupy,
+            stream_stats=stream_stats,
+        )
+        for shift, parent_local_all, child_matches in child_matches_by_shift:
+            matched = child_matches.get(int(child_chunk_idx))
             if matched is None:
                 continue
-            child_valid_mask, child_local = matched
-            child_outgoing = _build_outgoing_subset_streamed(
-                levels=levels,
-                transfer_by_parent=transfer_by_parent,
-                leaf_groups=leaf_groups,
-                leaf_apply_mode=leaf_apply_mode,
-                leaf_translation_tables=leaf_translation_tables,
-                pair_blocks_scratch=pair_blocks_scratch,
-                leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
-                leaf_otf_bytes_budget=leaf_otf_bytes_budget,
-                streamed_far_chunk_bytes_budget=int(streamed_far_chunk_bytes_budget),
-                level_idx=child_level,
-                leaf_level=int(leaf_level),
-                box_ids_sorted=child_chunk_ids,
-                box_nm_leaf=int(box_nm_leaf),
-                x_states=x_states,
-                nrhs=int(nrhs),
-                cupy=cupy,
-                stream_stats=stream_stats,
-            )
+            child_query_rows, child_local = matched
+            parent_rows = parent_local_all[child_query_rows]
             if str(transfer.map_up.storage) == "packed_stencil":
                 _transfer_up_packed_unique_complex128(
                     outgoing,
-                    parent_local_all[child_valid_mask],
+                    parent_rows,
                     child_outgoing,
                     child_local,
                     transfer.map_up,
@@ -4915,7 +4999,7 @@ def _build_outgoing_subset_streamed(
             elif str(transfer.map_up.storage) == "sparse":
                 _transfer_up_sparse_unique_complex128(
                     outgoing,
-                    parent_local_all[child_valid_mask],
+                    parent_rows,
                     child_outgoing,
                     child_local,
                     transfer.map_up,
@@ -4930,7 +5014,7 @@ def _build_outgoing_subset_streamed(
                 )
                 _weighted_add_at_complex128(
                     outgoing,
-                    parent_local_all[child_valid_mask],
+                    parent_rows,
                     mapped,
                     transfer.phase_up_by_shift[shift],
                     cupy=cupy,
@@ -5013,6 +5097,8 @@ def _apply_multilevel_level_streamed(
                 dict[str, int], stream_stats.setdefault("full_level_outgoing_reuse_count", {})
             )
             fast_counts[str(level_idx)] = int(fast_counts.get(str(level_idx), 0) + 1)
+    filtered_by_offset: list[tuple[Offset3, Any, Any]] = []
+    source_batches: list[Any] = []
     for offset, batch in level.far_offset_batches.items():
         filtered = _filter_batch_for_sorted_dst_ids(
             src_indices=batch.src_indices,
@@ -5023,61 +5109,80 @@ def _apply_multilevel_level_streamed(
         if filtered is None:
             continue
         source_ids_all, dst_local_all = filtered
+        filtered_by_offset.append((offset, source_ids_all, dst_local_all))
+        source_batches.append(source_ids_all)
+    if filtered_by_offset:
         if full_source_outgoing is not None and full_source_ids is not None:
-            matched = _filter_query_ids_to_sorted_chunk(
-                chunk_ids_sorted=full_source_ids,
-                query_ids=source_ids_all,
-                cupy=cupy,
+            for offset, source_ids_all, dst_local_all in filtered_by_offset:
+                matched = _filter_query_ids_to_sorted_chunk(
+                    chunk_ids_sorted=full_source_ids,
+                    query_ids=source_ids_all,
+                    cupy=cupy,
+                )
+                if matched is None:
+                    continue
+                source_query_rows, source_local = matched
+                _weighted_gather_add_complex128(
+                    current_incoming,
+                    dst_local_all[source_query_rows],
+                    full_source_outgoing,
+                    source_local,
+                    level.offset_diagonals[offset],
+                    cupy=cupy,
+                )
+        else:
+            source_ids_unique = cupy.unique(cupy.concatenate(source_batches, axis=0)).astype(
+                cupy.int32, copy=False
             )
-            if matched is None:
-                continue
-            source_valid_mask, source_local = matched
-            _weighted_gather_add_complex128(
-                current_incoming,
-                dst_local_all[source_valid_mask],
-                full_source_outgoing,
-                source_local,
-                level.offset_diagonals[offset],
-                cupy=cupy,
-            )
-            continue
-        source_ids_unique = cupy.unique(source_ids_all).astype(cupy.int32)
-        for source_chunk_ids in _iter_id_chunks(source_ids_unique, chunk_size=int(source_box_cap)):
-            matched = _filter_query_ids_to_sorted_chunk(
-                chunk_ids_sorted=source_chunk_ids,
-                query_ids=source_ids_all,
-                cupy=cupy,
-            )
-            if matched is None:
-                continue
-            source_valid_mask, source_local = matched
-            source_outgoing = _build_outgoing_subset_streamed(
-                levels=levels,
-                transfer_by_parent=transfer_by_parent,
-                leaf_groups=leaf_groups,
-                leaf_apply_mode=leaf_apply_mode,
-                leaf_translation_tables=leaf_translation_tables,
-                pair_blocks_scratch=pair_blocks_scratch,
-                leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
-                leaf_otf_bytes_budget=leaf_otf_bytes_budget,
-                streamed_far_chunk_bytes_budget=int(streamed_far_chunk_bytes_budget),
-                level_idx=int(level_idx),
-                leaf_level=int(leaf_level),
-                box_ids_sorted=source_chunk_ids,
-                box_nm_leaf=int(box_nm_leaf),
-                x_states=x_states,
-                nrhs=int(nrhs),
-                cupy=cupy,
-                stream_stats=stream_stats,
-            )
-            _weighted_gather_add_complex128(
-                current_incoming,
-                dst_local_all[source_valid_mask],
-                source_outgoing,
-                source_local,
-                level.offset_diagonals[offset],
-                cupy=cupy,
-            )
+            source_matches_by_offset: list[tuple[Offset3, Any, dict[int, tuple[Any, Any]]]] = []
+            for offset, source_ids_all, dst_local_all in filtered_by_offset:
+                source_matches_by_offset.append(
+                    (
+                        offset,
+                        dst_local_all,
+                        _partition_query_rows_by_compact_unique_chunks(
+                            unique_ids_sorted=source_ids_unique,
+                            query_ids=source_ids_all,
+                            chunk_size=int(source_box_cap),
+                            cupy=cupy,
+                        ),
+                    )
+                )
+            for source_chunk_idx, source_chunk_ids in enumerate(
+                _iter_id_chunks(source_ids_unique, chunk_size=int(source_box_cap))
+            ):
+                source_outgoing = _build_outgoing_subset_streamed(
+                    levels=levels,
+                    transfer_by_parent=transfer_by_parent,
+                    leaf_groups=leaf_groups,
+                    leaf_apply_mode=leaf_apply_mode,
+                    leaf_translation_tables=leaf_translation_tables,
+                    pair_blocks_scratch=pair_blocks_scratch,
+                    leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
+                    leaf_otf_bytes_budget=leaf_otf_bytes_budget,
+                    streamed_far_chunk_bytes_budget=int(streamed_far_chunk_bytes_budget),
+                    level_idx=int(level_idx),
+                    leaf_level=int(leaf_level),
+                    box_ids_sorted=source_chunk_ids,
+                    box_nm_leaf=int(box_nm_leaf),
+                    x_states=x_states,
+                    nrhs=int(nrhs),
+                    cupy=cupy,
+                    stream_stats=stream_stats,
+                )
+                for offset, dst_local_all, source_matches in source_matches_by_offset:
+                    matched = source_matches.get(int(source_chunk_idx))
+                    if matched is None:
+                        continue
+                    source_query_rows, source_local = matched
+                    _weighted_gather_add_complex128(
+                        current_incoming,
+                        dst_local_all[source_query_rows],
+                        source_outgoing,
+                        source_local,
+                        level.offset_diagonals[offset],
+                        cupy=cupy,
+                    )
 
     if int(level_idx) >= int(leaf_level):
         incoming_box = _directional_to_box_regular_cupy(
@@ -5108,8 +5213,9 @@ def _apply_multilevel_level_streamed(
             f"{int(level_idx)}."
         )
     child_level = int(transfer_down.child_level)
+    filtered_child_by_shift: list[tuple[Offset3, Any, Any]] = []
     child_batches: list[Any] = []
-    for batch in transfer_down.batches_by_shift.values():
+    for shift, batch in transfer_down.batches_by_shift.items():
         filtered = _filter_batch_for_sorted_dst_ids(
             src_indices=batch.src_indices,
             dst_indices=batch.dst_indices,
@@ -5118,8 +5224,10 @@ def _apply_multilevel_level_streamed(
         )
         if filtered is None:
             continue
-        child_batches.append(filtered[0])
-    if not child_batches:
+        child_ids_all, parent_local_all = filtered
+        filtered_child_by_shift.append((shift, child_ids_all, parent_local_all))
+        child_batches.append(child_ids_all)
+    if not filtered_child_by_shift:
         return
     child_ids_unique = cupy.unique(cupy.concatenate(child_batches, axis=0)).astype(cupy.int32)
     child_chunk_box_cap = _level_chunk_box_cap(
@@ -5130,7 +5238,23 @@ def _apply_multilevel_level_streamed(
     if stream_stats is not None:
         caps = cast(dict[str, int], stream_stats.setdefault("level_chunk_box_cap", {}))
         caps[str(child_level)] = int(child_chunk_box_cap)
-    for child_chunk_ids in _iter_id_chunks(child_ids_unique, chunk_size=int(child_chunk_box_cap)):
+    child_matches_by_shift: list[tuple[Offset3, Any, dict[int, tuple[Any, Any]]]] = []
+    for shift, child_ids_all, parent_local_all in filtered_child_by_shift:
+        child_matches_by_shift.append(
+            (
+                shift,
+                parent_local_all,
+                _partition_query_rows_by_compact_unique_chunks(
+                    unique_ids_sorted=child_ids_unique,
+                    query_ids=child_ids_all,
+                    chunk_size=int(child_chunk_box_cap),
+                    cupy=cupy,
+                ),
+            )
+        )
+    for child_chunk_idx, child_chunk_ids in enumerate(
+        _iter_id_chunks(child_ids_unique, chunk_size=int(child_chunk_box_cap))
+    ):
         child_incoming = cupy.zeros(
             (
                 int(child_chunk_ids.shape[0]),
@@ -5140,30 +5264,18 @@ def _apply_multilevel_level_streamed(
             ),
             dtype=cupy.complex128,
         )
-        for shift, batch in transfer_down.batches_by_shift.items():
-            filtered = _filter_batch_for_sorted_dst_ids(
-                src_indices=batch.src_indices,
-                dst_indices=batch.dst_indices,
-                dst_ids_sorted=box_ids,
-                cupy=cupy,
-            )
-            if filtered is None:
-                continue
-            child_ids_all, parent_local_all = filtered
-            matched = _filter_query_ids_to_sorted_chunk(
-                chunk_ids_sorted=child_chunk_ids,
-                query_ids=child_ids_all,
-                cupy=cupy,
-            )
+        for shift, parent_local_all, child_matches in child_matches_by_shift:
+            matched = child_matches.get(int(child_chunk_idx))
             if matched is None:
                 continue
-            child_valid_mask, child_local = matched
+            child_query_rows, child_local = matched
+            parent_rows = parent_local_all[child_query_rows]
             if str(transfer_down.map_down.storage) == "packed_stencil":
                 _transfer_down_packed_unique_complex128(
                     child_incoming,
                     child_local,
                     current_incoming,
-                    parent_local_all[child_valid_mask],
+                    parent_rows,
                     transfer_down.map_down,
                     transfer_down.phase_down_by_shift[shift],
                     cupy=cupy,
@@ -5173,14 +5285,14 @@ def _apply_multilevel_level_streamed(
                     child_incoming,
                     child_local,
                     current_incoming,
-                    parent_local_all[child_valid_mask],
+                    parent_rows,
                     transfer_down.map_down,
                     transfer_down.phase_down_by_shift[shift],
                     cupy=cupy,
                 )
             else:
                 shifted = (
-                    current_incoming[parent_local_all[child_valid_mask]]
+                    current_incoming[parent_rows]
                     * transfer_down.phase_down_by_shift[shift][None, None, :, None]
                 )
                 mapped = _apply_directional_map(shifted, transfer_down.map_down, cupy=cupy)
@@ -5958,9 +6070,8 @@ class CuPyMLFMMCouplingOperator:
             resolved_streamed_far_chunk_bytes_budget
         )
         self._last_stream_stats = None if stream_stats is None else dict(stream_stats)
-        y_total = cupy.asarray(y_near, dtype=cupy.complex128) + cupy.asarray(
-            y_far, dtype=cupy.complex128
-        )
+        y_total = cupy.asarray(y_far, dtype=cupy.complex128)
+        y_total += cupy.asarray(y_near, dtype=cupy.complex128)
         self._update_device_pool_peak(cupy=cupy)
         return _restore_unknown_shape(
             y_total.astype(_cupy_complex_dtype(out_dtype, cupy=cupy), copy=False),
