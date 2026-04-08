@@ -4772,6 +4772,202 @@ def _partition_query_rows_by_compact_unique_chunks(
     return partitions
 
 
+def _level_group_box_cap(
+    *,
+    level: CuPyMLFMMLevelData,
+    nrhs: int,
+    bytes_budget: int,
+) -> int:
+    """Cap one resident destination-chunk group from incoming-buffer live bytes."""
+
+    ndirs = int(level.directional.grid.n_directions)
+    bytes_per_box = 4 * ndirs * int(nrhs) * np.dtype(np.complex128).itemsize
+    if bytes_per_box <= 0:
+        return 1
+    return max(1, int(bytes_budget) // int(bytes_per_box))
+
+
+def _iter_chunk_groups_by_total_boxes(
+    chunks: list[tuple[Any, Any]],
+    *,
+    box_cap: int,
+) -> Iterator[list[tuple[Any, Any]]]:
+    """Yield contiguous chunk groups whose total box count stays within `box_cap`."""
+
+    grouped: list[tuple[Any, Any]] = []
+    grouped_boxes = 0
+    for box_ids, incoming in chunks:
+        n_boxes = int(box_ids.shape[0])
+        if grouped and grouped_boxes + n_boxes > int(box_cap):
+            yield grouped
+            grouped = []
+            grouped_boxes = 0
+        grouped.append((box_ids, incoming))
+        grouped_boxes += int(n_boxes)
+    if grouped:
+        yield grouped
+
+
+def _apply_same_level_far_streamed_chunk_group(
+    *,
+    levels: tuple[CuPyMLFMMLevelData, ...],
+    transfer_by_parent: dict[int, CuPyMLFMMTransferData],
+    leaf_groups: tuple[CuPyLeafApplyGroupData, ...],
+    leaf_apply_mode: CuPyMLFMMLeafApplyMode,
+    leaf_translation_tables: CuPyLeafTranslationTablesData | None,
+    pair_blocks_scratch: dict[str, Any] | None,
+    leaf_otf_chunk_leaves: int | None,
+    leaf_otf_bytes_budget: int | None,
+    streamed_far_chunk_bytes_budget: int,
+    level_idx: int,
+    leaf_level: int,
+    chunks: list[tuple[Any, Any]],
+    box_nm_leaf: int,
+    x_states: Any,
+    nrhs: int,
+    cupy: Any,
+    stream_stats: dict[str, object] | None,
+) -> None:
+    """Accumulate same-level far contributions for one destination-chunk group."""
+
+    if not chunks:
+        return
+    level = levels[int(level_idx)]
+    source_box_cap = _level_chunk_box_cap(
+        level=level,
+        nrhs=int(nrhs),
+        bytes_budget=int(streamed_far_chunk_bytes_budget),
+    )
+    if stream_stats is not None:
+        caps = cast(dict[str, int], stream_stats.setdefault("level_chunk_box_cap", {}))
+        caps[str(level_idx)] = int(source_box_cap)
+    full_source_ids: Any | None = None
+    full_source_outgoing: Any | None = None
+    if int(source_box_cap) >= int(level.n_boxes):
+        full_source_ids = cupy.arange(int(level.n_boxes), dtype=cupy.int32)
+        full_source_outgoing = _build_outgoing_subset_streamed(
+            levels=levels,
+            transfer_by_parent=transfer_by_parent,
+            leaf_groups=leaf_groups,
+            leaf_apply_mode=leaf_apply_mode,
+            leaf_translation_tables=leaf_translation_tables,
+            pair_blocks_scratch=pair_blocks_scratch,
+            leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
+            leaf_otf_bytes_budget=leaf_otf_bytes_budget,
+            streamed_far_chunk_bytes_budget=int(streamed_far_chunk_bytes_budget),
+            level_idx=int(level_idx),
+            leaf_level=int(leaf_level),
+            box_ids_sorted=full_source_ids,
+            box_nm_leaf=int(box_nm_leaf),
+            x_states=x_states,
+            nrhs=int(nrhs),
+            cupy=cupy,
+            stream_stats=stream_stats,
+        )
+        if stream_stats is not None:
+            fast_counts = cast(
+                dict[str, int], stream_stats.setdefault("full_level_outgoing_reuse_count", {})
+            )
+            fast_counts[str(level_idx)] = int(fast_counts.get(str(level_idx), 0) + int(len(chunks)))
+    filtered_by_chunk: list[list[tuple[Offset3, Any, Any]]] = []
+    source_batches: list[Any] = []
+    for box_ids, _incoming in chunks:
+        filtered_offsets: list[tuple[Offset3, Any, Any]] = []
+        for offset, batch in level.far_offset_batches.items():
+            filtered = _filter_batch_for_sorted_dst_ids(
+                src_indices=batch.src_indices,
+                dst_indices=batch.dst_indices,
+                dst_ids_sorted=box_ids,
+                cupy=cupy,
+            )
+            if filtered is None:
+                continue
+            source_ids_all, dst_local_all = filtered
+            filtered_offsets.append((offset, source_ids_all, dst_local_all))
+            source_batches.append(source_ids_all)
+        filtered_by_chunk.append(filtered_offsets)
+    if not source_batches:
+        return
+    if full_source_outgoing is not None and full_source_ids is not None:
+        for (_box_ids, incoming), filtered_offsets in zip(chunks, filtered_by_chunk):
+            current_incoming = cupy.asarray(incoming, dtype=cupy.complex128)
+            for offset, source_ids_all, dst_local_all in filtered_offsets:
+                matched = _filter_query_ids_to_sorted_chunk(
+                    chunk_ids_sorted=full_source_ids,
+                    query_ids=source_ids_all,
+                    cupy=cupy,
+                )
+                if matched is None:
+                    continue
+                source_query_rows, source_local = matched
+                _weighted_gather_add_complex128(
+                    current_incoming,
+                    dst_local_all[source_query_rows],
+                    full_source_outgoing,
+                    source_local,
+                    level.offset_diagonals[offset],
+                    cupy=cupy,
+                )
+        return
+    source_ids_unique = cupy.unique(cupy.concatenate(source_batches, axis=0)).astype(
+        cupy.int32, copy=False
+    )
+    source_matches_by_chunk: list[list[tuple[Offset3, Any, dict[int, tuple[Any, Any]]]]] = []
+    for filtered_offsets in filtered_by_chunk:
+        offset_matches: list[tuple[Offset3, Any, dict[int, tuple[Any, Any]]]] = []
+        for offset, source_ids_all, dst_local_all in filtered_offsets:
+            offset_matches.append(
+                (
+                    offset,
+                    dst_local_all,
+                    _partition_query_rows_by_compact_unique_chunks(
+                        unique_ids_sorted=source_ids_unique,
+                        query_ids=source_ids_all,
+                        chunk_size=int(source_box_cap),
+                        cupy=cupy,
+                    ),
+                )
+            )
+        source_matches_by_chunk.append(offset_matches)
+    for source_chunk_idx, source_chunk_ids in enumerate(
+        _iter_id_chunks(source_ids_unique, chunk_size=int(source_box_cap))
+    ):
+        source_outgoing = _build_outgoing_subset_streamed(
+            levels=levels,
+            transfer_by_parent=transfer_by_parent,
+            leaf_groups=leaf_groups,
+            leaf_apply_mode=leaf_apply_mode,
+            leaf_translation_tables=leaf_translation_tables,
+            pair_blocks_scratch=pair_blocks_scratch,
+            leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
+            leaf_otf_bytes_budget=leaf_otf_bytes_budget,
+            streamed_far_chunk_bytes_budget=int(streamed_far_chunk_bytes_budget),
+            level_idx=int(level_idx),
+            leaf_level=int(leaf_level),
+            box_ids_sorted=source_chunk_ids,
+            box_nm_leaf=int(box_nm_leaf),
+            x_states=x_states,
+            nrhs=int(nrhs),
+            cupy=cupy,
+            stream_stats=stream_stats,
+        )
+        for (_box_ids, incoming), offset_matches in zip(chunks, source_matches_by_chunk):
+            current_incoming = cupy.asarray(incoming, dtype=cupy.complex128)
+            for offset, dst_local_all, source_matches in offset_matches:
+                matched = source_matches.get(int(source_chunk_idx))
+                if matched is None:
+                    continue
+                source_query_rows, source_local = matched
+                _weighted_gather_add_complex128(
+                    current_incoming,
+                    dst_local_all[source_query_rows],
+                    source_outgoing,
+                    source_local,
+                    level.offset_diagonals[offset],
+                    cupy=cupy,
+                )
+
+
 def _build_outgoing_subset_streamed(
     *,
     levels: tuple[CuPyMLFMMLevelData, ...],
@@ -4955,9 +5151,9 @@ def _build_outgoing_subset_streamed(
             )
         )
     # Keep chunks aligned to this call's compact unique-id order. A previous
-    # fixed-global-chunk cache regressed the 1M benchmark by increasing
-    # outgoing rebuild counts, so do not reintroduce global chunk ranges here
-    # unless the whole streamed traversal is redesigned around them.
+    # fixed-global-chunk cache increased outgoing rebuild counts on large
+    # streamed runs, so do not reintroduce global chunk ranges here unless the
+    # whole streamed traversal is redesigned around them.
     for child_chunk_idx, child_chunk_ids in enumerate(
         _iter_id_chunks(child_ids_unique, chunk_size=int(child_box_cap))
     ):
@@ -5045,11 +5241,11 @@ def _apply_multilevel_level_streamed(
     nrhs: int,
     cupy: Any,
     stream_stats: dict[str, object] | None,
+    skip_same_level_far: bool = False,
 ) -> None:
     """Apply one streamed multilevel destination chunk recursively."""
 
     box_ids = cupy.asarray(box_ids_sorted, dtype=cupy.int32).reshape(-1)
-    level = levels[int(level_idx)]
     current_incoming = cupy.asarray(incoming_chunk, dtype=cupy.complex128)
     if int(box_ids.size) != int(current_incoming.shape[0]):
         raise ValueError(
@@ -5061,19 +5257,8 @@ def _apply_multilevel_level_streamed(
         level_counts[str(level_idx)] = int(level_counts.get(str(level_idx), 0) + 1)
         peak_boxes = cast(dict[str, int], stream_stats.setdefault("processed_chunk_peak_boxes", {}))
         peak_boxes[str(level_idx)] = max(int(peak_boxes.get(str(level_idx), 0)), int(box_ids.size))
-    source_box_cap = _level_chunk_box_cap(
-        level=level,
-        nrhs=int(nrhs),
-        bytes_budget=int(streamed_far_chunk_bytes_budget),
-    )
-    if stream_stats is not None:
-        caps = cast(dict[str, int], stream_stats.setdefault("level_chunk_box_cap", {}))
-        caps[str(level_idx)] = int(source_box_cap)
-    full_source_ids: Any | None = None
-    full_source_outgoing: Any | None = None
-    if int(source_box_cap) >= int(level.n_boxes):
-        full_source_ids = cupy.arange(int(level.n_boxes), dtype=cupy.int32)
-        full_source_outgoing = _build_outgoing_subset_streamed(
+    if not skip_same_level_far:
+        _apply_same_level_far_streamed_chunk_group(
             levels=levels,
             transfer_by_parent=transfer_by_parent,
             leaf_groups=leaf_groups,
@@ -5085,104 +5270,13 @@ def _apply_multilevel_level_streamed(
             streamed_far_chunk_bytes_budget=int(streamed_far_chunk_bytes_budget),
             level_idx=int(level_idx),
             leaf_level=int(leaf_level),
-            box_ids_sorted=full_source_ids,
+            chunks=[(box_ids, current_incoming)],
             box_nm_leaf=int(box_nm_leaf),
             x_states=x_states,
             nrhs=int(nrhs),
             cupy=cupy,
             stream_stats=stream_stats,
         )
-        if stream_stats is not None:
-            fast_counts = cast(
-                dict[str, int], stream_stats.setdefault("full_level_outgoing_reuse_count", {})
-            )
-            fast_counts[str(level_idx)] = int(fast_counts.get(str(level_idx), 0) + 1)
-    filtered_by_offset: list[tuple[Offset3, Any, Any]] = []
-    source_batches: list[Any] = []
-    for offset, batch in level.far_offset_batches.items():
-        filtered = _filter_batch_for_sorted_dst_ids(
-            src_indices=batch.src_indices,
-            dst_indices=batch.dst_indices,
-            dst_ids_sorted=box_ids,
-            cupy=cupy,
-        )
-        if filtered is None:
-            continue
-        source_ids_all, dst_local_all = filtered
-        filtered_by_offset.append((offset, source_ids_all, dst_local_all))
-        source_batches.append(source_ids_all)
-    if filtered_by_offset:
-        if full_source_outgoing is not None and full_source_ids is not None:
-            for offset, source_ids_all, dst_local_all in filtered_by_offset:
-                matched = _filter_query_ids_to_sorted_chunk(
-                    chunk_ids_sorted=full_source_ids,
-                    query_ids=source_ids_all,
-                    cupy=cupy,
-                )
-                if matched is None:
-                    continue
-                source_query_rows, source_local = matched
-                _weighted_gather_add_complex128(
-                    current_incoming,
-                    dst_local_all[source_query_rows],
-                    full_source_outgoing,
-                    source_local,
-                    level.offset_diagonals[offset],
-                    cupy=cupy,
-                )
-        else:
-            source_ids_unique = cupy.unique(cupy.concatenate(source_batches, axis=0)).astype(
-                cupy.int32, copy=False
-            )
-            source_matches_by_offset: list[tuple[Offset3, Any, dict[int, tuple[Any, Any]]]] = []
-            for offset, source_ids_all, dst_local_all in filtered_by_offset:
-                source_matches_by_offset.append(
-                    (
-                        offset,
-                        dst_local_all,
-                        _partition_query_rows_by_compact_unique_chunks(
-                            unique_ids_sorted=source_ids_unique,
-                            query_ids=source_ids_all,
-                            chunk_size=int(source_box_cap),
-                            cupy=cupy,
-                        ),
-                    )
-                )
-            for source_chunk_idx, source_chunk_ids in enumerate(
-                _iter_id_chunks(source_ids_unique, chunk_size=int(source_box_cap))
-            ):
-                source_outgoing = _build_outgoing_subset_streamed(
-                    levels=levels,
-                    transfer_by_parent=transfer_by_parent,
-                    leaf_groups=leaf_groups,
-                    leaf_apply_mode=leaf_apply_mode,
-                    leaf_translation_tables=leaf_translation_tables,
-                    pair_blocks_scratch=pair_blocks_scratch,
-                    leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
-                    leaf_otf_bytes_budget=leaf_otf_bytes_budget,
-                    streamed_far_chunk_bytes_budget=int(streamed_far_chunk_bytes_budget),
-                    level_idx=int(level_idx),
-                    leaf_level=int(leaf_level),
-                    box_ids_sorted=source_chunk_ids,
-                    box_nm_leaf=int(box_nm_leaf),
-                    x_states=x_states,
-                    nrhs=int(nrhs),
-                    cupy=cupy,
-                    stream_stats=stream_stats,
-                )
-                for offset, dst_local_all, source_matches in source_matches_by_offset:
-                    matched = source_matches.get(int(source_chunk_idx))
-                    if matched is None:
-                        continue
-                    source_query_rows, source_local = matched
-                    _weighted_gather_add_complex128(
-                        current_incoming,
-                        dst_local_all[source_query_rows],
-                        source_outgoing,
-                        source_local,
-                        level.offset_diagonals[offset],
-                        cupy=cupy,
-                    )
 
     if int(level_idx) >= int(leaf_level):
         incoming_box = _directional_to_box_regular_cupy(
@@ -5252,6 +5346,7 @@ def _apply_multilevel_level_streamed(
                 ),
             )
         )
+    child_chunks: list[tuple[Any, Any]] = []
     for child_chunk_idx, child_chunk_ids in enumerate(
         _iter_id_chunks(child_ids_unique, chunk_size=int(child_chunk_box_cap))
     ):
@@ -5302,29 +5397,59 @@ def _apply_multilevel_level_streamed(
                     mapped,
                     cupy=cupy,
                 )
-        _apply_multilevel_level_streamed(
+        child_chunks.append((child_chunk_ids, child_incoming))
+    child_group_box_cap = _level_group_box_cap(
+        level=levels[child_level],
+        nrhs=int(nrhs),
+        bytes_budget=int(streamed_far_chunk_bytes_budget),
+    )
+    for child_group in _iter_chunk_groups_by_total_boxes(
+        child_chunks, box_cap=int(child_group_box_cap)
+    ):
+        _apply_same_level_far_streamed_chunk_group(
             levels=levels,
             transfer_by_parent=transfer_by_parent,
             leaf_groups=leaf_groups,
             leaf_apply_mode=leaf_apply_mode,
             leaf_translation_tables=leaf_translation_tables,
-            receive_adjoint_cache=receive_adjoint_cache,
             pair_blocks_scratch=pair_blocks_scratch,
             leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
             leaf_otf_bytes_budget=leaf_otf_bytes_budget,
             streamed_far_chunk_bytes_budget=int(streamed_far_chunk_bytes_budget),
-            level_idx=child_level,
+            level_idx=int(child_level),
             leaf_level=int(leaf_level),
-            box_ids_sorted=child_chunk_ids,
-            incoming_chunk=child_incoming,
+            chunks=child_group,
             box_nm_leaf=int(box_nm_leaf),
             x_states=x_states,
-            y_out=y_out,
-            nm=int(nm),
             nrhs=int(nrhs),
             cupy=cupy,
             stream_stats=stream_stats,
         )
+        for child_chunk_ids, child_incoming in child_group:
+            _apply_multilevel_level_streamed(
+                levels=levels,
+                transfer_by_parent=transfer_by_parent,
+                leaf_groups=leaf_groups,
+                leaf_apply_mode=leaf_apply_mode,
+                leaf_translation_tables=leaf_translation_tables,
+                receive_adjoint_cache=receive_adjoint_cache,
+                pair_blocks_scratch=pair_blocks_scratch,
+                leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
+                leaf_otf_bytes_budget=leaf_otf_bytes_budget,
+                streamed_far_chunk_bytes_budget=int(streamed_far_chunk_bytes_budget),
+                level_idx=child_level,
+                leaf_level=int(leaf_level),
+                box_ids_sorted=child_chunk_ids,
+                incoming_chunk=child_incoming,
+                box_nm_leaf=int(box_nm_leaf),
+                x_states=x_states,
+                y_out=y_out,
+                nm=int(nm),
+                nrhs=int(nrhs),
+                cupy=cupy,
+                stream_stats=stream_stats,
+                skip_same_level_far=True,
+            )
 
 
 def _apply_multilevel_far_streamed(
@@ -5374,6 +5499,7 @@ def _apply_multilevel_far_streamed(
     if stream_stats is not None:
         caps = cast(dict[str, int], stream_stats.setdefault("level_chunk_box_cap", {}))
         caps[str(hf_start)] = int(top_chunk_box_cap)
+    top_chunks: list[tuple[Any, Any]] = []
     for top_chunk_ids in _iter_id_chunks(top_box_ids, chunk_size=int(top_chunk_box_cap)):
         top_incoming = cupy.zeros(
             (
@@ -5384,29 +5510,57 @@ def _apply_multilevel_far_streamed(
             ),
             dtype=cupy.complex128,
         )
-        _apply_multilevel_level_streamed(
+        top_chunks.append((top_chunk_ids, top_incoming))
+    top_group_box_cap = _level_group_box_cap(
+        level=start_level,
+        nrhs=int(nrhs),
+        bytes_budget=int(streamed_far_chunk_bytes_budget),
+    )
+    for top_group in _iter_chunk_groups_by_total_boxes(top_chunks, box_cap=int(top_group_box_cap)):
+        _apply_same_level_far_streamed_chunk_group(
             levels=levels,
             transfer_by_parent=transfer_by_parent,
             leaf_groups=multilevel.leaf_groups,
             leaf_apply_mode=multilevel.leaf_apply_mode,
             leaf_translation_tables=multilevel.leaf_translation_tables,
-            receive_adjoint_cache=receive_adjoint_cache,
             pair_blocks_scratch=pair_blocks_scratch,
             leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
             leaf_otf_bytes_budget=leaf_otf_bytes_budget,
             streamed_far_chunk_bytes_budget=int(streamed_far_chunk_bytes_budget),
-            level_idx=hf_start,
-            leaf_level=leaf_level,
-            box_ids_sorted=top_chunk_ids,
-            incoming_chunk=top_incoming,
+            level_idx=int(hf_start),
+            leaf_level=int(leaf_level),
+            chunks=top_group,
             box_nm_leaf=int(multilevel.box_nm),
             x_states=x_states,
-            y_out=y_far,
-            nm=int(nm),
             nrhs=int(nrhs),
             cupy=cupy,
             stream_stats=stream_stats,
         )
+        for top_chunk_ids, top_incoming in top_group:
+            _apply_multilevel_level_streamed(
+                levels=levels,
+                transfer_by_parent=transfer_by_parent,
+                leaf_groups=multilevel.leaf_groups,
+                leaf_apply_mode=multilevel.leaf_apply_mode,
+                leaf_translation_tables=multilevel.leaf_translation_tables,
+                receive_adjoint_cache=receive_adjoint_cache,
+                pair_blocks_scratch=pair_blocks_scratch,
+                leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
+                leaf_otf_bytes_budget=leaf_otf_bytes_budget,
+                streamed_far_chunk_bytes_budget=int(streamed_far_chunk_bytes_budget),
+                level_idx=hf_start,
+                leaf_level=leaf_level,
+                box_ids_sorted=top_chunk_ids,
+                incoming_chunk=top_incoming,
+                box_nm_leaf=int(multilevel.box_nm),
+                x_states=x_states,
+                y_out=y_far,
+                nm=int(nm),
+                nrhs=int(nrhs),
+                cupy=cupy,
+                stream_stats=stream_stats,
+                skip_same_level_far=True,
+            )
     return y_far
 
 
