@@ -266,6 +266,7 @@ def gmres_cupy_native(
     reorthogonalize: bool = True,
     breakdown_tol: float = 1e-30,
     happy_breakdown_tol: float = 0.0,
+    compute_final_residual: bool = True,
 ) -> CuPyGMRESNativeResult:
     """Run restarted left-preconditioned GMRES fully on CuPy arrays.
 
@@ -487,6 +488,16 @@ def gmres_cupy_native(
         if float(cupy.abs(y[0])) > 0.0:
             y[0] = y[0] / H[0, 0].copy()
         x_vec = x_vec + cupy.asarray(y @ V[:k_used, :], dtype=op_dtype)
+        if iterations >= maxiter_total and not bool(compute_final_residual):
+            residual_norm = float("nan")
+            relative_residual = float("nan")
+            if cycle_breakdown:
+                info = iterations if iterations > 0 else maxiter_total
+                converged_reason = cycle_breakdown_reason
+            else:
+                info = iterations
+                converged_reason = "maxiter_reached"
+            break
         residual_norm, relative_residual, r_true = _true_residual_stats(x_vec)
         true_hist.append(relative_residual)
         if restart_callback is not None:
@@ -563,6 +574,7 @@ def fgmres_cupy_native(
     reorthogonalize: bool = True,
     breakdown_tol: float = 1e-30,
     happy_breakdown_tol: float = 0.0,
+    compute_final_residual: bool = True,
 ) -> CuPyGMRESNativeResult:
     """Run restarted right-preconditioned flexible GMRES on CuPy arrays.
 
@@ -788,6 +800,16 @@ def fgmres_cupy_native(
         if float(cupy.abs(y[0])) > 0.0:
             y[0] = y[0] / H[0, 0].copy()
         x_vec = x_vec + cupy.asarray(y @ Z[:k_used, :], dtype=op_dtype)
+        if iterations >= maxiter_total and not bool(compute_final_residual):
+            residual_norm = float("nan")
+            relative_residual = float("nan")
+            if cycle_breakdown:
+                info = iterations if iterations > 0 else maxiter_total
+                converged_reason = cycle_breakdown_reason
+            else:
+                info = iterations
+                converged_reason = "maxiter_reached"
+            break
         residual_norm, relative_residual, r_true = _true_residual_stats(x_vec)
         true_hist.append(relative_residual)
         if restart_callback is not None:
@@ -847,6 +869,7 @@ def lgmres_cupy_native(
     reorthogonalize: bool = True,
     breakdown_tol: float = 1e-30,
     happy_breakdown_tol: float = 0.0,
+    compute_final_residual: bool = True,
 ) -> CuPyGMRESNativeResult:
     """Run restarted right-preconditioned LGMRES on CuPy arrays.
 
@@ -1081,7 +1104,7 @@ def lgmres_cupy_native(
         dx = cupy.asarray(y @ Z[:k_used, :], dtype=op_dtype)
         x_vec = x_vec + dx
 
-        if outer_keep > 0:
+        if outer_keep > 0 and iterations < maxiter_total:
             dx_norm = _norm(dx, cupy=cupy, accum_dtype=acc_dtype)
             if dx_norm > breakdown_tol_f:
                 dx_unit = cupy.asarray(dx / dx_norm, dtype=op_dtype)
@@ -1090,6 +1113,16 @@ def lgmres_cupy_native(
                 while len(outer_v) > outer_keep:
                     del outer_v[0]
 
+        if iterations >= maxiter_total and not bool(compute_final_residual):
+            residual_norm = float("nan")
+            relative_residual = float("nan")
+            if cycle_breakdown:
+                info = iterations if iterations > 0 else maxiter_total
+                converged_reason = cycle_breakdown_reason
+            else:
+                info = iterations
+                converged_reason = "maxiter_reached"
+            break
         residual_norm, relative_residual, r_true = _true_residual_stats(x_vec)
         true_hist.append(relative_residual)
         if restart_callback is not None:
@@ -1139,6 +1172,7 @@ def bicgstab_cupy_native(
     accum_dtype: npt.DTypeLike | None = None,
     callback: Callable[[float], None] | None = None,
     breakdown_tol: float = 1e-30,
+    compute_final_residual: bool = True,
 ) -> CuPyBiCGSTABNativeResult:
     """Run right-preconditioned BiCGSTAB fully on CuPy arrays.
 
@@ -1306,7 +1340,11 @@ def bicgstab_cupy_native(
         rho_old = rho
         info = iterations
     else:
-        residual_norm, relative_residual, _ = _true_residual_stats(x_vec)
+        if bool(compute_final_residual):
+            residual_norm, relative_residual, _ = _true_residual_stats(x_vec)
+        else:
+            residual_norm = float("nan")
+            relative_residual = float("nan")
         info = maxiter_total
         converged_reason = "maxiter_reached"
         return CuPyBiCGSTABNativeResult(

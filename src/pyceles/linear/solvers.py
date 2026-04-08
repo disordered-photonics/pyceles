@@ -863,6 +863,7 @@ def gmres_cupy(
         orthogonalization=orthogonalization,
         cgs_refinement=cgs_refinement,
         happy_breakdown_tol=float(happy_breakdown_tol),
+        compute_final_residual=bool(compute_final_residual),
     )
     progress_close()
 
@@ -987,6 +988,7 @@ def fgmres_cupy(
         orthogonalization=orthogonalization,
         cgs_refinement=cgs_refinement,
         happy_breakdown_tol=float(happy_breakdown_tol),
+        compute_final_residual=bool(compute_final_residual),
     )
     progress_close()
 
@@ -1113,6 +1115,7 @@ def lgmres_cupy(
         orthogonalization=orthogonalization,
         cgs_refinement=cgs_refinement,
         happy_breakdown_tol=float(happy_breakdown_tol),
+        compute_final_residual=bool(compute_final_residual),
     )
     progress_close()
 
@@ -1203,6 +1206,7 @@ def bicgstab_cupy(
         maxiter=maxiter_total,
         operator_dtype=op_dtype,
         callback=_native_callback if (show_progress or callback is not None) else None,
+        compute_final_residual=bool(compute_final_residual),
     )
     progress_close()
 

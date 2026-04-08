@@ -1067,6 +1067,35 @@ def test_solve_linear_system_lgmres_cupy_smoke(monkeypatch):
     np.testing.assert_allclose(np.asarray(out.x), b, atol=1e-10, rtol=1e-10)
 
 
+def test_solve_linear_system_lgmres_cupy_skip_final_residual_avoids_extra_applies(monkeypatch):
+    monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
+    A = np.asarray([[2.0 + 0.0j, 0.25 + 0.0j], [0.0 + 0.0j, 3.0 + 0.0j]], dtype=np.complex128)
+    b = np.asarray([1.0 + 0.0j, -1.5 + 0.0j], dtype=np.complex128)
+    calls = 0
+
+    def A_mv(x: np.ndarray) -> np.ndarray:
+        nonlocal calls
+        calls += 1
+        return A @ np.asarray(x)
+
+    out = solve_linear_system(
+        A_mv,
+        b,
+        method="lgmres",
+        backend="cupy",
+        restart=10,
+        maxiter=1,
+        rtol=1e-12,
+        atol=0.0,
+        show_progress=False,
+        compute_final_residual=False,
+    )
+    assert calls == 1
+    assert int(out.iterations) == 1
+    assert np.isnan(float(out.residual_norm))
+    assert np.isnan(float(out.relative_residual))
+
+
 def test_solve_linear_system_bicgstab_cupy_multi_rhs_smoke(monkeypatch):
     monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
     A = np.array([[3.0 + 0j, 1.0 + 0j], [0.5 + 0j, 2.0 + 0j]], dtype=np.complex128)
@@ -1084,6 +1113,41 @@ def test_solve_linear_system_bicgstab_cupy_multi_rhs_smoke(monkeypatch):
     assert out.rhs_count == 2
     assert np.all(np.asarray(out.info, dtype=int) == 0)
     np.testing.assert_allclose(A @ np.asarray(out.x), B, atol=1e-8, rtol=1e-8)
+
+
+def test_solve_linear_system_bicgstab_cupy_skip_final_residual_avoids_extra_apply(monkeypatch):
+    monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
+    A = np.asarray(
+        [
+            [4.0 + 0.0j, 1.0 + 0.0j, 0.0 + 0.0j],
+            [1.0 + 0.0j, 3.0 + 0.0j, 1.0 + 0.0j],
+            [0.0 + 0.0j, 1.0 + 0.0j, 2.0 + 0.0j],
+        ],
+        dtype=np.complex128,
+    )
+    b = np.asarray([1.0 + 0.0j, -1.5 + 0.0j, 0.5 + 0.0j], dtype=np.complex128)
+    calls = 0
+
+    def A_mv(x: np.ndarray) -> np.ndarray:
+        nonlocal calls
+        calls += 1
+        return A @ np.asarray(x)
+
+    out = solve_linear_system(
+        A_mv,
+        b,
+        method="bicgstab",
+        backend="cupy",
+        maxiter=1,
+        rtol=1e-12,
+        atol=0.0,
+        show_progress=False,
+        compute_final_residual=False,
+    )
+    assert calls == 2
+    assert int(out.iterations) == 1
+    assert np.isnan(float(out.residual_norm))
+    assert np.isnan(float(out.relative_residual))
 
 
 @pytest.mark.skipif(not _cupy_available(), reason="CuPy runtime unavailable")
