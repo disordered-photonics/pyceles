@@ -45,7 +45,7 @@ class CuPyMLFMMHostCachePolicy:
 
     `leaf_apply_mode` controls how leaf aggregation/disaggregation is represented
     in the reusable host cache:
-    - `dense`: keep grouped dense aggregation maps (transitional reference/debug path),
+    - `dense`: keep grouped dense aggregation maps as a reference/debug override,
     - `on_the_fly`: keep compact schedules + translation ingredients and
       regenerate leaf translation blocks during repeated apply.
 
@@ -64,7 +64,8 @@ class CuPyMLFMMHostCachePolicy:
     substep by estimated dense pair-block bytes. `streamed_far_chunk_bytes_budget`
     bounds one sampled-far directional chunk by estimated directional-state
     bytes. When omitted, both budgets are derived conservatively from currently
-    available device memory during apply.
+    available device memory during apply, while runtime diagnostics report the
+    resolved chunking in native leaf/box units.
 
     `collect_stream_stats` keeps streamed multilevel chunk/build counters for
     diagnostics. Leave it off for production runs so repeated applies do not
@@ -3780,6 +3781,44 @@ def _leaf_otf_group_chunk_leaves(
     return max(1, min(int(n_group), int(by_leaves), int(by_bytes)))
 
 
+def _leaf_otf_resolved_chunk_summary(
+    *,
+    leaf_groups: tuple[CuPyLeafApplyGroupData, ...],
+    leaf_otf_chunk_leaves: int | None,
+    leaf_otf_bytes_budget: int | None,
+    box_nm: int,
+    nrhs: int,
+) -> dict[str, object] | None:
+    """Summarize resolved leaf OTF chunk sizes in native leaf units."""
+
+    if not leaf_groups:
+        return None
+    resolved_by_occupancy: dict[str, int] = {}
+    chunk_values: list[int] = []
+    for group in leaf_groups:
+        n_group = int(group.leaf_ids.shape[0])
+        if n_group <= 0:
+            continue
+        resolved_chunk = _leaf_otf_group_chunk_leaves(
+            n_group=n_group,
+            chunk_leaves=leaf_otf_chunk_leaves,
+            occupancy=int(group.occupancy),
+            box_nm=int(box_nm),
+            nmodes=int(group.nmodes),
+            nrhs=int(nrhs),
+            bytes_budget=leaf_otf_bytes_budget,
+        )
+        resolved_by_occupancy[str(int(group.occupancy))] = int(resolved_chunk)
+        chunk_values.append(int(resolved_chunk))
+    if not chunk_values:
+        return None
+    return {
+        "by_occupancy": resolved_by_occupancy,
+        "min": int(min(chunk_values)),
+        "max": int(max(chunk_values)),
+    }
+
+
 def _matched_sorted_rows(
     *,
     container_ids: Any,
@@ -5458,10 +5497,9 @@ def _build_outgoing_subset_streamed(
                 ),
             )
         )
-    # Keep chunks aligned to this call's compact unique-id order. A previous
-    # fixed-global-chunk cache increased outgoing rebuild counts on large
-    # streamed runs, so do not reintroduce global chunk ranges here unless the
-    # whole streamed traversal is redesigned around them.
+    # Keep chunks aligned to this call's compact unique-id order. Global chunk
+    # ranges fight the frontier-local source subsets used by streamed far apply,
+    # so only reintroduce them if the traversal itself becomes source-centric.
     for child_chunk_idx, child_chunk_ids in enumerate(
         _iter_id_chunks(child_ids_unique, chunk_size=int(child_box_cap))
     ):
@@ -6250,6 +6288,17 @@ class CuPyMLFMMCouplingOperator:
                 multilevel, nrhs=nrhs_ref
             )
             streamed_chunk_local = str(multilevel.leaf_apply_mode) == "on_the_fly"
+            leaf_otf_chunk_summary = (
+                None
+                if not streamed_chunk_local
+                else _leaf_otf_resolved_chunk_summary(
+                    leaf_groups=multilevel.leaf_groups,
+                    leaf_otf_chunk_leaves=self.host_cache_policy.leaf_otf_chunk_leaves,
+                    leaf_otf_bytes_budget=self._last_resolved_leaf_otf_bytes_budget,
+                    box_nm=int(multilevel.box_nm),
+                    nrhs=int(nrhs_ref),
+                )
+            )
             if streamed_chunk_local:
                 rolling_actual = None
                 rolling_outgoing_actual = None
@@ -6308,6 +6357,21 @@ class CuPyMLFMMCouplingOperator:
                     None
                     if self._last_resolved_streamed_far_frontier_box_cap is None
                     else int(self._last_resolved_streamed_far_frontier_box_cap)
+                ),
+                "resolved_leaf_otf_chunk_leaves_by_occupancy": (
+                    None
+                    if leaf_otf_chunk_summary is None
+                    else dict(cast(dict[str, int], leaf_otf_chunk_summary["by_occupancy"]))
+                ),
+                "resolved_leaf_otf_chunk_leaves_min": (
+                    None
+                    if leaf_otf_chunk_summary is None
+                    else int(cast(int, leaf_otf_chunk_summary["min"]))
+                ),
+                "resolved_leaf_otf_chunk_leaves_max": (
+                    None
+                    if leaf_otf_chunk_summary is None
+                    else int(cast(int, leaf_otf_chunk_summary["max"]))
                 ),
                 "resolved_leaf_otf_bytes_budget": (
                     None
