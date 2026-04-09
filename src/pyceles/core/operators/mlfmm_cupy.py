@@ -9,7 +9,7 @@ This module validates and uploads repeated-apply structures to device memory.
 from dataclasses import dataclass, field, fields, is_dataclass, replace
 from functools import cache
 from importlib import import_module
-from typing import Any, Iterator, Literal, cast
+from typing import Any, Iterable, Iterator, Literal, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -4794,7 +4794,7 @@ def _level_group_box_cap(
 
 
 def _iter_chunk_groups_by_total_boxes(
-    chunks: list[tuple[Any, Any]],
+    chunks: Iterable[tuple[Any, Any]],
     *,
     box_cap: int,
 ) -> Iterator[list[tuple[Any, Any]]]:
@@ -4812,6 +4812,25 @@ def _iter_chunk_groups_by_total_boxes(
         grouped_boxes += int(n_boxes)
     if grouped:
         yield grouped
+
+
+def _iter_zero_incoming_chunks_for_level(
+    *,
+    level: CuPyMLFMMLevelData,
+    chunk_box_cap: int,
+    nrhs: int,
+    cupy: Any,
+) -> Iterator[tuple[Any, Any]]:
+    """Yield zero-initialized destination chunks for one sampled level lazily."""
+
+    level_box_ids = cupy.arange(int(level.n_boxes), dtype=cupy.int32)
+    ndirs = int(level.directional.grid.n_directions)
+    for box_ids in _iter_id_chunks(level_box_ids, chunk_size=int(chunk_box_cap)):
+        incoming = cupy.zeros(
+            (int(box_ids.shape[0]), 4, ndirs, int(nrhs)),
+            dtype=cupy.complex128,
+        )
+        yield box_ids, incoming
 
 
 def _apply_same_level_far_streamed_chunk_group(
@@ -5341,7 +5360,7 @@ def _build_outgoing_subset_streamed(
     return outgoing
 
 
-def _apply_multilevel_level_streamed(
+def _apply_multilevel_frontier_streamed(
     *,
     levels: tuple[CuPyMLFMMLevelData, ...],
     transfer_by_parent: dict[int, CuPyMLFMMTransferData],
@@ -5353,10 +5372,10 @@ def _apply_multilevel_level_streamed(
     leaf_otf_chunk_leaves: int | None,
     leaf_otf_bytes_budget: int | None,
     streamed_far_chunk_bytes_budget: int,
+    streamed_far_frontier_bytes_budget: int,
     level_idx: int,
     leaf_level: int,
-    box_ids_sorted: Any,
-    incoming_chunk: Any,
+    frontier_chunks: list[tuple[Any, Any]],
     box_nm_leaf: int,
     x_states: Any,
     y_out: Any,
@@ -5364,130 +5383,157 @@ def _apply_multilevel_level_streamed(
     nrhs: int,
     cupy: Any,
     stream_stats: dict[str, object] | None,
-    skip_same_level_far: bool = False,
 ) -> None:
-    """Apply one streamed multilevel destination chunk recursively."""
+    """Apply one streamed multilevel frontier window recursively."""
 
-    box_ids = cupy.asarray(box_ids_sorted, dtype=cupy.int32).reshape(-1)
-    current_incoming = cupy.asarray(incoming_chunk, dtype=cupy.complex128)
-    if int(box_ids.size) != int(current_incoming.shape[0]):
-        raise ValueError(
-            "Streamed multilevel incoming chunk row count mismatch: "
-            f"{int(box_ids.size)} vs {int(current_incoming.shape[0])}."
-        )
+    if not frontier_chunks:
+        return
     if stream_stats is not None:
         level_counts = cast(dict[str, int], stream_stats.setdefault("processed_chunk_count", {}))
-        level_counts[str(level_idx)] = int(level_counts.get(str(level_idx), 0) + 1)
+        level_counts[str(level_idx)] = int(
+            level_counts.get(str(level_idx), 0) + len(frontier_chunks)
+        )
         peak_boxes = cast(dict[str, int], stream_stats.setdefault("processed_chunk_peak_boxes", {}))
-        peak_boxes[str(level_idx)] = max(int(peak_boxes.get(str(level_idx), 0)), int(box_ids.size))
-    if not skip_same_level_far:
-        _apply_same_level_far_streamed_chunk_group(
-            levels=levels,
-            transfer_by_parent=transfer_by_parent,
-            leaf_groups=leaf_groups,
-            leaf_apply_mode=leaf_apply_mode,
-            leaf_translation_tables=leaf_translation_tables,
-            pair_blocks_scratch=pair_blocks_scratch,
-            leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
-            leaf_otf_bytes_budget=leaf_otf_bytes_budget,
-            streamed_far_chunk_bytes_budget=int(streamed_far_chunk_bytes_budget),
-            level_idx=int(level_idx),
-            leaf_level=int(leaf_level),
-            chunks=[(box_ids, current_incoming)],
-            box_nm_leaf=int(box_nm_leaf),
-            x_states=x_states,
-            nrhs=int(nrhs),
-            cupy=cupy,
-            stream_stats=stream_stats,
+        peak_boxes[str(level_idx)] = max(
+            int(peak_boxes.get(str(level_idx), 0)),
+            max(int(box_ids.shape[0]) for box_ids, _incoming in frontier_chunks),
         )
-
-    if int(level_idx) >= int(leaf_level):
-        incoming_box = _directional_to_box_regular_cupy(
-            levels[int(leaf_level)].directional,
-            current_incoming,
-            cupy=cupy,
-        )
-        _receive_selected_leaf_boxes_to_particles(
-            incoming_box,
-            selected_leaf_ids=box_ids,
-            leaf_groups=leaf_groups,
-            leaf_apply_mode=leaf_apply_mode,
-            leaf_translation_tables=leaf_translation_tables,
-            pair_blocks_scratch=pair_blocks_scratch,
-            leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
-            leaf_otf_bytes_budget=leaf_otf_bytes_budget,
-            receive_adjoint_cache=receive_adjoint_cache,
-            nm=int(nm),
-            out=y_out,
-            cupy=cupy,
-        )
-        return
-
-    child_level, child_chunks = _collect_child_chunks_streamed(
+    _apply_same_level_far_streamed_chunk_group(
         levels=levels,
         transfer_by_parent=transfer_by_parent,
-        level_idx=int(level_idx),
-        box_ids_sorted=box_ids,
-        incoming_chunk=current_incoming,
+        leaf_groups=leaf_groups,
+        leaf_apply_mode=leaf_apply_mode,
+        leaf_translation_tables=leaf_translation_tables,
+        pair_blocks_scratch=pair_blocks_scratch,
+        leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
+        leaf_otf_bytes_budget=leaf_otf_bytes_budget,
         streamed_far_chunk_bytes_budget=int(streamed_far_chunk_bytes_budget),
+        level_idx=int(level_idx),
+        leaf_level=int(leaf_level),
+        chunks=frontier_chunks,
+        box_nm_leaf=int(box_nm_leaf),
+        x_states=x_states,
         nrhs=int(nrhs),
         cupy=cupy,
         stream_stats=stream_stats,
     )
-    if not child_chunks:
+
+    if int(level_idx) >= int(leaf_level):
+        for box_ids, incoming_chunk in frontier_chunks:
+            incoming_box = _directional_to_box_regular_cupy(
+                levels[int(leaf_level)].directional,
+                cupy.asarray(incoming_chunk, dtype=cupy.complex128),
+                cupy=cupy,
+            )
+            _receive_selected_leaf_boxes_to_particles(
+                incoming_box,
+                selected_leaf_ids=box_ids,
+                leaf_groups=leaf_groups,
+                leaf_apply_mode=leaf_apply_mode,
+                leaf_translation_tables=leaf_translation_tables,
+                pair_blocks_scratch=pair_blocks_scratch,
+                leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
+                leaf_otf_bytes_budget=leaf_otf_bytes_budget,
+                receive_adjoint_cache=receive_adjoint_cache,
+                nm=int(nm),
+                out=y_out,
+                cupy=cupy,
+            )
         return
-    child_group_box_cap = _level_group_box_cap(
-        level=levels[child_level],
-        nrhs=int(nrhs),
-        bytes_budget=int(streamed_far_chunk_bytes_budget),
-    )
-    for child_group in _iter_chunk_groups_by_total_boxes(
-        child_chunks, box_cap=int(child_group_box_cap)
-    ):
-        _apply_same_level_far_streamed_chunk_group(
+
+    child_level: int | None = None
+    child_frontier_box_cap: int | None = None
+    child_frontier: list[tuple[Any, Any]] = []
+    child_frontier_boxes = 0
+    for box_ids, incoming_chunk in frontier_chunks:
+        next_child_level, child_chunks = _collect_child_chunks_streamed(
             levels=levels,
             transfer_by_parent=transfer_by_parent,
-            leaf_groups=leaf_groups,
-            leaf_apply_mode=leaf_apply_mode,
-            leaf_translation_tables=leaf_translation_tables,
-            pair_blocks_scratch=pair_blocks_scratch,
-            leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
-            leaf_otf_bytes_budget=leaf_otf_bytes_budget,
+            level_idx=int(level_idx),
+            box_ids_sorted=box_ids,
+            incoming_chunk=cupy.asarray(incoming_chunk, dtype=cupy.complex128),
             streamed_far_chunk_bytes_budget=int(streamed_far_chunk_bytes_budget),
-            level_idx=int(child_level),
-            leaf_level=int(leaf_level),
-            chunks=child_group,
-            box_nm_leaf=int(box_nm_leaf),
-            x_states=x_states,
             nrhs=int(nrhs),
             cupy=cupy,
             stream_stats=stream_stats,
         )
-        for child_chunk_ids, child_incoming in child_group:
-            _apply_multilevel_level_streamed(
-                levels=levels,
-                transfer_by_parent=transfer_by_parent,
-                leaf_groups=leaf_groups,
-                leaf_apply_mode=leaf_apply_mode,
-                leaf_translation_tables=leaf_translation_tables,
-                receive_adjoint_cache=receive_adjoint_cache,
-                pair_blocks_scratch=pair_blocks_scratch,
-                leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
-                leaf_otf_bytes_budget=leaf_otf_bytes_budget,
-                streamed_far_chunk_bytes_budget=int(streamed_far_chunk_bytes_budget),
-                level_idx=child_level,
-                leaf_level=int(leaf_level),
-                box_ids_sorted=child_chunk_ids,
-                incoming_chunk=child_incoming,
-                box_nm_leaf=int(box_nm_leaf),
-                x_states=x_states,
-                y_out=y_out,
-                nm=int(nm),
+        if not child_chunks:
+            continue
+        if child_level is None:
+            child_level = int(next_child_level)
+            child_frontier_box_cap = _level_group_box_cap(
+                level=levels[child_level],
                 nrhs=int(nrhs),
-                cupy=cupy,
-                stream_stats=stream_stats,
-                skip_same_level_far=True,
+                bytes_budget=int(streamed_far_frontier_bytes_budget),
             )
+            if stream_stats is not None:
+                caps = cast(dict[str, int], stream_stats.setdefault("level_frontier_box_cap", {}))
+                caps[str(child_level)] = int(child_frontier_box_cap)
+        elif int(next_child_level) != int(child_level):
+            raise RuntimeError(
+                "Internal CuPy MLFMM error: inconsistent streamed child frontier levels "
+                f"{int(child_level)} vs {int(next_child_level)}."
+            )
+        for child_chunk in child_chunks:
+            child_boxes = int(child_chunk[0].shape[0])
+            if (
+                child_frontier
+                and child_frontier_box_cap is not None
+                and child_frontier_boxes + child_boxes > int(child_frontier_box_cap)
+            ):
+                _apply_multilevel_frontier_streamed(
+                    levels=levels,
+                    transfer_by_parent=transfer_by_parent,
+                    leaf_groups=leaf_groups,
+                    leaf_apply_mode=leaf_apply_mode,
+                    leaf_translation_tables=leaf_translation_tables,
+                    receive_adjoint_cache=receive_adjoint_cache,
+                    pair_blocks_scratch=pair_blocks_scratch,
+                    leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
+                    leaf_otf_bytes_budget=leaf_otf_bytes_budget,
+                    streamed_far_chunk_bytes_budget=int(streamed_far_chunk_bytes_budget),
+                    streamed_far_frontier_bytes_budget=int(streamed_far_frontier_bytes_budget),
+                    level_idx=int(child_level),
+                    leaf_level=int(leaf_level),
+                    frontier_chunks=child_frontier,
+                    box_nm_leaf=int(box_nm_leaf),
+                    x_states=x_states,
+                    y_out=y_out,
+                    nm=int(nm),
+                    nrhs=int(nrhs),
+                    cupy=cupy,
+                    stream_stats=stream_stats,
+                )
+                child_frontier = []
+                child_frontier_boxes = 0
+            child_frontier.append(child_chunk)
+            child_frontier_boxes += int(child_boxes)
+
+    if child_level is None or not child_frontier:
+        return
+    _apply_multilevel_frontier_streamed(
+        levels=levels,
+        transfer_by_parent=transfer_by_parent,
+        leaf_groups=leaf_groups,
+        leaf_apply_mode=leaf_apply_mode,
+        leaf_translation_tables=leaf_translation_tables,
+        receive_adjoint_cache=receive_adjoint_cache,
+        pair_blocks_scratch=pair_blocks_scratch,
+        leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
+        leaf_otf_bytes_budget=leaf_otf_bytes_budget,
+        streamed_far_chunk_bytes_budget=int(streamed_far_chunk_bytes_budget),
+        streamed_far_frontier_bytes_budget=int(streamed_far_frontier_bytes_budget),
+        level_idx=int(child_level),
+        leaf_level=int(leaf_level),
+        frontier_chunks=child_frontier,
+        box_nm_leaf=int(box_nm_leaf),
+        x_states=x_states,
+        y_out=y_out,
+        nm=int(nm),
+        nrhs=int(nrhs),
+        cupy=cupy,
+        stream_stats=stream_stats,
+    )
 
 
 def _apply_multilevel_far_streamed(
@@ -5499,6 +5545,7 @@ def _apply_multilevel_far_streamed(
     leaf_otf_chunk_leaves: int | None,
     leaf_otf_bytes_budget: int | None,
     streamed_far_chunk_bytes_budget: int,
+    streamed_far_frontier_bytes_budget: int,
     workspace: CuPyMLFMMMultilevelWorkspace | None,
     cupy: Any,
     stream_stats: dict[str, object] | None,
@@ -5528,7 +5575,6 @@ def _apply_multilevel_far_streamed(
     hf_start = int(multilevel.hf_start_level)
     leaf_level = int(multilevel.leaf_level)
     start_level = levels[hf_start]
-    top_box_ids = cupy.arange(int(start_level.n_boxes), dtype=cupy.int32)
     top_chunk_box_cap = _level_chunk_box_cap(
         level=start_level,
         nrhs=int(nrhs),
@@ -5537,74 +5583,52 @@ def _apply_multilevel_far_streamed(
     if stream_stats is not None:
         caps = cast(dict[str, int], stream_stats.setdefault("level_chunk_box_cap", {}))
         caps[str(hf_start)] = int(top_chunk_box_cap)
-    top_chunks: list[tuple[Any, Any]] = []
-    for top_chunk_ids in _iter_id_chunks(top_box_ids, chunk_size=int(top_chunk_box_cap)):
-        top_incoming = cupy.zeros(
-            (
-                int(top_chunk_ids.shape[0]),
-                4,
-                int(start_level.directional.grid.n_directions),
-                int(nrhs),
-            ),
-            dtype=cupy.complex128,
-        )
-        top_chunks.append((top_chunk_ids, top_incoming))
-    top_group_box_cap = _level_group_box_cap(
+    top_frontier_box_cap = _level_group_box_cap(
         level=start_level,
         nrhs=int(nrhs),
-        bytes_budget=int(streamed_far_chunk_bytes_budget),
+        bytes_budget=int(streamed_far_frontier_bytes_budget),
     )
+    if stream_stats is not None:
+        caps = cast(dict[str, int], stream_stats.setdefault("level_frontier_box_cap", {}))
+        caps[str(hf_start)] = int(top_frontier_box_cap)
     # The grouped same-level pass below was the first large streamed-far win:
     # one source-outgoing chunk is now reused across multiple destination
     # chunks before we descend. The remaining rebuild pressure comes from the
     # recursive parent-chunk traversal after transfer-down, so the next
     # structural widening should be a level-synchronous frontier walk rather
     # than another fixed global source-chunk cache.
-    for top_group in _iter_chunk_groups_by_total_boxes(top_chunks, box_cap=int(top_group_box_cap)):
-        _apply_same_level_far_streamed_chunk_group(
+    top_chunks = _iter_zero_incoming_chunks_for_level(
+        level=start_level,
+        chunk_box_cap=int(top_chunk_box_cap),
+        nrhs=int(nrhs),
+        cupy=cupy,
+    )
+    for top_frontier in _iter_chunk_groups_by_total_boxes(
+        top_chunks, box_cap=int(top_frontier_box_cap)
+    ):
+        _apply_multilevel_frontier_streamed(
             levels=levels,
             transfer_by_parent=transfer_by_parent,
             leaf_groups=multilevel.leaf_groups,
             leaf_apply_mode=multilevel.leaf_apply_mode,
             leaf_translation_tables=multilevel.leaf_translation_tables,
+            receive_adjoint_cache=receive_adjoint_cache,
             pair_blocks_scratch=pair_blocks_scratch,
             leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
             leaf_otf_bytes_budget=leaf_otf_bytes_budget,
             streamed_far_chunk_bytes_budget=int(streamed_far_chunk_bytes_budget),
+            streamed_far_frontier_bytes_budget=int(streamed_far_frontier_bytes_budget),
             level_idx=int(hf_start),
             leaf_level=int(leaf_level),
-            chunks=top_group,
+            frontier_chunks=top_frontier,
             box_nm_leaf=int(multilevel.box_nm),
             x_states=x_states,
+            y_out=y_far,
+            nm=int(nm),
             nrhs=int(nrhs),
             cupy=cupy,
             stream_stats=stream_stats,
         )
-        for top_chunk_ids, top_incoming in top_group:
-            _apply_multilevel_level_streamed(
-                levels=levels,
-                transfer_by_parent=transfer_by_parent,
-                leaf_groups=multilevel.leaf_groups,
-                leaf_apply_mode=multilevel.leaf_apply_mode,
-                leaf_translation_tables=multilevel.leaf_translation_tables,
-                receive_adjoint_cache=receive_adjoint_cache,
-                pair_blocks_scratch=pair_blocks_scratch,
-                leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
-                leaf_otf_bytes_budget=leaf_otf_bytes_budget,
-                streamed_far_chunk_bytes_budget=int(streamed_far_chunk_bytes_budget),
-                level_idx=hf_start,
-                leaf_level=leaf_level,
-                box_ids_sorted=top_chunk_ids,
-                incoming_chunk=top_incoming,
-                box_nm_leaf=int(multilevel.box_nm),
-                x_states=x_states,
-                y_out=y_far,
-                nm=int(nm),
-                nrhs=int(nrhs),
-                cupy=cupy,
-                stream_stats=stream_stats,
-                skip_same_level_far=True,
-            )
     return y_far
 
 
@@ -5617,6 +5641,7 @@ def _apply_multilevel_far(
     leaf_otf_chunk_leaves: int | None,
     leaf_otf_bytes_budget: int | None,
     streamed_far_chunk_bytes_budget: int,
+    streamed_far_frontier_bytes_budget: int,
     workspace: CuPyMLFMMMultilevelWorkspace | None,
     cupy: Any,
     stream_stats: dict[str, object] | None,
@@ -5640,6 +5665,7 @@ def _apply_multilevel_far(
             leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
             leaf_otf_bytes_budget=leaf_otf_bytes_budget,
             streamed_far_chunk_bytes_budget=int(streamed_far_chunk_bytes_budget),
+            streamed_far_frontier_bytes_budget=int(streamed_far_frontier_bytes_budget),
             workspace=workspace,
             cupy=cupy,
             stream_stats=stream_stats,
@@ -5864,6 +5890,27 @@ def _multilevel_outgoing_hierarchy_bytes(
     return int(total)
 
 
+def _multilevel_stream_full_level_incoming_bytes_theoretical(
+    multilevel: CuPyMLFMMMultilevelData,
+    *,
+    nrhs: int,
+) -> int:
+    """Return bytes needed to keep one full sampled incoming level resident."""
+
+    peak = 0
+    for level_idx in range(int(multilevel.hf_start_level), int(multilevel.hf_end_level) + 1):
+        level = multilevel.levels[level_idx]
+        incoming_bytes = (
+            int(level.n_boxes)
+            * 4
+            * int(level.directional.grid.n_directions)
+            * int(nrhs)
+            * np.dtype(np.complex128).itemsize
+        )
+        peak = max(int(peak), int(incoming_bytes))
+    return int(peak)
+
+
 def _multilevel_stream_full_level_live_bytes_theoretical(
     multilevel: CuPyMLFMMMultilevelData,
     *,
@@ -5934,6 +5981,9 @@ class CuPyMLFMMCouplingOperator:
     )
     _last_resolved_leaf_otf_bytes_budget: int | None = field(default=None, init=False, repr=False)
     _last_resolved_streamed_far_chunk_bytes_budget: int | None = field(
+        default=None, init=False, repr=False
+    )
+    _last_resolved_streamed_far_frontier_bytes_budget: int | None = field(
         default=None, init=False, repr=False
     )
     _last_stream_stats: dict[str, object] | None = field(default=None, init=False, repr=False)
@@ -6074,6 +6124,11 @@ class CuPyMLFMMCouplingOperator:
                     if self._last_resolved_streamed_far_chunk_bytes_budget is None
                     else int(self._last_resolved_streamed_far_chunk_bytes_budget)
                 ),
+                "resolved_streamed_far_frontier_bytes_budget": (
+                    None
+                    if self._last_resolved_streamed_far_frontier_bytes_budget is None
+                    else int(self._last_resolved_streamed_far_frontier_bytes_budget)
+                ),
                 "last_apply_stats": (
                     None if self._last_stream_stats is None else dict(self._last_stream_stats)
                 ),
@@ -6100,6 +6155,11 @@ class CuPyMLFMMCouplingOperator:
                 None
                 if self.host_cache_policy.streamed_far_chunk_bytes_budget is None
                 else int(self.host_cache_policy.streamed_far_chunk_bytes_budget)
+            ),
+            "streamed_far_frontier_bytes_budget": (
+                None
+                if self._last_resolved_streamed_far_frontier_bytes_budget is None
+                else int(self._last_resolved_streamed_far_frontier_bytes_budget)
             ),
             "collect_stream_stats": bool(self.host_cache_policy.collect_stream_stats),
             "device_pool": {
@@ -6178,6 +6238,7 @@ class CuPyMLFMMCouplingOperator:
         stage = str(self.prepared_data.stage)
         resolved_leaf_otf_bytes_budget: int | None = None
         resolved_streamed_far_chunk_bytes_budget: int | None = None
+        resolved_streamed_far_frontier_bytes_budget: int | None = None
         stream_stats: dict[str, object] | None = None
         if stage == "single_level":
             single_ws = _ensure_single_level_workspace(
@@ -6228,6 +6289,12 @@ class CuPyMLFMMCouplingOperator:
                     multilevel,
                     nrhs=int(x_states.shape[2]),
                 )
+                full_level_incoming_bytes = (
+                    _multilevel_stream_full_level_incoming_bytes_theoretical(
+                        multilevel,
+                        nrhs=int(x_states.shape[2]),
+                    )
+                )
                 resolved_leaf_otf_bytes_budget = _resolve_stream_bytes_budget(
                     explicit_budget=self.host_cache_policy.leaf_otf_bytes_budget,
                     free_bytes=int(free_bytes),
@@ -6246,6 +6313,21 @@ class CuPyMLFMMCouplingOperator:
                     ),
                     maximum_bytes=max(256 * 1024**2, min(1024 * 1024**2, int(free_bytes))),
                 )
+                resolved_streamed_far_frontier_bytes_budget = _resolve_stream_bytes_budget(
+                    explicit_budget=None,
+                    free_bytes=int(free_bytes),
+                    # Frontier residency and source-chunk residency are different
+                    # constraints: wider frontiers can materially reduce outgoing
+                    # rebuilds even when source chunk size stays fixed.
+                    fraction=0.50,
+                    minimum_bytes=64 * 1024**2,
+                    maximum_bytes=max(
+                        64 * 1024**2,
+                        min(
+                            int(full_level_incoming_bytes), max(256 * 1024**2, int(free_bytes) // 2)
+                        ),
+                    ),
+                )
                 if bool(self.host_cache_policy.collect_stream_stats):
                     stream_stats = {}
             y_far = _apply_multilevel_far(
@@ -6260,6 +6342,11 @@ class CuPyMLFMMCouplingOperator:
                     if resolved_streamed_far_chunk_bytes_budget is None
                     else int(resolved_streamed_far_chunk_bytes_budget)
                 ),
+                streamed_far_frontier_bytes_budget=(
+                    0
+                    if resolved_streamed_far_frontier_bytes_budget is None
+                    else int(resolved_streamed_far_frontier_bytes_budget)
+                ),
                 workspace=multi_ws,
                 cupy=cupy,
                 stream_stats=stream_stats,
@@ -6269,6 +6356,9 @@ class CuPyMLFMMCouplingOperator:
         self._last_resolved_leaf_otf_bytes_budget = resolved_leaf_otf_bytes_budget
         self._last_resolved_streamed_far_chunk_bytes_budget = (
             resolved_streamed_far_chunk_bytes_budget
+        )
+        self._last_resolved_streamed_far_frontier_bytes_budget = (
+            resolved_streamed_far_frontier_bytes_budget
         )
         self._last_stream_stats = None if stream_stats is None else dict(stream_stats)
         y_total = cupy.asarray(y_far, dtype=cupy.complex128)
