@@ -1067,6 +1067,54 @@ def test_solve_linear_system_lgmres_cupy_smoke(monkeypatch):
     np.testing.assert_allclose(np.asarray(out.x), b, atol=1e-10, rtol=1e-10)
 
 
+@pytest.mark.parametrize("method", ["gmres", "fgmres", "lgmres"])
+def test_solve_linear_system_cupy_restart_solvers_only_verify_true_residual_on_exit(
+    monkeypatch, method: Literal["gmres", "fgmres", "lgmres"]
+):
+    monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
+    A = np.asarray([[2.0 + 0.0j, 0.25 + 0.0j], [0.0 + 0.0j, 3.0 + 0.0j]], dtype=np.complex128)
+    b = np.asarray([1.0 + 0.0j, -1.5 + 0.0j], dtype=np.complex128)
+    calls = 0
+
+    def A_mv(x: np.ndarray) -> np.ndarray:
+        nonlocal calls
+        calls += 1
+        return A @ np.asarray(x)
+
+    if method == "lgmres":
+        out = solve_linear_system(
+            A_mv,
+            b,
+            method="lgmres",
+            backend="cupy",
+            restart=1,
+            maxiter=2,
+            rtol=1e-30,
+            atol=0.0,
+            show_progress=False,
+            compute_final_residual=True,
+            lgmres_outer_k=0,
+            lgmres_store_outer_av=False,
+        )
+    else:
+        out = solve_linear_system(
+            A_mv,
+            b,
+            method=method,
+            backend="cupy",
+            restart=1,
+            maxiter=2,
+            rtol=1e-30,
+            atol=0.0,
+            show_progress=False,
+            compute_final_residual=True,
+        )
+    assert calls == 3
+    assert int(out.iterations) == 2
+    assert np.isfinite(float(out.residual_norm))
+    assert np.isfinite(float(out.relative_residual))
+
+
 def test_solve_linear_system_lgmres_cupy_skip_final_residual_avoids_extra_applies(monkeypatch):
     monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
     A = np.asarray([[2.0 + 0.0j, 0.25 + 0.0j], [0.0 + 0.0j, 3.0 + 0.0j]], dtype=np.complex128)

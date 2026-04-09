@@ -270,10 +270,10 @@ def gmres_cupy_native(
 ) -> CuPyGMRESNativeResult:
     """Run restarted left-preconditioned GMRES fully on CuPy arrays.
 
-    The convergence criterion follows SciPy-style semantics: convergence is
-    decided on the true residual `||b - A x||` at restart boundaries.
     Inner-iteration callbacks receive the GMRES preconditioned residual proxy
-    from the Arnoldi/Givens recurrence.
+    from the Arnoldi/Givens recurrence. When `compute_final_residual=True`,
+    the native CuPy path verifies the true residual only at terminal decision
+    points rather than at every restart boundary.
     """
     b_dtype_obj = getattr(b, "dtype", None)
     b_dtype = np.dtype(np.asarray(b).dtype if b_dtype_obj is None else b_dtype_obj)
@@ -338,37 +338,41 @@ def gmres_cupy_native(
     eps = float(np.finfo(op_dtype.char).eps)
     breakdown_tol_f = float(breakdown_tol)
     Mb_norm = _norm(_apply_minv(b_vec), cupy=cupy, accum_dtype=acc_dtype)
-    ptol_max_factor = 1.0
-    ptol = Mb_norm * min(ptol_max_factor, target_abs / b_norm) if b_norm > 0 else target_abs
+    ptol = Mb_norm * min(1.0, target_abs / b_norm) if b_norm > 0 else target_abs
     precond_hist: list[float] = []
     true_hist: list[float] = []
     iterations = 0
     info = maxiter_total
     converged_reason = "maxiter_reached"
-    residual_norm = float("nan")
-    relative_residual = float("nan")
-    r_true = None
+    residual_norm: float
+    relative_residual: float
     need_pr_rel = bool(callback is not None or record_preconditioned_history)
+    restart_z = None
 
-    while iterations < maxiter_total:
-        if r_true is None:
-            if x0_is_zero:
-                residual_norm = float(b_norm)
-                relative_residual = 1.0 if b_norm > 0 else 0.0
-                r_true = cupy.asarray(b_vec, dtype=op_dtype)
-                x0_is_zero = False
-            else:
-                residual_norm, relative_residual, r_true = _true_residual_stats(x_vec)
-            true_hist.append(relative_residual)
-            if restart_callback is not None:
-                restart_callback(relative_residual)
-        if residual_norm <= target_abs:
-            info = 0
-            converged_reason = "converged"
-            break
+    def _record_true_residual(rel_norm: float) -> None:
+        true_hist.append(float(rel_norm))
+        if restart_callback is not None:
+            restart_callback(float(rel_norm))
 
-        r0 = r_true
-        z0 = _apply_minv(r0)
+    if x0_is_zero:
+        residual_norm = float(b_norm)
+        relative_residual = 1.0 if b_norm > 0 else 0.0
+        r_true = cupy.asarray(b_vec, dtype=op_dtype)
+        x0_is_zero = False
+    else:
+        residual_norm, relative_residual, r_true = _true_residual_stats(x_vec)
+    if bool(compute_final_residual):
+        _record_true_residual(relative_residual)
+    if residual_norm <= target_abs:
+        info = 0
+        converged_reason = "converged"
+
+    while iterations < maxiter_total and info != 0:
+        if restart_z is None:
+            z0 = _apply_minv(r_true)
+        else:
+            z0 = cupy.asarray(restart_z, dtype=op_dtype)
+            restart_z = None
         beta = _norm(z0, cupy=cupy, accum_dtype=acc_dtype)
         if beta <= breakdown_tol_f:
             info = iterations if iterations > 0 else maxiter_total
@@ -488,35 +492,44 @@ def gmres_cupy_native(
         if float(cupy.abs(y[0])) > 0.0:
             y[0] = y[0] / H[0, 0].copy()
         x_vec = x_vec + cupy.asarray(y @ V[:k_used, :], dtype=op_dtype)
-        if iterations >= maxiter_total and not bool(compute_final_residual):
-            residual_norm = float("nan")
-            relative_residual = float("nan")
+        restart_z = cupy.asarray(g[k_used], dtype=op_dtype) * cupy.asarray(
+            V[k_used, :], dtype=op_dtype
+        )
+        should_verify_true = bool(compute_final_residual) and (
+            cycle_presid <= ptol or iterations >= maxiter_total or cycle_breakdown
+        )
+        if should_verify_true:
+            residual_norm, relative_residual, r_true = _true_residual_stats(x_vec)
+            _record_true_residual(relative_residual)
+            if residual_norm <= target_abs:
+                info = 0
+                converged_reason = "converged"
+                break
             if cycle_breakdown:
                 info = iterations if iterations > 0 else maxiter_total
                 converged_reason = cycle_breakdown_reason
-            else:
+                break
+            if iterations >= maxiter_total:
                 info = iterations
                 converged_reason = "maxiter_reached"
-            break
-        residual_norm, relative_residual, r_true = _true_residual_stats(x_vec)
-        true_hist.append(relative_residual)
-        if restart_callback is not None:
-            restart_callback(relative_residual)
-        if residual_norm <= target_abs:
-            info = 0
-            converged_reason = "converged"
-            break
+                break
+            restart_z = None
+            continue
         if cycle_breakdown:
+            residual_norm = float("nan")
+            relative_residual = float("nan")
             info = iterations if iterations > 0 else maxiter_total
             converged_reason = cycle_breakdown_reason
             break
         if cycle_presid <= ptol:
-            ptol_max_factor = max(eps, 0.25 * ptol_max_factor)
-        else:
-            ptol_max_factor = min(1.0, 1.5 * ptol_max_factor)
-        if residual_norm > 0:
-            ptol = cycle_presid * min(ptol_max_factor, target_abs / residual_norm)
+            residual_norm = float("nan")
+            relative_residual = float("nan")
+            info = 0
+            converged_reason = "converged"
+            break
         if iterations >= maxiter_total:
+            residual_norm = float("nan")
+            relative_residual = float("nan")
             info = iterations
             converged_reason = "maxiter_reached"
             break
@@ -580,7 +593,9 @@ def fgmres_cupy_native(
 
     Compared with standard GMRES, FGMRES stores both Krylov basis vectors `V`
     and preconditioned vectors `Z_j = M_j^{-1} V_j`, allowing the
-    preconditioner to vary by iteration.
+    preconditioner to vary by iteration. When `compute_final_residual=True`,
+    true-residual verification is deferred to terminal decision points instead
+    of every restart boundary.
     """
     b_dtype_obj = getattr(b, "dtype", None)
     b_dtype = np.dtype(np.asarray(b).dtype if b_dtype_obj is None else b_dtype_obj)
@@ -648,35 +663,35 @@ def fgmres_cupy_native(
     target_abs = max(float(atol), float(rtol) * b_norm)
     eps = float(np.finfo(op_dtype.char).eps)
     breakdown_tol_f = float(breakdown_tol)
-    ptol_max_factor = 1.0
     ptol = target_abs
     precond_hist: list[float] = []
     true_hist: list[float] = []
     iterations = 0
     info = maxiter_total
     converged_reason = "maxiter_reached"
-    residual_norm = float("nan")
-    relative_residual = float("nan")
-    r_true = None
+    residual_norm: float
+    relative_residual: float
     need_pr_rel = bool(callback is not None or record_preconditioned_history)
 
-    while iterations < maxiter_total:
-        if r_true is None:
-            if x0_is_zero:
-                residual_norm = float(b_norm)
-                relative_residual = 1.0 if b_norm > 0 else 0.0
-                r_true = cupy.asarray(b_vec, dtype=op_dtype)
-                x0_is_zero = False
-            else:
-                residual_norm, relative_residual, r_true = _true_residual_stats(x_vec)
-            true_hist.append(relative_residual)
-            if restart_callback is not None:
-                restart_callback(relative_residual)
-        if residual_norm <= target_abs:
-            info = 0
-            converged_reason = "converged"
-            break
+    def _record_true_residual(rel_norm: float) -> None:
+        true_hist.append(float(rel_norm))
+        if restart_callback is not None:
+            restart_callback(float(rel_norm))
 
+    if x0_is_zero:
+        residual_norm = float(b_norm)
+        relative_residual = 1.0 if b_norm > 0 else 0.0
+        r_true = cupy.asarray(b_vec, dtype=op_dtype)
+        x0_is_zero = False
+    else:
+        residual_norm, relative_residual, r_true = _true_residual_stats(x_vec)
+    if bool(compute_final_residual):
+        _record_true_residual(relative_residual)
+    if residual_norm <= target_abs:
+        info = 0
+        converged_reason = "converged"
+
+    while iterations < maxiter_total and info != 0:
         beta = _norm(r_true, cupy=cupy, accum_dtype=acc_dtype)
         if beta <= breakdown_tol_f:
             info = iterations if iterations > 0 else maxiter_total
@@ -800,35 +815,43 @@ def fgmres_cupy_native(
         if float(cupy.abs(y[0])) > 0.0:
             y[0] = y[0] / H[0, 0].copy()
         x_vec = x_vec + cupy.asarray(y @ Z[:k_used, :], dtype=op_dtype)
-        if iterations >= maxiter_total and not bool(compute_final_residual):
-            residual_norm = float("nan")
-            relative_residual = float("nan")
+        r_true = cupy.asarray(g[k_used], dtype=op_dtype) * cupy.asarray(
+            V[k_used, :], dtype=op_dtype
+        )
+        should_verify_true = bool(compute_final_residual) and (
+            cycle_presid <= ptol or iterations >= maxiter_total or cycle_breakdown
+        )
+        if should_verify_true:
+            residual_norm, relative_residual, r_true = _true_residual_stats(x_vec)
+            _record_true_residual(relative_residual)
+            if residual_norm <= target_abs:
+                info = 0
+                converged_reason = "converged"
+                break
             if cycle_breakdown:
                 info = iterations if iterations > 0 else maxiter_total
                 converged_reason = cycle_breakdown_reason
-            else:
+                break
+            if iterations >= maxiter_total:
                 info = iterations
                 converged_reason = "maxiter_reached"
-            break
-        residual_norm, relative_residual, r_true = _true_residual_stats(x_vec)
-        true_hist.append(relative_residual)
-        if restart_callback is not None:
-            restart_callback(relative_residual)
-        if residual_norm <= target_abs:
-            info = 0
-            converged_reason = "converged"
-            break
+                break
+            continue
         if cycle_breakdown:
+            residual_norm = float("nan")
+            relative_residual = float("nan")
             info = iterations if iterations > 0 else maxiter_total
             converged_reason = cycle_breakdown_reason
             break
         if cycle_presid <= ptol:
-            ptol_max_factor = max(eps, 0.25 * ptol_max_factor)
-        else:
-            ptol_max_factor = min(1.0, 1.5 * ptol_max_factor)
-        if residual_norm > 0:
-            ptol = cycle_presid * min(ptol_max_factor, target_abs / residual_norm)
+            residual_norm = float("nan")
+            relative_residual = float("nan")
+            info = 0
+            converged_reason = "converged"
+            break
         if iterations >= maxiter_total:
+            residual_norm = float("nan")
+            relative_residual = float("nan")
             info = iterations
             converged_reason = "maxiter_reached"
             break
@@ -875,7 +898,9 @@ def lgmres_cupy_native(
 
     LGMRES augments each restarted cycle with up to ``outer_k`` normalized
     correction directions from previous cycles, which often mitigates restart
-    stagnation versus plain restarted GMRES at similar memory footprint.
+    stagnation versus plain restarted GMRES at similar memory footprint. When
+    `compute_final_residual=True`, true-residual verification is deferred to
+    terminal decision points instead of every restart boundary.
     """
     if prepend_outer_v:
         raise ValueError("`prepend_outer_v=True` is not supported in the native CuPy LGMRES path.")
@@ -940,36 +965,36 @@ def lgmres_cupy_native(
     target_abs = max(float(atol), float(rtol) * b_norm)
     eps = float(np.finfo(op_dtype.char).eps)
     breakdown_tol_f = float(breakdown_tol)
-    ptol_max_factor = 1.0
     ptol = target_abs
     precond_hist: list[float] = []
     true_hist: list[float] = []
     iterations = 0
     info = maxiter_total
     converged_reason = "maxiter_reached"
-    residual_norm = float("nan")
-    relative_residual = float("nan")
-    r_true = None
+    residual_norm: float
+    relative_residual: float
     need_pr_rel = bool(callback is not None or record_preconditioned_history)
     outer_v: list[tuple[Any, Any | None]] = []
 
-    while iterations < maxiter_total:
-        if r_true is None:
-            if x0_is_zero:
-                residual_norm = float(b_norm)
-                relative_residual = 1.0 if b_norm > 0 else 0.0
-                r_true = cupy.asarray(b_vec, dtype=op_dtype)
-                x0_is_zero = False
-            else:
-                residual_norm, relative_residual, r_true = _true_residual_stats(x_vec)
-            true_hist.append(relative_residual)
-            if restart_callback is not None:
-                restart_callback(relative_residual)
-        if residual_norm <= target_abs:
-            info = 0
-            converged_reason = "converged"
-            break
+    def _record_true_residual(rel_norm: float) -> None:
+        true_hist.append(float(rel_norm))
+        if restart_callback is not None:
+            restart_callback(float(rel_norm))
 
+    if x0_is_zero:
+        residual_norm = float(b_norm)
+        relative_residual = 1.0 if b_norm > 0 else 0.0
+        r_true = cupy.asarray(b_vec, dtype=op_dtype)
+        x0_is_zero = False
+    else:
+        residual_norm, relative_residual, r_true = _true_residual_stats(x_vec)
+    if bool(compute_final_residual):
+        _record_true_residual(relative_residual)
+    if residual_norm <= target_abs:
+        info = 0
+        converged_reason = "converged"
+
+    while iterations < maxiter_total and info != 0:
         z0 = _apply_minv(r_true)
         beta = _norm(z0, cupy=cupy, accum_dtype=acc_dtype)
         if beta <= breakdown_tol_f:
@@ -1113,35 +1138,43 @@ def lgmres_cupy_native(
                 while len(outer_v) > outer_keep:
                     del outer_v[0]
 
-        if iterations >= maxiter_total and not bool(compute_final_residual):
-            residual_norm = float("nan")
-            relative_residual = float("nan")
+        r_true = cupy.asarray(g[k_used], dtype=op_dtype) * cupy.asarray(
+            V[k_used, :], dtype=op_dtype
+        )
+        should_verify_true = bool(compute_final_residual) and (
+            cycle_presid <= ptol or iterations >= maxiter_total or cycle_breakdown
+        )
+        if should_verify_true:
+            residual_norm, relative_residual, r_true = _true_residual_stats(x_vec)
+            _record_true_residual(relative_residual)
+            if residual_norm <= target_abs:
+                info = 0
+                converged_reason = "converged"
+                break
             if cycle_breakdown:
                 info = iterations if iterations > 0 else maxiter_total
                 converged_reason = cycle_breakdown_reason
-            else:
+                break
+            if iterations >= maxiter_total:
                 info = iterations
                 converged_reason = "maxiter_reached"
-            break
-        residual_norm, relative_residual, r_true = _true_residual_stats(x_vec)
-        true_hist.append(relative_residual)
-        if restart_callback is not None:
-            restart_callback(relative_residual)
-        if residual_norm <= target_abs:
-            info = 0
-            converged_reason = "converged"
-            break
+                break
+            continue
         if cycle_breakdown:
+            residual_norm = float("nan")
+            relative_residual = float("nan")
             info = iterations if iterations > 0 else maxiter_total
             converged_reason = cycle_breakdown_reason
             break
         if cycle_presid <= ptol:
-            ptol_max_factor = max(eps, 0.25 * ptol_max_factor)
-        else:
-            ptol_max_factor = min(1.0, 1.5 * ptol_max_factor)
-        if residual_norm > 0:
-            ptol = cycle_presid * min(ptol_max_factor, target_abs / residual_norm)
+            residual_norm = float("nan")
+            relative_residual = float("nan")
+            info = 0
+            converged_reason = "converged"
+            break
         if iterations >= maxiter_total:
+            residual_norm = float("nan")
+            relative_residual = float("nan")
             info = iterations
             converged_reason = "maxiter_reached"
             break
