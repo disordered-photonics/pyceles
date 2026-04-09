@@ -6,6 +6,7 @@ CPU build/planning remains the single source of truth in `mlfmm.py`.
 This module validates and uploads repeated-apply structures to device memory.
 """
 
+import time
 from dataclasses import dataclass, field, fields, is_dataclass, replace
 from functools import cache
 from importlib import import_module
@@ -4795,6 +4796,89 @@ def _partition_query_rows_by_compact_unique_chunks(
     return partitions
 
 
+def _sorted_unique_id_overlap_count(
+    *,
+    lhs_ids_sorted: Any,
+    rhs_ids_sorted: Any,
+    cupy: Any,
+) -> int:
+    """Count overlap between two sorted unique id vectors."""
+
+    lhs_ids = cupy.asarray(lhs_ids_sorted, dtype=cupy.int32).reshape(-1)
+    rhs_ids = cupy.asarray(rhs_ids_sorted, dtype=cupy.int32).reshape(-1)
+    if int(lhs_ids.size) == 0 or int(rhs_ids.size) == 0:
+        return 0
+    positions = cupy.searchsorted(rhs_ids, lhs_ids)
+    max_index = int(rhs_ids.size) - 1
+    clamped = cupy.minimum(positions, max_index)
+    valid = (positions < int(rhs_ids.size)) & (rhs_ids[clamped] == lhs_ids)
+    return int(cupy.count_nonzero(valid))
+
+
+def _accumulate_stream_seconds(
+    stream_stats: dict[str, object] | None,
+    *,
+    level_idx: int,
+    key: str,
+    seconds: float,
+) -> None:
+    """Accumulate optional streamed timing counters by sampled level."""
+
+    if stream_stats is None:
+        return
+    timings_by_level = cast(
+        dict[str, dict[str, float]],
+        stream_stats.setdefault("timings_seconds_by_level", {}),
+    )
+    level_timings = cast(dict[str, float], timings_by_level.setdefault(str(level_idx), {}))
+    level_timings[str(key)] = float(level_timings.get(str(key), 0.0) + float(seconds))
+
+
+def _record_same_level_source_union_stats(
+    stream_stats: dict[str, object] | None,
+    *,
+    level_idx: int,
+    source_ids_unique: Any,
+    cupy: Any,
+) -> None:
+    """Record optional overlap diagnostics for adjacent same-level source unions."""
+
+    if stream_stats is None:
+        return
+    source_ids = cupy.asarray(source_ids_unique, dtype=cupy.int32).reshape(-1)
+    union_stats_by_level = cast(
+        dict[str, dict[str, float | int]],
+        stream_stats.setdefault("same_level_source_union_stats", {}),
+    )
+    level_stats = cast(dict[str, float | int], union_stats_by_level.setdefault(str(level_idx), {}))
+    n_source_ids = int(source_ids.size)
+    level_stats["count"] = int(level_stats.get("count", 0)) + 1
+    level_stats["box_sum"] = int(level_stats.get("box_sum", 0)) + int(n_source_ids)
+    level_stats["box_peak"] = max(int(level_stats.get("box_peak", 0)), int(n_source_ids))
+    history_by_level = cast(
+        dict[str, list[Any]],
+        stream_stats.setdefault("_internal_same_level_source_union_history", {}),
+    )
+    history = history_by_level.setdefault(str(level_idx), [])
+    for lag_idx, prev_ids in enumerate(reversed(history[-3:]), start=1):
+        if n_source_ids <= 0:
+            overlap_ratio = 0.0
+        else:
+            overlap_count = _sorted_unique_id_overlap_count(
+                lhs_ids_sorted=source_ids,
+                rhs_ids_sorted=prev_ids,
+                cupy=cupy,
+            )
+            overlap_ratio = float(overlap_count) / float(n_source_ids)
+        ratio_key = f"overlap_prev{lag_idx}_ratio_sum"
+        count_key = f"overlap_prev{lag_idx}_count"
+        level_stats[ratio_key] = float(level_stats.get(ratio_key, 0.0)) + float(overlap_ratio)
+        level_stats[count_key] = int(level_stats.get(count_key, 0)) + 1
+    history.append(source_ids)
+    if len(history) > 3:
+        del history[:-3]
+
+
 def _level_group_box_cap(
     *,
     level: CuPyMLFMMLevelData,
@@ -4873,6 +4957,7 @@ def _apply_same_level_far_streamed_chunk_group(
 
     if not chunks:
         return
+    subset_filter_started = time.perf_counter() if stream_stats is not None else 0.0
     level = levels[int(level_idx)]
     source_box_cap = _level_chunk_box_cap(
         level=level,
@@ -4931,6 +5016,12 @@ def _apply_same_level_far_streamed_chunk_group(
     if not source_batches:
         return
     if full_source_outgoing is not None and full_source_ids is not None:
+        _accumulate_stream_seconds(
+            stream_stats,
+            level_idx=int(level_idx),
+            key="same_level_subset_filter",
+            seconds=time.perf_counter() - subset_filter_started,
+        )
         for (_box_ids, incoming), filtered_offsets in zip(chunks, filtered_by_chunk):
             current_incoming = cupy.asarray(incoming, dtype=cupy.complex128)
             for offset, source_ids_all, dst_local_all in filtered_offsets:
@@ -4954,6 +5045,12 @@ def _apply_same_level_far_streamed_chunk_group(
     source_ids_unique = cupy.unique(cupy.concatenate(source_batches, axis=0)).astype(
         cupy.int32, copy=False
     )
+    _record_same_level_source_union_stats(
+        stream_stats,
+        level_idx=int(level_idx),
+        source_ids_unique=source_ids_unique,
+        cupy=cupy,
+    )
     source_matches_by_chunk: list[list[tuple[Offset3, Any, dict[int, tuple[Any, Any]]]]] = []
     for filtered_offsets in filtered_by_chunk:
         offset_matches: list[tuple[Offset3, Any, dict[int, tuple[Any, Any]]]] = []
@@ -4971,6 +5068,12 @@ def _apply_same_level_far_streamed_chunk_group(
                 )
             )
         source_matches_by_chunk.append(offset_matches)
+    _accumulate_stream_seconds(
+        stream_stats,
+        level_idx=int(level_idx),
+        key="same_level_subset_filter",
+        seconds=time.perf_counter() - subset_filter_started,
+    )
     for source_chunk_idx, source_chunk_ids in enumerate(
         _iter_id_chunks(source_ids_unique, chunk_size=int(source_box_cap))
     ):
@@ -5151,6 +5254,7 @@ def _build_outgoing_subset_streamed(
 ) -> Any:
     """Build outgoing directional channels for one selected box subset."""
 
+    build_started = time.perf_counter() if stream_stats is not None else 0.0
     box_ids = cupy.asarray(box_ids_sorted, dtype=cupy.int32).reshape(-1)
     level = levels[int(level_idx)]
     n_boxes_sel = int(box_ids.size)
@@ -5177,8 +5281,15 @@ def _build_outgoing_subset_streamed(
         dtype=cupy.complex128,
     )
     if n_boxes_sel == 0:
+        _accumulate_stream_seconds(
+            stream_stats,
+            level_idx=int(level_idx),
+            key="outgoing_build_total",
+            seconds=time.perf_counter() - build_started,
+        )
         return outgoing
     if int(level_idx) == int(leaf_level):
+        leaf_started = time.perf_counter() if stream_stats is not None else 0.0
         leaf_box_states = _aggregate_selected_leaf_box_states(
             x_states,
             selected_leaf_ids=box_ids,
@@ -5192,12 +5303,25 @@ def _build_outgoing_subset_streamed(
             nrhs=int(nrhs),
             cupy=cupy,
         )
-        return _box_outgoing_to_directional_cupy(
+        outgoing_leaf = _box_outgoing_to_directional_cupy(
             levels[int(leaf_level)].directional,
             leaf_box_states,
             out=outgoing,
             cupy=cupy,
         )
+        _accumulate_stream_seconds(
+            stream_stats,
+            level_idx=int(level_idx),
+            key="leaf_outgoing_build",
+            seconds=time.perf_counter() - leaf_started,
+        )
+        _accumulate_stream_seconds(
+            stream_stats,
+            level_idx=int(level_idx),
+            key="outgoing_build_total",
+            seconds=time.perf_counter() - build_started,
+        )
+        return outgoing_leaf
 
     outgoing.fill(0)
     transfer = transfer_by_parent.get(int(level_idx))
@@ -5259,6 +5383,12 @@ def _build_outgoing_subset_streamed(
         filtered_by_shift.append((shift, child_ids_all, parent_local_all))
         child_batches.append(child_ids_all)
     if not filtered_by_shift:
+        _accumulate_stream_seconds(
+            stream_stats,
+            level_idx=int(level_idx),
+            key="outgoing_build_total",
+            seconds=time.perf_counter() - build_started,
+        )
         return outgoing
     if full_child_outgoing is not None and full_child_ids is not None:
         for shift, child_ids_all, parent_local_all in filtered_by_shift:
@@ -5304,6 +5434,12 @@ def _build_outgoing_subset_streamed(
                     transfer.phase_up_by_shift[shift],
                     cupy=cupy,
                 )
+        _accumulate_stream_seconds(
+            stream_stats,
+            level_idx=int(level_idx),
+            key="outgoing_build_total",
+            seconds=time.perf_counter() - build_started,
+        )
         return outgoing
     child_ids_unique = cupy.unique(cupy.concatenate(child_batches, axis=0)).astype(
         cupy.int32, copy=False
@@ -5388,6 +5524,12 @@ def _build_outgoing_subset_streamed(
                     transfer.phase_up_by_shift[shift],
                     cupy=cupy,
                 )
+    _accumulate_stream_seconds(
+        stream_stats,
+        level_idx=int(level_idx),
+        key="outgoing_build_total",
+        seconds=time.perf_counter() - build_started,
+    )
     return outgoing
 
 
@@ -6464,6 +6606,8 @@ class CuPyMLFMMCouplingOperator:
         self._last_resolved_streamed_far_frontier_bytes_budget = (
             resolved_streamed_far_frontier_bytes_budget
         )
+        if stream_stats is not None:
+            stream_stats.pop("_internal_same_level_source_union_history", None)
         self._last_stream_stats = None if stream_stats is None else dict(stream_stats)
         y_total = cupy.asarray(y_far, dtype=cupy.complex128)
         y_total += cupy.asarray(y_near, dtype=cupy.complex128)
