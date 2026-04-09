@@ -4647,6 +4647,26 @@ def _resolve_stream_bytes_budget(
     return max(int(minimum_bytes), min(int(maximum_bytes), int(derived)))
 
 
+def _level_chunk_bytes_per_box(*, level: CuPyMLFMMLevelData, nrhs: int) -> int:
+    """Return live directional bytes per source box for one streamed chunk."""
+
+    return (
+        3
+        * 4
+        * int(level.directional.grid.n_directions)
+        * int(nrhs)
+        * np.dtype(np.complex128).itemsize
+    )
+
+
+def _level_group_bytes_per_box(*, level: CuPyMLFMMLevelData, nrhs: int) -> int:
+    """Return incoming-buffer bytes per destination box in one frontier group."""
+
+    return (
+        4 * int(level.directional.grid.n_directions) * int(nrhs) * np.dtype(np.complex128).itemsize
+    )
+
+
 def _level_chunk_box_cap(
     *,
     level: CuPyMLFMMLevelData,
@@ -4655,13 +4675,7 @@ def _level_chunk_box_cap(
 ) -> int:
     """Return a conservative chunk-box cap for one directional level."""
 
-    per_box_bytes = (
-        3
-        * 4
-        * int(level.directional.grid.n_directions)
-        * int(nrhs)
-        * np.dtype(np.complex128).itemsize
-    )
+    per_box_bytes = _level_chunk_bytes_per_box(level=level, nrhs=nrhs)
     return max(1, int(bytes_budget) // max(1, int(per_box_bytes)))
 
 
@@ -4789,8 +4803,7 @@ def _level_group_box_cap(
 ) -> int:
     """Cap one resident destination-chunk group from incoming-buffer live bytes."""
 
-    ndirs = int(level.directional.grid.n_directions)
-    bytes_per_box = 4 * ndirs * int(nrhs) * np.dtype(np.complex128).itemsize
+    bytes_per_box = _level_group_bytes_per_box(level=level, nrhs=nrhs)
     if bytes_per_box <= 0:
         return 1
     return max(1, int(bytes_budget) // int(bytes_per_box))
@@ -4889,6 +4902,7 @@ def _apply_same_level_far_streamed_chunk_group(
             box_nm_leaf=int(box_nm_leaf),
             x_states=x_states,
             nrhs=int(nrhs),
+            build_reason="same_level_far",
             cupy=cupy,
             stream_stats=stream_stats,
         )
@@ -4976,6 +4990,7 @@ def _apply_same_level_far_streamed_chunk_group(
             box_nm_leaf=int(box_nm_leaf),
             x_states=x_states,
             nrhs=int(nrhs),
+            build_reason="same_level_far",
             cupy=cupy,
             stream_stats=stream_stats,
         )
@@ -5130,6 +5145,7 @@ def _build_outgoing_subset_streamed(
     box_nm_leaf: int,
     x_states: Any,
     nrhs: int,
+    build_reason: str,
     cupy: Any,
     stream_stats: dict[str, object] | None,
 ) -> Any:
@@ -5141,6 +5157,16 @@ def _build_outgoing_subset_streamed(
     if stream_stats is not None:
         build_counts = cast(dict[str, int], stream_stats.setdefault("outgoing_build_count", {}))
         build_counts[str(level_idx)] = int(build_counts.get(str(level_idx), 0) + 1)
+        build_reason_counts = cast(
+            dict[str, dict[str, int]],
+            stream_stats.setdefault("outgoing_build_count_by_reason", {}),
+        )
+        level_reason_counts = cast(
+            dict[str, int], build_reason_counts.setdefault(str(level_idx), {})
+        )
+        level_reason_counts[str(build_reason)] = int(
+            level_reason_counts.get(str(build_reason), 0) + 1
+        )
         peak_boxes = cast(dict[str, int], stream_stats.setdefault("outgoing_build_peak_boxes", {}))
         peak_boxes[str(level_idx)] = max(
             int(peak_boxes.get(str(level_idx), 0)),
@@ -5209,6 +5235,7 @@ def _build_outgoing_subset_streamed(
             box_nm_leaf=int(box_nm_leaf),
             x_states=x_states,
             nrhs=int(nrhs),
+            build_reason="parent_transfer",
             cupy=cupy,
             stream_stats=stream_stats,
         )
@@ -5318,6 +5345,7 @@ def _build_outgoing_subset_streamed(
             box_nm_leaf=int(box_nm_leaf),
             x_states=x_states,
             nrhs=int(nrhs),
+            build_reason="parent_transfer",
             cupy=cupy,
             stream_stats=stream_stats,
         )
@@ -5979,6 +6007,12 @@ class CuPyMLFMMCouplingOperator:
         default_factory=dict, init=False, repr=False
     )
     _last_resolved_leaf_otf_bytes_budget: int | None = field(default=None, init=False, repr=False)
+    _last_resolved_streamed_far_chunk_box_cap: int | None = field(
+        default=None, init=False, repr=False
+    )
+    _last_resolved_streamed_far_frontier_box_cap: int | None = field(
+        default=None, init=False, repr=False
+    )
     _last_resolved_streamed_far_chunk_bytes_budget: int | None = field(
         default=None, init=False, repr=False
     )
@@ -6123,6 +6157,16 @@ class CuPyMLFMMCouplingOperator:
             streaming_diag = {
                 "leaf_apply_mode": str(multilevel.leaf_apply_mode),
                 "collect_stream_stats": bool(self.host_cache_policy.collect_stream_stats),
+                "resolved_streamed_far_chunk_box_cap": (
+                    None
+                    if self._last_resolved_streamed_far_chunk_box_cap is None
+                    else int(self._last_resolved_streamed_far_chunk_box_cap)
+                ),
+                "resolved_streamed_far_frontier_box_cap": (
+                    None
+                    if self._last_resolved_streamed_far_frontier_box_cap is None
+                    else int(self._last_resolved_streamed_far_frontier_box_cap)
+                ),
                 "resolved_leaf_otf_bytes_budget": (
                     None
                     if self._last_resolved_leaf_otf_bytes_budget is None
@@ -6246,6 +6290,8 @@ class CuPyMLFMMCouplingOperator:
         )
         stage = str(self.prepared_data.stage)
         resolved_leaf_otf_bytes_budget: int | None = None
+        resolved_streamed_far_chunk_box_cap: int | None = None
+        resolved_streamed_far_frontier_box_cap: int | None = None
         resolved_streamed_far_chunk_bytes_budget: int | None = None
         resolved_streamed_far_frontier_bytes_budget: int | None = None
         stream_stats: dict[str, object] | None = None
@@ -6294,22 +6340,24 @@ class CuPyMLFMMCouplingOperator:
                 raise RuntimeError("Internal CuPy MLFMM error: missing multilevel prepared data.")
             if str(multilevel.leaf_apply_mode) == "on_the_fly":
                 free_bytes, _ = cupy.cuda.runtime.memGetInfo()
+                nrhs = int(x_states.shape[2])
                 full_level_live_bytes = _multilevel_stream_full_level_live_bytes_theoretical(
                     multilevel,
-                    nrhs=int(x_states.shape[2]),
+                    nrhs=nrhs,
                 )
                 full_level_incoming_bytes = (
                     _multilevel_stream_full_level_incoming_bytes_theoretical(
                         multilevel,
-                        nrhs=int(x_states.shape[2]),
+                        nrhs=nrhs,
                     )
                 )
                 hf_start_level = multilevel.levels[int(multilevel.hf_start_level)]
+                hf_end_level = multilevel.levels[int(multilevel.hf_end_level)]
                 hf_start_incoming_bytes = (
                     int(hf_start_level.n_boxes)
                     * 4
                     * int(hf_start_level.directional.grid.n_directions)
-                    * int(x_states.shape[2])
+                    * nrhs
                     * np.dtype(np.complex128).itemsize
                 )
                 # Streaming performance depends on two different reuse units.
@@ -6318,6 +6366,10 @@ class CuPyMLFMMCouplingOperator:
                 # next useful headroom is usually larger finer-level source
                 # chunks, which reduce repeated outgoing rebuild/filter work
                 # more effectively than pushing the frontier even wider.
+                # Do not blindly maximize finest-level chunk residency: larger
+                # chunks can still regress end-to-end throughput even when they
+                # reduce chunk/build counters, so this auto policy stays
+                # deliberately conservative there.
                 resolved_leaf_otf_bytes_budget = _resolve_stream_bytes_budget(
                     explicit_budget=self.host_cache_policy.leaf_otf_bytes_budget,
                     free_bytes=int(free_bytes),
@@ -6336,8 +6388,17 @@ class CuPyMLFMMCouplingOperator:
                     maximum_bytes=max(
                         64 * 1024**2,
                         min(
-                            int(full_level_incoming_bytes), max(256 * 1024**2, int(free_bytes) // 2)
+                            int(full_level_incoming_bytes),
+                            max(256 * 1024**2, int(free_bytes) // 2),
                         ),
+                    ),
+                )
+                resolved_streamed_far_frontier_box_cap = min(
+                    int(hf_start_level.n_boxes),
+                    _level_group_box_cap(
+                        level=hf_start_level,
+                        nrhs=nrhs,
+                        bytes_budget=int(resolved_streamed_far_frontier_bytes_budget),
                     ),
                 )
                 remaining_chunk_bytes = max(
@@ -6359,6 +6420,14 @@ class CuPyMLFMMCouplingOperator:
                     maximum_bytes=max(
                         256 * 1024**2,
                         min(1024 * 1024**2, int(remaining_chunk_bytes)),
+                    ),
+                )
+                resolved_streamed_far_chunk_box_cap = min(
+                    int(hf_end_level.n_boxes),
+                    _level_chunk_box_cap(
+                        level=hf_end_level,
+                        nrhs=nrhs,
+                        bytes_budget=int(resolved_streamed_far_chunk_bytes_budget),
                     ),
                 )
                 if bool(self.host_cache_policy.collect_stream_stats):
@@ -6387,6 +6456,8 @@ class CuPyMLFMMCouplingOperator:
         else:
             raise RuntimeError(f"Unsupported CuPy MLFMM stage {stage!r}.")
         self._last_resolved_leaf_otf_bytes_budget = resolved_leaf_otf_bytes_budget
+        self._last_resolved_streamed_far_chunk_box_cap = resolved_streamed_far_chunk_box_cap
+        self._last_resolved_streamed_far_frontier_box_cap = resolved_streamed_far_frontier_box_cap
         self._last_resolved_streamed_far_chunk_bytes_budget = (
             resolved_streamed_far_chunk_bytes_budget
         )

@@ -429,6 +429,12 @@ def test_cupy_multilevel_stream_stats_collection_is_opt_in(collect_stream_stats:
     assert isinstance(streaming, dict)
     assert isinstance(rolling, dict)
     assert streaming.get("collect_stream_stats") is collect_stream_stats
+    chunk_box_cap = streaming.get("resolved_streamed_far_chunk_box_cap")
+    frontier_box_cap = streaming.get("resolved_streamed_far_frontier_box_cap")
+    assert isinstance(chunk_box_cap, int)
+    assert isinstance(frontier_box_cap, int)
+    assert chunk_box_cap > 0
+    assert frontier_box_cap > 0
     assert rolling.get("execution_mode") == "streamed_chunk_local"
     assert rolling.get("rolling_incoming_bytes_actual_peak") is None
     assert rolling.get("rolling_outgoing_bytes_actual_peak") is None
