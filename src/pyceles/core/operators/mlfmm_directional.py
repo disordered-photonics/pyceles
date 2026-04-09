@@ -10,6 +10,7 @@ import numpy as np
 import scipy.sparse
 
 from pyceles.core.indexing import n_scalar, scalar_index
+from pyceles.core.spherical import legendre_normalized_trigon_scalar
 
 Array = np.ndarray
 
@@ -89,31 +90,25 @@ def _from_cache_key_factor(value: int) -> float:
 
 
 def _legendre2(n: int, x: float) -> Array:
-    """Return unnormalized associated Legendre values `P_n^m(x)` for one degree."""
+    """Return stable 4pi-normalized associated Legendre values for one degree.
+
+    The directional transform builder only needs the Legendre values after the
+    spherical-harmonic normalization is applied. Reusing the canonical
+    normalized CELES recurrence keeps the shallow/high-order path finite
+    without introducing a second angular-recurrence implementation here.
+    """
 
     n_i = int(n)
     if n_i < 0:
         raise ValueError(f"n must be >= 0. Got {n}.")
-    pm = np.zeros((n_i + 2, n_i + 2), dtype=np.float64)
-    pm[0, 0] = 1.0
-
-    x_f = float(x)
-    ls = 1.0 if abs(x_f) <= 1.0 else -1.0
-    xq = math.sqrt(max(0.0, ls * (1.0 - x_f * x_f)))
-
-    for m in range(1, n_i + 1):
-        pm[m, m] = -ls * (2.0 * m - 1.0) * xq * pm[m - 1, m - 1]
-
-    for m in range(0, n_i + 1):
-        pm[m, m + 1] = (2.0 * m + 1.0) * x_f * pm[m, m]
-
-    for m in range(0, n_i + 1):
-        for ell in range(m + 2, n_i + 1):
-            pm[m, ell] = (
-                (2.0 * ell - 1.0) * x_f * pm[m, ell - 1] - (m + ell - 1.0) * pm[m, ell - 2]
-            ) / float(ell - m)
-
-    return pm[: n_i + 1, n_i].copy()
+    x_f = float(np.clip(x, -1.0, 1.0))
+    st_f = math.sqrt(max(0.0, 1.0 - x_f * x_f))
+    plm = legendre_normalized_trigon_scalar(x_f, st_f, n_i)
+    phase = np.where(np.arange(n_i + 1, dtype=np.int32) & 1, -1.0, 1.0)
+    return np.asarray(
+        phase * plm[n_i, : n_i + 1] / math.sqrt(2.0 * np.pi),
+        dtype=np.float64,
+    )
 
 
 def _directional_reflection_permutation(
@@ -265,29 +260,37 @@ def _cached_directional_transforms(
         for l in range(1, int(box_order) + 1):
             l_arr = legendre_by_n[l]
             l1_arr = legendre_by_n[l + 1]
-            l2_arr = legendre_by_n[l - 1] if l > 1 else np.asarray([1.0], dtype=float)
+            l2_arr = legendre_by_n[l - 1] if l > 1 else legendre_by_n[0]
             q = math.sqrt(l * (l + 1.0)) / ((2.0 * l + 1.0) * sin_theta)
             for m in range(-l, l + 1):
                 mm = abs(m)
                 if m not in exp_cache:
                     exp_cache[m] = complex(np.exp(1j * m * phi))
                 phase = exp_cache[m]
-                log_norm = (
-                    math.log((2.0 * l + 1.0) / (4.0 * np.pi))
-                    + math.lgamma(l - mm + 1.0)
-                    - math.lgamma(l + mm + 1.0)
-                )
-                cc = (1j**l) * math.exp(0.5 * log_norm)
                 y = complex(l_arr[mm] * phase)
-                y1 = complex(l1_arr[mm] * phase)
-                y2 = 0.0j if mm == l else complex(l2_arr[mm] * phase)
-                y1 *= (l - mm + 1.0) / (l + 1.0)
-                y2 *= (l + mm) / l
+                y1 = complex(
+                    math.sqrt(
+                        (2.0 * l + 1.0)
+                        / (2.0 * l + 3.0)
+                        * (((l + 1.0) * (l + 1.0) - mm * mm) / ((l + 1.0) * (l + 1.0)))
+                    )
+                    * l1_arr[mm]
+                    * phase
+                )
+                y2 = (
+                    0.0j
+                    if mm == l
+                    else complex(
+                        math.sqrt((2.0 * l + 1.0) / (2.0 * l - 1.0) * ((l * l - mm * mm) / (l * l)))
+                        * l2_arr[mm]
+                        * phase
+                    )
+                )
                 b_theta = (y1 - y2) * q
                 b_phi = (1j * m * (2.0 * l + 1.0) / (l * (l + 1.0)) * y) * q
                 idx = scalar_index(l, m)
-                fth[idir, idx] = 1j * cc * b_theta
-                fph[idir, idx] = 1j * cc * b_phi
+                fth[idir, idx] = 1j * (1j**l) * b_theta
+                fph[idir, idx] = 1j * (1j**l) * b_phi
 
     return MLFMMDirectionalTransforms(
         box_order=int(box_order),

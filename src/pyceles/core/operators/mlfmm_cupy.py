@@ -453,10 +453,9 @@ class CuPyMLFMMMultilevelWorkspace:
 
 @dataclass
 class CuPyMLFMMNearWorkspace:
-    """Reusable exact-near work buffers for one RHS width."""
+    """Reusable exact-near output buffer for one RHS width."""
 
     nrhs: int
-    x_states: Any
     y_states: Any
 
 
@@ -4273,9 +4272,6 @@ def _ensure_exact_near_workspace(
         )
     ws = CuPyMLFMMNearWorkspace(
         nrhs=int(key.nrhs),
-        x_states=cupy.empty(
-            (int(key.n_particles), int(key.nm), int(key.nrhs)), dtype=cupy_near_dtype
-        ),
         y_states=cupy.empty(
             (int(key.n_particles), int(key.nm), int(key.nrhs)), dtype=cupy_near_dtype
         ),
@@ -4316,13 +4312,11 @@ def _apply_exact_near_pairs(
             workspace.y_states.fill(0)
             return workspace.y_states
         return cupy.zeros((n_particles, nm, nrhs), dtype=cupy_out_dtype)
+    x_arr = cupy.ascontiguousarray(cupy.asarray(x_states, dtype=cupy_compute_dtype))
     if workspace is None:
-        x_arr = cupy.ascontiguousarray(cupy.asarray(x_states, dtype=cupy_compute_dtype))
         y_arr = cupy.zeros((n_particles, nm, nrhs), dtype=cupy_compute_dtype)
     else:
-        x_arr = workspace.x_states
         y_arr = workspace.y_states
-        x_arr[...] = cupy.asarray(x_states, dtype=cupy_compute_dtype)
         y_arr.fill(0)
 
     props = cupy.cuda.runtime.getDeviceProperties(cupy.cuda.runtime.getDevice())
@@ -4762,11 +4756,20 @@ def _partition_query_rows_by_compact_unique_chunks(
         return_counts=True,
     )
     partitions: dict[int, tuple[Any, Any]] = {}
-    for chunk_idx, start, count in zip(
-        cupy.asnumpy(chunk_ids).tolist(),
-        cupy.asnumpy(start_rows).tolist(),
-        cupy.asnumpy(counts).tolist(),
-    ):
+    partition_triplets = np.asarray(
+        cupy.asnumpy(
+            cupy.stack(
+                (
+                    chunk_ids.astype(cupy.int32, copy=False),
+                    start_rows.astype(cupy.int32, copy=False),
+                    counts.astype(cupy.int32, copy=False),
+                ),
+                axis=1,
+            )
+        ),
+        dtype=np.int32,
+    )
+    for chunk_idx, start, count in partition_triplets.tolist():
         row_slice = slice(int(start), int(start) + int(count))
         chunk_row_offset = int(chunk_idx) * chunk_size
         partitions[int(chunk_idx)] = (
@@ -5550,7 +5553,7 @@ def _apply_multilevel_far_streamed(
     cupy: Any,
     stream_stats: dict[str, object] | None,
 ) -> Any:
-    """Apply multilevel far interactions by streaming selected destination chunks."""
+    """Apply multilevel far interactions by streaming selected destination frontiers."""
 
     multilevel = prepared.multilevel
     if multilevel is None:
@@ -5591,12 +5594,8 @@ def _apply_multilevel_far_streamed(
     if stream_stats is not None:
         caps = cast(dict[str, int], stream_stats.setdefault("level_frontier_box_cap", {}))
         caps[str(hf_start)] = int(top_frontier_box_cap)
-    # The grouped same-level pass below was the first large streamed-far win:
-    # one source-outgoing chunk is now reused across multiple destination
-    # chunks before we descend. The remaining rebuild pressure comes from the
-    # recursive parent-chunk traversal after transfer-down, so the next
-    # structural widening should be a level-synchronous frontier walk rather
-    # than another fixed global source-chunk cache.
+    # Process the sampled hierarchy as frontiers so one source chunk can feed
+    # more than one destination chunk before the traversal descends.
     top_chunks = _iter_zero_incoming_chunks_for_level(
         level=start_level,
         chunk_box_cap=int(top_chunk_box_cap),
@@ -6006,7 +6005,7 @@ class CuPyMLFMMCouplingOperator:
             self._device_pool_peak_total_bytes = int(pool_total)
 
     def memory_diagnostics(self) -> dict[str, object]:
-        """Return runtime memory diagnostics for Phase-D/Phase-E benchmark logging."""
+        """Return runtime memory diagnostics for the CuPy MLFMM operator."""
 
         cupy, _ = import_cupy()
         pool = cupy.get_default_memory_pool()
@@ -6014,10 +6013,7 @@ class CuPyMLFMMCouplingOperator:
         free_bytes, total_bytes = cupy.cuda.runtime.memGetInfo()
 
         near_ws_total = int(
-            sum(
-                _device_array_nbytes(ws.x_states) + _device_array_nbytes(ws.y_states)
-                for ws in self._near_workspace_cache.values()
-            )
+            sum(_device_array_nbytes(ws.y_states) for ws in self._near_workspace_cache.values())
         )
         single_ws_total = int(
             sum(
@@ -6077,18 +6073,25 @@ class CuPyMLFMMCouplingOperator:
             rolling_outgoing_theoretical = _multilevel_rolling_outgoing_bytes_theoretical(
                 multilevel, nrhs=nrhs_ref
             )
-            rolling_used = rolling_theoretical if rolling_actual is None else int(rolling_actual)
-            rolling_outgoing_used = (
-                rolling_outgoing_theoretical
-                if rolling_outgoing_actual is None
-                else int(rolling_outgoing_actual)
-            )
+            streamed_chunk_local = str(multilevel.leaf_apply_mode) == "on_the_fly"
+            if streamed_chunk_local:
+                rolling_actual = None
+                rolling_outgoing_actual = None
+                rolling_used = None
+                rolling_outgoing_used = None
+            else:
+                rolling_used = (
+                    rolling_theoretical if rolling_actual is None else int(rolling_actual)
+                )
+                rolling_outgoing_used = (
+                    rolling_outgoing_theoretical
+                    if rolling_outgoing_actual is None
+                    else int(rolling_outgoing_actual)
+                )
             rolling_diag = {
-                "execution_mode": (
-                    "streamed_chunk_local"
-                    if str(multilevel.leaf_apply_mode) == "on_the_fly"
-                    else "rolling_resident"
-                ),
+                "execution_mode": "streamed_chunk_local"
+                if streamed_chunk_local
+                else "rolling_resident",
                 "nrhs_reference": int(nrhs_ref),
                 "full_incoming_hierarchy_bytes": int(full_incoming),
                 "rolling_incoming_bytes_theoretical": int(rolling_theoretical),
@@ -6096,7 +6099,9 @@ class CuPyMLFMMCouplingOperator:
                     None if rolling_actual is None else int(rolling_actual)
                 ),
                 "incoming_reduction_ratio": (
-                    float(rolling_used) / float(full_incoming) if full_incoming > 0 else None
+                    None
+                    if rolling_used is None or full_incoming <= 0
+                    else float(rolling_used) / float(full_incoming)
                 ),
                 "outgoing_hierarchy_bytes": int(outgoing_hierarchy),
                 "rolling_outgoing_bytes_theoretical": int(rolling_outgoing_theoretical),
@@ -6104,12 +6109,16 @@ class CuPyMLFMMCouplingOperator:
                     None if rolling_outgoing_actual is None else int(rolling_outgoing_actual)
                 ),
                 "outgoing_reduction_ratio": (
-                    float(rolling_outgoing_used) / float(outgoing_hierarchy)
-                    if outgoing_hierarchy > 0
-                    else None
+                    None
+                    if rolling_outgoing_used is None or outgoing_hierarchy <= 0
+                    else float(rolling_outgoing_used) / float(outgoing_hierarchy)
                 ),
                 "full_far_hierarchy_bytes": int(full_incoming + outgoing_hierarchy),
-                "rolling_far_hierarchy_bytes": int(rolling_used + rolling_outgoing_used),
+                "rolling_far_hierarchy_bytes": (
+                    None
+                    if rolling_used is None or rolling_outgoing_used is None
+                    else int(rolling_used + rolling_outgoing_used)
+                ),
             }
             streaming_diag = {
                 "leaf_apply_mode": str(multilevel.leaf_apply_mode),

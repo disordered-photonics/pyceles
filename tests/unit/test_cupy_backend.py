@@ -425,8 +425,16 @@ def test_cupy_multilevel_stream_stats_collection_is_opt_in(collect_stream_stats:
     _ = asnumpy(runtime.apply(x))
     diag = runtime.memory_diagnostics()
     streaming = diag.get("multilevel_streaming")
+    rolling = diag.get("multilevel_rolling")
     assert isinstance(streaming, dict)
+    assert isinstance(rolling, dict)
     assert streaming.get("collect_stream_stats") is collect_stream_stats
+    assert rolling.get("execution_mode") == "streamed_chunk_local"
+    assert rolling.get("rolling_incoming_bytes_actual_peak") is None
+    assert rolling.get("rolling_outgoing_bytes_actual_peak") is None
+    assert rolling.get("incoming_reduction_ratio") is None
+    assert rolling.get("outgoing_reduction_ratio") is None
+    assert rolling.get("rolling_far_hierarchy_bytes") is None
     if collect_stream_stats:
         stats = streaming.get("last_apply_stats")
         assert isinstance(stats, dict)
