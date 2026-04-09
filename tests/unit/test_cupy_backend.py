@@ -351,6 +351,28 @@ def _mlfmm_transition_particles() -> tuple[Particle, ...]:
     return _random_uniform_sphere_particles(n_particles=27, seed=50)
 
 
+def _transition_numpy_mlfmm_coupling(*, max_leaf_particles: int) -> MLFMMCouplingOperator:
+    lmax = 1
+    wavelength = 550.0
+    n_medium = 1.0 + 0j
+    k = 2.0 * np.pi / wavelength
+    prepared = prepare_matvec(
+        lmax=lmax,
+        k=k,
+        particles=list(_mlfmm_transition_particles()),
+        n_medium=n_medium,
+        radial_lut_dr=0.5,
+        cache_translation_blocks=False,
+        coupling_backend="mlfmm",
+        mlfmm_options=MLFMMOptions(max_leaf_particles=max_leaf_particles, max_depth=4),
+        backend="numpy",
+    )
+    coupling = prepared.coupling
+    if not isinstance(coupling, MLFMMCouplingOperator):
+        raise AssertionError("Transition fixture unexpectedly resolved to direct stage.")
+    return coupling
+
+
 def _mlfmm_policy_particles() -> tuple[Particle, ...]:
     # Policy/retention tests do not require a stage split; keep this fixture
     # small so host-cache/policy tests stay lightweight.
@@ -382,6 +404,35 @@ def _sim_cfg(
         accum_dtype="complex128",
         verbose=False,
     )
+
+
+@pytest.mark.parametrize("collect_stream_stats", [False, True])
+def test_cupy_multilevel_stream_stats_collection_is_opt_in(collect_stream_stats: bool) -> None:
+    coupling = _transition_numpy_mlfmm_coupling(max_leaf_particles=4)
+    assert str(coupling.resolved_plan.stage) == "multilevel"
+    runtime = prepare_mlfmm_cupy_coupling(
+        coupling,
+        host_cache_policy=CuPyMLFMMHostCachePolicy(collect_stream_stats=collect_stream_stats),
+    )
+
+    nm = n_modes(1)
+    n_particles = len(_mlfmm_transition_particles())
+    rng = np.random.default_rng(20260409 + int(collect_stream_stats))
+    x = np.asarray(
+        rng.standard_normal(n_particles * nm) + 1j * rng.standard_normal(n_particles * nm),
+        dtype=np.complex128,
+    )
+    _ = asnumpy(runtime.apply(x))
+    diag = runtime.memory_diagnostics()
+    streaming = diag.get("multilevel_streaming")
+    assert isinstance(streaming, dict)
+    assert streaming.get("collect_stream_stats") is collect_stream_stats
+    if collect_stream_stats:
+        stats = streaming.get("last_apply_stats")
+        assert isinstance(stats, dict)
+        assert "processed_chunk_count" in stats
+    else:
+        assert streaming.get("last_apply_stats") is None
 
 
 @pytest.mark.parametrize(

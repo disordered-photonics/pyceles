@@ -64,6 +64,10 @@ class CuPyMLFMMHostCachePolicy:
     bounds one sampled-far directional chunk by estimated directional-state
     bytes. When omitted, both budgets are derived conservatively from currently
     available device memory during apply.
+
+    `collect_stream_stats` keeps streamed multilevel chunk/build counters for
+    diagnostics. Leave it off for production runs so repeated applies do not
+    spend time updating per-apply bookkeeping dictionaries.
     """
 
     leaf_apply_mode: CuPyMLFMMLeafApplyMode = "on_the_fly"
@@ -71,6 +75,7 @@ class CuPyMLFMMHostCachePolicy:
     leaf_otf_chunk_leaves: int | None = None
     leaf_otf_bytes_budget: int | None = None
     streamed_far_chunk_bytes_budget: int | None = None
+    collect_stream_stats: bool = False
 
 
 @dataclass(frozen=True)
@@ -1721,6 +1726,7 @@ def _runtime_host_cache_summary(
             if policy.streamed_far_chunk_bytes_budget is None
             else int(policy.streamed_far_chunk_bytes_budget)
         ),
+        "collect_stream_stats": bool(policy.collect_stream_stats),
         "stage": str(cache.stage),
         "near_static_tables_cached": bool(cache.near_plm_coeffs is not None),
         "numpy_payload_bytes_estimate": int(_estimate_numpy_payload_bytes(cache)),
@@ -4968,6 +4974,123 @@ def _apply_same_level_far_streamed_chunk_group(
                 )
 
 
+def _collect_child_chunks_streamed(
+    *,
+    levels: tuple[CuPyMLFMMLevelData, ...],
+    transfer_by_parent: dict[int, CuPyMLFMMTransferData],
+    level_idx: int,
+    box_ids_sorted: Any,
+    incoming_chunk: Any,
+    streamed_far_chunk_bytes_budget: int,
+    nrhs: int,
+    cupy: Any,
+    stream_stats: dict[str, object] | None,
+) -> tuple[int, list[tuple[Any, Any]]]:
+    """Build child incoming chunks for one parent streamed chunk without recursing."""
+
+    box_ids = cupy.asarray(box_ids_sorted, dtype=cupy.int32).reshape(-1)
+    current_incoming = cupy.asarray(incoming_chunk, dtype=cupy.complex128)
+    transfer_down = transfer_by_parent.get(int(level_idx))
+    if transfer_down is None:
+        raise RuntimeError(
+            "Internal CuPy MLFMM error: missing multilevel transfer for streamed parent level "
+            f"{int(level_idx)}."
+        )
+    child_level = int(transfer_down.child_level)
+    filtered_child_by_shift: list[tuple[Offset3, Any, Any]] = []
+    child_batches: list[Any] = []
+    for shift, batch in transfer_down.batches_by_shift.items():
+        filtered = _filter_batch_for_sorted_dst_ids(
+            src_indices=batch.src_indices,
+            dst_indices=batch.dst_indices,
+            dst_ids_sorted=box_ids,
+            cupy=cupy,
+        )
+        if filtered is None:
+            continue
+        child_ids_all, parent_local_all = filtered
+        filtered_child_by_shift.append((shift, child_ids_all, parent_local_all))
+        child_batches.append(child_ids_all)
+    if not filtered_child_by_shift:
+        return child_level, []
+    child_ids_unique = cupy.unique(cupy.concatenate(child_batches, axis=0)).astype(cupy.int32)
+    child_chunk_box_cap = _level_chunk_box_cap(
+        level=levels[child_level],
+        nrhs=int(nrhs),
+        bytes_budget=int(streamed_far_chunk_bytes_budget),
+    )
+    if stream_stats is not None:
+        caps = cast(dict[str, int], stream_stats.setdefault("level_chunk_box_cap", {}))
+        caps[str(child_level)] = int(child_chunk_box_cap)
+    child_matches_by_shift: list[tuple[Offset3, Any, dict[int, tuple[Any, Any]]]] = []
+    for shift, child_ids_all, parent_local_all in filtered_child_by_shift:
+        child_matches_by_shift.append(
+            (
+                shift,
+                parent_local_all,
+                _partition_query_rows_by_compact_unique_chunks(
+                    unique_ids_sorted=child_ids_unique,
+                    query_ids=child_ids_all,
+                    chunk_size=int(child_chunk_box_cap),
+                    cupy=cupy,
+                ),
+            )
+        )
+    child_chunks: list[tuple[Any, Any]] = []
+    for child_chunk_idx, child_chunk_ids in enumerate(
+        _iter_id_chunks(child_ids_unique, chunk_size=int(child_chunk_box_cap))
+    ):
+        child_incoming = cupy.zeros(
+            (
+                int(child_chunk_ids.shape[0]),
+                4,
+                int(levels[child_level].directional.grid.n_directions),
+                int(nrhs),
+            ),
+            dtype=cupy.complex128,
+        )
+        for shift, parent_local_all, child_matches in child_matches_by_shift:
+            matched = child_matches.get(int(child_chunk_idx))
+            if matched is None:
+                continue
+            child_query_rows, child_local = matched
+            parent_rows = parent_local_all[child_query_rows]
+            if str(transfer_down.map_down.storage) == "packed_stencil":
+                _transfer_down_packed_unique_complex128(
+                    child_incoming,
+                    child_local,
+                    current_incoming,
+                    parent_rows,
+                    transfer_down.map_down,
+                    transfer_down.phase_down_by_shift[shift],
+                    cupy=cupy,
+                )
+            elif str(transfer_down.map_down.storage) == "sparse":
+                _transfer_down_sparse_unique_complex128(
+                    child_incoming,
+                    child_local,
+                    current_incoming,
+                    parent_rows,
+                    transfer_down.map_down,
+                    transfer_down.phase_down_by_shift[shift],
+                    cupy=cupy,
+                )
+            else:
+                shifted = (
+                    current_incoming[parent_rows]
+                    * transfer_down.phase_down_by_shift[shift][None, None, :, None]
+                )
+                mapped = _apply_directional_map(shifted, transfer_down.map_down, cupy=cupy)
+                _add_at_complex128(
+                    child_incoming,
+                    child_local,
+                    mapped,
+                    cupy=cupy,
+                )
+        child_chunks.append((child_chunk_ids, child_incoming))
+    return child_level, child_chunks
+
+
 def _build_outgoing_subset_streamed(
     *,
     levels: tuple[CuPyMLFMMLevelData, ...],
@@ -5300,104 +5423,19 @@ def _apply_multilevel_level_streamed(
         )
         return
 
-    transfer_down = transfer_by_parent.get(int(level_idx))
-    if transfer_down is None:
-        raise RuntimeError(
-            "Internal CuPy MLFMM error: missing multilevel transfer for streamed parent level "
-            f"{int(level_idx)}."
-        )
-    child_level = int(transfer_down.child_level)
-    filtered_child_by_shift: list[tuple[Offset3, Any, Any]] = []
-    child_batches: list[Any] = []
-    for shift, batch in transfer_down.batches_by_shift.items():
-        filtered = _filter_batch_for_sorted_dst_ids(
-            src_indices=batch.src_indices,
-            dst_indices=batch.dst_indices,
-            dst_ids_sorted=box_ids,
-            cupy=cupy,
-        )
-        if filtered is None:
-            continue
-        child_ids_all, parent_local_all = filtered
-        filtered_child_by_shift.append((shift, child_ids_all, parent_local_all))
-        child_batches.append(child_ids_all)
-    if not filtered_child_by_shift:
-        return
-    child_ids_unique = cupy.unique(cupy.concatenate(child_batches, axis=0)).astype(cupy.int32)
-    child_chunk_box_cap = _level_chunk_box_cap(
-        level=levels[child_level],
+    child_level, child_chunks = _collect_child_chunks_streamed(
+        levels=levels,
+        transfer_by_parent=transfer_by_parent,
+        level_idx=int(level_idx),
+        box_ids_sorted=box_ids,
+        incoming_chunk=current_incoming,
+        streamed_far_chunk_bytes_budget=int(streamed_far_chunk_bytes_budget),
         nrhs=int(nrhs),
-        bytes_budget=int(streamed_far_chunk_bytes_budget),
+        cupy=cupy,
+        stream_stats=stream_stats,
     )
-    if stream_stats is not None:
-        caps = cast(dict[str, int], stream_stats.setdefault("level_chunk_box_cap", {}))
-        caps[str(child_level)] = int(child_chunk_box_cap)
-    child_matches_by_shift: list[tuple[Offset3, Any, dict[int, tuple[Any, Any]]]] = []
-    for shift, child_ids_all, parent_local_all in filtered_child_by_shift:
-        child_matches_by_shift.append(
-            (
-                shift,
-                parent_local_all,
-                _partition_query_rows_by_compact_unique_chunks(
-                    unique_ids_sorted=child_ids_unique,
-                    query_ids=child_ids_all,
-                    chunk_size=int(child_chunk_box_cap),
-                    cupy=cupy,
-                ),
-            )
-        )
-    child_chunks: list[tuple[Any, Any]] = []
-    for child_chunk_idx, child_chunk_ids in enumerate(
-        _iter_id_chunks(child_ids_unique, chunk_size=int(child_chunk_box_cap))
-    ):
-        child_incoming = cupy.zeros(
-            (
-                int(child_chunk_ids.shape[0]),
-                4,
-                int(levels[child_level].directional.grid.n_directions),
-                int(nrhs),
-            ),
-            dtype=cupy.complex128,
-        )
-        for shift, parent_local_all, child_matches in child_matches_by_shift:
-            matched = child_matches.get(int(child_chunk_idx))
-            if matched is None:
-                continue
-            child_query_rows, child_local = matched
-            parent_rows = parent_local_all[child_query_rows]
-            if str(transfer_down.map_down.storage) == "packed_stencil":
-                _transfer_down_packed_unique_complex128(
-                    child_incoming,
-                    child_local,
-                    current_incoming,
-                    parent_rows,
-                    transfer_down.map_down,
-                    transfer_down.phase_down_by_shift[shift],
-                    cupy=cupy,
-                )
-            elif str(transfer_down.map_down.storage) == "sparse":
-                _transfer_down_sparse_unique_complex128(
-                    child_incoming,
-                    child_local,
-                    current_incoming,
-                    parent_rows,
-                    transfer_down.map_down,
-                    transfer_down.phase_down_by_shift[shift],
-                    cupy=cupy,
-                )
-            else:
-                shifted = (
-                    current_incoming[parent_rows]
-                    * transfer_down.phase_down_by_shift[shift][None, None, :, None]
-                )
-                mapped = _apply_directional_map(shifted, transfer_down.map_down, cupy=cupy)
-                _add_at_complex128(
-                    child_incoming,
-                    child_local,
-                    mapped,
-                    cupy=cupy,
-                )
-        child_chunks.append((child_chunk_ids, child_incoming))
+    if not child_chunks:
+        return
     child_group_box_cap = _level_group_box_cap(
         level=levels[child_level],
         nrhs=int(nrhs),
@@ -5516,6 +5554,12 @@ def _apply_multilevel_far_streamed(
         nrhs=int(nrhs),
         bytes_budget=int(streamed_far_chunk_bytes_budget),
     )
+    # The grouped same-level pass below was the first large streamed-far win:
+    # one source-outgoing chunk is now reused across multiple destination
+    # chunks before we descend. The remaining rebuild pressure comes from the
+    # recursive parent-chunk traversal after transfer-down, so the next
+    # structural widening should be a level-synchronous frontier walk rather
+    # than another fixed global source-chunk cache.
     for top_group in _iter_chunk_groups_by_total_boxes(top_chunks, box_cap=int(top_group_box_cap)):
         _apply_same_level_far_streamed_chunk_group(
             levels=levels,
@@ -6019,6 +6063,7 @@ class CuPyMLFMMCouplingOperator:
             }
             streaming_diag = {
                 "leaf_apply_mode": str(multilevel.leaf_apply_mode),
+                "collect_stream_stats": bool(self.host_cache_policy.collect_stream_stats),
                 "resolved_leaf_otf_bytes_budget": (
                     None
                     if self._last_resolved_leaf_otf_bytes_budget is None
@@ -6056,6 +6101,7 @@ class CuPyMLFMMCouplingOperator:
                 if self.host_cache_policy.streamed_far_chunk_bytes_budget is None
                 else int(self.host_cache_policy.streamed_far_chunk_bytes_budget)
             ),
+            "collect_stream_stats": bool(self.host_cache_policy.collect_stream_stats),
             "device_pool": {
                 "used_bytes": int(pool.used_bytes()),
                 "total_bytes": int(pool.total_bytes()),
@@ -6200,7 +6246,8 @@ class CuPyMLFMMCouplingOperator:
                     ),
                     maximum_bytes=max(256 * 1024**2, min(1024 * 1024**2, int(free_bytes))),
                 )
-                stream_stats = {}
+                if bool(self.host_cache_policy.collect_stream_stats):
+                    stream_stats = {}
             y_far = _apply_multilevel_far(
                 self.prepared_data,
                 x_states,
