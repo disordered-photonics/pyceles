@@ -6295,6 +6295,20 @@ class CuPyMLFMMCouplingOperator:
                         nrhs=int(x_states.shape[2]),
                     )
                 )
+                hf_start_level = multilevel.levels[int(multilevel.hf_start_level)]
+                hf_start_incoming_bytes = (
+                    int(hf_start_level.n_boxes)
+                    * 4
+                    * int(hf_start_level.directional.grid.n_directions)
+                    * int(x_states.shape[2])
+                    * np.dtype(np.complex128).itemsize
+                )
+                # Streaming performance depends on two different reuse units.
+                # First, make the coarsest sampled frontier wide enough that we
+                # do not fragment same-level work there. After that point, the
+                # next useful headroom is usually larger finer-level source
+                # chunks, which reduce repeated outgoing rebuild/filter work
+                # more effectively than pushing the frontier even wider.
                 resolved_leaf_otf_bytes_budget = _resolve_stream_bytes_budget(
                     explicit_budget=self.host_cache_policy.leaf_otf_bytes_budget,
                     free_bytes=int(free_bytes),
@@ -6302,30 +6316,40 @@ class CuPyMLFMMCouplingOperator:
                     minimum_bytes=8 * 1024**2,
                     maximum_bytes=256 * 1024**2,
                 )
-                resolved_streamed_far_chunk_bytes_budget = _resolve_stream_bytes_budget(
-                    explicit_budget=self.host_cache_policy.streamed_far_chunk_bytes_budget,
-                    free_bytes=int(free_bytes),
-                    fraction=0.08,
-                    minimum_bytes=(
-                        int(full_level_live_bytes)
-                        if int(full_level_live_bytes) <= max(16 * 1024**2, int(free_bytes) // 2)
-                        else 16 * 1024**2
-                    ),
-                    maximum_bytes=max(256 * 1024**2, min(1024 * 1024**2, int(free_bytes))),
-                )
                 resolved_streamed_far_frontier_bytes_budget = _resolve_stream_bytes_budget(
                     explicit_budget=None,
                     free_bytes=int(free_bytes),
-                    # Frontier residency and source-chunk residency are different
-                    # constraints: wider frontiers can materially reduce outgoing
-                    # rebuilds even when source chunk size stays fixed.
+                    # Keep the coarsest sampled frontier whole when possible.
+                    # Once that reuse unit is covered, any remaining headroom is
+                    # often better spent on finer-level source chunks.
                     fraction=0.50,
-                    minimum_bytes=64 * 1024**2,
+                    minimum_bytes=max(64 * 1024**2, int(hf_start_incoming_bytes)),
                     maximum_bytes=max(
                         64 * 1024**2,
                         min(
                             int(full_level_incoming_bytes), max(256 * 1024**2, int(free_bytes) // 2)
                         ),
+                    ),
+                )
+                remaining_chunk_bytes = max(
+                    16 * 1024**2,
+                    int(free_bytes)
+                    - int(resolved_leaf_otf_bytes_budget or 0)
+                    - int(resolved_streamed_far_frontier_bytes_budget or 0),
+                )
+                resolved_streamed_far_chunk_bytes_budget = _resolve_stream_bytes_budget(
+                    explicit_budget=self.host_cache_policy.streamed_far_chunk_bytes_budget,
+                    free_bytes=int(remaining_chunk_bytes),
+                    fraction=0.50,
+                    minimum_bytes=(
+                        int(full_level_live_bytes)
+                        if int(full_level_live_bytes)
+                        <= max(16 * 1024**2, int(remaining_chunk_bytes) // 2)
+                        else 16 * 1024**2
+                    ),
+                    maximum_bytes=max(
+                        256 * 1024**2,
+                        min(1024 * 1024**2, int(remaining_chunk_bytes)),
                     ),
                 )
                 if bool(self.host_cache_policy.collect_stream_stats):
