@@ -38,15 +38,30 @@ Users of pyceles are referred to the publications listed in the CELES and SMUTHI
   - one uniform-depth occupied-box hierarchy (non-adaptive octree)
   - high-frequency-only formulation: no low-frequency/static regime handling is
     included in the current backend
+  - grouped dense leaf operators are the default repeated-apply path on CPU,
+    while a lower-persistent-memory on-the-fly leaf mode remains available as a
+    lean reference/debug option
   - relative-offset batching, interior radial-LUT reuse, and shared directional
     interpolation/transforms across occupied boxes
-  - structured resolved-plan metadata through the prepared operator
+  - structured resolved-plan, hierarchy, and memory diagnostics through the
+    prepared operator
   - precision policy: `compute_dtype=complex64` affects exact-near MLFMM work,
     while sampled far interactions remain `complex128` on both NumPy and CuPy
+- CuPy matrix-free MLFMM repeated-apply backend for the same high-frequency
+  hierarchy plan:
+  - `operator_backend="cupy", coupling_backend="mlfmm"`
+  - one-time hierarchy/build preparation stays on the validated CPU reference
+    implementation, while exact-near and sampled-far repeated applies run on
+    device
+  - compact host-cache/prepared-cache payloads remain the source of truth and
+    device-resident state is rebuilt from them as needed
+  - streamed-far diagnostics report chunk/frontier decisions in backend-native
+    units as well as byte-oriented summaries
 - CuPy direct backend for the same `A = I - T W` operator:
   - fused RawKernel pairwise coupling `W·x` for `complex64` and `complex128`
   - GPU single-body `T` support for diagonal groups and explicit dense spherical-basis blocks
-  - native CuPy GMRES solve path (`gmres[cupy]`)
+  - native CuPy GMRES / FGMRES / LGMRES / BiCGSTAB solve paths
+  - native CuPy block-GMRES for multi-RHS GMRES runs
   - inherited CuPy far-field scattered-PWP postprocessing path
   - inherited CuPy near-field postprocessing path for:
     - scattered field
@@ -317,9 +332,19 @@ inputs: `solve_linear_system(..., backend="cupy", method="gmres", b.shape==(n, n
 routes to a native block-GMRES path, and `Simulation.solve_sources(...)` uses
 that path automatically on labeled multi-channel runs.
 
+For single-RHS iterative solves on the CuPy backend, pyceles also ships native
+`fgmres[cupy]`, `lgmres[cupy]`, and `bicgstab[cupy]` paths. These keep the
+main Krylov state on device and use final/terminal true-residual verification
+rather than the older restart-boundary-only behavior.
+
 Current MLFMM scope/limits:
 - matrix-free MLFMM stages are available on both NumPy and CuPy operator
   backends, with sampled-far interactions fixed to `complex128`
+- on the NumPy path, grouped dense leaf operators are the default repeated-apply
+  shape; the compact on-the-fly leaf mode is kept as a lower-persistent-memory
+  reference/debug path rather than the main CPU fast path
+- prepared NumPy MLFMM operators expose canonical plan, hierarchy, and memory
+  diagnostics to make backend comparisons and storage tradeoffs explicit
 - on the CuPy path, one-time hierarchy/build preparation stays on the validated
   CPU reference implementation, while repeated MLFMM applies run on device
 - CuPy exact-near evaluation is memory-aware: near interactions are applied
@@ -362,8 +387,8 @@ Practical CuPy notes for dense systems:
     convergence and overshoot iterations; very small restart can degrade
     convergence quality
   - native GMRES keeps the Krylov work on device while exposing per-inner-step
-    progress (`pr_rel_res`) and preserving true-residual checks at restart
-    boundaries
+    progress (`pr_rel_res`) while deferring verified true-residual checks to
+    explicit terminal/final decision points
 - pyceles does not expose a public runtime toggle to swap back to built-in
   CuPy GMRES in the simulation API
 - CuPy block-GMRES now runs with native 2D operator/preconditioner applies on
@@ -402,10 +427,10 @@ Current CuPy feature-parity gaps relative to the NumPy reference path include:
 - spheroid internal near-field kernels,
 - mixed non-spherical internal-field subsets,
 - callback-only axisymmetric single-body GPU wrappers.
-Current performance milestones after that direct GPU backend are:
-- improve the CuPy raw kernel and surrounding solve path for larger low-`lmax` clusters,
-- extend GPU acceleration further into postprocessing-heavy workflows,
-- add an accelerated `O(N log N)` coupling backend for regimes where brute-force `O(N^2)` is no longer viable.
+Current performance milestones after the first direct and MLFMM GPU backends are:
+- continue improving the CuPy raw-kernel path and native solver stack for larger low-`lmax` clusters,
+- continue improving the streamed CuPy MLFMM backend for larger high-frequency clusters,
+- extend GPU acceleration further into postprocessing-heavy workflows and remaining backend gaps.
 A previous CELES experiment with rotation-translation-rotation (RTR) coupling idea
 was explored as a possible alternative translation backend. After matching the RTR
 block formulas to the shipped CELES-compatible translation conventions, the experimental implementation

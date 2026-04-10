@@ -12,11 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with repeated-RHS reuse through cached GPU LU payloads on the `Simulation`
   instance, mirroring the existing NumPy direct-solve cache pattern.
 - Added a native CuPy restarted GMRES implementation that keeps Arnoldi/Givens
-  work on device and exposes inner-iteration progress callbacks while preserving
-  true-residual checks at restart boundaries.
-- Added native CuPy FGMRES and LGMRES iterative solver paths, including
-  `solve_linear_system(..., backend="cupy", method="fgmres"|"lgmres")`, with
-  monitor-channel reporting aligned to the native GMRES result contract.
+  work on device and exposes inner-iteration progress callbacks, with optional
+  final true-residual verification through the shared solver controls.
+- Added native CuPy FGMRES, LGMRES, and BiCGSTAB iterative solver paths,
+  including `solve_linear_system(..., backend="cupy",
+  method="fgmres"|"lgmres"|"bicgstab")`, with monitor-channel reporting aligned
+  to the native GMRES result contract.
 - Added native CuPy block-GMRES support for iterative multi-RHS solves
   (`B.shape == (n, nrhs)`) with:
   - block-aware operator/preconditioner adapters,
@@ -42,7 +43,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of silently assuming the pairwise backend.
 - `solve_linear_system(..., backend="cupy", method="gmres")` now routes through
   pyceles' native CuPy GMRES path (instead of delegating to CuPy built-in
-  GMRES), improving convergence observability between restart boundaries.
+  GMRES), improving convergence observability within restart cycles.
 - CuPy GMRES now routes 2D RHS inputs to the native block-GMRES iterative path
   (single-RHS behavior remains on the existing native GMRES path).
 - Prepared CuPy direct-operator/preconditioner paths now accept true 2D RHS
@@ -85,8 +86,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CuPy MLFMM exact-near cache/runtime payload now uses directed leaf-pair
   schedules plus leaf particle tables instead of expanded directed particle-pair
   lists, improving memory scalability on large clusters.
+- Prepared NumPy MLFMM operators now expose canonical plan, hierarchy, and
+  memory diagnostics for backend-comparable stage and storage reporting.
+- NumPy MLFMM repeated apply now uses grouped dense leaf operators as the
+  default CPU path, while keeping a low-persistent-memory on-the-fly leaf mode
+  available for reference/debug runs.
 
 ### Fixed
+- Native CuPy GMRES / FGMRES / LGMRES now honor the shared
+  `compute_final_residual` policy consistently, deferring verified
+  true-residual work to terminal/final checks instead of forcing extra restart-
+  boundary verification.
 - Native CuPy block-GMRES now enforces per-RHS true-residual tolerance checks
   with strict per-column acceptance and now performs an in-cycle true-residual
   gate when the block proxy first reaches target, avoiding restart-boundary
@@ -103,6 +113,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   benchmark-scale multilevel runs.
 - Rectangular interior translation LUT reuse is now cached correctly, removing
   repeated rebuilds during MLFMM preparation.
+- Host-side directional MLFMM transforms now use the canonical normalized
+  Legendre recurrence, avoiding non-finite values in shallow/high-order plans.
 
 ## [0.3.0] - 2026-03-12
 
