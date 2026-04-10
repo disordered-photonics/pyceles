@@ -146,8 +146,11 @@ def test_prepare_matvec_mlfmm_internal_arrays_stay_complex128(
     assert coupling.radial_lut.dtype == np.dtype(np.complex128)
 
     if coupling.single_level is not None:
-        assert coupling.single_level.aggregation[0].dtype == np.dtype(np.complex128)
-        assert coupling.single_level.receive[0].dtype == np.dtype(np.complex128)
+        assert coupling.single_level.leaf_apply_mode == "dense"
+        assert len(coupling.single_level.aggregation) == 0
+        assert len(coupling.single_level.receive) == 0
+        assert coupling.single_level.leaf_groups[0].aggregation is not None
+        assert coupling.single_level.leaf_groups[0].aggregation.dtype == np.dtype(np.complex128)
         assert coupling.single_level.directional.Fth.dtype == np.dtype(np.complex128)
         assert coupling.single_level.directional.Gth.dtype == np.dtype(np.complex128)
         assert next(iter(coupling.single_level.offset_diagonals.values())).dtype == np.dtype(
@@ -155,8 +158,11 @@ def test_prepare_matvec_mlfmm_internal_arrays_stay_complex128(
         )
 
     if coupling.multilevel is not None:
-        assert coupling.multilevel.aggregation[0].dtype == np.dtype(np.complex128)
-        assert coupling.multilevel.receive[0].dtype == np.dtype(np.complex128)
+        assert coupling.multilevel.leaf_apply_mode == "dense"
+        assert len(coupling.multilevel.aggregation) == 0
+        assert len(coupling.multilevel.receive) == 0
+        assert coupling.multilevel.leaf_groups[0].aggregation is not None
+        assert coupling.multilevel.leaf_groups[0].aggregation.dtype == np.dtype(np.complex128)
         leaf_level = coupling.multilevel.leaf_level
         leaf_data = coupling.multilevel.levels[leaf_level]
         assert leaf_data.directional.Fth.dtype == np.dtype(np.complex128)
@@ -186,5 +192,8 @@ def test_prepare_matvec_mlfmm_complex64_keeps_far_internal_complex128() -> None:
     assert coupling.radial_lut.dtype == np.dtype(np.complex128)
 
     assert coupling.multilevel is not None
-    assert coupling.multilevel.aggregation[0].dtype == np.dtype(np.complex128)
-    assert coupling.multilevel.receive[0].dtype == np.dtype(np.complex128)
+    assert coupling.multilevel.leaf_apply_mode == "dense"
+    assert len(coupling.multilevel.aggregation) == 0
+    assert len(coupling.multilevel.receive) == 0
+    assert coupling.multilevel.leaf_groups[0].aggregation is not None
+    assert coupling.multilevel.leaf_groups[0].aggregation.dtype == np.dtype(np.complex128)

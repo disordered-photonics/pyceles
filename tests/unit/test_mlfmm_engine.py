@@ -547,6 +547,118 @@ def test_multilevel_apply_runs_and_produces_finite_output() -> None:
     assert np.all(np.isfinite(y_far))
 
 
+def test_single_level_otf_leaf_apply_matches_grouped_dense() -> None:
+    positions, radii, lmax, k = _single_level_fixture()
+    nm = n_modes(lmax)
+    rng = np.random.default_rng(17)
+    x = rng.standard_normal(positions.shape[0] * nm) + 1j * rng.standard_normal(
+        positions.shape[0] * nm
+    )
+    plan = resolve_mlfmm_plan(
+        positions,
+        particle_circumscribing_radii=radii,
+        options=MLFMMOptions(max_leaf_particles=1, max_depth=2),
+    )
+    lut = RadialLUT(
+        lmax=12,
+        k=k,
+        r_max=float(np.max(np.linalg.norm(positions[:, None, :] - positions[None, :, :], axis=2))),
+        dr=5.0,
+    )
+    dense = build_single_level_mlfmm_operators(
+        lmax=lmax,
+        k=k,
+        positions=positions,
+        partition=plan.partition,
+        radial_lut=lut,
+        box_order=6,
+        translator_order=6,
+        build_leaf_maps=True,
+    )
+    otf = build_single_level_mlfmm_operators(
+        lmax=lmax,
+        k=k,
+        positions=positions,
+        partition=plan.partition,
+        radial_lut=lut,
+        box_order=6,
+        translator_order=6,
+        build_leaf_maps=False,
+    )
+
+    y_near_dense, y_far_dense = apply_single_level_mlfmm(
+        lmax=lmax,
+        k=k,
+        positions=positions,
+        x=x,
+        operators=dense,
+        radial_lut=lut,
+    )
+    y_near_otf, y_far_otf = apply_single_level_mlfmm(
+        lmax=lmax,
+        k=k,
+        positions=positions,
+        x=x,
+        operators=otf,
+        radial_lut=lut,
+    )
+
+    np.testing.assert_allclose(y_near_otf, y_near_dense, rtol=1.0e-12, atol=1.0e-12)
+    np.testing.assert_allclose(y_far_otf, y_far_dense, rtol=1.0e-12, atol=1.0e-12)
+
+
+def test_multilevel_otf_leaf_apply_matches_grouped_dense() -> None:
+    positions, radii, lmax, k = _multilevel_fixture()
+    nm = n_modes(lmax)
+    rng = np.random.default_rng(18)
+    x = rng.standard_normal(positions.shape[0] * nm) + 1j * rng.standard_normal(
+        positions.shape[0] * nm
+    )
+    partition = build_uniform_mlfmm_partition(
+        positions,
+        particle_circumscribing_radii=radii,
+        depth=3,
+    )
+    dense = build_multilevel_mlfmm_operators(
+        lmax=lmax,
+        k=k,
+        positions=positions,
+        partition=partition,
+        radial_lut=None,
+        box_order=4,
+        build_leaf_maps=True,
+    )
+    otf = build_multilevel_mlfmm_operators(
+        lmax=lmax,
+        k=k,
+        positions=positions,
+        partition=partition,
+        radial_lut=None,
+        box_order=4,
+        build_leaf_maps=False,
+    )
+
+    y_near_dense, y_far_dense = apply_multilevel_mlfmm(
+        lmax=lmax,
+        k=k,
+        positions=positions,
+        x=x,
+        operators=dense,
+        radial_lut=None,
+    )
+    y_near_otf, y_far_otf = apply_multilevel_mlfmm(
+        lmax=lmax,
+        k=k,
+        positions=positions,
+        x=x,
+        operators=otf,
+        radial_lut=None,
+    )
+
+    np.testing.assert_allclose(y_near_otf, y_near_dense, rtol=1.0e-12, atol=1.0e-12)
+    np.testing.assert_allclose(y_far_otf, y_far_dense, rtol=1.0e-12, atol=1.0e-12)
+
+
 def test_mlfmm_populate_warms_exact_leaf_near_cache_directly() -> None:
     positions, radii, lmax, k = _single_level_fixture()
     plan = resolve_mlfmm_plan(

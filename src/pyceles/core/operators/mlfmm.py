@@ -31,6 +31,7 @@ from .mlfmm_directional import (
     directional_transforms,
 )
 from .mlfmm_partition import (
+    MLFMMBox,
     MLFMMPartition,
     build_uniform_mlfmm_partition,
     root_cube,
@@ -39,6 +40,7 @@ from .mlfmm_partition import (
 )
 
 MLFMMStage = Literal["direct", "single_level", "multilevel"]
+MLFMMLeafApplyMode = Literal["dense", "on_the_fly"]
 _ROKHLIN_MINIMUM_ORDERS = (3, 7, 11, 17, 24, 30)
 """Conservative minimum truncation orders for discrete accuracy levels,
 inspired from the heuristic values used in FasTMM.
@@ -104,6 +106,23 @@ class MLFMMResolvedPlan:
 
 
 @dataclass(frozen=True)
+class MLFMMLeafApplyGroup:
+    """Grouped leaf apply payload with uniform occupancy.
+
+    NumPy uses these grouped work units for both dense reusable leaf operators
+    and the reference on-the-fly path. Exactly one of `aggregation` or
+    `pair_deltas` is populated.
+    """
+
+    occupancy: int
+    nmodes: int
+    leaf_ids: np.ndarray
+    particle_indices: np.ndarray
+    aggregation: np.ndarray | None = None
+    pair_deltas: np.ndarray | None = None
+
+
+@dataclass(frozen=True)
 class MLFMMSingleLevelOperators:
     """Prepared single-level HF far operators over one occupied leaf level."""
 
@@ -112,11 +131,13 @@ class MLFMMSingleLevelOperators:
     translator_order: int
     grid_order: int
     directional: MLFMMDirectionalTransforms
-    aggregation: tuple[np.ndarray, ...]
-    receive: tuple[np.ndarray, ...]
     leaf_cell_coords: dict[int, tuple[int, int, int]]
     far_offset_batches: dict[tuple[int, int, int], tuple[np.ndarray, np.ndarray]]
     offset_diagonals: dict[tuple[int, int, int], np.ndarray]
+    aggregation: tuple[np.ndarray, ...] = tuple()
+    receive: tuple[np.ndarray, ...] = tuple()
+    leaf_groups: tuple[MLFMMLeafApplyGroup, ...] = tuple()
+    leaf_apply_mode: MLFMMLeafApplyMode = "dense"
 
 
 @dataclass(frozen=True)
@@ -159,8 +180,10 @@ class MLFMMMultilevelOperators:
     leaf_level: int
     hf_start_level: int
     hf_end_level: int
-    aggregation: tuple[np.ndarray, ...]
-    receive: tuple[np.ndarray, ...]
+    aggregation: tuple[np.ndarray, ...] = tuple()
+    receive: tuple[np.ndarray, ...] = tuple()
+    leaf_groups: tuple[MLFMMLeafApplyGroup, ...] = tuple()
+    leaf_apply_mode: MLFMMLeafApplyMode = "dense"
 
 
 @dataclass
@@ -889,6 +912,145 @@ def _build_leaf_box_maps(
     return tuple(aggregation), tuple(receive)
 
 
+def _group_leaves_by_occupancy(partition: MLFMMPartition) -> tuple[tuple[MLFMMBox, ...], ...]:
+    """Return occupied leaves grouped by uniform particle occupancy."""
+
+    leaves = tuple(sorted(partition.leaves, key=lambda leaf: int(leaf.id)))
+    grouped: dict[int, list[MLFMMBox]] = {}
+    for expected_id, leaf in enumerate(leaves):
+        if int(leaf.id) != expected_id:
+            raise ValueError(
+                "Leaf ids must be contiguous in [0, n_leaves) for grouped NumPy leaf apply. "
+                f"Missing leaf id {expected_id}."
+            )
+        occupancy = int(np.asarray(leaf.particle_indices, dtype=np.int64).reshape(-1).size)
+        if occupancy <= 0:
+            raise ValueError(f"leaf {expected_id} has non-positive occupancy {occupancy}.")
+        grouped.setdefault(occupancy, []).append(leaf)
+    return tuple(tuple(grouped[occupancy]) for occupancy in sorted(grouped))
+
+
+def _build_numpy_leaf_apply_groups_dense(
+    *,
+    lmax: int,
+    box_order: int,
+    k: float,
+    positions: np.ndarray,
+    partition: MLFMMPartition,
+    radial_lut: RadialLUT | None,
+    dtype: np.dtype,
+) -> tuple[MLFMMLeafApplyGroup, ...]:
+    """Build grouped dense leaf operators for the NumPy repeated-apply path."""
+
+    positions_arr = np.asarray(positions, dtype=float).reshape(-1, 3)
+    nmodes_in = int(n_modes(int(lmax)))
+    full_order = max(int(lmax), int(box_order))
+    ab5 = translation_ab5_table(full_order, dtype=np.complex128)
+    groups: list[MLFMMLeafApplyGroup] = []
+    for leaves in _group_leaves_by_occupancy(partition):
+        occupancy = int(leaves[0].particle_indices.size)
+        leaf_ids = np.asarray([int(leaf.id) for leaf in leaves], dtype=np.int64)
+        particle_indices = np.empty((len(leaves), occupancy), dtype=np.int64)
+        aggregation = np.empty(
+            (len(leaves), int(n_modes(int(box_order))), occupancy * nmodes_in),
+            dtype=np.dtype(dtype),
+        )
+        for local_idx, leaf in enumerate(leaves):
+            particle_idx = np.asarray(leaf.particle_indices, dtype=np.int64).reshape(-1)
+            particle_indices[local_idx] = particle_idx
+            agg_blocks = [
+                translation_block_rect(
+                    int(box_order),
+                    int(lmax),
+                    float(k),
+                    np.asarray(
+                        np.asarray(leaf.center, dtype=float) - positions_arr[int(pidx)], dtype=float
+                    ),
+                    ab5=ab5,
+                    radial_lut=radial_lut,
+                    family="interior",
+                )
+                for pidx in particle_idx
+            ]
+            aggregation[local_idx] = np.hstack(agg_blocks).astype(dtype, copy=False)
+        groups.append(
+            MLFMMLeafApplyGroup(
+                occupancy=occupancy,
+                nmodes=nmodes_in,
+                leaf_ids=leaf_ids,
+                particle_indices=particle_indices,
+                aggregation=np.ascontiguousarray(aggregation, dtype=dtype),
+                pair_deltas=None,
+            )
+        )
+    return tuple(groups)
+
+
+def _build_numpy_leaf_apply_groups_otf(
+    *,
+    lmax: int,
+    positions: np.ndarray,
+    partition: MLFMMPartition,
+) -> tuple[MLFMMLeafApplyGroup, ...]:
+    """Build compact grouped leaf metadata for NumPy on-the-fly apply."""
+
+    positions_arr = np.asarray(positions, dtype=float).reshape(-1, 3)
+    nmodes_in = int(n_modes(int(lmax)))
+    groups: list[MLFMMLeafApplyGroup] = []
+    for leaves in _group_leaves_by_occupancy(partition):
+        occupancy = int(leaves[0].particle_indices.size)
+        leaf_ids = np.asarray([int(leaf.id) for leaf in leaves], dtype=np.int64)
+        particle_indices = np.empty((len(leaves), occupancy), dtype=np.int64)
+        pair_deltas = np.empty((len(leaves), occupancy, 3), dtype=np.float64)
+        for local_idx, leaf in enumerate(leaves):
+            particle_idx = np.asarray(leaf.particle_indices, dtype=np.int64).reshape(-1)
+            particle_indices[local_idx] = particle_idx
+            pair_deltas[local_idx] = (
+                np.asarray(leaf.center, dtype=np.float64).reshape(1, 3)
+                - positions_arr[particle_idx]
+            )
+        groups.append(
+            MLFMMLeafApplyGroup(
+                occupancy=occupancy,
+                nmodes=nmodes_in,
+                leaf_ids=leaf_ids,
+                particle_indices=particle_indices,
+                aggregation=None,
+                pair_deltas=np.ascontiguousarray(pair_deltas, dtype=np.float64),
+            )
+        )
+    return tuple(groups)
+
+
+def _leaf_translation_blocks_from_pair_deltas(
+    *,
+    lmax_out: int,
+    lmax_in: int,
+    k: float,
+    pair_deltas: np.ndarray,
+    radial_lut: RadialLUT | None,
+    dtype: np.dtype,
+) -> np.ndarray:
+    """Build rectangular interior translation blocks for grouped leaf pair deltas."""
+
+    pair_rows = np.asarray(pair_deltas, dtype=float).reshape(-1, 3)
+    full_order = max(int(lmax_out), int(lmax_in))
+    ab5 = translation_ab5_table(full_order, dtype=np.complex128)
+    blocks = [
+        translation_block_rect(
+            int(lmax_out),
+            int(lmax_in),
+            float(k),
+            np.asarray(delta, dtype=float),
+            ab5=ab5,
+            radial_lut=radial_lut,
+            family="interior",
+        )
+        for delta in pair_rows
+    ]
+    return np.asarray(blocks, dtype=dtype)
+
+
 def _apply_reflection_to_channel_batches(
     channel_batches: np.ndarray,
     permutation: np.ndarray,
@@ -904,7 +1066,7 @@ def _apply_reflection_to_channel_batches(
     return np.asarray(np.take(arr, perm, axis=-1), dtype=arr.dtype)
 
 
-def _leaf_box_states(
+def _leaf_box_states_from_dense_maps(
     *,
     lmax: int,
     positions: np.ndarray,
@@ -923,6 +1085,109 @@ def _leaf_box_states(
         coeffs = arr[leaf.particle_indices].reshape(-1)
         states[int(leaf.id)] = aggregation[int(leaf.id)] @ coeffs
     return states
+
+
+def _aggregate_leaf_box_states(
+    *,
+    lmax: int,
+    box_order: int,
+    k: float,
+    x: np.ndarray,
+    leaf_groups: tuple[MLFMMLeafApplyGroup, ...],
+    n_leaves: int,
+    radial_lut: RadialLUT | None,
+    dtype: np.dtype,
+) -> np.ndarray:
+    """Aggregate particle coefficients into grouped leaf box states."""
+
+    nm = int(n_modes(int(lmax)))
+    box_nm = int(n_modes(int(box_order)))
+    arr = np.asarray(x, dtype=dtype).reshape(-1, nm)
+    states = np.zeros((int(n_leaves), box_nm), dtype=dtype)
+    for group in leaf_groups:
+        coeffs = arr[np.asarray(group.particle_indices, dtype=np.int64)]
+        if group.aggregation is not None:
+            coeffs_flat = coeffs.reshape(coeffs.shape[0], -1)
+            states[np.asarray(group.leaf_ids, dtype=np.int64)] = np.einsum(
+                "gmn,gn->gm",
+                np.asarray(group.aggregation, dtype=dtype),
+                coeffs_flat,
+                optimize=True,
+            )
+            continue
+        if group.pair_deltas is None:
+            raise RuntimeError(
+                "Internal error: grouped NumPy leaf apply is missing translation data."
+            )
+        pair_blocks = _leaf_translation_blocks_from_pair_deltas(
+            lmax_out=int(box_order),
+            lmax_in=int(lmax),
+            k=float(k),
+            pair_deltas=group.pair_deltas,
+            radial_lut=radial_lut,
+            dtype=np.dtype(dtype),
+        ).reshape(coeffs.shape[0], int(group.occupancy), box_nm, nm)
+        states[np.asarray(group.leaf_ids, dtype=np.int64)] = np.einsum(
+            "gqmn,gqn->gm",
+            pair_blocks,
+            coeffs,
+            optimize=True,
+        )
+    return states
+
+
+def _receive_leaf_boxes_to_particles(
+    *,
+    lmax: int,
+    box_order: int,
+    k: float,
+    n_particles: int,
+    incoming_box: np.ndarray,
+    leaf_groups: tuple[MLFMMLeafApplyGroup, ...],
+    radial_lut: RadialLUT | None,
+    dtype: np.dtype,
+) -> np.ndarray:
+    """Apply grouped leaf receive maps or on-the-fly adjoints back to particles."""
+
+    nm = int(n_modes(int(lmax)))
+    box_nm = int(n_modes(int(box_order)))
+    y_far = np.zeros((int(n_particles), nm), dtype=dtype)
+    incoming = np.asarray(incoming_box, dtype=dtype).reshape(-1, box_nm)
+    for group in leaf_groups:
+        leaf_ids = np.asarray(group.leaf_ids, dtype=np.int64)
+        particle_indices = np.asarray(group.particle_indices, dtype=np.int64)
+        if group.aggregation is not None:
+            # Keep only the grouped forward aggregation blocks in persistent
+            # NumPy state and recover the adjoint receive action on demand.
+            receive_adj = np.swapaxes(np.asarray(group.aggregation, dtype=dtype).conj(), 1, 2)
+            contribution = np.einsum(
+                "gmb,gb->gm",
+                receive_adj,
+                incoming[leaf_ids],
+                optimize=True,
+            ).reshape(particle_indices.shape[0], int(group.occupancy), nm)
+            y_far[particle_indices] += contribution
+            continue
+        if group.pair_deltas is None:
+            raise RuntimeError(
+                "Internal error: grouped NumPy leaf receive is missing translation data."
+            )
+        pair_blocks = _leaf_translation_blocks_from_pair_deltas(
+            lmax_out=int(box_order),
+            lmax_in=int(lmax),
+            k=float(k),
+            pair_deltas=group.pair_deltas,
+            radial_lut=radial_lut,
+            dtype=np.dtype(dtype),
+        ).reshape(particle_indices.shape[0], int(group.occupancy), box_nm, nm)
+        contribution = np.einsum(
+            "gqmn,gm->gqn",
+            np.conjugate(pair_blocks),
+            incoming[leaf_ids],
+            optimize=True,
+        )
+        y_far[particle_indices] += contribution
+    return y_far
 
 
 def _exact_leaf_near_apply(
@@ -1067,9 +1332,10 @@ def build_single_level_mlfmm_operators(
 ) -> MLFMMSingleLevelOperators:
     """Build the sampled single-level HF far operator over one occupied leaf level.
 
-    This prepares exact particle-to-leaf aggregation/receive maps plus
-    relative-offset-keyed sampled translators for all occupied leaves at the
-    resolved depth.
+    NumPy keeps grouped reusable leaf work units by default and can switch to
+    a compact on-the-fly leaf path when `build_leaf_maps=False`. Relative-
+    offset keyed sampled translators remain shared across all occupied leaves
+    at the resolved depth.
     """
 
     if not partition.leaves:
@@ -1092,7 +1358,31 @@ def build_single_level_mlfmm_operators(
     shared_grid_order = max(int(shared_box_order), int(shared_translator_order))
     out_dtype = np.dtype(dtype)
     directional = directional_transforms(int(shared_box_order), grid_order=int(shared_grid_order))
-    if bool(build_leaf_maps):
+    aggregation: tuple[np.ndarray, ...]
+    receive: tuple[np.ndarray, ...]
+    backend = str(leaf_map_backend).strip().lower()
+    if backend == "numpy":
+        if bool(build_leaf_maps):
+            leaf_groups = _build_numpy_leaf_apply_groups_dense(
+                lmax=int(lmax),
+                box_order=int(shared_box_order),
+                k=float(k),
+                positions=np.asarray(positions, dtype=float),
+                partition=partition,
+                radial_lut=radial_lut,
+                dtype=out_dtype,
+            )
+            leaf_apply_mode: MLFMMLeafApplyMode = "dense"
+        else:
+            leaf_groups = _build_numpy_leaf_apply_groups_otf(
+                lmax=int(lmax),
+                positions=np.asarray(positions, dtype=float),
+                partition=partition,
+            )
+            leaf_apply_mode = "on_the_fly"
+        aggregation = tuple()
+        receive = tuple()
+    elif bool(build_leaf_maps):
         aggregation, receive = _build_leaf_box_maps(
             lmax=int(lmax),
             box_order=int(shared_box_order),
@@ -1103,9 +1393,13 @@ def build_single_level_mlfmm_operators(
             dtype=out_dtype,
             leaf_map_backend=leaf_map_backend,
         )
+        leaf_groups = tuple()
+        leaf_apply_mode = "dense"
     else:
         aggregation = tuple()
         receive = tuple()
+        leaf_groups = tuple()
+        leaf_apply_mode = "on_the_fly"
     leaf_cell_coords = _leaf_cell_coords(partition)
     far_offset_batches = _leaf_offset_batches(partition, leaf_cell_coords)
     offset_diagonals: dict[tuple[int, int, int], np.ndarray] = {}
@@ -1125,11 +1419,13 @@ def build_single_level_mlfmm_operators(
         translator_order=int(shared_translator_order),
         grid_order=int(shared_grid_order),
         directional=directional,
-        aggregation=aggregation,
-        receive=receive,
         leaf_cell_coords=leaf_cell_coords,
         far_offset_batches=far_offset_batches,
         offset_diagonals=offset_diagonals,
+        aggregation=aggregation,
+        receive=receive,
+        leaf_groups=leaf_groups,
+        leaf_apply_mode=leaf_apply_mode,
     )
 
 
@@ -1154,9 +1450,11 @@ def apply_single_level_mlfmm(
     """
 
     out_dtype = np.dtype(dtype)
-    if len(operators.aggregation) == 0 or len(operators.receive) == 0:
+    if not operators.leaf_groups and (
+        len(operators.aggregation) == 0 or len(operators.receive) == 0
+    ):
         raise RuntimeError(
-            "single-level MLFMM operators are missing leaf aggregation/receive maps. "
+            "single-level MLFMM operators are missing reusable leaf apply data. "
             "This operator was likely prepared for CuPy host-cache conversion only."
         )
     near_out_dtype = np.dtype(out_dtype if near_dtype is None else near_dtype)
@@ -1171,14 +1469,26 @@ def apply_single_level_mlfmm(
         dtype=near_out_dtype,
         block_cache=block_cache,
     )
-    leaf_states = _leaf_box_states(
-        lmax=int(lmax),
-        positions=np.asarray(positions, dtype=float),
-        x=np.asarray(x, dtype=far_out_dtype),
-        partition=operators.partition,
-        aggregation=operators.aggregation,
-        dtype=far_out_dtype,
-    )
+    if operators.leaf_groups:
+        leaf_states = _aggregate_leaf_box_states(
+            lmax=int(lmax),
+            box_order=int(operators.box_order),
+            k=float(k),
+            x=np.asarray(x, dtype=far_out_dtype),
+            leaf_groups=operators.leaf_groups,
+            n_leaves=len(operators.partition.leaves),
+            radial_lut=radial_lut,
+            dtype=far_out_dtype,
+        )
+    else:
+        leaf_states = _leaf_box_states_from_dense_maps(
+            lmax=int(lmax),
+            positions=np.asarray(positions, dtype=float),
+            x=np.asarray(x, dtype=far_out_dtype),
+            partition=operators.partition,
+            aggregation=operators.aggregation,
+            dtype=far_out_dtype,
+        )
     ndir = int(operators.directional.grid.directions.shape[0])
     outgoing = np.zeros((len(operators.partition.leaves), 4, ndir), dtype=far_out_dtype)
     for leaf_id, box_state in enumerate(leaf_states):
@@ -1202,12 +1512,24 @@ def apply_single_level_mlfmm(
             incoming[leaf_id, 3],
         )
 
-    nm = n_modes(int(lmax))
-    ns = np.asarray(positions).shape[0]
-    y_far = np.zeros((ns, nm), dtype=far_out_dtype)
-    for leaf in operators.partition.leaves:
-        contribution = operators.receive[int(leaf.id)] @ incoming_box[int(leaf.id)]
-        y_far[leaf.particle_indices] += contribution.reshape(leaf.particle_indices.size, nm)
+    if operators.leaf_groups:
+        y_far = _receive_leaf_boxes_to_particles(
+            lmax=int(lmax),
+            box_order=int(operators.box_order),
+            k=float(k),
+            n_particles=np.asarray(positions).shape[0],
+            incoming_box=incoming_box,
+            leaf_groups=operators.leaf_groups,
+            radial_lut=radial_lut,
+            dtype=far_out_dtype,
+        )
+    else:
+        nm = n_modes(int(lmax))
+        ns = np.asarray(positions).shape[0]
+        y_far = np.zeros((ns, nm), dtype=far_out_dtype)
+        for leaf in operators.partition.leaves:
+            contribution = operators.receive[int(leaf.id)] @ incoming_box[int(leaf.id)]
+            y_far[leaf.particle_indices] += contribution.reshape(leaf.particle_indices.size, nm)
     return y_near.reshape(-1), y_far.reshape(-1)
 
 
@@ -1447,7 +1769,31 @@ def build_multilevel_mlfmm_operators(
             )
         )
 
-    if bool(build_leaf_maps):
+    backend = str(leaf_map_backend).strip().lower()
+    aggregation: tuple[np.ndarray, ...]
+    receive: tuple[np.ndarray, ...]
+    if backend == "numpy":
+        if bool(build_leaf_maps):
+            leaf_groups = _build_numpy_leaf_apply_groups_dense(
+                lmax=int(lmax),
+                box_order=int(levels[leaf_level].box_order),
+                k=float(k),
+                positions=np.asarray(positions, dtype=float),
+                partition=partition,
+                radial_lut=radial_lut,
+                dtype=out_dtype,
+            )
+            leaf_apply_mode: MLFMMLeafApplyMode = "dense"
+        else:
+            leaf_groups = _build_numpy_leaf_apply_groups_otf(
+                lmax=int(lmax),
+                positions=np.asarray(positions, dtype=float),
+                partition=partition,
+            )
+            leaf_apply_mode = "on_the_fly"
+        aggregation = tuple()
+        receive = tuple()
+    elif bool(build_leaf_maps):
         aggregation, receive = _build_leaf_box_maps(
             lmax=int(lmax),
             box_order=int(levels[leaf_level].box_order),
@@ -1458,9 +1804,13 @@ def build_multilevel_mlfmm_operators(
             dtype=out_dtype,
             leaf_map_backend=leaf_map_backend,
         )
+        leaf_groups = tuple()
+        leaf_apply_mode = "dense"
     else:
         aggregation = tuple()
         receive = tuple()
+        leaf_groups = tuple()
+        leaf_apply_mode = "on_the_fly"
     return MLFMMMultilevelOperators(
         partition=partition,
         levels=tuple(levels),
@@ -1470,6 +1820,8 @@ def build_multilevel_mlfmm_operators(
         hf_end_level=hf_end_level,
         aggregation=aggregation,
         receive=receive,
+        leaf_groups=leaf_groups,
+        leaf_apply_mode=leaf_apply_mode,
     )
 
 
@@ -1511,9 +1863,11 @@ def apply_multilevel_mlfmm(
     """
 
     out_dtype = np.dtype(dtype)
-    if len(operators.aggregation) == 0 or len(operators.receive) == 0:
+    if not operators.leaf_groups and (
+        len(operators.aggregation) == 0 or len(operators.receive) == 0
+    ):
         raise RuntimeError(
-            "multilevel MLFMM operators are missing leaf aggregation/receive maps. "
+            "multilevel MLFMM operators are missing reusable leaf apply data. "
             "This operator was likely prepared for CuPy host-cache conversion only."
         )
     near_out_dtype = np.dtype(out_dtype if near_dtype is None else near_dtype)
@@ -1538,14 +1892,26 @@ def apply_multilevel_mlfmm(
     incoming = [np.zeros_like(values, dtype=far_out_dtype) for values in outgoing]
 
     leaf_level = int(operators.leaf_level)
-    leaf_states = _leaf_box_states(
-        lmax=int(lmax),
-        positions=np.asarray(positions, dtype=float),
-        x=np.asarray(x, dtype=far_out_dtype),
-        partition=operators.partition,
-        aggregation=operators.aggregation,
-        dtype=far_out_dtype,
-    )
+    if operators.leaf_groups:
+        leaf_states = _aggregate_leaf_box_states(
+            lmax=int(lmax),
+            box_order=int(operators.levels[leaf_level].box_order),
+            k=float(k),
+            x=np.asarray(x, dtype=far_out_dtype),
+            leaf_groups=operators.leaf_groups,
+            n_leaves=len(operators.partition.leaves),
+            radial_lut=radial_lut,
+            dtype=far_out_dtype,
+        )
+    else:
+        leaf_states = _leaf_box_states_from_dense_maps(
+            lmax=int(lmax),
+            positions=np.asarray(positions, dtype=float),
+            x=np.asarray(x, dtype=far_out_dtype),
+            partition=operators.partition,
+            aggregation=operators.aggregation,
+            dtype=far_out_dtype,
+        )
     for leaf_id, box_state in enumerate(leaf_states):
         channels = box_outgoing_to_directional(operators.levels[leaf_level].directional, box_state)
         for chan_idx, channel in enumerate(channels):
@@ -1633,12 +1999,24 @@ def apply_multilevel_mlfmm(
             incoming[leaf_level][leaf_id, 3],
         )
 
-    nm = n_modes(int(lmax))
-    ns = np.asarray(positions).shape[0]
-    y_far = np.zeros((ns, nm), dtype=far_out_dtype)
-    for leaf in operators.partition.leaves:
-        contribution = operators.receive[int(leaf.id)] @ incoming_box[int(leaf.id)]
-        y_far[leaf.particle_indices] += contribution.reshape(leaf.particle_indices.size, nm)
+    if operators.leaf_groups:
+        y_far = _receive_leaf_boxes_to_particles(
+            lmax=int(lmax),
+            box_order=int(operators.levels[leaf_level].box_order),
+            k=float(k),
+            n_particles=np.asarray(positions).shape[0],
+            incoming_box=incoming_box,
+            leaf_groups=operators.leaf_groups,
+            radial_lut=radial_lut,
+            dtype=far_out_dtype,
+        )
+    else:
+        nm = n_modes(int(lmax))
+        ns = np.asarray(positions).shape[0]
+        y_far = np.zeros((ns, nm), dtype=far_out_dtype)
+        for leaf in operators.partition.leaves:
+            contribution = operators.receive[int(leaf.id)] @ incoming_box[int(leaf.id)]
+            y_far[leaf.particle_indices] += contribution.reshape(leaf.particle_indices.size, nm)
     return y_near.reshape(-1), y_far.reshape(-1)
 
 
