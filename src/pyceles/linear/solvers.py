@@ -11,7 +11,7 @@ only practical for small systems. This module therefore provides:
 Key requirements for development/debugging:
 - determinism and correctness-first
 - progress reporting
-- reliable reporting of *true* final residuals
+- reliable reporting of requested true-residual diagnostics
 """
 
 from __future__ import annotations
@@ -164,7 +164,7 @@ def _finalize_result(
     compute_final_residual: bool = True,
     converged_reason: str | None = None,
 ) -> LinearSolveResult:
-    """Finalize single-RHS diagnostics using true residual `||Ax-b||/||b||`."""
+    """Finalize single-RHS diagnostics, computing `||Ax-b||/||b||` only when requested."""
     if compute_final_residual:
         # Compute final residual in complex128 for stable diagnostics even when
         # the iterative solve used a lower-precision operator dtype.
@@ -206,7 +206,7 @@ def _finalize_multi_result(
     compute_final_residual: bool = True,
     converged_reason: np.ndarray | None = None,
 ) -> LinearSolveResult:
-    """Finalize multi-RHS diagnostics with per-column true residuals."""
+    """Finalize multi-RHS diagnostics with per-column true residuals when requested."""
     if compute_final_residual:
         x_ref = np.asarray(x, dtype=np.complex128)
         b_ref = np.asarray(b, dtype=np.complex128)
@@ -796,7 +796,9 @@ def gmres_cupy(
     The Arnoldi basis, Hessenberg system, and Givens updates stay device-side.
     `callback` receives inner preconditioned residual updates. `callback_true`
     receives verified true residual updates only when the native solver
-    performs an explicit `A @ x` check.
+    performs an explicit true-residual `A @ x` check. When
+    `compute_final_residual=False`, pyceles skips the extra terminal
+    verification matvec and leaves the final true-residual scalars as `NaN`.
     """
 
     cupy, _ = import_cupy()
@@ -927,7 +929,9 @@ def fgmres_cupy(
     FGMRES uses a separate preconditioned basis `Z` and supports variable
     preconditioners (including callables that optionally consume iteration
     state dictionaries). Verified true-residual callbacks are emitted only
-    when the native solver performs an explicit terminal `A @ x` check.
+    when the native solver performs an explicit terminal `A @ x` check. When
+    `compute_final_residual=False`, pyceles skips the extra terminal
+    verification matvec and leaves the final true-residual scalars as `NaN`.
     """
 
     cupy, _ = import_cupy()
@@ -1054,7 +1058,9 @@ def lgmres_cupy(
     reducing restart-stagnation risk compared with plain restarted GMRES.
     Monitor/callback semantics mirror ``gmres_cupy``: inner progress uses the
     projected/preconditioned recurrence, while verified true-residual callbacks
-    are emitted only at explicit terminal checks.
+    are emitted only at explicit terminal checks. When
+    `compute_final_residual=False`, pyceles skips the extra terminal
+    verification matvec and leaves the final true-residual scalars as `NaN`.
     """
 
     cupy, _ = import_cupy()
@@ -1686,10 +1692,12 @@ def solve_linear_system(
         ``lgmres_store_outer_av`` caches ``A @ v`` for those recycled vectors.
     compute_final_residual:
         If `True`, compute and store final true residual diagnostics
-        `||Ax-b||/||b||` after the solve. Native CuPy restarted
-        GMRES/FGMRES/LGMRES use projected or preconditioned residuals for
-        cycle progress and verify the true residual only at terminal decision
-        points.
+        `||Ax-b||/||b||` after the solve. If `False`, pyceles skips the extra
+        terminal verification matvec and leaves the final true-residual
+        scalars as `NaN`. Native CuPy restarted GMRES/FGMRES/LGMRES still use
+        projected or preconditioned residuals for cycle progress and, when a
+        nonzero warm start is provided, may need one initial true-residual
+        evaluation to seed the iteration correctly.
 
     Multi-RHS policy:
     - `backend='cupy', method='gmres', b.ndim==2` uses the native block-GMRES path.

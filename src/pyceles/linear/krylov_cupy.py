@@ -273,7 +273,8 @@ def gmres_cupy_native(
     Inner-iteration callbacks receive the GMRES preconditioned residual proxy
     from the Arnoldi/Givens recurrence. When `compute_final_residual=True`,
     the native CuPy path verifies the true residual only at terminal decision
-    points rather than at every restart boundary.
+    points rather than at every restart boundary. A nonzero warm start may
+    still require one initial true-residual evaluation to seed the iteration.
     """
     b_dtype_obj = getattr(b, "dtype", None)
     b_dtype = np.dtype(np.asarray(b).dtype if b_dtype_obj is None else b_dtype_obj)
@@ -595,7 +596,8 @@ def fgmres_cupy_native(
     and preconditioned vectors `Z_j = M_j^{-1} V_j`, allowing the
     preconditioner to vary by iteration. When `compute_final_residual=True`,
     true-residual verification is deferred to terminal decision points instead
-    of every restart boundary.
+    of every restart boundary. A nonzero warm start may still require one
+    initial true-residual evaluation to seed the iteration.
     """
     b_dtype_obj = getattr(b, "dtype", None)
     b_dtype = np.dtype(np.asarray(b).dtype if b_dtype_obj is None else b_dtype_obj)
@@ -900,7 +902,9 @@ def lgmres_cupy_native(
     correction directions from previous cycles, which often mitigates restart
     stagnation versus plain restarted GMRES at similar memory footprint. When
     `compute_final_residual=True`, true-residual verification is deferred to
-    terminal decision points instead of every restart boundary.
+    terminal decision points instead of every restart boundary. A nonzero warm
+    start may still require one initial true-residual evaluation to seed the
+    iteration.
     """
     if prepend_outer_v:
         raise ValueError("`prepend_outer_v=True` is not supported in the native CuPy LGMRES path.")

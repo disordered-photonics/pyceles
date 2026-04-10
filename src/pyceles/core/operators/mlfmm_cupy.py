@@ -35,25 +35,34 @@ from .mlfmm_directional import MLFMMDirectionalTransforms
 from .mlfmm_partition import MLFMMPartition
 
 Offset3 = tuple[int, int, int]
+# CuPy production runs use on-the-fly leaf apply; dense leaf payloads remain
+# available only for validation/debug parity against the CPU reference plan.
 CuPyMLFMMLeafApplyMode = Literal["dense", "on_the_fly"]
 CuPyMLFMMHostCacheRetention = Literal["full", "summary", "none"]
 
 
 @dataclass(frozen=True)
 class CuPyMLFMMHostCachePolicy:
-    """Memory-tier policy for compact host cache retention vs recomputation.
+    """Policy for compact host payload retention and repeated-apply shape.
 
-    `leaf_apply_mode` controls how leaf aggregation/disaggregation is represented
-    in the reusable host cache:
-    - `dense`: keep grouped dense aggregation maps as a reference/debug override,
+    The intended CuPy repeated-apply path is:
+    - `leaf_apply_mode="on_the_fly"`
+    - streamed sampled-far traversal
+    - `host_cache_retention="summary"`
+    - opt-in streamed diagnostics
+
+    `leaf_apply_mode` controls how leaf aggregation/disaggregation is
+    represented in the reusable host payload:
+    - `dense`: preserve grouped dense aggregation maps only for validation/debug
+      comparisons against the CPU reference path,
     - `on_the_fly`: keep compact schedules + translation ingredients and
       regenerate leaf translation blocks during repeated apply.
 
     `host_cache_retention` controls what stays attached to the runtime coupling
     object after upload:
-    - `full`: retain full compact host cache + summary,
-    - `summary`: retain only lightweight diagnostics summary (default),
-    - `none`: retain no host-cache diagnostics payload.
+    - `full`: retain the full compact host payload plus summary,
+    - `summary`: retain only the lightweight diagnostics summary (default),
+    - `none`: retain no host-side diagnostics payload.
 
     `leaf_otf_chunk_leaves` caps how many leaves of one occupancy-grouped batch
     are processed per on-the-fly translation substep. This is a simple
@@ -67,9 +76,10 @@ class CuPyMLFMMHostCachePolicy:
     available device memory during apply, while runtime diagnostics report the
     resolved chunking in native leaf/box units.
 
-    `collect_stream_stats` keeps streamed multilevel chunk/build counters for
-    diagnostics. Leave it off for production runs so repeated applies do not
-    spend time updating per-apply bookkeeping dictionaries.
+    `collect_stream_stats` enables profiling instrumentation for streamed
+    multilevel chunk/build counters. Leave it off for production runs so
+    repeated applies do not spend time updating per-apply bookkeeping
+    dictionaries.
     """
 
     leaf_apply_mode: CuPyMLFMMLeafApplyMode = "on_the_fly"
@@ -172,7 +182,11 @@ class CuPyHostTransferData:
 
 @dataclass(frozen=True)
 class CuPyHostSingleLevelData:
-    """Compact host single-level payload for CuPy upload."""
+    """Compact host single-level payload for CuPy upload.
+
+    Dense `aggregation` blocks are populated only for validation/debug uploads;
+    production CuPy runs use the on-the-fly leaf schedule instead.
+    """
 
     box_order: int
     translator_order: int
@@ -188,7 +202,11 @@ class CuPyHostSingleLevelData:
 
 @dataclass(frozen=True)
 class CuPyHostMultilevelData:
-    """Compact host multilevel payload for CuPy upload."""
+    """Compact host multilevel payload for CuPy upload.
+
+    Dense `aggregation` blocks are populated only for validation/debug uploads;
+    production CuPy runs use the on-the-fly leaf schedule instead.
+    """
 
     levels: tuple[CuPyHostLevelData, ...]
     transfers: tuple[CuPyHostTransferData, ...]
@@ -203,7 +221,12 @@ class CuPyHostMultilevelData:
 
 @dataclass(frozen=True)
 class CuPyMLFMMHostCacheData:
-    """Compact host-only cache artifact for CuPy MLFMM preparation."""
+    """Compact host-only payload for CuPy MLFMM preparation.
+
+    Dense leaf aggregation payloads are retained only for explicit
+    validation/debug uploads; the default CuPy path keeps compact on-the-fly
+    schedules and translation ingredients instead.
+    """
 
     lmax: int
     k: float
@@ -1503,7 +1526,11 @@ def _build_host_single_level(
     out_dtype: np.dtype,
     leaf_apply_mode: CuPyMLFMMLeafApplyMode,
 ) -> CuPyHostSingleLevelData:
-    """Build compact host cache payload for one single-level sampled-far stage."""
+    """Build compact host payload for one single-level sampled-far stage.
+
+    Dense leaf aggregation is preserved only for explicit validation/debug
+    uploads; the production path stores the compact on-the-fly leaf payload.
+    """
 
     if str(leaf_apply_mode) == "on_the_fly":
         leaf_groups_otf, leaf_tables = _build_host_leaf_otf_payload(
@@ -1551,7 +1578,11 @@ def _build_host_multilevel(
     out_dtype: np.dtype,
     leaf_apply_mode: CuPyMLFMMLeafApplyMode,
 ) -> CuPyHostMultilevelData:
-    """Build compact host cache payload for one multilevel sampled-far stage."""
+    """Build compact host payload for one multilevel sampled-far stage.
+
+    Dense leaf aggregation is preserved only for explicit validation/debug
+    uploads; the production path stores the compact on-the-fly leaf payload.
+    """
 
     levels = tuple(
         CuPyHostLevelData(
@@ -1740,7 +1771,7 @@ def _build_mlfmm_cupy_host_cache(
     *,
     host_cache_policy: CuPyMLFMMHostCachePolicy | None = None,
 ) -> CuPyMLFMMHostCacheData:
-    """Build a compact host-only MLFMM cache artifact from CPU reference operators."""
+    """Build a compact host-only MLFMM payload from CPU reference operators."""
 
     policy = _resolve_host_cache_policy(host_cache_policy)
     near_dtype = np.dtype(coupling.near_dtype)
@@ -6165,7 +6196,10 @@ class CuPyMLFMMCouplingOperator:
 
     The MLFMM plan and one-time operators are built on CPU (NumPy reference
     path). This class executes repeated exact-near and sampled-far applies on
-    CuPy device arrays.
+    CuPy device arrays. The intended production configuration is on-the-fly
+    leaf apply with streamed sampled-far traversal and compact host-summary
+    retention; dense leaf payloads remain available only for validation/debug
+    comparisons.
 
     Precision policy mirrors the NumPy MLFMM reference path:
     - exact-near runs at `near_dtype` (`complex64` or `complex128`);

@@ -80,7 +80,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - MLFMM precision policy now accepts `compute_dtype="complex64"` on both NumPy
   and CuPy backends; this request is applied to exact-near interactions while
   sampled-far interactions remain `complex128`.
-- CuPy MLFMM prepared-cache serialization now stores compact host artifacts and
+- CuPy MLFMM prepared-cache serialization now stores compact host payloads and
   rebuilds device prepared data on load, reducing cache footprint and avoiding
   device-graph pickling.
 - CuPy MLFMM exact-near cache/runtime payload now uses directed leaf-pair
