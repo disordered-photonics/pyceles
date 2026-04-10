@@ -87,6 +87,21 @@ class MLFMMResolvedPlan:
     max_particles_per_leaf: int
     partition: MLFMMPartition
 
+    def summary(self) -> dict[str, int | float | str]:
+        """Return a compact stage/partition summary in the canonical MLFMM vocabulary."""
+
+        return {
+            "stage": str(self.stage),
+            "selected_depth": int(self.selected_depth),
+            "depth_from_occupancy": int(self.depth_from_occupancy),
+            "depth_from_size_floor": int(self.depth_from_size_floor),
+            "occupied_leaf_count": int(self.occupied_leaf_count),
+            "max_particles_per_leaf": int(self.max_particles_per_leaf),
+            "root_side_length": float(self.root_side_length),
+            "leaf_side_length": float(self.leaf_side_length),
+            "max_global_radius": float(self.max_global_radius),
+        }
+
 
 @dataclass(frozen=True)
 class MLFMMSingleLevelOperators:
@@ -246,6 +261,88 @@ class MLFMMCouplingOperator:
             radial_lut=self.radial_lut,
             block_cache=self._exact_block_cache,
         )
+
+    def plan_summary(self) -> dict[str, int | float | str]:
+        """Return the canonical resolved-plan summary for this prepared operator."""
+
+        return self.resolved_plan.summary()
+
+    def hierarchy_diagnostics(self) -> dict[str, object]:
+        """Return stage-aware hierarchy diagnostics using the CuPy-aligned vocabulary.
+
+        The NumPy path remains free to execute with different storage choices,
+        but it should describe resolved MLFMM structure in the same conceptual
+        terms as the CuPy path so backend comparisons stay interpretable.
+        """
+
+        stage = str(self.resolved_plan.stage)
+        if stage == "single_level":
+            if self.single_level is None:
+                raise RuntimeError("Internal error: single-level operators are missing.")
+            directional = self.single_level.directional
+            return {
+                "stage": stage,
+                "leaf_level": int(self.resolved_plan.selected_depth),
+                "hf_start_level": int(self.resolved_plan.selected_depth),
+                "hf_end_level": int(self.resolved_plan.selected_depth),
+                "transfer_edges": [],
+                "levels": {
+                    "n_levels": 1,
+                    "translator_orders": [int(self.single_level.translator_order)],
+                    "grid_orders": [int(self.single_level.grid_order)],
+                    "direction_counts": [int(directional.grid.directions.shape[0])],
+                    "levels": [
+                        {
+                            "level": int(self.resolved_plan.selected_depth),
+                            "n_boxes": int(len(self.single_level.leaf_cell_coords)),
+                            "box_order": int(self.single_level.box_order),
+                            "translator_order": int(self.single_level.translator_order),
+                            "grid_order": int(self.single_level.grid_order),
+                            "n_directions": int(directional.grid.directions.shape[0]),
+                            "parity_from_hf_start": 0,
+                        }
+                    ],
+                },
+            }
+        if stage == "multilevel":
+            if self.multilevel is None:
+                raise RuntimeError("Internal error: multilevel operators are missing.")
+            levels = self.multilevel.levels
+            hf_start_level = int(self.multilevel.hf_start_level)
+            return {
+                "stage": stage,
+                "leaf_level": int(self.multilevel.leaf_level),
+                "hf_start_level": int(self.multilevel.hf_start_level),
+                "hf_end_level": int(self.multilevel.hf_end_level),
+                "transfer_edges": [
+                    {
+                        "child_level": int(transfer.child_level),
+                        "parent_level": int(transfer.parent_level),
+                    }
+                    for transfer in self.multilevel.transfers
+                ],
+                "levels": {
+                    "n_levels": int(len(levels)),
+                    "translator_orders": [int(level.translator_order) for level in levels],
+                    "grid_orders": [int(level.grid_order) for level in levels],
+                    "direction_counts": sorted(
+                        {int(level.directional.grid.directions.shape[0]) for level in levels}
+                    ),
+                    "levels": [
+                        {
+                            "level": int(level.level),
+                            "n_boxes": int(level.coords.shape[0]),
+                            "box_order": int(level.box_order),
+                            "translator_order": int(level.translator_order),
+                            "grid_order": int(level.grid_order),
+                            "n_directions": int(level.directional.grid.directions.shape[0]),
+                            "parity_from_hf_start": int((int(level.level) - hf_start_level) % 2),
+                        }
+                        for level in levels
+                    ],
+                },
+            }
+        raise RuntimeError(f"Unsupported MLFMM stage {self.resolved_plan.stage!r}.")
 
 
 def _validate_positions_and_radii(

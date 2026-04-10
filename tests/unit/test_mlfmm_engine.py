@@ -16,6 +16,7 @@ from pyceles.core.operators.mlfmm import (
     box_order_rokhlin_like,
     build_multilevel_mlfmm_operators,
     build_single_level_mlfmm_operators,
+    prepare_mlfmm_coupling,
     resolve_mlfmm_plan,
 )
 from pyceles.core.operators.mlfmm_directional import (
@@ -76,6 +77,32 @@ def _multilevel_fixture() -> tuple[np.ndarray, np.ndarray, int, float]:
         dtype=float,
     )
     radii = np.full((positions.shape[0],), 15.0, dtype=float)
+    return positions, radii, 1, 2.0 * np.pi / 550.0
+
+
+def _resolved_multilevel_stage_fixture() -> tuple[np.ndarray, np.ndarray, int, float]:
+    corner_centers = np.array(
+        [
+            [-300.0, -300.0, -300.0],
+            [-300.0, -300.0, 300.0],
+            [-300.0, 300.0, -300.0],
+            [-300.0, 300.0, 300.0],
+            [300.0, -300.0, -300.0],
+            [300.0, -300.0, 300.0],
+            [300.0, 300.0, -300.0],
+            [300.0, 300.0, 300.0],
+        ],
+        dtype=float,
+    )
+    intra_corner_offsets = np.array(
+        [
+            [-40.0, -40.0, -40.0],
+            [40.0, 40.0, 40.0],
+        ],
+        dtype=float,
+    )
+    positions = np.vstack([center + intra_corner_offsets for center in corner_centers])
+    radii = np.full((positions.shape[0],), 10.0, dtype=float)
     return positions, radii, 1, 2.0 * np.pi / 550.0
 
 
@@ -587,6 +614,83 @@ def test_mlfmm_options_expose_box_order_policy_controls() -> None:
     )
 
     assert stricter > baseline
+
+
+def test_mlfmm_resolved_plan_summary_uses_canonical_vocabulary() -> None:
+    positions, radii, _lmax, _k = _single_level_fixture()
+    plan = resolve_mlfmm_plan(
+        positions,
+        particle_circumscribing_radii=radii,
+        options=MLFMMOptions(max_leaf_particles=1, max_depth=2),
+    )
+
+    summary = plan.summary()
+
+    assert summary == {
+        "stage": str(plan.stage),
+        "selected_depth": int(plan.selected_depth),
+        "depth_from_occupancy": int(plan.depth_from_occupancy),
+        "depth_from_size_floor": int(plan.depth_from_size_floor),
+        "occupied_leaf_count": int(plan.occupied_leaf_count),
+        "max_particles_per_leaf": int(plan.max_particles_per_leaf),
+        "root_side_length": float(plan.root_side_length),
+        "leaf_side_length": float(plan.leaf_side_length),
+        "max_global_radius": float(plan.max_global_radius),
+    }
+
+
+def test_mlfmm_coupling_hierarchy_diagnostics_align_with_cupy_vocabulary() -> None:
+    positions, radii, lmax, k = _resolved_multilevel_stage_fixture()
+    radial_lut = RadialLUT(
+        lmax=12,
+        k=k,
+        r_max=float(np.max(np.linalg.norm(positions[:, None, :] - positions[None, :, :], axis=2))),
+        dr=5.0,
+    )
+    coupling = prepare_mlfmm_coupling(
+        lmax=lmax,
+        k=k,
+        positions=positions,
+        particle_circumscribing_radii=radii,
+        radial_lut=radial_lut,
+        options=MLFMMOptions(max_leaf_particles=1, max_depth=4),
+        dtype=np.complex128,
+    )
+
+    assert isinstance(coupling, MLFMMCouplingOperator)
+    assert str(coupling.resolved_plan.stage) == "multilevel"
+    assert coupling.multilevel is not None
+    multilevel = coupling.multilevel
+
+    plan_summary = coupling.plan_summary()
+    hierarchy = coupling.hierarchy_diagnostics()
+
+    assert plan_summary == coupling.resolved_plan.summary()
+    assert hierarchy["stage"] == "multilevel"
+    assert hierarchy["leaf_level"] == int(multilevel.leaf_level)
+    assert hierarchy["hf_start_level"] == int(multilevel.hf_start_level)
+    assert hierarchy["hf_end_level"] == int(multilevel.hf_end_level)
+
+    transfer_edges = hierarchy["transfer_edges"]
+    assert isinstance(transfer_edges, list)
+    assert len(transfer_edges) == len(multilevel.transfers)
+
+    levels_diag = hierarchy["levels"]
+    assert isinstance(levels_diag, dict)
+    assert levels_diag["n_levels"] == int(len(multilevel.levels))
+    assert levels_diag["translator_orders"] == [
+        int(level.translator_order) for level in multilevel.levels
+    ]
+    assert levels_diag["grid_orders"] == [int(level.grid_order) for level in multilevel.levels]
+    assert levels_diag["direction_counts"] == sorted(
+        {int(level.directional.grid.directions.shape[0]) for level in multilevel.levels}
+    )
+
+    level_rows = levels_diag["levels"]
+    assert isinstance(level_rows, list)
+    assert len(level_rows) == len(multilevel.levels)
+    assert level_rows[-1]["level"] == int(multilevel.leaf_level)
+    assert level_rows[-1]["n_boxes"] == int(multilevel.levels[-1].coords.shape[0])
 
 
 def test_multilevel_transfer_anterpolation_is_interpolation_transpose() -> None:
