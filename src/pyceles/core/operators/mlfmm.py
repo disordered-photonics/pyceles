@@ -8,6 +8,7 @@ from time import perf_counter
 from typing import Literal
 
 import numpy as np
+import scipy.sparse
 from scipy.special import spherical_jn, spherical_yn
 from tqdm.auto import tqdm
 
@@ -365,6 +366,34 @@ class MLFMMCouplingOperator:
                     ],
                 },
             }
+        raise RuntimeError(f"Unsupported MLFMM stage {self.resolved_plan.stage!r}.")
+
+    def memory_diagnostics(self) -> dict[str, object]:
+        """Return stage-aware NumPy memory and state diagnostics."""
+
+        stage = str(self.resolved_plan.stage)
+        if stage == "single_level":
+            if self.single_level is None:
+                raise RuntimeError("Internal error: single-level operators are missing.")
+            return _single_level_memory_diagnostics(
+                lmax=int(self.lmax),
+                n_particles=int(self.positions.shape[0]),
+                near_dtype=np.dtype(self.near_dtype),
+                far_dtype=np.dtype(self.far_dtype),
+                plan_summary=self.plan_summary(),
+                operators=self.single_level,
+            )
+        if stage == "multilevel":
+            if self.multilevel is None:
+                raise RuntimeError("Internal error: multilevel operators are missing.")
+            return _multilevel_memory_diagnostics(
+                lmax=int(self.lmax),
+                n_particles=int(self.positions.shape[0]),
+                near_dtype=np.dtype(self.near_dtype),
+                far_dtype=np.dtype(self.far_dtype),
+                plan_summary=self.plan_summary(),
+                operators=self.multilevel,
+            )
         raise RuntimeError(f"Unsupported MLFMM stage {self.resolved_plan.stage!r}.")
 
 
@@ -848,6 +877,213 @@ def _sampled_rokhlin_translator(
         truncation_order=int(truncation_order),
     )
     return np.asarray(transfer * np.asarray(weights, dtype=float), dtype=dtype)
+
+
+def _sparse_matrix_nbytes(matrix: scipy.sparse.csr_matrix) -> int:
+    """Return the byte footprint of one CSR interpolation matrix."""
+
+    return int(matrix.data.nbytes + matrix.indices.nbytes + matrix.indptr.nbytes)
+
+
+def _leaf_apply_groups_nbytes(
+    leaf_groups: tuple[MLFMMLeafApplyGroup, ...],
+) -> dict[str, int]:
+    """Return grouped leaf-apply bytes split by payload type."""
+
+    aggregation_bytes = 0
+    pair_delta_bytes = 0
+    index_bytes = 0
+    for group in leaf_groups:
+        index_bytes += int(np.asarray(group.leaf_ids, dtype=np.int64).nbytes)
+        index_bytes += int(np.asarray(group.particle_indices, dtype=np.int64).nbytes)
+        if group.aggregation is not None:
+            aggregation_bytes += int(np.asarray(group.aggregation).nbytes)
+        if group.pair_deltas is not None:
+            pair_delta_bytes += int(np.asarray(group.pair_deltas, dtype=np.float64).nbytes)
+    return {
+        "aggregation_bytes": int(aggregation_bytes),
+        "pair_delta_bytes": int(pair_delta_bytes),
+        "index_bytes": int(index_bytes),
+        "persistent_total_bytes": int(aggregation_bytes + pair_delta_bytes + index_bytes),
+    }
+
+
+def _single_level_offset_index_bytes(
+    offset_batches: dict[tuple[int, int, int], tuple[np.ndarray, np.ndarray]],
+) -> int:
+    """Return grouped offset index bytes for one same-level schedule."""
+
+    total = 0
+    for src_idx, dst_idx in offset_batches.values():
+        total += int(np.asarray(src_idx, dtype=np.int64).nbytes)
+        total += int(np.asarray(dst_idx, dtype=np.int64).nbytes)
+    return int(total)
+
+
+def _transfer_schedule_nbytes(transfers: tuple[MLFMMTransferOperators, ...]) -> dict[str, int]:
+    """Return packed transfer bytes split by maps, phases, and grouped indices."""
+
+    map_bytes = 0
+    phase_bytes = 0
+    batch_index_bytes = 0
+    for transfer in transfers:
+        map_bytes += _sparse_matrix_nbytes(transfer.interpolation.matrix)
+        map_bytes += _sparse_matrix_nbytes(transfer.anterpolation.matrix)
+        for child_idx, parent_idx in transfer.batches_by_shift.values():
+            batch_index_bytes += int(np.asarray(child_idx, dtype=np.int64).nbytes)
+            batch_index_bytes += int(np.asarray(parent_idx, dtype=np.int64).nbytes)
+        for phase in transfer.phase_up_by_shift.values():
+            phase_bytes += int(np.asarray(phase, dtype=np.complex128).nbytes)
+        for phase in transfer.phase_down_by_shift.values():
+            phase_bytes += int(np.asarray(phase, dtype=np.complex128).nbytes)
+    return {
+        "map_bytes": int(map_bytes),
+        "phase_bytes": int(phase_bytes),
+        "batch_index_bytes": int(batch_index_bytes),
+        "persistent_total_bytes": int(map_bytes + phase_bytes + batch_index_bytes),
+    }
+
+
+def _single_level_memory_diagnostics(
+    *,
+    lmax: int,
+    n_particles: int,
+    near_dtype: np.dtype,
+    far_dtype: np.dtype,
+    plan_summary: dict[str, int | float | str],
+    operators: MLFMMSingleLevelOperators,
+) -> dict[str, object]:
+    """Return stage-aware memory diagnostics for one single-level NumPy plan."""
+
+    nm = int(n_modes(int(lmax)))
+    box_nm = int(n_modes(int(operators.box_order)))
+    n_leaves = int(len(operators.partition.leaves))
+    ndir = int(operators.directional.grid.directions.shape[0])
+    far_itemsize = int(np.dtype(far_dtype).itemsize)
+    near_itemsize = int(np.dtype(near_dtype).itemsize)
+    leaf_apply = _leaf_apply_groups_nbytes(operators.leaf_groups)
+    offset_index_bytes = _single_level_offset_index_bytes(operators.far_offset_batches)
+    offset_diagonal_bytes = int(
+        sum(
+            np.asarray(diagonal, dtype=far_dtype).nbytes
+            for diagonal in operators.offset_diagonals.values()
+        )
+    )
+    return {
+        "stage": "single_level",
+        "plan_summary": dict(plan_summary),
+        "leaf_apply": {
+            "mode": str(operators.leaf_apply_mode),
+            "group_count": int(len(operators.leaf_groups)),
+            "occupancies": [int(group.occupancy) for group in operators.leaf_groups],
+            **leaf_apply,
+        },
+        "workspace_bytes": {
+            "nrhs_reference": 1,
+            "near_total_bytes_estimate": int(n_particles * nm * near_itemsize),
+            "leaf_box_states_bytes": int(n_leaves * box_nm * far_itemsize),
+            "outgoing_hierarchy_bytes": int(n_leaves * 4 * ndir * far_itemsize),
+            "incoming_hierarchy_bytes": int(n_leaves * 4 * ndir * far_itemsize),
+            "incoming_box_bytes": int(n_leaves * box_nm * far_itemsize),
+            "full_far_hierarchy_bytes": int(n_leaves * (8 * ndir + 2 * box_nm) * far_itemsize),
+        },
+        "prepared_bytes": {
+            "directional_transform_bytes": int(
+                np.asarray(operators.directional.grid.directions, dtype=float).nbytes
+                + np.asarray(operators.directional.grid.weights, dtype=float).nbytes
+                + np.asarray(
+                    operators.directional.grid.reflection_permutation, dtype=np.int64
+                ).nbytes
+                + np.asarray(operators.directional.Fth, dtype=np.complex128).nbytes
+                + np.asarray(operators.directional.Fph, dtype=np.complex128).nbytes
+            ),
+            "same_level_offset_index_bytes": int(offset_index_bytes),
+            "same_level_offset_diagonal_bytes": int(offset_diagonal_bytes),
+        },
+    }
+
+
+def _multilevel_memory_diagnostics(
+    *,
+    lmax: int,
+    n_particles: int,
+    near_dtype: np.dtype,
+    far_dtype: np.dtype,
+    plan_summary: dict[str, int | float | str],
+    operators: MLFMMMultilevelOperators,
+) -> dict[str, object]:
+    """Return stage-aware memory diagnostics for one multilevel NumPy plan."""
+
+    nm = int(n_modes(int(lmax)))
+    leaf_box_nm = int(n_modes(int(operators.levels[int(operators.leaf_level)].box_order)))
+    n_leaves = int(len(operators.partition.leaves))
+    far_itemsize = int(np.dtype(far_dtype).itemsize)
+    near_itemsize = int(np.dtype(near_dtype).itemsize)
+    outgoing_bytes = int(
+        sum(
+            level.coords.shape[0] * 4 * level.directional.grid.directions.shape[0] * far_itemsize
+            for level in operators.levels
+        )
+    )
+    incoming_bytes = int(
+        sum(
+            level.coords.shape[0] * 4 * level.directional.grid.directions.shape[0] * far_itemsize
+            for level in operators.levels
+        )
+    )
+    level_transform_bytes = int(
+        sum(
+            np.asarray(level.directional.grid.directions, dtype=float).nbytes
+            + np.asarray(level.directional.grid.weights, dtype=float).nbytes
+            + np.asarray(level.directional.grid.reflection_permutation, dtype=np.int64).nbytes
+            + np.asarray(level.directional.Fth, dtype=np.complex128).nbytes
+            + np.asarray(level.directional.Fph, dtype=np.complex128).nbytes
+            for level in operators.levels
+        )
+    )
+    level_offset_index_bytes = int(
+        sum(
+            _single_level_offset_index_bytes(level.far_offset_batches) for level in operators.levels
+        )
+    )
+    level_offset_diagonal_bytes = int(
+        sum(
+            np.asarray(diagonal, dtype=far_dtype).nbytes
+            for level in operators.levels
+            for diagonal in level.offset_diagonals.values()
+        )
+    )
+    transfer_bytes = _transfer_schedule_nbytes(operators.transfers)
+    leaf_apply = _leaf_apply_groups_nbytes(operators.leaf_groups)
+    return {
+        "stage": "multilevel",
+        "plan_summary": dict(plan_summary),
+        "leaf_apply": {
+            "mode": str(operators.leaf_apply_mode),
+            "group_count": int(len(operators.leaf_groups)),
+            "occupancies": [int(group.occupancy) for group in operators.leaf_groups],
+            **leaf_apply,
+        },
+        "workspace_bytes": {
+            "nrhs_reference": 1,
+            "near_total_bytes_estimate": int(n_particles * nm * near_itemsize),
+            "leaf_box_states_bytes": int(n_leaves * leaf_box_nm * far_itemsize),
+            "outgoing_hierarchy_bytes": int(outgoing_bytes),
+            "incoming_hierarchy_bytes": int(incoming_bytes),
+            "incoming_box_bytes": int(n_leaves * leaf_box_nm * far_itemsize),
+            "full_far_hierarchy_bytes": int(
+                outgoing_bytes + incoming_bytes + 2 * n_leaves * leaf_box_nm * far_itemsize
+            ),
+        },
+        "prepared_bytes": {
+            "directional_transform_bytes": int(level_transform_bytes),
+            "same_level_offset_index_bytes": int(level_offset_index_bytes),
+            "same_level_offset_diagonal_bytes": int(level_offset_diagonal_bytes),
+            "transfer_map_bytes": int(transfer_bytes["map_bytes"]),
+            "transfer_phase_bytes": int(transfer_bytes["phase_bytes"]),
+            "transfer_batch_index_bytes": int(transfer_bytes["batch_index_bytes"]),
+        },
+    }
 
 
 def _build_leaf_box_maps(

@@ -805,6 +805,65 @@ def test_mlfmm_coupling_hierarchy_diagnostics_align_with_cupy_vocabulary() -> No
     assert level_rows[-1]["n_boxes"] == int(multilevel.levels[-1].coords.shape[0])
 
 
+def test_mlfmm_coupling_memory_diagnostics_report_leaf_modes() -> None:
+    positions, radii, lmax, k = _resolved_multilevel_stage_fixture()
+    radial_lut = RadialLUT(
+        lmax=12,
+        k=k,
+        r_max=float(np.max(np.linalg.norm(positions[:, None, :] - positions[None, :, :], axis=2))),
+        dr=5.0,
+    )
+    dense = prepare_mlfmm_coupling(
+        lmax=lmax,
+        k=k,
+        positions=positions,
+        particle_circumscribing_radii=radii,
+        radial_lut=radial_lut,
+        options=MLFMMOptions(max_leaf_particles=1, max_depth=4),
+        dtype=np.complex128,
+        build_leaf_maps=True,
+    )
+    otf = prepare_mlfmm_coupling(
+        lmax=lmax,
+        k=k,
+        positions=positions,
+        particle_circumscribing_radii=radii,
+        radial_lut=radial_lut,
+        options=MLFMMOptions(max_leaf_particles=1, max_depth=4),
+        dtype=np.complex128,
+        build_leaf_maps=False,
+    )
+
+    assert isinstance(dense, MLFMMCouplingOperator)
+    assert isinstance(otf, MLFMMCouplingOperator)
+
+    dense_diag = dense.memory_diagnostics()
+    otf_diag = otf.memory_diagnostics()
+
+    assert dense_diag["stage"] == "multilevel"
+    assert otf_diag["stage"] == "multilevel"
+    assert dense_diag["plan_summary"] == otf_diag["plan_summary"]
+
+    dense_leaf = dense_diag["leaf_apply"]
+    otf_leaf = otf_diag["leaf_apply"]
+    assert isinstance(dense_leaf, dict)
+    assert isinstance(otf_leaf, dict)
+    assert dense_leaf["mode"] == "dense"
+    assert otf_leaf["mode"] == "on_the_fly"
+    assert dense_leaf["group_count"] == otf_leaf["group_count"]
+    assert dense_leaf["aggregation_bytes"] > 0
+    assert dense_leaf["pair_delta_bytes"] == 0
+    assert otf_leaf["aggregation_bytes"] == 0
+    assert otf_leaf["pair_delta_bytes"] > 0
+
+    dense_ws = dense_diag["workspace_bytes"]
+    otf_ws = otf_diag["workspace_bytes"]
+    assert isinstance(dense_ws, dict)
+    assert isinstance(otf_ws, dict)
+    assert dense_ws["full_far_hierarchy_bytes"] == otf_ws["full_far_hierarchy_bytes"]
+    assert dense_ws["near_total_bytes_estimate"] == otf_ws["near_total_bytes_estimate"]
+
+
 def test_multilevel_transfer_anterpolation_is_interpolation_transpose() -> None:
     matrix = directional_interpolation(14, 14).matrix
     anterpolation = directional_anterpolation(14, 14)
