@@ -106,6 +106,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   kernel and lookup-table uploads (instead of only casting the final near
   output), restoring the intended mixed-precision speedup while keeping
   sampled-far interactions on `complex128`.
+- Plane-wave cross sections now report physical local dissipation by default:
+  `cross_sections["C_abs"]` is now `C_abs_local`, while
+  `C_abs_raw_diff = C_ext_raw - C_sca_raw` and `Delta_closure` remain exposed
+  as explicit numerical diagnostics.
+- Low-level `plane_wave_cross_sections(...)` semantics are now strict:
+  callers must provide `local_absorption` explicitly, while legacy
+  raw-difference behavior requires explicit `allow_raw_diff_fallback=True`.
 - CuPy MLFMM repeated apply now memoizes grouped leaf receive adjoints per
   runtime object, removing repeated grouped `swapaxes(...).conj()` work in the
   hot loop.

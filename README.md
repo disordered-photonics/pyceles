@@ -81,7 +81,13 @@ Users of pyceles are referred to the publications listed in the CELES and SMUTHI
     - differential scattering cross section (`dC_sca/dOmega`)
     - total scattering cross section (PWP-integrated, SMUTHI-style cluster definition)
     - extinction cross section (coefficient-based)
-    - absorption cross section (`C_abs = C_ext - C_sca`)
+    - local absorption cross section (`C_abs = C_abs_local`)
+    - explicit raw/closure diagnostics:
+      - `C_abs_raw_diff = C_ext_raw - C_sca_raw`
+      - `Delta_closure = C_abs_raw_diff - C_abs_local`
+    - low-level helper contract:
+      - `plane_wave_cross_sections(...)` requires explicit `local_absorption`
+      - legacy raw-difference fallback is opt-in via `allow_raw_diff_fallback=True`
     - no coefficient-only cluster `C_sca` helper is exposed
 - Physical source checks:
   - finite-beam-only diagnostics use source capability

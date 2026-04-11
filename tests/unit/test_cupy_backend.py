@@ -27,6 +27,7 @@ from pyceles.core.operators.mlfmm_cupy import _upload_offset_batches
 from pyceles.core.particles import Particle, spheres_from_arrays
 from pyceles.core.translation import RadialLUT
 from pyceles.io import far_field_intensity
+from pyceles.postprocessing.farfield import local_absorption_cross_section_from_exciting
 
 
 def _cupy_available() -> bool:
@@ -164,6 +165,35 @@ def test_cupy_mlfmm_upload_offset_batches_rejects_nonunique() -> None:
             cupy=cupy,
             name="test_batches",
         )
+
+
+def test_local_absorption_cross_section_from_exciting_accepts_cupy_arrays() -> None:
+    cupy, _ = import_cupy()
+    source = _plane_wave_source(550.0, 1.0 + 0j)
+    rng = np.random.default_rng(20260411)
+    e_np = np.asarray(
+        rng.standard_normal(48) + 1j * rng.standard_normal(48),
+        dtype=np.complex128,
+    )
+    x_np = np.asarray(
+        rng.standard_normal(48) + 1j * rng.standard_normal(48),
+        dtype=np.complex128,
+    )
+    ref = local_absorption_cross_section_from_exciting(
+        source,
+        e_np,
+        x_np,
+        k0=2.0 * np.pi / 550.0,
+        n_medium=1.0 + 0j,
+    )
+    got = local_absorption_cross_section_from_exciting(
+        source,
+        cupy.asarray(e_np),
+        cupy.asarray(x_np),
+        k0=2.0 * np.pi / 550.0,
+        n_medium=1.0 + 0j,
+    )
+    np.testing.assert_allclose(got, ref, rtol=1e-13, atol=1e-13)
 
 
 def _policy_numpy_mlfmm_coupling() -> MLFMMCouplingOperator:
@@ -396,7 +426,7 @@ def _sim_cfg(
         azimuthal_angles=pcl.core.uniform_periodic_azimuth_grid(36),
         radial_lut_dr=0.5,
         solver_method="gmres",
-        solver_rtol=1e-10 if compute_dtype == "complex128" else 1e-6,
+        solver_rtol=1e-10 if compute_dtype == "complex128" else 1e-8,
         solver_restart=10,
         solver_maxiter=120,
         operator_backend=operator_backend,
@@ -753,10 +783,15 @@ def test_cupy_mlfmm_complex64_request_matches_numpy_with_far_complex128() -> Non
         "ff_back_atol",
         "nf_rtol",
         "nf_atol",
+        "cs_main_rtol",
+        "cs_main_atol",
+        "cs_local_atol",
+        "cs_delta_rtol",
+        "cs_delta_atol",
     ),
     [
-        (np.complex64, 3e-5, 3e-6, 4e-5, 2e-6, 3e-5, 3e-6),
-        (np.complex128, 5e-9, 5e-10, 5e-9, 5e-10, 1e-8, 1e-9),
+        (np.complex64, 3e-5, 3e-6, 4e-5, 2e-6, 3e-5, 3e-6, 3e-5, 1e-4, 1e-8, 3e-5, 1e-4),
+        (np.complex128, 5e-9, 5e-10, 5e-9, 5e-10, 1e-8, 1e-9, 5e-9, 1e-9, 1e-8, 5e-9, 1e-9),
     ],
 )
 def test_cupy_simulation_run_matches_numpy_for_coeffs_farfield_and_nearfield(
@@ -767,6 +802,11 @@ def test_cupy_simulation_run_matches_numpy_for_coeffs_farfield_and_nearfield(
     ff_back_atol: float,
     nf_rtol: float,
     nf_atol: float,
+    cs_main_rtol: float,
+    cs_main_atol: float,
+    cs_local_atol: float,
+    cs_delta_rtol: float,
+    cs_delta_atol: float,
 ) -> None:
     wavelength = 550.0
     n_medium = 1.0 + 0j
@@ -830,6 +870,34 @@ def test_cupy_simulation_run_matches_numpy_for_coeffs_farfield_and_nearfield(
         intensity_numpy[backward_mask],
         rtol=ff_back_rtol,
         atol=ff_back_atol,
+    )
+    if run_numpy.cross_sections is None or run_cupy.cross_sections is None:
+        raise AssertionError("Plane-wave CuPy/NuPy parity run must expose cross sections.")
+    for key in (
+        "C_ext",
+        "C_sca",
+        "C_abs",
+        "C_ext_raw",
+        "C_sca_raw",
+        "C_abs_raw_diff",
+    ):
+        np.testing.assert_allclose(
+            run_cupy.cross_sections[key],
+            run_numpy.cross_sections[key],
+            rtol=cs_main_rtol,
+            atol=cs_main_atol,
+        )
+    np.testing.assert_allclose(
+        run_cupy.cross_sections["C_abs_local"],
+        run_numpy.cross_sections["C_abs_local"],
+        rtol=0.0,
+        atol=cs_local_atol,
+    )
+    np.testing.assert_allclose(
+        run_cupy.cross_sections["Delta_closure"],
+        run_numpy.cross_sections["Delta_closure"],
+        rtol=cs_delta_rtol,
+        atol=cs_delta_atol,
     )
 
     nearfield_points = np.array(

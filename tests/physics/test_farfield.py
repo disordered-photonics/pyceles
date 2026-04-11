@@ -4,13 +4,14 @@ import numpy as np
 import pytest
 
 from pyceles.core.fields import BesselBeam, GaussianBeam, PlaneWave, SLMSource
-from pyceles.core.particles import spheres_from_arrays
+from pyceles.core.particles import LayeredSphere, Spheroid, spheres_from_arrays
 from pyceles.core.tmatrix import mie_cross_sections
 from pyceles.postprocessing.farfield import (
     absorption_cross_section,
     extinction_cross_section,
     finite_beam_power_fractions,
     incident_power_from_pwp,
+    plane_wave_cross_section_components,
     plane_wave_cross_sections,
     pwp_power_decomposition,
     pwp_power_flux,
@@ -445,6 +446,7 @@ def test_plane_wave_cross_sections_are_invariant_to_global_incident_scale():
         n_medium=n_medium,
         scattered_pwp_te=pte_ref,
         scattered_pwp_tm=ptm_ref,
+        allow_raw_diff_fallback=True,
     )
     cs_scaled = plane_wave_cross_sections(
         source_scaled,
@@ -454,10 +456,71 @@ def test_plane_wave_cross_sections_are_invariant_to_global_incident_scale():
         n_medium=n_medium,
         scattered_pwp_te=_dummy_pwp(alpha, beta, scale * gte_ref),
         scattered_pwp_tm=_dummy_pwp(alpha, beta, scale * gtm_ref),
+        allow_raw_diff_fallback=True,
     )
 
     for key in ("C_ext", "C_sca", "C_abs"):
         np.testing.assert_allclose(cs_scaled[key], cs_ref[key], rtol=1e-12, atol=1e-12)
+
+
+def test_plane_wave_cross_section_components_expose_raw_local_and_closure():
+    alpha = np.linspace(0.0, 2 * np.pi, 31, endpoint=False)
+    beta = np.linspace(0.0, np.pi, 25)
+    k0 = 2.0 * np.pi / 550.0
+    n_medium = 1.0 + 0j
+    rng = np.random.default_rng(71)
+
+    b = rng.standard_normal((2, 5)) + 1j * rng.standard_normal((2, 5))
+    x = rng.standard_normal((2, 5)) + 1j * rng.standard_normal((2, 5))
+    gte = rng.standard_normal((alpha.size, beta.size)) + 1j * rng.standard_normal(
+        (alpha.size, beta.size)
+    )
+    gtm = rng.standard_normal((alpha.size, beta.size)) + 1j * rng.standard_normal(
+        (alpha.size, beta.size)
+    )
+
+    source = PlaneWave(
+        wavelength=550.0,
+        medium_n=n_medium,
+        polarization=(1.0 + 0.0j, 0.5j),
+        polar_angle=0.4,
+        azimuthal_angle=0.9,
+        focal_point=(0.0, 0.0, 0.0),
+        amplitude=1.0,
+    )
+    pte = _dummy_pwp(alpha, beta, gte)
+    ptm = _dummy_pwp(alpha, beta, gtm)
+
+    base = plane_wave_cross_section_components(
+        source,
+        b,
+        x,
+        pte,
+        ptm,
+        k0=k0,
+        n_medium=n_medium,
+    )
+    assert np.isclose(base["C_abs_local"], base["C_abs_raw_diff"])
+    assert np.isclose(base["Delta_closure"], 0.0)
+
+    override_val = float(base["C_abs_raw_diff"] + 0.123)
+    overridden = plane_wave_cross_section_components(
+        source,
+        b,
+        x,
+        pte,
+        ptm,
+        k0=k0,
+        n_medium=n_medium,
+        local_absorption=override_val,
+    )
+    np.testing.assert_allclose(overridden["C_abs_local"], override_val, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(
+        overridden["Delta_closure"],
+        overridden["C_abs_raw_diff"] - override_val,
+        rtol=0.0,
+        atol=0.0,
+    )
 
 
 def test_plane_wave_cross_sections_from_coefficients_match_single_sphere_mie():
@@ -504,6 +567,7 @@ def test_plane_wave_cross_sections_from_coefficients_match_single_sphere_mie():
         n_medium=n_medium,
         scattered_pwp_te=run.farfield.scattered_te,
         scattered_pwp_tm=run.farfield.scattered_tm,
+        local_absorption=float(run.cross_sections["C_abs_local"]),
     )
     mie = mie_cross_sections(
         lmax=cfg.lmax,
@@ -514,8 +578,8 @@ def test_plane_wave_cross_sections_from_coefficients_match_single_sphere_mie():
     )
 
     np.testing.assert_allclose(cs["C_ext"], mie["C_ext"], rtol=2e-11, atol=1e-11)
-    np.testing.assert_allclose(cs["C_sca"], mie["C_sca"], rtol=1e-3, atol=1e-3)
-    np.testing.assert_allclose(cs["C_abs"], mie["C_abs"], rtol=1e-3, atol=1e-3)
+    np.testing.assert_allclose(cs["C_sca"], mie["C_sca"], rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(cs["C_abs"], mie["C_abs"], rtol=1e-4, atol=1e-4)
 
     c_ext = extinction_cross_section(
         source,
@@ -534,10 +598,261 @@ def test_plane_wave_cross_sections_from_coefficients_match_single_sphere_mie():
         n_medium=n_medium,
     )
     np.testing.assert_allclose(c_ext, cs["C_ext"], rtol=1e-13, atol=1e-13)
-    np.testing.assert_allclose(c_abs, cs["C_abs"], rtol=1e-13, atol=1e-13)
+    np.testing.assert_allclose(c_abs, cs["C_abs_raw_diff"], rtol=1e-13, atol=1e-13)
     np.testing.assert_allclose(run.cross_sections["C_ext"], cs["C_ext"], rtol=1e-13, atol=1e-13)
     np.testing.assert_allclose(run.cross_sections["C_sca"], cs["C_sca"], rtol=1e-13, atol=1e-13)
     np.testing.assert_allclose(run.cross_sections["C_abs"], cs["C_abs"], rtol=1e-13, atol=1e-13)
+    assert "C_ext_raw" in run.cross_sections
+    assert "C_sca_raw" in run.cross_sections
+    assert "C_abs_raw_diff" in run.cross_sections
+    assert "C_abs_local" in run.cross_sections
+    assert "Delta_closure" in run.cross_sections
+    np.testing.assert_allclose(
+        run.cross_sections["C_ext_raw"],
+        run.cross_sections["C_ext"],
+        rtol=0.0,
+        atol=0.0,
+    )
+    np.testing.assert_allclose(
+        run.cross_sections["C_sca_raw"],
+        run.cross_sections["C_sca"],
+        rtol=0.0,
+        atol=0.0,
+    )
+    np.testing.assert_allclose(run.cross_sections["C_abs"], run.cross_sections["C_abs_local"])
+    np.testing.assert_allclose(
+        run.cross_sections["Delta_closure"],
+        run.cross_sections["C_abs_raw_diff"] - run.cross_sections["C_abs_local"],
+        rtol=1e-14,
+        atol=1e-14,
+    )
+    np.testing.assert_allclose(
+        run.cross_sections["C_abs_local"],
+        mie["C_abs"],
+        rtol=1e-10,
+        atol=1e-10,
+    )
+
+
+def test_plane_wave_local_absorption_lossless_single_sphere_is_nearly_zero():
+    wavelength = 550.0
+    n_medium = 1.0 + 0j
+    radius = 80.0
+    n_particle = 1.5 + 0.0j
+
+    source = PlaneWave(
+        wavelength=wavelength,
+        medium_n=n_medium,
+        polarization="TE",
+        polar_angle=0.7,
+        azimuthal_angle=1.1,
+        focal_point=(0.0, 0.0, 0.0),
+        amplitude=1.0,
+    )
+    cfg = SimulationConfig(
+        wavelength=wavelength,
+        n_medium=n_medium,
+        lmax=8,
+        source=source,
+        polar_angles=np.linspace(0.0, np.pi, 121),
+        azimuthal_angles=np.linspace(0.0, 2.0 * np.pi, 181, endpoint=False),
+        solver_method="direct",
+        verbose=False,
+        compute_dtype="complex128",
+        accum_dtype="complex128",
+    )
+    run = Simulation(
+        cfg,
+        particles=_single_sphere_particles(radius=radius, n_particle=n_particle),
+    ).run()
+    assert run.cross_sections is not None
+
+    np.testing.assert_allclose(run.cross_sections["C_abs_local"], 0.0, rtol=0.0, atol=1e-8)
+    np.testing.assert_allclose(
+        run.cross_sections["Delta_closure"],
+        run.cross_sections["C_abs_raw_diff"],
+        rtol=1e-11,
+        atol=1e-11,
+    )
+
+
+def test_plane_wave_lossless_cluster_skips_expensive_local_absorption_route(monkeypatch):
+    import pyceles.simulation.postprocess as simulation_postprocess_module
+
+    def _should_not_be_called(*args, **kwargs):
+        raise AssertionError("Lossless cluster should bypass local-absorption W·x route.")
+
+    monkeypatch.setattr(
+        simulation_postprocess_module,
+        "_plane_wave_local_absorption_generic_route",
+        _should_not_be_called,
+    )
+    source = PlaneWave(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        polarization="TE",
+        polar_angle=0.4,
+        azimuthal_angle=0.3,
+        focal_point=(0.0, 0.0, 0.0),
+        amplitude=1.0,
+    )
+    cfg = SimulationConfig(
+        wavelength=550.0,
+        n_medium=1.0 + 0j,
+        lmax=3,
+        source=source,
+        solver_method="direct",
+        verbose=False,
+        compute_dtype="complex128",
+        accum_dtype="complex128",
+    )
+    particles = spheres_from_arrays(
+        positions=np.array([[0.0, 0.0, 0.0], [260.0, 0.0, 0.0]], dtype=float),
+        radii=np.array([60.0, 55.0], dtype=float),
+        refractive_indices=np.array([1.50 + 0.0j, 1.45 + 0.0j], dtype=np.complex128),
+    )
+    run = Simulation(cfg, particles=particles).run()
+    assert run.cross_sections is not None
+    np.testing.assert_allclose(run.cross_sections["C_abs_local"], 0.0, rtol=0.0, atol=0.0)
+
+
+def test_plane_wave_local_absorption_varies_smoothly_with_weak_absorber():
+    wavelength = 550.0
+    n_medium = 1.0 + 0j
+    source = PlaneWave(
+        wavelength=wavelength,
+        medium_n=n_medium,
+        polarization="TE",
+        polar_angle=0.4,
+        azimuthal_angle=0.3,
+        focal_point=(0.0, 0.0, 0.0),
+        amplitude=1.0,
+    )
+    cfg = SimulationConfig(
+        wavelength=wavelength,
+        n_medium=n_medium,
+        lmax=3,
+        source=source,
+        solver_method="direct",
+        verbose=False,
+        compute_dtype="complex128",
+        accum_dtype="complex128",
+    )
+    positions = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [260.0, 0.0, 0.0],
+            [0.0, 260.0, 0.0],
+        ],
+        dtype=float,
+    )
+    radii = np.array([60.0, 55.0, 50.0], dtype=float)
+    imag_parts = [0.0, 1e-5, 2e-5, 5e-5]
+    c_abs_local: list[float] = []
+    delta_closure: list[float] = []
+
+    for imag_part in imag_parts:
+        particles = spheres_from_arrays(
+            positions=positions,
+            radii=radii,
+            refractive_indices=np.array(
+                [
+                    1.50 + 0.0j,
+                    1.45 + 1j * imag_part,
+                    1.55 + 0.0j,
+                ],
+                dtype=np.complex128,
+            ),
+        )
+        run = Simulation(cfg, particles=particles).run()
+        assert run.cross_sections is not None
+        c_abs_local.append(float(run.cross_sections["C_abs_local"]))
+        delta_closure.append(float(run.cross_sections["Delta_closure"]))
+
+    c_abs_local_arr = np.asarray(c_abs_local, dtype=float)
+    delta_closure_arr = np.asarray(delta_closure, dtype=float)
+    # Local absorption should move continuously and monotonically as one sphere
+    # is made weakly lossy from a lossless baseline.
+    assert np.all(np.diff(c_abs_local_arr) > 0.0)
+    np.testing.assert_allclose(c_abs_local_arr[0], 0.0, rtol=0.0, atol=1e-8)
+    # Closure defect is primarily driven by the independent raw estimators and
+    # should remain smooth while loss is perturbed.
+    np.testing.assert_allclose(
+        delta_closure_arr,
+        np.full_like(delta_closure_arr, delta_closure_arr[0]),
+        rtol=5e-4,
+        atol=5e-6,
+    )
+
+
+def test_plane_wave_local_absorption_lossless_layered_sphere_is_nearly_zero():
+    source = PlaneWave(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        polarization="TE",
+        polar_angle=0.4,
+        azimuthal_angle=0.3,
+        amplitude=1.0,
+    )
+    cfg = SimulationConfig(
+        wavelength=550.0,
+        n_medium=1.0 + 0j,
+        lmax=4,
+        source=source,
+        solver_method="direct",
+        verbose=False,
+        compute_dtype="complex128",
+        accum_dtype="complex128",
+    )
+    particle = LayeredSphere(
+        position=(0.0, 0.0, 0.0),
+        layer_radii=(55.0, 90.0),
+        layer_refractive_indices=(1.35 + 0.0j, 1.68 + 0.0j),
+    )
+    run = Simulation(cfg, particles=[particle]).run()
+    assert run.cross_sections is not None
+
+    np.testing.assert_allclose(run.cross_sections["C_abs_local"], 0.0, rtol=0.0, atol=1e-8)
+    np.testing.assert_allclose(
+        run.cross_sections["Delta_closure"],
+        run.cross_sections["C_abs_raw_diff"],
+        rtol=1e-11,
+        atol=1e-11,
+    )
+
+
+def test_plane_wave_local_absorption_lossless_spheroid_is_small():
+    source = PlaneWave(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        polarization="TE",
+        polar_angle=0.4,
+        azimuthal_angle=0.3,
+        amplitude=1.0,
+    )
+    # lmax>=6 materially stabilizes the lossless spheroid local-dissipation
+    # estimate for this reference geometry.
+    cfg = SimulationConfig(
+        wavelength=550.0,
+        n_medium=1.0 + 0j,
+        lmax=6,
+        source=source,
+        solver_method="direct",
+        verbose=False,
+        compute_dtype="complex128",
+        accum_dtype="complex128",
+    )
+    particle = Spheroid(
+        position=(0.0, 0.0, 0.0),
+        equatorial_radius=60.0,
+        polar_radius=95.0,
+        refractive_index=1.47 + 0.0j,
+        euler_angles=(0.1, 0.35, -0.2),
+    )
+    run = Simulation(cfg, particles=[particle]).run()
+    assert run.cross_sections is not None
+
+    np.testing.assert_allclose(run.cross_sections["C_abs_local"], 0.0, rtol=0.0, atol=1e-8)
 
 
 def test_plane_wave_cross_sections_require_scattered_pwps():
@@ -560,6 +875,63 @@ def test_plane_wave_cross_sections_require_scattered_pwps():
             k0=2.0 * np.pi / 550.0,
             n_medium=1.0 + 0j,
         )  # type: ignore[call-arg]
+
+
+def test_plane_wave_cross_sections_require_explicit_local_absorption():
+    source = PlaneWave(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        polarization="TE",
+        polar_angle=0.3,
+        azimuthal_angle=0.2,
+        focal_point=(0.0, 0.0, 0.0),
+        amplitude=1.0,
+    )
+    alpha = np.linspace(0.0, 2 * np.pi, 13, endpoint=False)
+    beta = np.linspace(0.0, np.pi, 11)
+    p = _dummy_pwp(alpha, beta, np.zeros((alpha.size, beta.size), dtype=np.complex128))
+    b = np.zeros((1, 8), dtype=np.complex128)
+    x = np.zeros((1, 8), dtype=np.complex128)
+
+    with pytest.raises(ValueError, match="requires `local_absorption`"):
+        plane_wave_cross_sections(
+            source,
+            b,
+            x,
+            k0=2.0 * np.pi / 550.0,
+            n_medium=1.0 + 0j,
+            scattered_pwp_te=p,
+            scattered_pwp_tm=p,
+        )
+
+    cs = plane_wave_cross_sections(
+        source,
+        b,
+        x,
+        k0=2.0 * np.pi / 550.0,
+        n_medium=1.0 + 0j,
+        scattered_pwp_te=p,
+        scattered_pwp_tm=p,
+        allow_raw_diff_fallback=True,
+    )
+    np.testing.assert_allclose(cs["C_abs"], cs["C_abs_raw_diff"], rtol=0.0, atol=0.0)
+
+    b_empty = np.zeros((0, 8), dtype=np.complex128)
+    x_empty = np.zeros((0, 8), dtype=np.complex128)
+    cs_empty = plane_wave_cross_sections(
+        source,
+        b_empty,
+        x_empty,
+        k0=2.0 * np.pi / 550.0,
+        n_medium=1.0 + 0j,
+        scattered_pwp_te=p,
+        scattered_pwp_tm=p,
+    )
+    np.testing.assert_allclose(cs_empty["C_ext"], 0.0, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(cs_empty["C_sca"], 0.0, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(cs_empty["C_abs"], 0.0, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(cs_empty["C_abs_local"], 0.0, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(cs_empty["Delta_closure"], 0.0, rtol=0.0, atol=0.0)
 
 
 def test_simulation_dual_basis_jones_mixing_consistency():

@@ -7,12 +7,15 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from pyceles._optional import import_cupy, is_cupy_array
 from pyceles.core.indexing import n_modes
+from pyceles.core.particles import LayeredSphere, Particle, Sphere, Spheroid
 from pyceles.core.sources import JonesPolarizedSource, PlaneWave, Source
 from pyceles.postprocessing.farfield import (
     FarFieldPatterns,
     compute_far_field_patterns,
     finite_beam_power_fractions,
+    local_absorption_cross_section_from_exciting,
     plane_wave_cross_sections,
     pwp_power_decomposition,
 )
@@ -29,6 +32,78 @@ from .results import (
 
 if TYPE_CHECKING:
     from .workflow import Simulation
+
+
+def _is_numerically_lossless_cluster(
+    particles: tuple[Particle, ...], *, imag_tol: float = 0.0
+) -> bool:
+    """Return True when all particle materials are numerically lossless."""
+    tol = float(imag_tol)
+    for particle in particles:
+        if isinstance(particle, (Sphere, Spheroid)):
+            if abs(complex(particle.refractive_index).imag) > tol:
+                return False
+            continue
+        if isinstance(particle, LayeredSphere):
+            if any(abs(complex(n).imag) > tol for n in particle.layer_refractive_indices):
+                return False
+            continue
+        # Unknown particle families default to "possibly lossy" so we do not
+        # skip local-absorption evaluation incorrectly.
+        return False
+    return True
+
+
+def _plane_wave_local_absorption_generic_route(
+    sim: "Simulation",
+    *,
+    source: Source,
+    initial_coeffs: np.ndarray,
+    coeffs: np.ndarray,
+    k0: float,
+    accum_dtype: np.dtype,
+) -> float | None:
+    """Compute local plane-wave absorption through the generic `e=b+W x` route.
+
+    For CuPy runs this keeps the extra post-solve `W x` apply and local reduction
+    on-device, returning only the final scalar to host.
+
+    Note: solver outputs are currently materialized as NumPy arrays in
+    `solve_sources_core()`, so the CuPy path still performs a host->device
+    upload for this postprocess route before `apply_W(...)`.
+    """
+    if not isinstance(source, PlaneWave):
+        return None
+    coeffs_size = int(getattr(coeffs, "size", np.asarray(coeffs).size))
+    if coeffs_size == 0:
+        return 0.0
+    prepared = sim._prepared_operator_cache
+    if prepared is None:
+        return None
+    use_cupy = bool(
+        str(sim.config.operator_backend).lower() == "cupy"
+        or is_cupy_array(coeffs)
+        or is_cupy_array(initial_coeffs)
+    )
+    if use_cupy:
+        cupy, _ = import_cupy()
+        x_flat = cupy.asarray(coeffs, dtype=accum_dtype).reshape(-1)
+        b_flat = cupy.asarray(initial_coeffs, dtype=accum_dtype).reshape(-1)
+        wx = prepared.apply_W(x_flat)
+        e_flat = b_flat + wx
+    else:
+        x_flat = np.asarray(coeffs, dtype=accum_dtype).reshape(-1)
+        wx = prepared.apply_W(x_flat)
+        e_flat = np.asarray(initial_coeffs, dtype=accum_dtype).reshape(-1) + np.asarray(
+            wx, dtype=accum_dtype
+        ).reshape(-1)
+    return local_absorption_cross_section_from_exciting(
+        source,
+        e_flat,
+        x_flat,
+        k0=float(k0),
+        n_medium=sim.config.n_medium,
+    )
 
 
 def _mix_pwp_dict(
@@ -159,6 +234,18 @@ def build_single_channel_result(
             show_progress=bool(cfg.verbose),
         )
         if isinstance(source, PlaneWave):
+            c_abs_local = (
+                0.0
+                if _is_numerically_lossless_cluster(sim.particles)
+                else _plane_wave_local_absorption_generic_route(
+                    sim,
+                    source=source,
+                    initial_coeffs=initial_coeffs,
+                    coeffs=coeffs,
+                    k0=float(k0),
+                    accum_dtype=accum_dtype,
+                )
+            )
             cross_sections = plane_wave_cross_sections(
                 source,
                 initial_coeffs,
@@ -167,6 +254,7 @@ def build_single_channel_result(
                 n_medium=cfg.n_medium,
                 scattered_pwp_te=ff.scattered_te,
                 scattered_pwp_tm=ff.scattered_tm,
+                local_absorption=c_abs_local,
             )
         elif (
             ff.initial_te is not None
@@ -279,16 +367,17 @@ def postprocess_sources_impl(
         if label not in solved.coeffs:
             raise KeyError(f"Missing solved coefficients for label '{label}'.")
 
-        x_col = np.asarray(solved.coeffs[label], dtype=accum_dtype)
-        if x_col.shape != (Ns, Nm):
+        x_col = solved.coeffs[label]
+        if tuple(np.shape(x_col)) != (Ns, Nm):
             raise ValueError(
                 f"Solved coefficients for label '{label}' must have shape {(Ns, Nm)}. "
-                f"Got {x_col.shape}."
+                f"Got {np.shape(x_col)}."
             )
-        rhs_col = np.asarray(solved.rhs[label], dtype=accum_dtype)
-        if rhs_col.shape != (Ns, Nm):
+        rhs_col = solved.rhs[label]
+        if tuple(np.shape(rhs_col)) != (Ns, Nm):
             raise ValueError(
-                f"Solved RHS for label '{label}' must have shape {(Ns, Nm)}. Got {rhs_col.shape}."
+                f"Solved RHS for label '{label}' must have shape {(Ns, Nm)}. "
+                f"Got {np.shape(rhs_col)}."
             )
         solver_col = (
             solved.solver_result
@@ -298,8 +387,8 @@ def postprocess_sources_impl(
         runs[label] = build_single_channel_result(
             sim,
             source=solved.sources[label],
-            initial_coeffs=np.asarray(solved.initial_coeffs[label], dtype=accum_dtype),
-            rhs_flat=rhs_col.reshape(Ns * Nm),
+            initial_coeffs=solved.initial_coeffs[label],
+            rhs_flat=np.asarray(rhs_col, dtype=accum_dtype).reshape(Ns * Nm),
             coeffs=x_col,
             solver_result=solver_col,
             k=float(solved.k),
@@ -347,16 +436,16 @@ def run_impl(sim: "Simulation", *, include_farfield: bool = True) -> SimulationR
     compute_dtype = np.dtype(run_te.compute_dtype)
     accum_dtype = np.dtype(run_te.accum_dtype)
 
-    b_te = np.asarray(basis_solved.initial_coeffs["te"])
-    b_tm = np.asarray(basis_solved.initial_coeffs["tm"])
-    rhs_te = np.asarray(basis_solved.rhs["te"])
-    rhs_tm = np.asarray(basis_solved.rhs["tm"])
-    x_te = np.asarray(basis_solved.coeffs["te"])
-    x_tm = np.asarray(basis_solved.coeffs["tm"])
+    b_te = basis_solved.initial_coeffs["te"]
+    b_tm = basis_solved.initial_coeffs["tm"]
+    rhs_te = basis_solved.rhs["te"]
+    rhs_tm = basis_solved.rhs["tm"]
+    x_te = basis_solved.coeffs["te"]
+    x_tm = basis_solved.coeffs["tm"]
 
-    b = np.asarray(a_te * b_te + a_tm * b_tm, dtype=accum_dtype)
-    rhs = np.asarray(a_te * rhs_te + a_tm * rhs_tm, dtype=accum_dtype)
-    x = np.asarray(a_te * x_te + a_tm * x_tm, dtype=accum_dtype)
+    b = a_te * b_te + a_tm * b_tm
+    rhs = a_te * rhs_te + a_tm * rhs_tm
+    x = a_te * x_te + a_tm * x_tm
 
     ff_basis = {"te": run_te.farfield, "tm": run_tm.farfield}
     ff = (
@@ -373,6 +462,18 @@ def run_impl(sim: "Simulation", *, include_farfield: bool = True) -> SimulationR
     decomposition_backward = None
     if include_farfield:
         if isinstance(source, PlaneWave):
+            c_abs_local = (
+                0.0
+                if _is_numerically_lossless_cluster(sim.particles)
+                else _plane_wave_local_absorption_generic_route(
+                    sim,
+                    source=source,
+                    initial_coeffs=b,
+                    coeffs=x,
+                    k0=float(run_te.k0),
+                    accum_dtype=accum_dtype,
+                )
+            )
             cross_sections = plane_wave_cross_sections(
                 source,
                 b,
@@ -381,6 +482,7 @@ def run_impl(sim: "Simulation", *, include_farfield: bool = True) -> SimulationR
                 n_medium=cfg.n_medium,
                 scattered_pwp_te=ff.scattered_te,
                 scattered_pwp_tm=ff.scattered_tm,
+                local_absorption=c_abs_local,
             )
         elif (
             ff.initial_te is not None

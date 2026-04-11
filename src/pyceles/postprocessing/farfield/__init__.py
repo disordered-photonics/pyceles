@@ -11,6 +11,8 @@ The package surface is organized by physical ownership:
 from .cross_sections import (
     absorption_cross_section,
     extinction_cross_section,
+    local_absorption_cross_section_from_exciting,
+    plane_wave_cross_section_components,
     plane_wave_cross_sections,
     scattering_cross_section,
     total_scattering_cross_section,
@@ -35,6 +37,8 @@ __all__ = [
     "extinction_cross_section",
     "finite_beam_power_fractions",
     "incident_power_from_pwp",
+    "local_absorption_cross_section_from_exciting",
+    "plane_wave_cross_section_components",
     "plane_wave_cross_sections",
     "pwp_power_decomposition",
     "pwp_power_flux",
