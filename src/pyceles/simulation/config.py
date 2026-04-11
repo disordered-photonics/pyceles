@@ -122,7 +122,9 @@ class SimulationConfig:
     farfield_azimuthal_angles: np.ndarray | None = None
     radial_lut_dr: float = 0.0
     force_general_initial_field: bool = False
-    solver_method: Literal["auto", "gmres", "bicgstab", "lgmres", "gcrotmk", "direct"] = "direct"
+    solver_method: Literal["auto", "gmres", "fgmres", "bicgstab", "lgmres", "gcrotmk", "direct"] = (
+        "direct"
+    )
     solver_direct_max_n: int = 15_000
     solver_rtol: float = 1e-5
     solver_compute_final_residual: bool = True
@@ -227,7 +229,7 @@ class SimulationConfig:
         )
 
         method = str(self.solver_method).lower()
-        allowed = {"auto", "gmres", "bicgstab", "lgmres", "gcrotmk", "direct"}
+        allowed = {"auto", "gmres", "fgmres", "bicgstab", "lgmres", "gcrotmk", "direct"}
         if method not in allowed:
             raise ValueError(
                 f"`solver_method` must be one of {sorted(allowed)}. Got {self.solver_method!r}."

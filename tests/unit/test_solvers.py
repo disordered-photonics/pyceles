@@ -1068,7 +1068,7 @@ def test_solve_linear_system_lgmres_cupy_smoke(monkeypatch):
 
 
 @pytest.mark.parametrize("method", ["gmres", "fgmres", "lgmres"])
-def test_solve_linear_system_cupy_restart_solvers_only_verify_true_residual_on_exit(
+def test_solve_linear_system_cupy_restart_solvers_verify_true_residual_each_restart(
     monkeypatch, method: Literal["gmres", "fgmres", "lgmres"]
 ):
     monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
@@ -1109,7 +1109,7 @@ def test_solve_linear_system_cupy_restart_solvers_only_verify_true_residual_on_e
             show_progress=False,
             compute_final_residual=True,
         )
-    assert calls == 3
+    assert calls == 4
     assert int(out.iterations) == 2
     assert np.isfinite(float(out.residual_norm))
     assert np.isfinite(float(out.relative_residual))

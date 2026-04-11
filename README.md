@@ -334,8 +334,10 @@ that path automatically on labeled multi-channel runs.
 
 For single-RHS iterative solves on the CuPy backend, pyceles also ships native
 `fgmres[cupy]`, `lgmres[cupy]`, and `bicgstab[cupy]` paths. These keep the
-main Krylov state on device and use final/terminal true-residual verification
-rather than the older restart-boundary-only behavior.
+main Krylov state on device. For restarted GMRES-family methods, pyceles now
+uses restart-boundary true-residual checks by default (`compute_final_residual=True`)
+for robust stopping decisions; setting `compute_final_residual=False` disables
+those checks for profiling-focused runs.
 
 Current MLFMM scope/limits:
 - matrix-free MLFMM stages are available on both NumPy and CuPy operator
@@ -387,8 +389,8 @@ Practical CuPy notes for dense systems:
     convergence and overshoot iterations; very small restart can degrade
     convergence quality
   - native GMRES keeps the Krylov work on device while exposing per-inner-step
-    progress (`pr_rel_res`) while deferring verified true-residual checks to
-    explicit terminal/final decision points
+    progress (`pr_rel_res`) and verifying true residuals at restart boundaries
+    for robust stop decisions
 - pyceles does not expose a public runtime toggle to swap back to built-in
   CuPy GMRES in the simulation API
 - CuPy block-GMRES now runs with native 2D operator/preconditioner applies on
@@ -409,6 +411,14 @@ Practical CuPy notes for dense systems:
 - On dense/non-normal systems, left-preconditioned restarted GMRES can be very
   restart-sensitive. Small restart values may stagnate even with a reasonable
   block preconditioner; larger restart values can recover convergence.
+
+In internal solver sweeps on representative pairwise CuPy cases, restarted
+GMRES-family methods remained restart-sensitive at small restart budgets,
+while native `bicgstab[cupy]` was consistently a strong all-rounder with a
+much smaller solver-state footprint than restarted GMRES-family methods.
+For memory-aware large-scale CuPy runs, `bicgstab` is therefore a sensible
+first solver choice unless a specific geometry shows better behavior with a
+restarted method.
 - Treat the CuPy grid-block preconditioner as a tuning knob, not an always-on
   accelerator. Validate both residual trend and wall time for your geometry.
 
@@ -823,10 +833,15 @@ Notes:
   low-level solver's `direct_max_n/max_n` guard.
 - Repeated direct solves on the same `Simulation` instance (for changed RHS/source)
   reuse both dense `A` and its LU factorization.
-- `SimulationConfig.solver_compute_final_residual` controls whether pyceles
-  computes final true residual diagnostics `||Ax-b||/||b||` after each solve.
-  Keep it `True` by default; set it `False` for high-throughput repeated direct
-  solves (for example LDOS maps) when you want maximum speed.
+- `SimulationConfig.solver_compute_final_residual` controls true-residual
+  verification/diagnostics policy:
+  - for native CuPy restarted GMRES/FGMRES/LGMRES, `True` enables restart-boundary
+    true-residual checks (robust default), while `False` disables them;
+  - for other solver paths, it controls whether final `||Ax-b||/||b||`
+    diagnostics are computed after the solve.
+  Keep it `True` by default; set it `False` for profiling or high-throughput
+  repeated solves when you want maximum speed and can accept less residual
+  verification.
 - `Simulation.solve_sources(..., solver_compute_final_residual=...)` can override
   the above per call.
 - If `solver_preconditioner` (custom callable) is set, keep

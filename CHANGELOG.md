@@ -94,9 +94,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Native CuPy GMRES / FGMRES / LGMRES now honor the shared
-  `compute_final_residual` policy consistently, deferring verified
-  true-residual work to terminal/final checks instead of forcing extra restart-
-  boundary verification.
+  `compute_final_residual` policy consistently with robust defaults:
+  `compute_final_residual=True` performs true-residual checks at restart
+  boundaries, while `False` disables true-residual verification for
+  profiling-focused runs.
 - Native CuPy block-GMRES now enforces per-RHS true-residual tolerance checks
   with strict per-column acceptance and now performs an in-cycle true-residual
   gate when the block proxy first reaches target, avoiding restart-boundary
