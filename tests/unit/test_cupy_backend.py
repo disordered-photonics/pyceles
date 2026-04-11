@@ -27,7 +27,11 @@ from pyceles.core.operators.mlfmm_cupy import _upload_offset_batches
 from pyceles.core.particles import Particle, spheres_from_arrays
 from pyceles.core.translation import RadialLUT
 from pyceles.io import far_field_intensity
-from pyceles.postprocessing.farfield import local_absorption_cross_section_from_exciting
+from pyceles.postprocessing.farfield import (
+    local_absorbed_power_components_from_exciting,
+    local_absorbed_power_from_exciting,
+    local_absorption_cross_section_from_exciting,
+)
 
 
 def _cupy_available() -> bool:
@@ -194,6 +198,74 @@ def test_local_absorption_cross_section_from_exciting_accepts_cupy_arrays() -> N
         n_medium=1.0 + 0j,
     )
     np.testing.assert_allclose(got, ref, rtol=1e-13, atol=1e-13)
+
+
+def test_local_absorbed_power_from_exciting_accepts_cupy_arrays() -> None:
+    cupy, _ = import_cupy()
+    rng = np.random.default_rng(20260412)
+    e_np = np.asarray(
+        rng.standard_normal(48) + 1j * rng.standard_normal(48),
+        dtype=np.complex128,
+    )
+    x_np = np.asarray(
+        rng.standard_normal(48) + 1j * rng.standard_normal(48),
+        dtype=np.complex128,
+    )
+    ref = local_absorbed_power_from_exciting(
+        e_np,
+        x_np,
+        k0=2.0 * np.pi / 550.0,
+        n_medium=1.0 + 0j,
+    )
+    got = local_absorbed_power_from_exciting(
+        cupy.asarray(e_np),
+        cupy.asarray(x_np),
+        k0=2.0 * np.pi / 550.0,
+        n_medium=1.0 + 0j,
+    )
+    np.testing.assert_allclose(got, ref, rtol=1e-13, atol=1e-13)
+
+
+def test_local_absorbed_power_components_from_exciting_accepts_cupy_arrays() -> None:
+    cupy, _ = import_cupy()
+    rng = np.random.default_rng(20260413)
+    n_particles = 4
+    nmodes = 6
+    e_np = np.asarray(
+        rng.standard_normal((n_particles, nmodes))
+        + 1j * rng.standard_normal((n_particles, nmodes)),
+        dtype=np.complex128,
+    )
+    x_np = np.asarray(
+        rng.standard_normal((n_particles, nmodes))
+        + 1j * rng.standard_normal((n_particles, nmodes)),
+        dtype=np.complex128,
+    )
+    ref = local_absorbed_power_components_from_exciting(
+        e_np,
+        x_np,
+        k0=2.0 * np.pi / 550.0,
+        n_medium=1.0 + 0j,
+        n_particles=n_particles,
+        nmodes_per_particle=nmodes,
+    )
+    got = local_absorbed_power_components_from_exciting(
+        cupy.asarray(e_np),
+        cupy.asarray(x_np),
+        k0=2.0 * np.pi / 550.0,
+        n_medium=1.0 + 0j,
+        n_particles=n_particles,
+        nmodes_per_particle=nmodes,
+    )
+    np.testing.assert_allclose(
+        float(got["P_abs_local"]), float(ref["P_abs_local"]), rtol=1e-13, atol=1e-13
+    )
+    np.testing.assert_allclose(
+        np.asarray(got["P_abs_local_particles"], dtype=float),
+        np.asarray(ref["P_abs_local_particles"], dtype=float),
+        rtol=1e-13,
+        atol=1e-13,
+    )
 
 
 def _policy_numpy_mlfmm_coupling() -> MLFMMCouplingOperator:

@@ -98,6 +98,16 @@ Users of pyceles are referred to the publications listed in the CELES and SMUTHI
     excluded from beam-power fractions by source capability policy
   - finite-beam power fractions are normalized by integrating the initial TE/TM
     plane-wave spectrum (works for normal and tilted Gaussian beams)
+  - finite-power diagnostics now expose both raw missing-energy and local
+    dissipation terms:
+    - `P_abs_raw_diff = P_initial - P_transmitted - P_reflected`
+    - `P_abs_local` from the generic local exciting-field route (`e = b + W x`)
+    - per-particle local diagnostics:
+      - `P_abs_local_particles`
+      - `A_local_particles`
+    - `A_raw_diff = P_abs_raw_diff / P_initial`
+    - `A_local = P_abs_local / P_initial`
+    - `Delta_power_closure = P_abs_raw_diff - P_abs_local`
 - Geometry sanity check:
   - by default, `Simulation` enforces disjoint particle circumscribing spheres
     (required by T-matrix superposition), can be disabled via `check_circumscribing_sphere_overlap=False`

@@ -113,6 +113,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Low-level `plane_wave_cross_sections(...)` semantics are now strict:
   callers must provide `local_absorption` explicitly, while legacy
   raw-difference behavior requires explicit `allow_raw_diff_fallback=True`.
+- Finite-power diagnostics now expose explicit local/closure terms alongside
+  existing `T/R` outputs:
+  `P_abs_raw_diff`, `A_raw_diff`, `P_abs_local`, `A_local`, and
+  `Delta_power_closure`, plus per-particle local vectors
+  (`P_abs_local_particles`, `A_local_particles`).
+- Finite-power local absorbed-power normalization now uses the same
+  medium-dependent incident-intensity convention as the cross-section path,
+  restoring expected `P_abs_raw_diff -> P_abs_local` quadrature convergence
+  (including `n_medium != 1` cases).
 - CuPy MLFMM repeated apply now memoizes grouped leaf receive adjoints per
   runtime object, removing repeated grouped `swapaxes(...).conj()` work in the
   hot loop.

@@ -26,6 +26,8 @@ from .patterns import (
 from .power import (
     finite_beam_power_fractions,
     incident_power_from_pwp,
+    local_absorbed_power_components_from_exciting,
+    local_absorbed_power_from_exciting,
     pwp_power_decomposition,
     pwp_power_flux,
 )
@@ -37,6 +39,8 @@ __all__ = [
     "extinction_cross_section",
     "finite_beam_power_fractions",
     "incident_power_from_pwp",
+    "local_absorbed_power_components_from_exciting",
+    "local_absorbed_power_from_exciting",
     "local_absorption_cross_section_from_exciting",
     "plane_wave_cross_section_components",
     "plane_wave_cross_sections",

@@ -3,7 +3,7 @@ from __future__ import annotations
 """Postprocessing-phase helpers for solved simulation channels."""
 
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
 
@@ -15,6 +15,7 @@ from pyceles.postprocessing.farfield import (
     FarFieldPatterns,
     compute_far_field_patterns,
     finite_beam_power_fractions,
+    local_absorbed_power_components_from_exciting,
     local_absorption_cross_section_from_exciting,
     plane_wave_cross_sections,
     pwp_power_decomposition,
@@ -54,6 +55,41 @@ def _is_numerically_lossless_cluster(
     return True
 
 
+def _build_exciting_scattered_flat_generic_route(
+    sim: "Simulation",
+    *,
+    initial_coeffs: np.ndarray,
+    coeffs: np.ndarray,
+    accum_dtype: np.dtype,
+):
+    """Build flattened `(e, x)` payload for generic post-solve local-dissipation routes."""
+    coeffs_size = int(getattr(coeffs, "size", np.asarray(coeffs).size))
+    if coeffs_size == 0:
+        return np.zeros((0,), dtype=np.dtype(accum_dtype)), np.zeros(
+            (0,), dtype=np.dtype(accum_dtype)
+        )
+    prepared = sim._prepared_operator_cache
+    if prepared is None:
+        return None
+    use_cupy = bool(
+        str(sim.config.operator_backend).lower() == "cupy"
+        or is_cupy_array(coeffs)
+        or is_cupy_array(initial_coeffs)
+    )
+    if use_cupy:
+        cupy, _ = import_cupy()
+        x_flat = cupy.asarray(coeffs, dtype=accum_dtype).reshape(-1)
+        b_flat = cupy.asarray(initial_coeffs, dtype=accum_dtype).reshape(-1)
+        wx = prepared.apply_W(x_flat)
+        return b_flat + wx, x_flat
+    x_flat = np.asarray(coeffs, dtype=accum_dtype).reshape(-1)
+    wx = prepared.apply_W(x_flat)
+    e_flat = np.asarray(initial_coeffs, dtype=accum_dtype).reshape(-1) + np.asarray(
+        wx, dtype=accum_dtype
+    ).reshape(-1)
+    return e_flat, x_flat
+
+
 def _plane_wave_local_absorption_generic_route(
     sim: "Simulation",
     *,
@@ -74,29 +110,15 @@ def _plane_wave_local_absorption_generic_route(
     """
     if not isinstance(source, PlaneWave):
         return None
-    coeffs_size = int(getattr(coeffs, "size", np.asarray(coeffs).size))
-    if coeffs_size == 0:
-        return 0.0
-    prepared = sim._prepared_operator_cache
-    if prepared is None:
-        return None
-    use_cupy = bool(
-        str(sim.config.operator_backend).lower() == "cupy"
-        or is_cupy_array(coeffs)
-        or is_cupy_array(initial_coeffs)
+    payload = _build_exciting_scattered_flat_generic_route(
+        sim,
+        initial_coeffs=initial_coeffs,
+        coeffs=coeffs,
+        accum_dtype=accum_dtype,
     )
-    if use_cupy:
-        cupy, _ = import_cupy()
-        x_flat = cupy.asarray(coeffs, dtype=accum_dtype).reshape(-1)
-        b_flat = cupy.asarray(initial_coeffs, dtype=accum_dtype).reshape(-1)
-        wx = prepared.apply_W(x_flat)
-        e_flat = b_flat + wx
-    else:
-        x_flat = np.asarray(coeffs, dtype=accum_dtype).reshape(-1)
-        wx = prepared.apply_W(x_flat)
-        e_flat = np.asarray(initial_coeffs, dtype=accum_dtype).reshape(-1) + np.asarray(
-            wx, dtype=accum_dtype
-        ).reshape(-1)
+    if payload is None:
+        return None
+    e_flat, x_flat = payload
     return local_absorption_cross_section_from_exciting(
         source,
         e_flat,
@@ -104,6 +126,40 @@ def _plane_wave_local_absorption_generic_route(
         k0=float(k0),
         n_medium=sim.config.n_medium,
     )
+
+
+def _finite_power_local_absorbed_power_generic_route(
+    sim: "Simulation",
+    *,
+    initial_coeffs: np.ndarray,
+    coeffs: np.ndarray,
+    k0: float,
+    accum_dtype: np.dtype,
+) -> dict[str, float | np.ndarray] | None:
+    """Compute local absorbed power diagnostics via the generic `e=b+W x` route."""
+    payload = _build_exciting_scattered_flat_generic_route(
+        sim,
+        initial_coeffs=initial_coeffs,
+        coeffs=coeffs,
+        accum_dtype=accum_dtype,
+    )
+    if payload is None:
+        return None
+    e_flat, x_flat = payload
+    return local_absorbed_power_components_from_exciting(
+        e_flat,
+        x_flat,
+        k0=float(k0),
+        n_medium=sim.config.n_medium,
+        n_particles=int(sim.positions.shape[0]),
+        nmodes_per_particle=int(n_modes(sim.config.lmax)),
+    )
+
+
+def _as_float_scalar(value: float | np.ndarray) -> float:
+    """Convert a scalar-like numeric payload to Python float."""
+    arr = np.asarray(value, dtype=np.float64).reshape(())
+    return float(arr)
 
 
 def _mix_pwp_dict(
@@ -216,7 +272,7 @@ def build_single_channel_result(
     Ns = positions.shape[0]
     Nm = n_modes(cfg.lmax)
 
-    power = None
+    power: dict[str, float | np.ndarray] | None = None
     cross_sections = None
     decomposition_forward = None
     decomposition_backward = None
@@ -261,7 +317,21 @@ def build_single_channel_result(
             and ff.initial_tm is not None
             and source.has_finite_incident_power()
         ):
-            power = finite_beam_power_fractions(
+            p_abs_diag: dict[str, float | np.ndarray] | None
+            if _is_numerically_lossless_cluster(sim.particles):
+                p_abs_diag = {
+                    "P_abs_local": 0.0,
+                    "P_abs_local_particles": np.zeros((Ns,), dtype=np.float64),
+                }
+            else:
+                p_abs_diag = _finite_power_local_absorbed_power_generic_route(
+                    sim,
+                    initial_coeffs=initial_coeffs,
+                    coeffs=coeffs,
+                    k0=float(k0),
+                    accum_dtype=accum_dtype,
+                )
+            power_base = finite_beam_power_fractions(
                 source,
                 ff.initial_te,
                 ff.initial_tm,
@@ -269,7 +339,18 @@ def build_single_channel_result(
                 ff.scattered_tm,
                 k0=k0,
                 k_medium=k,
+                local_absorbed_power=(
+                    None if p_abs_diag is None else _as_float_scalar(p_abs_diag["P_abs_local"])
+                ),
             )
+            power = cast(dict[str, float | np.ndarray], dict(power_base))
+            if power is not None and p_abs_diag is not None:
+                p_abs_local_particles = np.asarray(
+                    p_abs_diag.get("P_abs_local_particles", np.zeros((Ns,), dtype=np.float64)),
+                    dtype=np.float64,
+                ).reshape(Ns)
+                power["P_abs_local_particles"] = p_abs_local_particles
+                power["A_local_particles"] = p_abs_local_particles / float(power["P_initial"])
             decomposition_forward = pwp_power_decomposition(
                 direction="forward",
                 initial_pwp_te=ff.initial_te,
@@ -456,7 +537,7 @@ def run_impl(sim: "Simulation", *, include_farfield: bool = True) -> SimulationR
         else empty_farfield_patterns(compute_dtype)
     )
 
-    power = None
+    power: dict[str, float | np.ndarray] | None = None
     cross_sections = None
     decomposition_forward = None
     decomposition_backward = None
@@ -489,7 +570,22 @@ def run_impl(sim: "Simulation", *, include_farfield: bool = True) -> SimulationR
             and ff.initial_tm is not None
             and source.has_finite_incident_power()
         ):
-            power = finite_beam_power_fractions(
+            ns = int(sim.positions.shape[0])
+            p_abs_diag: dict[str, float | np.ndarray] | None
+            if _is_numerically_lossless_cluster(sim.particles):
+                p_abs_diag = {
+                    "P_abs_local": 0.0,
+                    "P_abs_local_particles": np.zeros((ns,), dtype=np.float64),
+                }
+            else:
+                p_abs_diag = _finite_power_local_absorbed_power_generic_route(
+                    sim,
+                    initial_coeffs=b,
+                    coeffs=x,
+                    k0=float(run_te.k0),
+                    accum_dtype=accum_dtype,
+                )
+            power_base = finite_beam_power_fractions(
                 source,
                 ff.initial_te,
                 ff.initial_tm,
@@ -497,7 +593,18 @@ def run_impl(sim: "Simulation", *, include_farfield: bool = True) -> SimulationR
                 ff.scattered_tm,
                 k0=run_te.k0,
                 k_medium=run_te.k,
+                local_absorbed_power=(
+                    None if p_abs_diag is None else _as_float_scalar(p_abs_diag["P_abs_local"])
+                ),
             )
+            power = cast(dict[str, float | np.ndarray], dict(power_base))
+            if power is not None and p_abs_diag is not None:
+                p_abs_local_particles = np.asarray(
+                    p_abs_diag.get("P_abs_local_particles", np.zeros((ns,), dtype=np.float64)),
+                    dtype=np.float64,
+                ).reshape(ns)
+                power["P_abs_local_particles"] = p_abs_local_particles
+                power["A_local_particles"] = p_abs_local_particles / float(power["P_initial"])
             decomposition_forward = pwp_power_decomposition(
                 direction="forward",
                 initial_pwp_te=ff.initial_te,

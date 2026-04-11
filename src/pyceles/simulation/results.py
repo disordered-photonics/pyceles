@@ -38,8 +38,8 @@ class SimulationResult:
     solver_result_basis: LinearSolveResult | None
     farfield: FarFieldPatterns
     farfield_basis: dict[str, FarFieldPatterns] | None
-    power: dict[str, float] | None
-    power_basis: dict[str, dict[str, float]] | None
+    power: dict[str, float | np.ndarray] | None
+    power_basis: dict[str, dict[str, float | np.ndarray]] | None
     cross_sections: dict[str, float] | None
     cross_sections_basis: dict[str, dict[str, float]] | None
     unpolarized: dict[str, dict[str, float]] | None

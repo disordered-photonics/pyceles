@@ -2,6 +2,7 @@ from typing import Any
 
 import numpy as np
 import pytest
+from _flux_oracle import circumsphere_absorbed_power_quadrature
 
 from pyceles.core.fields import BesselBeam, GaussianBeam, PlaneWave, SLMSource
 from pyceles.core.particles import LayeredSphere, Spheroid, spheres_from_arrays
@@ -11,6 +12,8 @@ from pyceles.postprocessing.farfield import (
     extinction_cross_section,
     finite_beam_power_fractions,
     incident_power_from_pwp,
+    local_absorbed_power_components_from_exciting,
+    local_absorbed_power_from_exciting,
     plane_wave_cross_section_components,
     plane_wave_cross_sections,
     pwp_power_decomposition,
@@ -208,6 +211,122 @@ def test_finite_beam_power_fractions_finite_beam_returns_finite_fraction():
     assert np.isfinite(out["P_initial"])
     assert np.isfinite(out["T"])
     assert np.isfinite(out["R"])
+    assert np.isfinite(out["P_abs_raw_diff"])
+    assert np.isfinite(out["A_raw_diff"])
+
+
+def test_local_absorbed_power_from_exciting_matches_manual_prefactor():
+    rng = np.random.default_rng(20260412)
+    e = rng.standard_normal(64) + 1j * rng.standard_normal(64)
+    x = rng.standard_normal(64) + 1j * rng.standard_normal(64)
+    k0 = 2.0 * np.pi / 550.0
+    n_medium = 1.33 + 0j
+    n_real = float(np.real(n_medium))
+    k_medium = k0 * n_real
+    pref = (np.pi * n_real) / (2.0 * (k_medium**2))
+    term_ex = float(np.real(np.vdot(e, x)))
+    term_xx = float(np.real(np.vdot(x, x)))
+    ref = float(pref * (-term_ex - term_xx))
+    got = local_absorbed_power_from_exciting(
+        e,
+        x,
+        k0=k0,
+        n_medium=n_medium,
+    )
+    np.testing.assert_allclose(got, ref, rtol=1e-13, atol=1e-13)
+
+
+def test_local_absorbed_power_from_exciting_scales_inverse_with_n_medium():
+    # Hold (e, x) fixed: the finite-power prefactor scales as 1 / n_medium.
+    e = np.asarray([1.0 + 2.0j, -0.5 + 0.75j, 0.25 - 1.5j], dtype=np.complex128)
+    x = np.asarray([-0.3 + 0.2j, 0.8 - 1.1j, -0.4 + 0.6j], dtype=np.complex128)
+    k0 = 2.0 * np.pi / 550.0
+    p_n1 = local_absorbed_power_from_exciting(
+        e,
+        x,
+        k0=k0,
+        n_medium=1.0 + 0j,
+    )
+    p_n12 = local_absorbed_power_from_exciting(
+        e,
+        x,
+        k0=k0,
+        n_medium=1.2 + 0j,
+    )
+    np.testing.assert_allclose(p_n12 / p_n1, 1.0 / 1.2, rtol=1e-13, atol=1e-13)
+
+
+def test_local_absorbed_power_components_include_per_particle_contributions():
+    rng = np.random.default_rng(20260413)
+    n_particles = 3
+    nmodes = 7
+    e = rng.standard_normal((n_particles, nmodes)) + 1j * rng.standard_normal((n_particles, nmodes))
+    x = rng.standard_normal((n_particles, nmodes)) + 1j * rng.standard_normal((n_particles, nmodes))
+    out = local_absorbed_power_components_from_exciting(
+        e,
+        x,
+        k0=2.0 * np.pi / 550.0,
+        n_medium=1.0 + 0j,
+        n_particles=n_particles,
+        nmodes_per_particle=nmodes,
+    )
+    assert "P_abs_local" in out
+    assert "P_abs_local_particles" in out
+    pvec = np.asarray(out["P_abs_local_particles"], dtype=float)
+    assert pvec.shape == (n_particles,)
+    np.testing.assert_allclose(np.sum(pvec), float(out["P_abs_local"]), rtol=1e-13, atol=1e-13)
+
+
+def test_finite_beam_power_fractions_expose_local_and_closure_terms():
+    alpha = np.linspace(0.0, 2 * np.pi, 13, endpoint=False)
+    beta = np.linspace(0.0, np.pi, 17)
+    initial_coeff = np.ones((alpha.size, beta.size), dtype=np.complex128)
+    scattered_coeff = 0.03 * np.ones_like(initial_coeff)
+    p_i_te = _dummy_pwp(alpha, beta, initial_coeff)
+    p_i_tm = _dummy_pwp(alpha, beta, np.zeros_like(initial_coeff))
+    p_s_te = _dummy_pwp(alpha, beta, scattered_coeff)
+    p_s_tm = _dummy_pwp(alpha, beta, np.zeros_like(initial_coeff))
+    source = GaussianBeam(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        polarization="TE",
+        polar_angle=0.0,
+        azimuthal_angle=0.0,
+        beam_width=1000.0,
+        focal_point=(0.0, 0.0, 0.0),
+        amplitude=1.0,
+    )
+    out = finite_beam_power_fractions(
+        source,
+        p_i_te,
+        p_i_tm,
+        p_s_te,
+        p_s_tm,
+        k0=2.0 * np.pi / 550.0,
+        k_medium=2.0 * np.pi / 550.0,
+        local_absorbed_power=0.123,
+    )
+    for key in ("P_abs_raw_diff", "A_raw_diff", "P_abs_local", "A_local", "Delta_power_closure"):
+        assert key in out
+    np.testing.assert_allclose(
+        out["P_abs_raw_diff"],
+        out["P_initial"] - out["P_transmitted"] - out["P_reflected"],
+        rtol=1e-13,
+        atol=1e-13,
+    )
+    np.testing.assert_allclose(out["A_raw_diff"], 1.0 - out["T"] - out["R"], rtol=1e-13, atol=1e-13)
+    np.testing.assert_allclose(
+        out["Delta_power_closure"],
+        out["P_abs_raw_diff"] - out["P_abs_local"],
+        rtol=1e-13,
+        atol=1e-13,
+    )
+    np.testing.assert_allclose(
+        out["A_local"],
+        out["P_abs_local"] / out["P_initial"],
+        rtol=1e-13,
+        atol=1e-13,
+    )
 
 
 def test_finite_beam_power_fractions_uses_initial_pwp_for_tilted_sources():
@@ -279,6 +398,102 @@ def test_finite_beam_power_fractions_rejects_plane_wave_limit_gaussian():
             k0=2.0 * np.pi / 550.0,
             k_medium=2.0 * np.pi / 550.0,
         )
+
+
+def test_finite_beam_simulation_reports_local_absorption_and_closure():
+    source = GaussianBeam(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        polarization="TE",
+        polar_angle=0.1,
+        azimuthal_angle=0.2,
+        beam_width=1200.0,
+        focal_point=(0.0, 0.0, 0.0),
+        amplitude=1.0,
+    )
+    cfg = SimulationConfig(
+        wavelength=550.0,
+        n_medium=1.0 + 0j,
+        lmax=3,
+        source=source,
+        solver_method="direct",
+        verbose=False,
+        compute_dtype="complex128",
+        accum_dtype="complex128",
+    )
+    run = Simulation(
+        cfg,
+        particles=_single_sphere_particles(radius=60.0, n_particle=1.5 + 0.02j),
+    ).run()
+    assert run.power is not None
+    for key in (
+        "P_abs_raw_diff",
+        "A_raw_diff",
+        "P_abs_local",
+        "A_local",
+        "Delta_power_closure",
+        "P_abs_local_particles",
+        "A_local_particles",
+    ):
+        assert key in run.power
+    np.testing.assert_allclose(
+        run.power["P_abs_raw_diff"],
+        run.power["P_initial"] - run.power["P_transmitted"] - run.power["P_reflected"],
+        rtol=1e-13,
+        atol=1e-13,
+    )
+    np.testing.assert_allclose(
+        run.power["Delta_power_closure"],
+        run.power["P_abs_raw_diff"] - run.power["P_abs_local"],
+        rtol=1e-13,
+        atol=1e-13,
+    )
+    pvec = np.asarray(run.power["P_abs_local_particles"], dtype=float)
+    avec = np.asarray(run.power["A_local_particles"], dtype=float)
+    assert pvec.shape == (1,)
+    assert avec.shape == (1,)
+    np.testing.assert_allclose(np.sum(pvec), run.power["P_abs_local"], rtol=1e-13, atol=1e-13)
+    np.testing.assert_allclose(np.sum(avec), run.power["A_local"], rtol=1e-13, atol=1e-13)
+    assert float(run.power["P_abs_local"]) > 0.0
+
+
+def test_finite_beam_lossless_cluster_shortcuts_local_absorption_to_zero():
+    source = GaussianBeam(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        polarization="TE",
+        polar_angle=0.1,
+        azimuthal_angle=0.2,
+        beam_width=1200.0,
+        focal_point=(0.0, 0.0, 0.0),
+        amplitude=1.0,
+    )
+    cfg = SimulationConfig(
+        wavelength=550.0,
+        n_medium=1.0 + 0j,
+        lmax=3,
+        source=source,
+        solver_method="direct",
+        verbose=False,
+        compute_dtype="complex128",
+        accum_dtype="complex128",
+    )
+    run = Simulation(
+        cfg,
+        particles=_single_sphere_particles(radius=60.0, n_particle=1.5 + 0.0j),
+    ).run()
+    assert run.power is not None
+    np.testing.assert_allclose(run.power["P_abs_local"], 0.0, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(
+        run.power["P_abs_local_particles"], np.zeros((1,)), rtol=0.0, atol=0.0
+    )
+    np.testing.assert_allclose(run.power["A_local_particles"], np.zeros((1,)), rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(
+        run.power["Delta_power_closure"],
+        run.power["P_abs_raw_diff"],
+        rtol=1e-13,
+        atol=1e-13,
+    )
 
 
 def test_pwp_power_flux_periodic_alpha_endpoint_handling():
@@ -673,6 +888,84 @@ def test_plane_wave_local_absorption_lossless_single_sphere_is_nearly_zero():
         run.cross_sections["C_abs_raw_diff"],
         rtol=1e-11,
         atol=1e-11,
+    )
+
+
+@pytest.mark.parametrize("n_medium", [1.0 + 0j, 1.2 + 0j])
+def test_plane_wave_circumsphere_flux_matches_local_absorption_single_sphere(
+    n_medium: complex,
+):
+    wavelength = 550.0
+    radius = 80.0
+    n_particle = 1.5 + 0.02j
+
+    source = PlaneWave(
+        wavelength=wavelength,
+        medium_n=n_medium,
+        polarization="TE",
+        polar_angle=0.7,
+        azimuthal_angle=1.1,
+        focal_point=(0.0, 0.0, 0.0),
+        amplitude=1.0,
+    )
+    cfg = SimulationConfig(
+        wavelength=wavelength,
+        n_medium=n_medium,
+        lmax=8,
+        source=source,
+        polar_angles=np.linspace(0.0, np.pi, 121),
+        azimuthal_angles=np.linspace(0.0, 2.0 * np.pi, 181, endpoint=False),
+        solver_method="direct",
+        verbose=False,
+        compute_dtype="complex128",
+        accum_dtype="complex128",
+    )
+    sim = Simulation(
+        cfg,
+        particles=_single_sphere_particles(radius=radius, n_particle=n_particle),
+    )
+    run = sim.run()
+    assert run.cross_sections is not None
+
+    flux_diag = circumsphere_absorbed_power_quadrature(
+        coeffs=run.coeffs,
+        k=run.k,
+        lmax=cfg.lmax,
+        beam=source,
+        polar_angles=cfg.polar_angles,
+        azimuthal_angles=cfg.azimuthal_angles,
+        particles=sim.particles,
+        n_medium=n_medium,
+        n_polar=20,
+        n_azimuth=40,
+        radius_scale=1.05,
+        show_progress=False,
+        backend="numpy",
+        compute_dtype=np.complex128,
+        accum_dtype=np.complex128,
+    )
+    p_abs_particles = np.asarray(flux_diag["P_abs_surface_particles"], dtype=float)
+    assert p_abs_particles.shape == (1,)
+    np.testing.assert_allclose(
+        np.sum(p_abs_particles),
+        float(flux_diag["P_abs_surface_total"]),
+        rtol=1e-13,
+        atol=1e-13,
+    )
+
+    a_te, a_tm = source.jones_coefficients()
+    incident_scale = (
+        float(abs(complex(source.amplitude)) ** 2)
+        * float(abs(a_te) ** 2 + abs(a_tm) ** 2)
+        * float(np.real(n_medium))
+        / 2.0
+    )
+    c_abs_surface = float(flux_diag["P_abs_surface_total"]) / incident_scale
+    np.testing.assert_allclose(
+        c_abs_surface,
+        float(run.cross_sections["C_abs_local"]),
+        rtol=8e-4,
+        atol=1e-4,
     )
 
 
