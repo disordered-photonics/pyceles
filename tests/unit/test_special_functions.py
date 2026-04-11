@@ -73,7 +73,7 @@ def test_dx_xj_and_dx_xh_against_smuthi_prototype_subset():
         dxxj[4], 0.230875079050277 - 0.041423344864749j, rtol=1e-12, atol=1e-12
     )
     np.testing.assert_allclose(
-        dxxj[5], 3.329872586039824e07 - 1.858505295737451e08j, rtol=1e-10, atol=1e-2
+        dxxj[5], 3.329872586039824e07 - 1.858505295737451e08j, rtol=1e-10, atol=1e-3
     )
 
     # Skip z=0.01 and z=20+20j prototype values (sensitive in different numerical backends).
