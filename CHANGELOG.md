@@ -37,6 +37,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - exact-near and sampled far repeated applies run on device
   - direct-stage fallback remains the CuPy pairwise coupling path
   - sampled-far MLFMM interactions stay on `complex128` for both NumPy and CuPy
+- Added absolute local absorbed-power diagnostics for dipole-source runs:
+  `run.power["P_abs_local"]` and `run.power["P_abs_local_particles"]`.
 
 ### Changed
 - Dense/direct NumPy solves now reject true MLFMM coupling stages explicitly

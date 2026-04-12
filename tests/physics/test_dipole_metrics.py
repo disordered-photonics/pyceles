@@ -12,6 +12,16 @@ def _run_no_scatterers(cfg: pcl.SimulationConfig) -> pcl.SimulationResult:
     return pcl.Simulation(cfg, particles=[]).run()
 
 
+def _single_sphere(radius: float, n_particle: complex):
+    return tuple(
+        spheres_from_arrays(
+            positions=np.array([[0.0, 0.0, 0.0]], dtype=float),
+            radii=np.array([radius], dtype=float),
+            refractive_indices=np.array([n_particle], dtype=np.complex128),
+        )
+    )
+
+
 def test_dipole_power_ldos_no_scatterers_single_dipole():
     source = pcl.DipoleSource(
         wavelength=550.0,
@@ -73,6 +83,80 @@ def test_dipole_power_ldos_no_scatterers_collection_matches_background_formula()
         rtol=1e-13,
         atol=0.0,
     )
+
+
+def test_dipole_run_reports_local_absorbed_power_no_scatterers():
+    source = pcl.DipoleSource(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        position=(15.0, -10.0, 40.0),
+        dipole_moment=(1.0 + 0.2j, -0.3 + 0.1j, 0.4 - 0.2j),
+    )
+    cfg = pcl.SimulationConfig(
+        wavelength=550.0,
+        n_medium=1.0 + 0j,
+        lmax=1,
+        source=source,
+        solver_method="direct",
+        verbose=False,
+    )
+    run = _run_no_scatterers(cfg)
+    assert run.power is not None
+    assert "P_abs_local" in run.power
+    assert "P_abs_local_particles" in run.power
+    np.testing.assert_allclose(float(run.power["P_abs_local"]), 0.0, rtol=0.0, atol=0.0)
+    pvec = np.asarray(run.power["P_abs_local_particles"], dtype=float)
+    assert pvec.shape == (0,)
+
+
+def test_dipole_run_lossless_sphere_local_absorption_is_nearly_zero():
+    source = pcl.DipoleSource(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        position=(220.0, 0.0, 0.0),
+        dipole_moment=(1.0 + 0j, 0.0 + 0j, 0.0 + 0j),
+    )
+    cfg = pcl.SimulationConfig(
+        wavelength=550.0,
+        n_medium=1.0 + 0j,
+        lmax=3,
+        source=source,
+        solver_method="direct",
+        verbose=False,
+    )
+    run = pcl.Simulation(cfg, particles=_single_sphere(80.0, 1.5 + 0.0j)).run()
+    assert run.power is not None
+    np.testing.assert_allclose(float(run.power["P_abs_local"]), 0.0, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(
+        np.asarray(run.power["P_abs_local_particles"], dtype=float),
+        np.zeros((1,), dtype=float),
+        rtol=0.0,
+        atol=0.0,
+    )
+
+
+def test_dipole_run_absorbing_sphere_reports_positive_local_absorption():
+    source = pcl.DipoleSource(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        position=(220.0, 0.0, 0.0),
+        dipole_moment=(1.0 + 0j, 0.0 + 0j, 0.0 + 0j),
+    )
+    cfg = pcl.SimulationConfig(
+        wavelength=550.0,
+        n_medium=1.0 + 0j,
+        lmax=3,
+        source=source,
+        solver_method="direct",
+        verbose=False,
+    )
+    run = pcl.Simulation(cfg, particles=_single_sphere(80.0, 1.5 + 0.01j)).run()
+    assert run.power is not None
+    p_abs = float(run.power["P_abs_local"])
+    pvec = np.asarray(run.power["P_abs_local_particles"], dtype=float)
+    assert p_abs > 0.0
+    assert pvec.shape == (1,)
+    np.testing.assert_allclose(np.sum(pvec), p_abs, rtol=1e-13, atol=1e-13)
 
 
 def test_dipole_power_ldos_inside_particle_requires_explicit_override():

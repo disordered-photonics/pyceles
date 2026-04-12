@@ -151,6 +151,10 @@ Users of pyceles are referred to the publications listed in the CELES and SMUTHI
   - `pcl.DipoleSource` and `pcl.DipoleCollection`
   - dipole RHS assembly uses outgoing `l=1` SVWF coefficients translated to each
     sphere center (SMUTHI-style concept, pyceles translation kernels)
+  - simulation power outputs now include absolute local absorbed-power diagnostics
+    for dipole-driven runs:
+    - `P_abs_local`
+    - `P_abs_local_particles`
   - near-field initial field supports dipoles and masks exact dipole-center
     grid hits as `NaN`
 - Solver API extensions:

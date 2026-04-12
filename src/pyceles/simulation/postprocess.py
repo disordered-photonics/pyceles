@@ -10,7 +10,13 @@ import numpy as np
 from pyceles._optional import import_cupy, is_cupy_array
 from pyceles.core.indexing import n_modes
 from pyceles.core.particles import LayeredSphere, Particle, Sphere, Spheroid
-from pyceles.core.sources import JonesPolarizedSource, PlaneWave, Source
+from pyceles.core.sources import (
+    DipoleCollection,
+    DipoleSource,
+    JonesPolarizedSource,
+    PlaneWave,
+    Source,
+)
 from pyceles.postprocessing.farfield import (
     FarFieldPatterns,
     compute_far_field_patterns,
@@ -128,7 +134,7 @@ def _plane_wave_local_absorption_generic_route(
     )
 
 
-def _finite_power_local_absorbed_power_generic_route(
+def _local_absorbed_power_components_generic_route(
     sim: "Simulation",
     *,
     initial_coeffs: np.ndarray,
@@ -136,7 +142,7 @@ def _finite_power_local_absorbed_power_generic_route(
     k0: float,
     accum_dtype: np.dtype,
 ) -> dict[str, float | np.ndarray] | None:
-    """Compute local absorbed power diagnostics via the generic `e=b+W x` route."""
+    """Compute local absorbed-power diagnostics via the generic `e=b+W x` route."""
     payload = _build_exciting_scattered_flat_generic_route(
         sim,
         initial_coeffs=initial_coeffs,
@@ -324,7 +330,7 @@ def build_single_channel_result(
                     "P_abs_local_particles": np.zeros((Ns,), dtype=np.float64),
                 }
             else:
-                p_abs_diag = _finite_power_local_absorbed_power_generic_route(
+                p_abs_diag = _local_absorbed_power_components_generic_route(
                     sim,
                     initial_coeffs=initial_coeffs,
                     coeffs=coeffs,
@@ -371,6 +377,31 @@ def build_single_channel_result(
                 k_medium=k,
                 source=source,
             )
+        elif isinstance(source, (DipoleSource, DipoleCollection)):
+            if _is_numerically_lossless_cluster(sim.particles):
+                power = {
+                    "P_abs_local": 0.0,
+                    "P_abs_local_particles": np.zeros((Ns,), dtype=np.float64),
+                }
+            else:
+                p_abs_diag = _local_absorbed_power_components_generic_route(
+                    sim,
+                    initial_coeffs=initial_coeffs,
+                    coeffs=coeffs,
+                    k0=float(k0),
+                    accum_dtype=accum_dtype,
+                )
+                if p_abs_diag is not None:
+                    power = {
+                        "P_abs_local": _as_float_scalar(p_abs_diag["P_abs_local"]),
+                        "P_abs_local_particles": np.asarray(
+                            p_abs_diag.get(
+                                "P_abs_local_particles",
+                                np.zeros((Ns,), dtype=np.float64),
+                            ),
+                            dtype=np.float64,
+                        ).reshape(Ns),
+                    }
     else:
         ff = empty_farfield_patterns(compute_dtype)
 
@@ -578,7 +609,7 @@ def run_impl(sim: "Simulation", *, include_farfield: bool = True) -> SimulationR
                     "P_abs_local_particles": np.zeros((ns,), dtype=np.float64),
                 }
             else:
-                p_abs_diag = _finite_power_local_absorbed_power_generic_route(
+                p_abs_diag = _local_absorbed_power_components_generic_route(
                     sim,
                     initial_coeffs=b,
                     coeffs=x,
