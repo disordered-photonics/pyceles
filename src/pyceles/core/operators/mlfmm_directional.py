@@ -376,12 +376,6 @@ def directional_to_box_regular(
     return np.concatenate((top, bottom)).astype(np.complex128, copy=False)
 
 
-def _grid_key_bytes(values: Array) -> bytes:
-    """Return a stable cache key payload for one sampled angular grid."""
-
-    return np.ascontiguousarray(np.asarray(values, dtype=np.float64).reshape(-1)).tobytes()
-
-
 def _build_sparse_directional_interpolation(
     *,
     source_alpha: Array,

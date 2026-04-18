@@ -103,12 +103,6 @@ def _norm(v: Any, *, cupy: Any, accum_dtype: np.dtype) -> float:
     return float(cupy.linalg.norm(cupy.asarray(v, dtype=accum_dtype)))
 
 
-def _dot_block(v: Any, w: Any, *, cupy: Any, accum_dtype: np.dtype) -> Any:
-    v_acc = cupy.asarray(v, dtype=accum_dtype)
-    w_acc = cupy.asarray(w, dtype=accum_dtype)
-    return v_acc.conj().T @ w_acc
-
-
 def _norms_block(v: Any, *, cupy: Any, accum_dtype: np.dtype) -> Any:
     return cupy.linalg.norm(cupy.asarray(v, dtype=accum_dtype), axis=0)
 
