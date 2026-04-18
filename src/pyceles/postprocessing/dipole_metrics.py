@@ -1,10 +1,10 @@
-from __future__ import annotations
-
 """Dipole-emitter power and LDOS helpers for homogeneous-host pyceles runs.
 
 These helpers intentionally evaluate *particle-scattered* fields at dipole
 positions and avoid direct dipole self-field sampling at r=0.
 """
+
+from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass
@@ -66,7 +66,7 @@ def _dipole_arrays(source: DipoleSource | DipoleCollection) -> tuple[np.ndarray,
 
 
 def compute_dipole_power_ldos(
-    run: "SimulationResult",
+    run: SimulationResult,
     *,
     channel: Literal["mixed"] = "mixed",
     allow_inside_particle: bool = False,
@@ -179,7 +179,7 @@ def compute_dipole_power_ldos(
 
 
 def compute_dipole_ldos_enhancement(
-    run: "SimulationResult",
+    run: SimulationResult,
     *,
     channel: Literal["mixed"] = "mixed",
     allow_inside_particle: bool = False,

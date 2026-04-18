@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Simulation result containers and result-shaping helpers.
 
 These dataclasses are intentionally frozen because they represent completed
@@ -8,8 +6,10 @@ mutation. The mutable state lives in the `Simulation` orchestrator caches, not
 in result objects.
 """
 
+from __future__ import annotations
+
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Mapping
 
 import numpy as np
 import numpy.typing as npt
@@ -54,7 +54,7 @@ class SimulationResult:
 
     @property
     def n_particles(self) -> int:
-        return int(len(self.particles))
+        return len(self.particles)
 
     @property
     def positions(self) -> np.ndarray:

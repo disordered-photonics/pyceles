@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """CuPy-backed single-particle scattering operators.
 
 The CuPy many-body backend already evaluates the inter-particle coupling `W`
@@ -9,8 +7,10 @@ dense spherical-basis blocks, so the iterative `A = I - T W` path does not
 fall back to CPU for non-spherical particle families.
 """
 
+from __future__ import annotations
+
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Sequence
 
 import numpy as np
 

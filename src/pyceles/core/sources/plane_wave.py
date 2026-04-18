@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Tuple
 
 import numpy as np
 import numpy.typing as npt
@@ -19,7 +18,7 @@ class PlaneWave:
     polarization: PolarizationInput = "TE"
     polar_angle: float = 0.0
     azimuthal_angle: float = 0.0
-    focal_point: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+    focal_point: tuple[float, float, float] = (0.0, 0.0, 0.0)
     amplitude: float = 1.0
 
     def __post_init__(self):
@@ -37,7 +36,7 @@ class PlaneWave:
         """Return normalized TE/TM Jones weights for this plane wave."""
         return polarization_to_jones(self.polarization)
 
-    def with_polarization(self, polarization: PolarizationInput) -> "PlaneWave":
+    def with_polarization(self, polarization: PolarizationInput) -> PlaneWave:
         """Clone plane wave with new polarization and unchanged propagation."""
         return replace(self, polarization=polarization)
 

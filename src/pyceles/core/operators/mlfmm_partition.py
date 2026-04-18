@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Uniform occupied-box hierarchy helpers for pyceles MLFMM."""
+
+from __future__ import annotations
 
 from dataclasses import dataclass
 

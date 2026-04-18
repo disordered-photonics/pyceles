@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 
@@ -10,9 +10,10 @@ from pyceles.core.particles import spheres_from_arrays
 
 def _scattered_intensity(run: pcl.SimulationResult) -> np.ndarray:
     ff = run.farfield
-    return (
+    return cast(
+        np.ndarray,
         np.abs(np.asarray(ff.scattered_te["coeff"])) ** 2
-        + np.abs(np.asarray(ff.scattered_tm["coeff"])) ** 2
+        + np.abs(np.asarray(ff.scattered_tm["coeff"])) ** 2,
     )
 
 
@@ -20,7 +21,7 @@ def _rotate_z(points: np.ndarray, angle: float) -> np.ndarray:
     c = float(np.cos(angle))
     s = float(np.sin(angle))
     rot = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]], dtype=float)
-    return np.asarray(points, dtype=float) @ rot.T
+    return cast(np.ndarray, np.asarray(points, dtype=float) @ rot.T)
 
 
 def test_scattered_field_far_zone_obeys_inverse_radius_scaling():

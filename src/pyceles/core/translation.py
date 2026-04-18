@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from functools import cache
-from typing import Optional
 
 import numpy as np
 import numpy.typing as npt
@@ -32,7 +31,7 @@ def spherical_bessel_jy(lmax: int, z: np.ndarray) -> tuple[np.ndarray, np.ndarra
         Arrays of shape (lmax+1, *z.shape).
     """
     z = np.asarray(z)
-    j = np.zeros((lmax + 1,) + z.shape, dtype=np.complex128)
+    j = np.zeros((lmax + 1, *z.shape), dtype=np.complex128)
     y = np.zeros_like(j)
     for l in range(0, lmax + 1):
         j[l] = spherical_jn(l, z)
@@ -44,7 +43,7 @@ def spherical_bessel_j(lmax: int, z: np.ndarray) -> np.ndarray:
     """Return `j_l(z)` for `l=0..lmax`."""
 
     z = np.asarray(z)
-    j = np.zeros((lmax + 1,) + z.shape, dtype=np.complex128)
+    j = np.zeros((lmax + 1, *z.shape), dtype=np.complex128)
     for l in range(0, lmax + 1):
         j[l] = spherical_jn(l, z)
     return j
@@ -309,7 +308,7 @@ def _translation_radial_values(
     *,
     out_dtype: np.dtype,
     family: str,
-    radial_lut: Optional[RadialLUT],
+    radial_lut: RadialLUT | None,
 ) -> np.ndarray:
     """Return the radial sequence for one SVWF translation family."""
 
@@ -338,7 +337,7 @@ def _translation_block_family(
     rvec: np.ndarray,
     *,
     ab5: np.ndarray,
-    radial_lut: Optional[RadialLUT],
+    radial_lut: RadialLUT | None,
     family: str,
 ) -> np.ndarray:
     """Shared SVWF translation-block assembly for one radial family."""
@@ -367,14 +366,14 @@ def _translation_block_family(
     )
 
     plm = legendre_normalized_trigon_scalar(ct, st, 2 * lmax)
-    dm, absdm, dm_lookup = _translation_mode_pair_tables(lmax)
+    _dm, absdm, dm_lookup = _translation_mode_pair_tables(lmax)
     g_mp = (plm * radial[:, None]).T.astype(out_dtype, copy=False)
     gp = g_mp[absdm]
     acc = np.sum(ab5 * gp, axis=2)
     m_phase = np.arange(-2 * lmax, 2 * lmax + 1, dtype=np.int32)
     phase_lut = np.exp(1j * phi * m_phase).astype(out_dtype, copy=False)
     phase = phase_lut[dm_lookup]
-    return (acc * phase).astype(out_dtype, copy=False)
+    return np.asarray(acc * phase, dtype=out_dtype)
 
 
 @cache
@@ -416,10 +415,8 @@ def _translation_plm_coeff_table_cached(lmax: int, dtype_str: str) -> np.ndarray
     for l in range(max_degree + 1):
         for m in range(l + 1):
             poly = q_poly[l][m]
-            jj = 0
-            for lam in range(l - m, -1, -2):
+            for jj, lam in enumerate(range(l - m, -1, -2)):
                 coeffs[jj, m, l] = out_dtype(poly[lam]) if lam < poly.size else out_dtype(0.0)
-                jj += 1
     coeffs.setflags(write=False)
     return coeffs
 
@@ -435,7 +432,7 @@ def translation_block(
     rvec: np.ndarray,
     *,
     ab5: np.ndarray,
-    radial_lut: Optional[RadialLUT] = None,
+    radial_lut: RadialLUT | None = None,
 ) -> np.ndarray:
     """Return the outgoing-to-regular SVWF coupling block `W_ij`.
 
@@ -495,7 +492,7 @@ def translation_block_rect(
     rvec: np.ndarray,
     *,
     ab5: np.ndarray | None = None,
-    radial_lut: Optional[RadialLUT] = None,
+    radial_lut: RadialLUT | None = None,
     family: str = "outgoing_to_regular",
 ) -> np.ndarray:
     """Return a rectangular SVWF translation block between different orders.

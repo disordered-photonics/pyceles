@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Sequence
+from collections.abc import Iterable, Sequence
 
 import numpy as np
 import numpy.typing as npt
@@ -122,7 +122,7 @@ def _compute_internal_field_homogeneous_spheres(
             accum_dtype=accum_dtype,
         )
 
-    sphere_iter = range(n_spheres)
+    sphere_iter: Iterable[int] = range(n_spheres)
     if show_progress:
         sphere_iter = tqdm(sphere_iter, desc="Internal field (spheres)", leave=True)
 
@@ -233,7 +233,7 @@ def _compute_internal_field_homogeneous_spheres_cupy(
     e = np.zeros((n_points, 3), dtype=accum_dtype)
     h = np.zeros((n_points, 3), dtype=accum_dtype)
     inside = np.zeros(n_points, dtype=bool)
-    sphere_iter = range(n_spheres)
+    sphere_iter: Iterable[int] = range(n_spheres)
     if show_progress:
         sphere_iter = tqdm(sphere_iter, desc="Internal field (spheres)", leave=True)
 
@@ -446,7 +446,7 @@ def _compute_internal_field_particles(
     if spheroid_idx:
         eps = 1e-12
         mode_by_l = mode_indices_by_l(lmax)
-        sph_iter = spheroid_idx
+        sph_iter: Iterable[int] = spheroid_idx
         if show_progress:
             sph_iter = tqdm(spheroid_idx, desc="Internal field (spheroids)", leave=True)
         internal_block_memo: dict[tuple[object, ...], np.ndarray] = {}
@@ -542,7 +542,7 @@ def _compute_internal_field_particles(
 
     eps = 1e-12
     mode_by_l = mode_indices_by_l(lmax)
-    layer_iter = layered_idx
+    layer_iter: Iterable[int] = layered_idx
     if show_progress:
         layer_iter = tqdm(layered_idx, desc="Internal field (layered particles)", leave=True)
 

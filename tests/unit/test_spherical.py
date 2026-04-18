@@ -13,9 +13,9 @@ def _celes_legendre_norm(l: int, m: int) -> float:
 
         \bar{P}_l^m(x) = sqrt((2l+1)/2 * (l-m)!/(l+m)!) * P_l^m(x)
 
-    and omits the Condon–Shortley phase (-1)^m.
+    and omits the Condon-Shortley phase (-1)^m.
 
-    SciPy's lpmv includes the Condon–Shortley phase, so we multiply by (-1)^m.
+    SciPy's lpmv includes the Condon-Shortley phase, so we multiply by (-1)^m.
     """
 
     return math.sqrt((2 * l + 1) / 2 * math.factorial(l - m) / math.factorial(l + m))

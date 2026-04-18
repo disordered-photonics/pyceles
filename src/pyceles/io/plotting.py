@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Literal
+from typing import Literal, cast
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -182,9 +182,9 @@ def near_field_component(E: np.ndarray, H: np.ndarray, component: str) -> np.nda
     if c == "real hz":
         return np.real(h[..., 2])
     if c == "abs e":
-        return np.sqrt(np.sum(np.abs(e) ** 2, axis=-1))
+        return cast(np.ndarray, np.sqrt(np.sum(np.abs(e) ** 2, axis=-1)))
     if c == "abs h":
-        return np.sqrt(np.sum(np.abs(h) ** 2, axis=-1))
+        return cast(np.ndarray, np.sqrt(np.sum(np.abs(h) ** 2, axis=-1)))
     raise ValueError(f"Unsupported component '{component}'.")
 
 
@@ -198,12 +198,18 @@ def unpolarized_near_field_intensity(E_te: np.ndarray, E_tm: np.ndarray) -> np.n
     """
     e_te = np.asarray(E_te)
     e_tm = np.asarray(E_tm)
-    return 0.5 * (np.sum(np.abs(e_te) ** 2, axis=-1) + np.sum(np.abs(e_tm) ** 2, axis=-1))
+    return cast(
+        np.ndarray,
+        0.5 * (np.sum(np.abs(e_te) ** 2, axis=-1) + np.sum(np.abs(e_tm) ** 2, axis=-1)),
+    )
 
 
 def far_field_intensity(pwp_te: dict, pwp_tm: dict) -> np.ndarray:
     """Return combined PWP intensity |g_TE|^2 + |g_TM|^2."""
-    return np.abs(np.asarray(pwp_te["coeff"])) ** 2 + np.abs(np.asarray(pwp_tm["coeff"])) ** 2
+    return cast(
+        np.ndarray,
+        np.abs(np.asarray(pwp_te["coeff"])) ** 2 + np.abs(np.asarray(pwp_tm["coeff"])) ** 2,
+    )
 
 
 def far_field_intensity_from_result(run, *, channel: str = "mixed") -> np.ndarray:
@@ -251,7 +257,7 @@ def far_field_intensity_from_result(run, *, channel: str = "mixed") -> np.ndarra
         I_tm = far_field_intensity(
             run.farfield_basis["tm"].scattered_te, run.farfield_basis["tm"].scattered_tm
         )
-        return 0.5 * (I_te + I_tm)
+        return cast(np.ndarray, 0.5 * (I_te + I_tm))
     raise ValueError("channel must be one of {'mixed', 'te', 'tm', 'unpolarized'}.")
 
 
@@ -524,7 +530,7 @@ def _plot_nearfield_panel_block(
     components = [
         (name, near_field_component(E, H, name)) for name in _nearfield_panel_component_names()
     ]
-    for ax, (name, F) in zip(np.asarray(axes_block).flat, components):
+    for ax, (name, F) in zip(np.asarray(axes_block).flat, components, strict=True):
         title = _component_panel_title(name)
         if title_prefix:
             title = f"{title_prefix}: {title}"
@@ -703,7 +709,7 @@ def plot_source_showcase_slices(
         raise ValueError("`plane_values` must contain exactly three entries for x/y/z.")
 
     slices = []
-    for plane, plane_value in zip(planes, plane_values):
+    for plane, plane_value in zip(planes, plane_values, strict=True):
         slices.append(
             compute_near_field_slice(
                 run,
@@ -723,7 +729,7 @@ def plot_source_showcase_slices(
 
     fig, axes = plt.subplots(3, 5, figsize=(24, 13), constrained_layout=True)
 
-    for row, (plane, slc) in enumerate(zip(planes, slices)):
+    for row, (plane, slc) in enumerate(zip(planes, slices, strict=True)):
         E, H = slc.field_maps[family]
         E_arr = np.asarray(E)
 

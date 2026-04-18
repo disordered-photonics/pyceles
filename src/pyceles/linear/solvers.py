@@ -17,8 +17,9 @@ Key requirements for development/debugging:
 from __future__ import annotations
 
 import time
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import Any, Callable, Literal, Optional
+from typing import Any, Literal, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -89,10 +90,13 @@ def factorize_dense_matrix(
         # actually want to keep. Allowing cuSOLVER to overwrite the dense matrix
         # avoids carrying both A and LU in device memory when callers are done
         # with the unfactorized operator.
-        return cupyx.scipy.linalg.lu_factor(
-            A_gpu,
-            overwrite_a=bool(overwrite_input),
-            check_finite=True,
+        return cast(
+            DenseLUFactorization,
+            cupyx.scipy.linalg.lu_factor(
+                A_gpu,
+                overwrite_a=bool(overwrite_input),
+                check_finite=True,
+            ),
         )
     import scipy.linalg
 
@@ -136,7 +140,7 @@ def _make_linear_operator(A_mv: Callable[[np.ndarray], np.ndarray], n: int, dtyp
 
 
 def _make_preconditioner_operator(
-    preconditioner: Optional[Callable[[np.ndarray], np.ndarray]],
+    preconditioner: Callable[[np.ndarray], np.ndarray] | None,
     n: int,
     dtype: np.dtype,
 ):
@@ -160,7 +164,7 @@ def _finalize_result(
     info: int,
     iterations: int,
     method: str,
-    residual_history: Optional[list[float]] = None,
+    residual_history: list[float] | None = None,
     compute_final_residual: bool = True,
     converged_reason: str | None = None,
 ) -> LinearSolveResult:
@@ -236,7 +240,7 @@ def _finalize_multi_result(
 
 def _estimate_eta(
     history: list[float], *, target_rel: float, elapsed: float
-) -> Optional[tuple[int, float]]:
+) -> tuple[int, float] | None:
     """Estimate time-to-target assuming multiplicative residual decay.
 
     For Krylov solvers, residuals often behave approximately as:
@@ -398,15 +402,15 @@ def gmres_cupy_block(
     A_mv: Callable[[np.ndarray], np.ndarray],
     b: np.ndarray,
     *,
-    x0: Optional[np.ndarray] = None,
-    preconditioner: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+    x0: np.ndarray | None = None,
+    preconditioner: Callable[[np.ndarray], np.ndarray] | None = None,
     rtol: float = 1e-6,
     atol: float = 0.0,
     restart: int = 30,
-    maxiter: Optional[int] = None,
+    maxiter: int | None = None,
     block_batch_size: int | None = None,
     deflation_tol: float | None = None,
-    callback: Optional[Callable[[BlockKrylovCallbackPayload], None]] = None,
+    callback: Callable[[BlockKrylovCallbackPayload], None] | None = None,
     monitor: Literal["preconditioned", "true", "both"] = "preconditioned",
     progress_residual: Literal["preconditioned", "true"] = "true",
     reorthogonalize: bool = True,
@@ -499,7 +503,7 @@ def gmres_cupy_block(
             x0_comp = x0_gpu if basis_gpu is None else x0_gpu @ basis_gpu
 
         batch_index = int(bidx)
-        batch_count = int(len(batch_ranges))
+        batch_count = len(batch_ranges)
 
         def _inner_cb(
             payload: dict[str, Any],
@@ -532,7 +536,7 @@ def gmres_cupy_block(
             if progress_mode == "true":
                 progress_update(r)
             if callback is not None:
-                per_rhs = payload.get("per_rhs_relative_residual", None)
+                per_rhs = payload.get("per_rhs_relative_residual")
                 callback(
                     BlockKrylovCallbackPayload(
                         stage="restart",
@@ -666,7 +670,7 @@ def gmres_cupy_block(
         stopping_rule="per_rhs_true_residual_at_restart",
         block_metadata={
             "batch_size": int(batch_size),
-            "batch_count": int(len(batch_ranges)),
+            "batch_count": len(batch_ranges),
             "deflation_tol": None if deflation_tol is None else float(deflation_tol),
             "batches": batch_meta,
             "block_residual_norm": float(block_residual),
@@ -686,13 +690,13 @@ def gmres_scipy(
     A_mv: Callable[[np.ndarray], np.ndarray],
     b: np.ndarray,
     *,
-    x0: Optional[np.ndarray] = None,
-    preconditioner: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+    x0: np.ndarray | None = None,
+    preconditioner: Callable[[np.ndarray], np.ndarray] | None = None,
     rtol: float = 1e-6,
     atol: float = 0.0,
     restart: int = 50,
-    maxiter: Optional[int] = None,
-    callback: Optional[Callable[[float], None]] = None,
+    maxiter: int | None = None,
+    callback: Callable[[float], None] | None = None,
     show_progress: bool = True,
     compute_final_residual: bool = True,
 ) -> GmresResult:
@@ -775,14 +779,14 @@ def gmres_cupy(
     A_mv: Callable[[np.ndarray], np.ndarray],
     b: np.ndarray,
     *,
-    x0: Optional[np.ndarray] = None,
-    preconditioner: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+    x0: np.ndarray | None = None,
+    preconditioner: Callable[[np.ndarray], np.ndarray] | None = None,
     rtol: float = 1e-6,
     atol: float = 0.0,
     restart: int = 50,
-    maxiter: Optional[int] = None,
-    callback: Optional[Callable[[float], None]] = None,
-    callback_true: Optional[Callable[[float], None]] = None,
+    maxiter: int | None = None,
+    callback: Callable[[float], None] | None = None,
+    callback_true: Callable[[float], None] | None = None,
     monitor: Literal["preconditioned", "true", "both"] = "preconditioned",
     progress_residual: Literal["preconditioned", "true"] = "preconditioned",
     orthogonalization: Literal["mgs", "cgs"] = "mgs",
@@ -910,14 +914,14 @@ def fgmres_cupy(
     A_mv: Callable[[np.ndarray], np.ndarray],
     b: np.ndarray,
     *,
-    x0: Optional[np.ndarray] = None,
-    preconditioner: Optional[Callable[..., np.ndarray]] = None,
+    x0: np.ndarray | None = None,
+    preconditioner: Callable[..., np.ndarray] | None = None,
     rtol: float = 1e-6,
     atol: float = 0.0,
     restart: int = 50,
-    maxiter: Optional[int] = None,
-    callback: Optional[Callable[[float], None]] = None,
-    callback_true: Optional[Callable[[float], None]] = None,
+    maxiter: int | None = None,
+    callback: Callable[[float], None] | None = None,
+    callback_true: Callable[[float], None] | None = None,
     monitor: Literal["preconditioned", "true", "both"] = "preconditioned",
     progress_residual: Literal["preconditioned", "true"] = "preconditioned",
     orthogonalization: Literal["mgs", "cgs"] = "mgs",
@@ -1038,16 +1042,16 @@ def lgmres_cupy(
     A_mv: Callable[[np.ndarray], np.ndarray],
     b: np.ndarray,
     *,
-    x0: Optional[np.ndarray] = None,
-    preconditioner: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+    x0: np.ndarray | None = None,
+    preconditioner: Callable[[np.ndarray], np.ndarray] | None = None,
     rtol: float = 1e-6,
     atol: float = 0.0,
     restart: int = 30,
-    maxiter: Optional[int] = None,
+    maxiter: int | None = None,
     outer_k: int = 3,
     store_outer_av: bool = True,
-    callback: Optional[Callable[[float], None]] = None,
-    callback_true: Optional[Callable[[float], None]] = None,
+    callback: Callable[[float], None] | None = None,
+    callback_true: Callable[[float], None] | None = None,
     monitor: Literal["preconditioned", "true", "both"] = "preconditioned",
     progress_residual: Literal["preconditioned", "true"] = "preconditioned",
     orthogonalization: Literal["mgs", "cgs"] = "mgs",
@@ -1171,12 +1175,12 @@ def bicgstab_cupy(
     A_mv: Callable[[np.ndarray], np.ndarray],
     b: np.ndarray,
     *,
-    x0: Optional[np.ndarray] = None,
-    preconditioner: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+    x0: np.ndarray | None = None,
+    preconditioner: Callable[[np.ndarray], np.ndarray] | None = None,
     rtol: float = 1e-6,
     atol: float = 0.0,
-    maxiter: Optional[int] = None,
-    callback: Optional[Callable[[float], None]] = None,
+    maxiter: int | None = None,
+    callback: Callable[[float], None] | None = None,
     show_progress: bool = True,
     compute_final_residual: bool = True,
 ) -> LinearSolveResult:
@@ -1254,11 +1258,11 @@ def bicgstab_scipy(
     A_mv: Callable[[np.ndarray], np.ndarray],
     b: np.ndarray,
     *,
-    x0: Optional[np.ndarray] = None,
-    preconditioner: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+    x0: np.ndarray | None = None,
+    preconditioner: Callable[[np.ndarray], np.ndarray] | None = None,
     rtol: float = 1e-6,
     atol: float = 0.0,
-    maxiter: Optional[int] = None,
+    maxiter: int | None = None,
     show_progress: bool = True,
     compute_final_residual: bool = True,
 ) -> LinearSolveResult:
@@ -1307,11 +1311,11 @@ def lgmres_scipy(
     A_mv: Callable[[np.ndarray], np.ndarray],
     b: np.ndarray,
     *,
-    x0: Optional[np.ndarray] = None,
-    preconditioner: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+    x0: np.ndarray | None = None,
+    preconditioner: Callable[[np.ndarray], np.ndarray] | None = None,
     rtol: float = 1e-6,
     atol: float = 0.0,
-    maxiter: Optional[int] = None,
+    maxiter: int | None = None,
     show_progress: bool = True,
     compute_final_residual: bool = True,
 ) -> LinearSolveResult:
@@ -1340,7 +1344,17 @@ def lgmres_scipy(
         # tracking can be stale; avoid reporting misleading values.
         progress_update(None)
 
-    x, info = lgmres(Aop, b, x0=x0, M=Mop, rtol=rtol, atol=atol, maxiter=maxiter, callback=_cb)
+    maxiter_resolved = int(maxiter) if maxiter is not None else 1000
+    x, info = lgmres(
+        Aop,
+        b,
+        x0=x0,
+        M=Mop,
+        rtol=rtol,
+        atol=atol,
+        maxiter=maxiter_resolved,
+        callback=_cb,
+    )
     progress_close()
     return _finalize_result(
         A_mv,
@@ -1358,11 +1372,11 @@ def gcrotmk_scipy(
     A_mv: Callable[[np.ndarray], np.ndarray],
     b: np.ndarray,
     *,
-    x0: Optional[np.ndarray] = None,
-    preconditioner: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+    x0: np.ndarray | None = None,
+    preconditioner: Callable[[np.ndarray], np.ndarray] | None = None,
     rtol: float = 1e-6,
     atol: float = 0.0,
-    maxiter: Optional[int] = None,
+    maxiter: int | None = None,
     show_progress: bool = True,
     compute_final_residual: bool = True,
 ) -> LinearSolveResult:
@@ -1391,7 +1405,17 @@ def gcrotmk_scipy(
         # tracking can be stale; avoid reporting misleading values.
         progress_update(None)
 
-    x, info = gcrotmk(Aop, b, x0=x0, M=Mop, rtol=rtol, atol=atol, maxiter=maxiter, callback=_cb)
+    maxiter_resolved = int(maxiter) if maxiter is not None else 1000
+    x, info = gcrotmk(
+        Aop,
+        b,
+        x0=x0,
+        M=Mop,
+        rtol=rtol,
+        atol=atol,
+        maxiter=maxiter_resolved,
+        callback=_cb,
+    )
     progress_close()
     return _finalize_result(
         A_mv,
@@ -1409,7 +1433,7 @@ def direct_dense_scipy(
     A_mv: Callable[[np.ndarray], np.ndarray],
     b: np.ndarray,
     *,
-    A_dense: Optional[np.ndarray] = None,
+    A_dense: np.ndarray | None = None,
     A_factorized: DenseLUFactorization | None = None,
     max_n: int = 15000,
     dtype: npt.DTypeLike = np.complex128,
@@ -1479,7 +1503,7 @@ def direct_dense_scipy(
         if A_for_residual is None:
             A = np.empty((n, n), dtype=solve_dtype)
             eye = np.eye(n, dtype=solve_dtype)
-            col_iter = range(n)
+            col_iter: Iterable[int] = range(n)
             if show_progress:
                 col_iter = tqdm(col_iter, desc="Assemble A (dense via matvec)")
             for j in col_iter:
@@ -1535,7 +1559,7 @@ def direct_dense_cupy(
     A_mv: Callable[[np.ndarray], np.ndarray],
     b: np.ndarray,
     *,
-    A_dense: Optional[np.ndarray] = None,
+    A_dense: np.ndarray | None = None,
     A_factorized: DenseLUFactorization | None = None,
     max_n: int = 15000,
     dtype: npt.DTypeLike = np.complex128,
@@ -1583,7 +1607,7 @@ def direct_dense_cupy(
         if A_for_residual is None:
             A = np.empty((n, n), dtype=solve_dtype)
             eye = np.eye(n, dtype=solve_dtype)
-            col_iter = range(n)
+            col_iter: Iterable[int] = range(n)
             if show_progress:
                 col_iter = tqdm(col_iter, desc="Assemble A (dense via matvec)")
             for j in col_iter:
@@ -1638,14 +1662,14 @@ def solve_linear_system(
     b: np.ndarray,
     *,
     method: str = "auto",
-    A_dense: Optional[np.ndarray] = None,
+    A_dense: np.ndarray | None = None,
     A_factorized: DenseLUFactorization | None = None,
-    x0: Optional[np.ndarray] = None,
-    preconditioner: Optional[Callable[..., np.ndarray]] = None,
+    x0: np.ndarray | None = None,
+    preconditioner: Callable[..., np.ndarray] | None = None,
     rtol: float = 1e-6,
     atol: float = 0.0,
     restart: int = 50,
-    maxiter: Optional[int] = None,
+    maxiter: int | None = None,
     gmres_monitor: Literal["preconditioned", "true", "both"] = "preconditioned",
     gmres_progress_residual: Literal["preconditioned", "true"] = "preconditioned",
     gmres_orthogonalization: Literal["mgs", "cgs"] = "mgs",

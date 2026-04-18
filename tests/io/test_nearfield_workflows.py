@@ -36,7 +36,7 @@ def test_mix_near_field_components_linear_combination():
 
 def test_mix_near_field_slices_linear_combination():
     axis_0, axis_1 = np.meshgrid(np.linspace(-1, 1, 2), np.linspace(-1, 1, 2), indexing="xy")
-    te_map = np.ones(axis_0.shape + (3,), dtype=np.complex128)
+    te_map = np.ones((*axis_0.shape, 3), dtype=np.complex128)
     tm_map = 2j * np.ones_like(te_map)
     slice_te = NearFieldSlice(
         axis_0=axis_0,

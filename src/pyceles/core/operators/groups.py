@@ -1,9 +1,10 @@
-from __future__ import annotations
-
 """Prepared single-particle group types and group-factory planning."""
 
+from __future__ import annotations
+
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Callable, Protocol, Sequence, TypeAlias
+from typing import Protocol
 
 import numpy as np
 
@@ -11,6 +12,7 @@ from pyceles.core.indexing import n_modes
 from pyceles.core.particles import Particle, ParticleTRepresentation
 
 Array = np.ndarray
+COMPLEX128_DTYPE = np.dtype(np.complex128)
 
 
 @dataclass(frozen=True)
@@ -53,17 +55,17 @@ class PreparedParticleTGroup(Protocol):
     def degree_diagonals(self) -> tuple[Array, Array] | None: ...
 
 
-ParticleTGroupFactory: TypeAlias = Callable[
+type ParticleTGroupFactory = Callable[
     [ParticleTGroupPlan, ParticleTPreparationContext], PreparedParticleTGroup
 ]
-DenseBlockProvider: TypeAlias = Callable[[Sequence[Particle], ParticleTPreparationContext], Array]
-AxisymmetricSubsetApply: TypeAlias = Callable[
+type DenseBlockProvider = Callable[[Sequence[Particle], ParticleTPreparationContext], Array]
+type AxisymmetricSubsetApply = Callable[
     [Array, Sequence[Particle], ParticleTPreparationContext], Array
 ]
-AxisymmetricLocalBlockApply: TypeAlias = Callable[
+type AxisymmetricLocalBlockApply = Callable[
     [int, Array, Sequence[Particle], ParticleTPreparationContext], Array
 ]
-AxisymmetricMetadataBuilder: TypeAlias = Callable[
+type AxisymmetricMetadataBuilder = Callable[
     [Sequence[Particle], ParticleTPreparationContext], object | None
 ]
 
@@ -94,17 +96,20 @@ class DiagonalTGroup:
     T_M: Array
     T_N: Array
     T_diag: Array
-    dtype: np.dtype = np.dtype(np.complex128)
+    dtype: np.dtype = COMPLEX128_DTYPE
 
     def apply_subset(self, x_subset: Array) -> Array:
         arr = np.asarray(x_subset, dtype=self.dtype)
-        return self.T_diag * arr
+        return np.asarray(self.T_diag * arr, dtype=self.dtype)
 
     def rhs_subset(self, b_subset: Array) -> Array:
         return self.apply_subset(b_subset)
 
     def apply_local_block(self, local_particle_index: int, block: Array) -> Array:
-        return self.T_diag[int(local_particle_index)][:, None] * np.asarray(block, dtype=self.dtype)
+        return np.asarray(
+            self.T_diag[int(local_particle_index)][:, None] * np.asarray(block, dtype=self.dtype),
+            dtype=self.dtype,
+        )
 
     def mode_diagonal(self) -> Array | None:
         return np.asarray(self.T_diag, dtype=self.dtype)
@@ -117,7 +122,7 @@ class DiagonalTGroup:
 class DenseTGroup:
     particle_indices: Array
     T_blocks: Array
-    dtype: np.dtype = np.dtype(np.complex128)
+    dtype: np.dtype = COMPLEX128_DTYPE
 
     def __post_init__(self) -> None:
         blocks = np.asarray(self.T_blocks, dtype=self.dtype)
@@ -134,13 +139,18 @@ class DenseTGroup:
 
     def apply_subset(self, x_subset: Array) -> Array:
         arr = np.asarray(x_subset, dtype=self.dtype)
-        return np.einsum("gij,gj->gi", self.T_blocks, arr, optimize=True)
+        return np.asarray(
+            np.einsum("gij,gj->gi", self.T_blocks, arr, optimize=True), dtype=self.dtype
+        )
 
     def rhs_subset(self, b_subset: Array) -> Array:
         return self.apply_subset(b_subset)
 
     def apply_local_block(self, local_particle_index: int, block: Array) -> Array:
-        return self.T_blocks[int(local_particle_index)] @ np.asarray(block, dtype=self.dtype)
+        return np.asarray(
+            self.T_blocks[int(local_particle_index)] @ np.asarray(block, dtype=self.dtype),
+            dtype=self.dtype,
+        )
 
     def mode_diagonal(self) -> Array | None:
         return None
@@ -157,7 +167,7 @@ class AxisymmetricTGroup:
     rhs_subset_fn: Callable[[Array], Array] | None = None
     apply_local_block_fn: Callable[[int, Array], Array] | None = None
     body_metadata: object | None = None
-    dtype: np.dtype = np.dtype(np.complex128)
+    dtype: np.dtype = COMPLEX128_DTYPE
 
     def __post_init__(self) -> None:
         self.particle_indices = np.asarray(self.particle_indices, dtype=np.int64).reshape(-1)
@@ -178,7 +188,9 @@ class AxisymmetricTGroup:
     def apply_subset(self, x_subset: Array) -> Array:
         if self.T_blocks is not None:
             arr = np.asarray(x_subset, dtype=self.dtype)
-            return np.einsum("gij,gj->gi", self.T_blocks, arr, optimize=True)
+            return np.asarray(
+                np.einsum("gij,gj->gi", self.T_blocks, arr, optimize=True), dtype=self.dtype
+            )
         if self.apply_subset_fn is None:
             raise NotImplementedError(
                 "Axisymmetric particle-T operators are planned but not implemented yet."
@@ -198,7 +210,10 @@ class AxisymmetricTGroup:
 
     def apply_local_block(self, local_particle_index: int, block: Array) -> Array:
         if self.T_blocks is not None:
-            return self.T_blocks[int(local_particle_index)] @ np.asarray(block, dtype=self.dtype)
+            return np.asarray(
+                self.T_blocks[int(local_particle_index)] @ np.asarray(block, dtype=self.dtype),
+                dtype=self.dtype,
+            )
         if self.apply_local_block_fn is None:
             raise NotImplementedError(
                 "Axisymmetric particle-T operators are planned but not implemented yet."

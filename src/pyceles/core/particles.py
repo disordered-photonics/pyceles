@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, fields
-from typing import Literal, Tuple
+from typing import Literal
 
 import numpy as np
 
@@ -20,7 +20,7 @@ class Particle:
     for every particle family.
     """
 
-    position: Tuple[float, float, float]
+    position: tuple[float, float, float]
 
     def pos_array(self, dtype=float) -> np.ndarray:
         """Return particle center as numeric array for kernel consumption."""
@@ -69,8 +69,8 @@ class Sphere(Particle):
 class LayeredSphere(Particle):
     """Concentric multilayer sphere for exact multilayer Mie kernels."""
 
-    layer_radii: Tuple[float, ...]
-    layer_refractive_indices: Tuple[complex, ...]
+    layer_radii: tuple[float, ...]
+    layer_refractive_indices: tuple[complex, ...]
 
     def __post_init__(self) -> None:
         if len(self.layer_radii) == 0:
@@ -101,7 +101,7 @@ class Spheroid(Particle):
     equatorial_radius: float
     polar_radius: float
     refractive_index: complex = 1.5 + 0j
-    euler_angles: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+    euler_angles: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
     def __post_init__(self) -> None:
         if float(self.equatorial_radius) <= 0.0:
@@ -119,7 +119,7 @@ class Spheroid(Particle):
         return "axisymmetric"
 
 
-def _rotation_matrix_zyz_lab_to_body(euler_angles: Tuple[float, float, float]) -> np.ndarray:
+def _rotation_matrix_zyz_lab_to_body(euler_angles: tuple[float, float, float]) -> np.ndarray:
     """Return the lab-to-body rotation matrix for particle Euler angles.
 
     The convention matches the particle-orientation usage elsewhere in
@@ -154,7 +154,7 @@ def _rotation_matrix_zyz_lab_to_body(euler_angles: Tuple[float, float, float]) -
         ],
         dtype=float,
     )
-    return rot_3 @ rot_2 @ rot_1
+    return np.asarray(rot_3 @ rot_2 @ rot_1, dtype=float)
 
 
 def particle_contains_points(
@@ -169,18 +169,18 @@ def particle_contains_points(
 
     if isinstance(particle, Sphere):
         radius = float(particle.radius)
-        return np.sum(rel * rel, axis=1) < (radius**2)
+        return np.asarray(np.sum(rel * rel, axis=1) < (radius**2), dtype=bool)
 
     if isinstance(particle, LayeredSphere):
         radius = float(particle.layer_radii[-1])
-        return np.sum(rel * rel, axis=1) < (radius**2)
+        return np.asarray(np.sum(rel * rel, axis=1) < (radius**2), dtype=bool)
 
     if isinstance(particle, Spheroid):
         body = rel @ _rotation_matrix_zyz_lab_to_body(particle.euler_angles).T
         a = float(particle.equatorial_radius)
         c = float(particle.polar_radius)
         rho2 = (body[:, 0] / a) ** 2 + (body[:, 1] / a) ** 2 + (body[:, 2] / c) ** 2
-        return rho2 < 1.0
+        return np.asarray(rho2 < 1.0, dtype=bool)
 
     raise TypeError(f"Unsupported particle instance: {type(particle)!r}")
 
@@ -291,7 +291,7 @@ def spheres_from_arrays(
             radius=float(r),
             refractive_index=complex(nr),
         )
-        for p, r, nr in zip(pos, rad, n_part)
+        for p, r, nr in zip(pos, rad, n_part, strict=True)
     )
     return out
 
@@ -360,7 +360,7 @@ def layered_spheres_from_arrays(
             layer_radii=tuple(float(v) for v in r_row),
             layer_refractive_indices=tuple(complex(v) for v in n_row),
         )
-        for p, r_row, n_row in zip(pos, lr, li)
+        for p, r_row, n_row in zip(pos, lr, li, strict=True)
     )
     return out
 
@@ -423,6 +423,6 @@ def spheroids_from_arrays(
             refractive_index=complex(nr),
             euler_angles=(float(ang[0]), float(ang[1]), float(ang[2])),
         )
-        for p, a_eq, a_po, nr, ang in zip(pos, eq, po, n_part, eul)
+        for p, a_eq, a_po, nr, ang in zip(pos, eq, po, n_part, eul, strict=True)
     )
     return out

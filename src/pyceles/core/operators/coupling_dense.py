@@ -1,8 +1,8 @@
-from __future__ import annotations
-
 """Dense-assembly helpers built on the prepared-operator boundary."""
 
-from typing import Callable
+from __future__ import annotations
+
+from collections.abc import Callable, Iterable
 
 import numpy as np
 import numpy.typing as npt
@@ -55,7 +55,7 @@ def assemble_dense_A_numpy(
     A = np.zeros((n, n), dtype=prepared.dtype)
     A[np.arange(n), np.arange(n)] = 1.0 + 0.0j
 
-    pair_iter = ((i, j) for i in range(ns) for j in range(ns) if i != j)
+    pair_iter: Iterable[tuple[int, int]] = ((i, j) for i in range(ns) for j in range(ns) if i != j)
     if show_progress:
         pair_iter = tqdm(pair_iter, total=ns * (ns - 1), desc="Assemble A (blockwise)")
 

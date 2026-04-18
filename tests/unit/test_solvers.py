@@ -241,7 +241,7 @@ def test_solve_linear_system_direct_with_lu_uses_dense_residual_path():
     def A_mv(x: np.ndarray) -> np.ndarray:
         nonlocal calls
         calls += 1
-        return A @ np.asarray(x)
+        return cast(np.ndarray, A @ np.asarray(x))
 
     out = solve_linear_system(
         A_mv,
@@ -264,7 +264,7 @@ def test_solve_linear_system_direct_can_skip_final_residual_with_lu_only():
     def A_mv(x: np.ndarray) -> np.ndarray:
         nonlocal calls
         calls += 1
-        return A @ np.asarray(x)
+        return cast(np.ndarray, A @ np.asarray(x))
 
     out = solve_linear_system(
         A_mv,
@@ -595,7 +595,7 @@ def test_gmres_cupy_native_clamps_restart_to_system_size(monkeypatch):
             zero_shapes.append(tuple(int(v) for v in shape))
         return orig_zeros(shape, dtype=dtype)
 
-    cupy.zeros = _zeros  # type: ignore[method-assign]
+    cupy.zeros = _zeros
     monkeypatch.setattr(solvers, "import_cupy", lambda: (cupy, None))
     n = 4
     b = np.arange(1, n + 1, dtype=np.float64).astype(np.complex128)
@@ -827,13 +827,13 @@ def test_solve_linear_system_cupy_block_gmres_vector_only_operator_fallback(monk
         arr = np.asarray(x)
         if arr.ndim != 1:
             raise ValueError("vector-only operator")
-        return A @ arr
+        return cast(np.ndarray, A @ arr)
 
     def _m_vec_only(x: np.ndarray) -> np.ndarray:
         arr = np.asarray(x)
         if arr.ndim != 1:
             raise ValueError("vector-only preconditioner")
-        return arr / diag
+        return cast(np.ndarray, arr / diag)
 
     out_block = solve_linear_system(
         _a_vec_only,
@@ -1079,7 +1079,7 @@ def test_solve_linear_system_cupy_restart_solvers_verify_true_residual_each_rest
     def A_mv(x: np.ndarray) -> np.ndarray:
         nonlocal calls
         calls += 1
-        return A @ np.asarray(x)
+        return cast(np.ndarray, A @ np.asarray(x))
 
     if method == "lgmres":
         out = solve_linear_system(
@@ -1124,7 +1124,7 @@ def test_solve_linear_system_lgmres_cupy_skip_final_residual_avoids_extra_applie
     def A_mv(x: np.ndarray) -> np.ndarray:
         nonlocal calls
         calls += 1
-        return A @ np.asarray(x)
+        return cast(np.ndarray, A @ np.asarray(x))
 
     out = solve_linear_system(
         A_mv,
@@ -1179,7 +1179,7 @@ def test_solve_linear_system_bicgstab_cupy_skip_final_residual_avoids_extra_appl
     def A_mv(x: np.ndarray) -> np.ndarray:
         nonlocal calls
         calls += 1
-        return A @ np.asarray(x)
+        return cast(np.ndarray, A @ np.asarray(x))
 
     out = solve_linear_system(
         A_mv,
@@ -1320,7 +1320,7 @@ def test_gmres_warm_restart_roundtrip_from_h5(tmp_path):
     b = rng.standard_normal(n) + 1j * rng.standard_normal(n)
 
     def A_mv(x: np.ndarray) -> np.ndarray:
-        return A @ np.asarray(x)
+        return cast(np.ndarray, A @ np.asarray(x))
 
     # Strict reference solve from scratch.
     strict_cold = solve_linear_system(

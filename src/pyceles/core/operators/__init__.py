@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Prepared many-body operator package.
 
 This package owns the solver-side split between particle-local scattering
@@ -8,6 +6,8 @@ such as periodic, FFT, FMM, or GPU variants should plug in here through the
 owned coupling and preparation modules rather than re-entangling the operator
 stack into one file.
 """
+
+from __future__ import annotations
 
 from .base import Array, CouplingOperator, PrecomputableCouplingOperator, PreparedOperator
 from .coupling_dense import (
@@ -72,9 +72,9 @@ __all__ = [
     "MLFMMOptions",
     "MLFMMResolvedPlan",
     "PairwiseCouplingOperator",
-    "ParticleTOperator",
     "ParticleTGroupFactories",
     "ParticleTGroupPlan",
+    "ParticleTOperator",
     "ParticleTPreparationContext",
     "PrecomputableCouplingOperator",
     "PreparedOperator",
@@ -89,13 +89,13 @@ __all__ = [
     "make_axisymmetric_group_factory",
     "make_dense_group_factory",
     "make_prepared_A_and_rhs",
-    "prepare_mlfmm_coupling",
     "plan_particle_t_groups",
     "precompute_T_diagonal",
     "prepare_matvec",
+    "prepare_mlfmm_coupling",
     "prepare_mlfmm_cupy_coupling",
     "prepare_mlfmm_cupy_data",
-    "resolve_mlfmm_plan",
     "require_pairwise_coupling",
+    "resolve_mlfmm_plan",
     "rhs_Tb_numpy",
 ]

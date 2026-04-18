@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Layered-sphere regression against fixed MSTM-v4 oracle values.
 
 MSTM-v4 text outputs print far-field/cross-section aggregates with fixed-format
@@ -13,8 +11,10 @@ The three oracle configurations below are deliberately more challenging:
 - layer stacks are non-monotonic (alternating index trend across shells).
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import numpy as np
 
@@ -213,7 +213,10 @@ def _unpolarized_near_erms(case: LayeredMSTMOracle) -> np.ndarray:
         compute_near_field(run_tm, points=points, channel="mixed", show_progress=False).E_total,
         dtype=np.complex128,
     )
-    return np.sqrt(0.5 * (np.sum(np.abs(e_te) ** 2, axis=-1) + np.sum(np.abs(e_tm) ** 2, axis=-1)))
+    return cast(
+        np.ndarray,
+        np.sqrt(0.5 * (np.sum(np.abs(e_te) ** 2, axis=-1) + np.sum(np.abs(e_tm) ** 2, axis=-1))),
+    )
 
 
 def test_layered_spheres_match_mstm_oracles_for_cross_sections():

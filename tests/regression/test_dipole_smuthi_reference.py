@@ -1,11 +1,13 @@
-from __future__ import annotations
-
 """Local regression against SMUTHI-generated dipole reference values.
 
 This test intentionally hard-codes a small set of reference values extracted
 from a local SMUTHI diagnostic run so routine regression checks do not require
 re-running SMUTHI.
 """
+
+from __future__ import annotations
+
+from typing import cast
 
 import numpy as np
 
@@ -45,7 +47,10 @@ def _probe_points(shift_z: float) -> np.ndarray:
 
 
 def _intensity(pwp_te: dict[str, np.ndarray], pwp_tm: dict[str, np.ndarray]) -> np.ndarray:
-    return np.abs(np.asarray(pwp_te["coeff"])) ** 2 + np.abs(np.asarray(pwp_tm["coeff"])) ** 2
+    return cast(
+        np.ndarray,
+        np.abs(np.asarray(pwp_te["coeff"])) ** 2 + np.abs(np.asarray(pwp_tm["coeff"])) ** 2,
+    )
 
 
 def _run_case(

@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """SVWF projection routines (PWP -> incident coefficients)."""
+
+from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal
 

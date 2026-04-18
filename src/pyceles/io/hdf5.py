@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 import h5py
 import numpy as np
@@ -52,7 +52,7 @@ def _write_particle_descriptors(
     """Persist explicit particle descriptors in canonical typed form."""
     pg = group.create_group("particles")
     pg.attrs["schema"] = "pyceles.particles.v1"
-    pg.attrs["count"] = int(len(particles))
+    pg.attrs["count"] = len(particles)
     for idx, particle in enumerate(particles):
         pgroup = pg.create_group(str(idx))
         _write_dataset(
@@ -435,11 +435,10 @@ def _write_mapping_recursive(
             group.attrs[name] = value
             continue
         arr = np.asarray(value)
-        if arr.dtype.kind in {"U", "S", "O"}:
+        if arr.dtype.kind in {"U", "S", "O"} and arr.shape == ():
             # Keep non-numeric scalars as attrs for readability.
-            if arr.shape == ():
-                group.attrs[name] = str(arr.item())
-                continue
+            group.attrs[name] = str(arr.item())
+            continue
         _write_dataset(group, name, arr, compression=compression)
 
 

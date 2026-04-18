@@ -98,10 +98,8 @@ def test_translation_plm_coeff_table_matches_scalar_legendre_values():
         for l in range(max_degree + 1):
             for m in range(l + 1):
                 got = 0.0
-                jj = 0
-                for lam in range(l - m, -1, -2):
+                for jj, lam in enumerate(range(l - m, -1, -2)):
                     got += (st**m) * (ct**lam) * float(coeff_tab[jj, m, l])
-                    jj += 1
                 np.testing.assert_allclose(got, float(plm[l, m]), rtol=rtol, atol=atol)
 
 
@@ -274,7 +272,7 @@ def _vector_A_from_scalar_coeffs(
     Reference:
     Dufva et al., PIER B 4 (2008) 79-99, Sec. 5, Eq. (67).
     """
-    return (
+    return complex(
         0.5
         * np.sqrt((l_src - m_src) * (l_src + m_src + 1) * (l_dst - m_dst) * (l_dst + m_dst + 1))
         * _scalar_lookup(table, l_src, m_src + 1, l_dst, m_dst + 1)
@@ -329,7 +327,7 @@ def _vector_B_from_scalar_coeffs(
         / l_dst
         * _scalar_lookup(table, l_src, m_src, l_dst - 1, m_dst)
     )
-    return term_a + term_b + term_c
+    return complex(term_a + term_b + term_c)
 
 
 @pytest.mark.parametrize("lmax", [1, 2, 3])

@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Plan-resolution helpers for the pyceles-native MLFMM coupling backend."""
+
+from __future__ import annotations
 
 import math
 from dataclasses import dataclass
@@ -42,6 +42,7 @@ from .mlfmm_partition import (
 
 MLFMMStage = Literal["direct", "single_level", "multilevel"]
 MLFMMLeafApplyMode = Literal["dense", "on_the_fly"]
+COMPLEX128_DTYPE = np.dtype(np.complex128)
 _ROKHLIN_MINIMUM_ORDERS = (3, 7, 11, 17, 24, 30)
 """Conservative minimum truncation orders for discrete accuracy levels,
 inspired from the heuristic values used in FasTMM.
@@ -206,9 +207,9 @@ class MLFMMCouplingOperator:
     positions: np.ndarray
     radial_lut: RadialLUT
     resolved_plan: MLFMMResolvedPlan
-    dtype: np.dtype = np.dtype(np.complex128)
-    near_dtype: np.dtype = np.dtype(np.complex128)
-    far_dtype: np.dtype = np.dtype(np.complex128)
+    dtype: np.dtype = COMPLEX128_DTYPE
+    near_dtype: np.dtype = COMPLEX128_DTYPE
+    far_dtype: np.dtype = COMPLEX128_DTYPE
     cache_translation_blocks: bool = False
     single_level: MLFMMSingleLevelOperators | None = None
     multilevel: MLFMMMultilevelOperators | None = None
@@ -318,7 +319,7 @@ class MLFMMCouplingOperator:
                     "levels": [
                         {
                             "level": int(self.resolved_plan.selected_depth),
-                            "n_boxes": int(len(self.single_level.leaf_cell_coords)),
+                            "n_boxes": len(self.single_level.leaf_cell_coords),
                             "box_order": int(self.single_level.box_order),
                             "translator_order": int(self.single_level.translator_order),
                             "grid_order": int(self.single_level.grid_order),
@@ -346,7 +347,7 @@ class MLFMMCouplingOperator:
                     for transfer in self.multilevel.transfers
                 ],
                 "levels": {
-                    "n_levels": int(len(levels)),
+                    "n_levels": len(levels),
                     "translator_orders": [int(level.translator_order) for level in levels],
                     "grid_orders": [int(level.grid_order) for level in levels],
                     "direction_counts": sorted(
@@ -544,7 +545,7 @@ def resolve_mlfmm_plan(
         root_side_length=float(root_side_length),
         leaf_side_length=float(leaf_side_length),
         max_global_radius=float(max_global_radius),
-        occupied_leaf_count=int(len(partition.leaves)),
+        occupied_leaf_count=len(partition.leaves),
         max_particles_per_leaf=int(np.max(occupancies)) if occupancies.size else 0,
         partition=partition,
     )
@@ -957,7 +958,7 @@ def _single_level_memory_diagnostics(
 
     nm = int(n_modes(int(lmax)))
     box_nm = int(n_modes(int(operators.box_order)))
-    n_leaves = int(len(operators.partition.leaves))
+    n_leaves = len(operators.partition.leaves)
     ndir = int(operators.directional.grid.directions.shape[0])
     far_itemsize = int(np.dtype(far_dtype).itemsize)
     near_itemsize = int(np.dtype(near_dtype).itemsize)
@@ -974,7 +975,7 @@ def _single_level_memory_diagnostics(
         "plan_summary": dict(plan_summary),
         "leaf_apply": {
             "mode": str(operators.leaf_apply_mode),
-            "group_count": int(len(operators.leaf_groups)),
+            "group_count": len(operators.leaf_groups),
             "occupancies": [int(group.occupancy) for group in operators.leaf_groups],
             **leaf_apply,
         },
@@ -1016,7 +1017,7 @@ def _multilevel_memory_diagnostics(
 
     nm = int(n_modes(int(lmax)))
     leaf_box_nm = int(n_modes(int(operators.levels[int(operators.leaf_level)].box_order)))
-    n_leaves = int(len(operators.partition.leaves))
+    n_leaves = len(operators.partition.leaves)
     far_itemsize = int(np.dtype(far_dtype).itemsize)
     near_itemsize = int(np.dtype(near_dtype).itemsize)
     outgoing_bytes = int(
@@ -1060,7 +1061,7 @@ def _multilevel_memory_diagnostics(
         "plan_summary": dict(plan_summary),
         "leaf_apply": {
             "mode": str(operators.leaf_apply_mode),
-            "group_count": int(len(operators.leaf_groups)),
+            "group_count": len(operators.leaf_groups),
             "occupancies": [int(group.occupancy) for group in operators.leaf_groups],
             **leaf_apply,
         },
@@ -2290,10 +2291,7 @@ def prepare_mlfmm_coupling(
             f"Unsupported leaf-map backend {leaf_map_backend!r}. Use 'numpy' or 'cupy'."
         )
     leaf_backend_lit: Literal["numpy", "cupy"]
-    if leaf_backend == "cupy":
-        leaf_backend_lit = "cupy"
-    else:
-        leaf_backend_lit = "numpy"
+    leaf_backend_lit = "cupy" if leaf_backend == "cupy" else "numpy"
     near_out_dtype = np.dtype(dtype)
     far_out_dtype = np.dtype(np.complex128)
     pts = np.asarray(positions, dtype=float)

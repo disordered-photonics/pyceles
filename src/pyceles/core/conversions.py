@@ -1,7 +1,8 @@
-from __future__ import annotations
-
 """Canonical basis-conversion helpers for SVWF/PVWF workflows."""
 
+from __future__ import annotations
+
+from collections.abc import Iterable
 from functools import cache
 from typing import TYPE_CHECKING
 
@@ -101,16 +102,14 @@ def transformation_coefficients(
     """
     ifac = (-1j) if dagger else (1j)
     mabs = abs(int(m))
-    if int(tau) == int(pol):
-        spher_fun = taulm[l, mabs]
-    else:
-        spher_fun = int(m) * pilm[l, mabs]
-    return (
+    spher_fun = taulm[l, mabs] if int(tau) == int(pol) else int(m) * pilm[l, mabs]
+    return np.asarray(
         -1
         / (ifac ** (l + 1))
         / np.sqrt(2 * l * (l + 1))
         * (ifac * (pol == 1) + (pol == 2))
-        * spher_fun
+        * spher_fun,
+        dtype=np.result_type(spher_fun, np.complex128),
     )
 
 
@@ -313,7 +312,7 @@ def _svwf_to_pwp_common(
         "coeff": np.zeros((Na, Nb), dtype=ctype),
     }
 
-    sphere_iter = range(Ns)
+    sphere_iter: Iterable[int] = range(Ns)
     if show_progress:
         sphere_iter = tqdm(sphere_iter, desc="PWP (SVWF->PWP)")
 

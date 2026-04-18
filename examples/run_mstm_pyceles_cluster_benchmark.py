@@ -160,10 +160,7 @@ def _write_mstm_input(
             raise ValueError("scattering_map_dimension must be >= 3 for map model 1.")
     elif map_model == 0:
         if scattering_map_increment_deg is None:
-            if int(cfg.n_beta) > 1:
-                map_increment = 180.0 / float(int(cfg.n_beta) - 1)
-            else:
-                map_increment = 1.0
+            map_increment = 180.0 / float(int(cfg.n_beta) - 1) if int(cfg.n_beta) > 1 else 1.0
         else:
             map_increment = float(scattering_map_increment_deg)
         if map_increment <= 0.0:
@@ -430,12 +427,12 @@ def _parse_mstm_output(output_path: Path) -> dict[str, Any]:
     return {
         "cross_section_radius_dimless": acs,
         "cross_section_area_dimless": area,
-        "max_iterations_input": int(round(solver_in[0])),
+        "max_iterations_input": round(solver_in[0]),
         "solution_epsilon_input": float(solver_in[1]),
         "mie_epsilon_input": float(solver_in[2]),
-        "max_mie_order_used": int(round(mie_block[0])),
-        "number_equations": int(round(mie_block[1])),
-        "solver_iterations": int(round(solver_out[0])),
+        "max_mie_order_used": round(mie_block[0]),
+        "number_equations": round(mie_block[1]),
+        "solver_iterations": round(solver_out[0]),
         "solver_residual": float(solver_out[1]),
         "solver_time_s": float(solver_out[2]),
         "Qext_unpol": float(qext_u),
@@ -473,17 +470,17 @@ def _parse_mstm_nearfield_output(path: Path) -> dict[str, Any]:
         return i
 
     idx = _next_nonempty(idx)
-    run_number = int(round(_extract_float_tokens(lines[idx])[0]))
+    run_number = round(_extract_float_tokens(lines[idx])[0])
     idx += 1
     idx = _next_nonempty(idx)
-    n_intersecting = int(round(_extract_float_tokens(lines[idx])[0]))
+    n_intersecting = round(_extract_float_tokens(lines[idx])[0])
     idx += 1
     for _ in range(n_intersecting):
         idx = _next_nonempty(idx)
         idx += 1
 
     idx = _next_nonempty(idx)
-    n_boundaries = int(round(_extract_float_tokens(lines[idx])[0]))
+    n_boundaries = round(_extract_float_tokens(lines[idx])[0])
     idx += 1
     for _ in range(n_boundaries):
         idx = _next_nonempty(idx)
@@ -499,7 +496,7 @@ def _parse_mstm_nearfield_output(path: Path) -> dict[str, Any]:
     dims_tokens = _extract_float_tokens(lines[idx])
     if len(dims_tokens) < 3:
         raise RuntimeError("Malformed near-field grid dimensions line.")
-    dims = np.asarray([int(round(v)) for v in dims_tokens[:3]], dtype=int)
+    dims = np.asarray([round(v) for v in dims_tokens[:3]], dtype=int)
     idx += 1
 
     npts = int(np.prod(dims))
@@ -867,7 +864,7 @@ def _sample_py_intensity_at_kxy(
     pts = np.column_stack([kx[mask], ky[mask]])
     tree = cKDTree(pts)
     _, idx = tree.query(np.column_stack([kx_targets, ky_targets]), k=1)
-    return inten[mask][idx]
+    return cast(np.ndarray, inten[mask][idx])
 
 
 def _real_metrics(model_values: np.ndarray, ref_values: np.ndarray) -> dict[str, float]:
@@ -1161,7 +1158,7 @@ def _sample_scalar_at_kxy(
         np.column_stack([np.asarray(target_kx, dtype=float), np.asarray(target_ky, dtype=float)]),
         k=1,
     )
-    return src_vals[idx]
+    return cast(np.ndarray, src_vals[idx])
 
 
 def _mstm_s11_on_py_grid(py_map: dict[str, Any], mstm_map: dict[str, Any]) -> np.ndarray:
@@ -1182,7 +1179,7 @@ def _mstm_s11_on_py_grid(py_map: dict[str, Any], mstm_map: dict[str, Any]) -> np
             target_ky=ky_py[mask],
         )
         out[mask] = sampled
-    return np.nan_to_num(out, nan=0.0)
+    return cast(np.ndarray, np.nan_to_num(out, nan=0.0))
 
 
 def _plot_s11_maps_with_pyceles_helpers(
@@ -1506,8 +1503,7 @@ def main() -> None:
             proc = subprocess.run(
                 [str(cfg.mstm_exe), inpf.name],
                 cwd=str(cfg.workdir),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                capture_output=True,
                 text=True,
                 check=False,
             )

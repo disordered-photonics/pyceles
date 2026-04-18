@@ -76,7 +76,7 @@ class _ForcedRepresentationParticle(Particle):
 def _wrapped_particle_t_diag(group_particles, context):
     diag_rows = []
     for wrapped in group_particles:
-        base = wrapped.base_particle  # type: ignore[attr-defined]
+        base = wrapped.base_particle
         Td = particle_T_diagonal(
             lmax=context.lmax,
             k_medium=context.k,
@@ -372,7 +372,7 @@ def test_prepare_matvec_accepts_custom_dense_group_factory():
     def provide_dense_blocks(group_particles, context):
         nm = context.n_modes
         assert len(group_particles) == 1
-        scale = complex(group_particles[0].scale)  # type: ignore[attr-defined]
+        scale = complex(group_particles[0].scale)
         base = np.eye(nm, dtype=context.dtype) * scale
         base[0, 1] = 0.25 - 0.1j
         return base[None, :, :]
@@ -629,7 +629,7 @@ def test_sphere_and_layered_match_when_forced_through_axisymmetric_factory():
 
 
 def test_prepare_matvec_rejects_dense_representation_without_canonical_block_dispatch():
-    lmax, k, positions, radii, n_particle, _, n_medium, x, b = _sample_problem()
+    lmax, k, positions, radii, n_particle, _, n_medium, _x, _b = _sample_problem()
     base_particles: list[Particle] = [
         Sphere(
             position=tuple(positions[0].tolist()),
@@ -814,7 +814,7 @@ def test_block_cache_fills_once_and_reuses():
 
 
 def test_prepared_operator_accepts_generic_coupling_protocol():
-    lmax, k, positions, _, _, particles, n_medium, x, _ = _sample_problem()
+    lmax, k, _positions, _, _, particles, n_medium, x, _ = _sample_problem()
     prepared = prepare_matvec(
         lmax=lmax,
         k=k,

@@ -84,7 +84,7 @@ def interpolate_center_pixels(
 
     axis_0_values = np.asarray(axis_0_grid[0, :], dtype=float)
     axis_1_values = np.asarray(axis_1_grid[:, 0], dtype=float)
-    for uu, vv in zip(u, v):
+    for uu, vv in zip(u, v, strict=True):
         i0 = int(np.argmin(np.abs(axis_0_values - uu)))
         i1 = int(np.argmin(np.abs(axis_1_values - vv)))
         if not (

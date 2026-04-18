@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Sphere regression against fixed miepython far-field and near-field oracles.
 
 These tests intentionally hard-code a compact set of reference values derived
@@ -13,6 +11,8 @@ For this incidence, `pyceles`' source convention corresponds to an incident
 electric field polarized along ``+x``, which matches the fixed plane-wave
 convention used by `miepython.field`.
 """
+
+from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import cast

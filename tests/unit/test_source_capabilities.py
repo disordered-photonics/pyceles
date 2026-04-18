@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, cast
+from typing import cast
 
 import numpy as np
 import numpy.typing as npt
@@ -50,7 +51,7 @@ class _ExplicitInfinitePowerSource:
     def jones_coefficients(self) -> tuple[complex, complex]:
         return 1.0 + 0.0j, 0.0 + 0.0j
 
-    def with_polarization(self, polarization: str) -> "_ExplicitInfinitePowerSource":
+    def with_polarization(self, polarization: str) -> _ExplicitInfinitePowerSource:
         return _ExplicitInfinitePowerSource(
             wavelength=self.wavelength,
             medium_n=self.medium_n,

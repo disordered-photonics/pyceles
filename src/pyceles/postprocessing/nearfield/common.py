@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from functools import cache
+from typing import cast
 
 import numpy as np
 from scipy.special import spherical_jn, spherical_yn
@@ -39,7 +40,7 @@ def dx_xz_hankel1(l: int, x: np.ndarray) -> np.ndarray:
 
 def contract_modes(mode_coeffs: np.ndarray, mode_tensor: np.ndarray) -> np.ndarray:
     """Contract mode axis: (M,) x (B,M,3) -> (B,3)."""
-    return np.matmul(np.transpose(mode_tensor, (0, 2, 1)), mode_coeffs)
+    return cast(np.ndarray, np.matmul(np.transpose(mode_tensor, (0, 2, 1)), mode_coeffs))
 
 
 def build_internal_mode_tensors(

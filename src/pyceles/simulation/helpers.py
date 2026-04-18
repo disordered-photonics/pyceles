@@ -1,9 +1,9 @@
-from __future__ import annotations
-
 """Shared non-public helpers for simulation geometry and startup behavior."""
 
+from __future__ import annotations
+
 import warnings
-from typing import Sequence
+from collections.abc import Iterable, Sequence
 
 import numpy as np
 import numpy.typing as npt
@@ -120,7 +120,7 @@ def first_overlapping_circumscribing_pair(
     from scipy.spatial import cKDTree
 
     tree = cKDTree(pos)
-    i_iter = range(n - 1)
+    i_iter: Iterable[int] = range(n - 1)
     if show_progress:
         i_iter = tqdm(i_iter, total=n - 1, desc="Geometry check (circumspheres)")
 

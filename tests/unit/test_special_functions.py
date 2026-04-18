@@ -1,3 +1,5 @@
+from typing import cast
+
 import numpy as np
 from scipy.special import spherical_jn, spherical_yn
 
@@ -7,7 +9,7 @@ from pyceles.core.translation import spherical_bessel_jy
 def _dx_xj(n: int, z: np.ndarray) -> np.ndarray:
     jn = spherical_jn(n, z)
     djn = spherical_jn(n, z, derivative=True)
-    return jn + z * djn
+    return cast(np.ndarray, jn + z * djn)
 
 
 def _dx_xh(n: int, z: np.ndarray) -> np.ndarray:
@@ -17,7 +19,7 @@ def _dx_xh(n: int, z: np.ndarray) -> np.ndarray:
     djn = spherical_jn(n, z, derivative=True)
     dyn = spherical_yn(n, z, derivative=True)
     dhn = djn + 1j * dyn
-    return hn + z * dhn
+    return cast(np.ndarray, hn + z * dhn)
 
 
 def test_spherical_bessel_and_hankel_against_smuthi_prototype_subset():

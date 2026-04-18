@@ -181,7 +181,7 @@ def wigner_D(l: int, m: int, m_prime: int, alpha: float, beta: float, gamma: flo
     else:
         delta = (-1) ** (m + m_prime)
 
-    return (
+    return complex(
         ((-1) ** (m + m_prime))
         * np.exp(1j * m * alpha)
         * delta

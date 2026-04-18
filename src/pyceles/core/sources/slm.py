@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, replace
-from typing import Callable
 
 import numpy as np
 import numpy.typing as npt
@@ -60,7 +60,7 @@ class SLMSource:
     def jones_coefficients(self) -> tuple[complex, complex]:
         return self.base_source.jones_coefficients()
 
-    def with_polarization(self, polarization: PolarizationInput) -> "SLMSource":
+    def with_polarization(self, polarization: PolarizationInput) -> SLMSource:
         return replace(self, base_source=self.base_source.with_polarization(polarization))
 
     def has_finite_incident_power(self) -> bool:

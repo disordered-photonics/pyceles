@@ -123,7 +123,7 @@ def legendre_normalized_trigon(ct: Any, st: Any, lmax: int, xp=None):
     a_lm = xp.asarray(a_lm_np, dtype=ct.dtype)
     b_lm = xp.asarray(b_lm_np, dtype=ct.dtype)
 
-    plm = xp.zeros((lmax + 1, lmax + 1) + ct.shape, dtype=ct.dtype)
+    plm = xp.zeros((lmax + 1, lmax + 1, *ct.shape), dtype=ct.dtype)
 
     # m=0 base
     plm[0, 0] = xp.ones_like(ct) * (xp.sqrt(2.0) / 2.0)
@@ -169,10 +169,10 @@ def spherical_functions_trigon(ct: Any, st: Any, lmax: int, xp=None, *, return_p
     a_lm = xp.asarray(a_lm_np, dtype=ct.dtype)
     b_lm = xp.asarray(b_lm_np, dtype=ct.dtype)
 
-    plm = xp.zeros((lmax + 1, lmax + 1) + ct.shape, dtype=ct.dtype)
+    plm = xp.zeros((lmax + 1, lmax + 1, *ct.shape), dtype=ct.dtype)
     pi = xp.zeros_like(plm)
     tau = xp.zeros_like(plm)
-    pprimel0 = xp.zeros((lmax + 1,) + ct.shape, dtype=ct.dtype)
+    pprimel0 = xp.zeros((lmax + 1, *ct.shape), dtype=ct.dtype)
 
     # base
     plm[0, 0] = xp.ones_like(ct) * (xp.sqrt(2.0) / 2.0)

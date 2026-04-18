@@ -541,7 +541,7 @@ preconditioner remains useful on the NumPy reference path, but it is not a
 speed win on the CuPy path: restarted CuPy GMRES with the raw-kernel backend is
 already strong enough here that the preconditioner build/apply overhead makes
 the solve slower.
-  
+
 ## Cumulative Optimization Notes
 
 The current performance is the cumulative result of several tweaks.

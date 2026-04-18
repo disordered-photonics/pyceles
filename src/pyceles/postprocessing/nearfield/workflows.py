@@ -192,7 +192,7 @@ def compute_near_field(
         vec_shape: tuple[int, ...] = (3,)
         mask_shape: tuple[int, ...] = ()
     else:
-        vec_shape = lead_shape + (3,)
+        vec_shape = (*lead_shape, 3)
         mask_shape = lead_shape
 
     return NearFieldComponents(

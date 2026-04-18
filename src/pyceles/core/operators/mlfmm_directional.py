@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Directional sampled-basis helpers for pyceles MLFMM."""
+
+from __future__ import annotations
 
 import math
 from dataclasses import dataclass
@@ -82,7 +82,7 @@ class MLFMMDirectionalInterpolation:
 
 
 def _cache_key_factor(value: float) -> int:
-    return int(round(float(value) * 1_000_000))
+    return round(float(value) * 1_000_000)
 
 
 def _from_cache_key_factor(value: int) -> float:

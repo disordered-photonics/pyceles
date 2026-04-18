@@ -23,11 +23,8 @@ def test_codebase_uses_particle_only_simulation_constructor() -> None:
                 if not isinstance(node, ast.Call):
                     continue
                 is_sim_call = (
-                    isinstance(node.func, ast.Name)
-                    and node.func.id == "Simulation"
-                    or isinstance(node.func, ast.Attribute)
-                    and node.func.attr == "Simulation"
-                )
+                    isinstance(node.func, ast.Name) and node.func.id == "Simulation"
+                ) or (isinstance(node.func, ast.Attribute) and node.func.attr == "Simulation")
                 if not is_sim_call:
                     continue
                 kws = {kw.arg for kw in node.keywords if kw.arg is not None}

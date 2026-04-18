@@ -1,9 +1,9 @@
-from __future__ import annotations
-
 """Pairwise free-space coupling backend and low-level pairwise kernels."""
 
+from __future__ import annotations
+
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Optional
 
 import numpy as np
 import numpy.typing as npt
@@ -13,6 +13,8 @@ from pyceles.core.indexing import n_modes
 from pyceles.core.translation import RadialLUT, translation_ab5_table, translation_block
 
 from .base import CouplingOperator
+
+COMPLEX128_DTYPE = np.dtype(np.complex128)
 
 
 @dataclass
@@ -24,7 +26,7 @@ class PairwiseCouplingOperator:
     positions: np.ndarray
     ab5: np.ndarray
     radial_lut: RadialLUT
-    dtype: np.dtype = np.dtype(np.complex128)
+    dtype: np.dtype = COMPLEX128_DTYPE
     cache_translation_blocks: bool = False
     _W_cache: dict[tuple[int, int], np.ndarray] = field(default_factory=dict)
 
@@ -47,7 +49,9 @@ class PairwiseCouplingOperator:
         if not self.cache_translation_blocks:
             return
         ns = self.positions.shape[0]
-        pair_iter = ((i, j) for i in range(ns) for j in range(ns) if i != j)
+        pair_iter: Iterable[tuple[int, int]] = (
+            (i, j) for i in range(ns) for j in range(ns) if i != j
+        )
         if show_progress:
             pair_iter = tqdm(pair_iter, total=ns * (ns - 1), desc="Populate W cache")
         for i, j in pair_iter:
@@ -82,8 +86,8 @@ def apply_W_numpy(
     ab5: np.ndarray,
     *,
     dtype: npt.DTypeLike = np.complex128,
-    radial_lut: Optional[RadialLUT],
-    block_cache: Optional[dict[tuple[int, int], np.ndarray]] = None,
+    radial_lut: RadialLUT | None,
+    block_cache: dict[tuple[int, int], np.ndarray] | None = None,
 ) -> np.ndarray:
     """Compute y = W x (NumPy), excluding self-interaction."""
     out_dtype = np.dtype(dtype)
@@ -119,8 +123,8 @@ def apply_A_numpy(
     T_diag: np.ndarray | None = None,
     ab5: np.ndarray | None = None,
     dtype: npt.DTypeLike = np.complex128,
-    radial_lut: Optional[RadialLUT],
-    block_cache: Optional[dict[tuple[int, int], np.ndarray]] = None,
+    radial_lut: RadialLUT | None,
+    block_cache: dict[tuple[int, int], np.ndarray] | None = None,
 ) -> np.ndarray:
     """Compute y = (I - T W) x with precomputed diagonal T entries."""
     from .prepare import build_T_mode_diagonal

@@ -1,8 +1,9 @@
-from __future__ import annotations
-
 """Solve-phase helpers for the high-level simulation workflow."""
 
-from typing import TYPE_CHECKING, Mapping
+from __future__ import annotations
+
+from collections.abc import Iterable, Mapping
+from typing import TYPE_CHECKING
 
 import numpy as np
 from tqdm.auto import tqdm
@@ -48,7 +49,7 @@ def _assemble_dense_operator_via_matvec(
     """
     A = np.empty((n, n), dtype=dtype)
     eye = np.eye(n, dtype=dtype)
-    col_iter = range(n)
+    col_iter: Iterable[int] = range(n)
     if show_progress:
         col_iter = tqdm(col_iter, desc="Assemble A (dense via matvec)")
     for j in col_iter:
@@ -61,7 +62,7 @@ if TYPE_CHECKING:
 
 
 def validate_source_compatibility(
-    sim: "Simulation",
+    sim: Simulation,
     source: Source,
     *,
     label: str,
@@ -90,9 +91,7 @@ def validate_source_compatibility(
         )
 
 
-def normalize_sources_argument(
-    sim: "Simulation", sources: Mapping[str, Source]
-) -> dict[str, Source]:
+def normalize_sources_argument(sim: Simulation, sources: Mapping[str, Source]) -> dict[str, Source]:
     """Normalize multi-source mapping inputs to a deterministic labeled dictionary."""
     if not isinstance(sources, Mapping):
         raise TypeError("`sources` must be a mapping `{label: source}`.")
@@ -110,7 +109,7 @@ def normalize_sources_argument(
 
 
 def solve_sources_core(
-    sim: "Simulation",
+    sim: Simulation,
     labeled_sources: Mapping[str, Source],
     *,
     solver_compute_final_residual: bool | None = None,

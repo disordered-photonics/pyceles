@@ -148,7 +148,7 @@ def _validated_int(name: str, value: int, *, minimum: int | None = None) -> int:
         raise ValueError(f"`{name}` must be an integer. Got {value!r}.") from exc
     if not np.isfinite(value_f) or (not np.isclose(value_f, round(value_f), atol=0.0)):
         raise ValueError(f"`{name}` must be an integer. Got {value!r}.")
-    value_i = int(round(value_f))
+    value_i = round(value_f)
     if minimum is not None and value_i < int(minimum):
         raise ValueError(f"`{name}` must be >= {int(minimum)}. Got {value_i}.")
     return value_i

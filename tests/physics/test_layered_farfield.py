@@ -1,10 +1,10 @@
-from __future__ import annotations
-
 """Physics-side invariants for layered far-field/power behavior.
 
 These tests complement external-oracle regression by checking exact internal
 consistency identities that should hold independently of MSTM references.
 """
+
+from __future__ import annotations
 
 import numpy as np
 

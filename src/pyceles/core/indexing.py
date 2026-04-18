@@ -23,7 +23,7 @@ This ordering avoids interleaving and matches CELES/SMUTHI convention more direc
 
 from __future__ import annotations
 
-from typing import Iterator, Tuple
+from collections.abc import Iterator
 
 
 def n_modes(lmax: int) -> int:
@@ -64,7 +64,7 @@ def index_vswf(l: int, m: int, tau: int, lmax: int) -> int:
     return (tau - 1) * n_scalar(lmax) + scalar_index(l, m)
 
 
-def unindex_vswf(idx: int, lmax: int) -> Tuple[int, int, int]:
+def unindex_vswf(idx: int, lmax: int) -> tuple[int, int, int]:
     """Inverse map from global mode index to `(l,m,tau)`."""
     idx = int(idx)
     lmax = int(lmax)
@@ -82,7 +82,7 @@ def unindex_vswf(idx: int, lmax: int) -> Tuple[int, int, int]:
     return l, m, tau
 
 
-def iter_modes(lmax: int) -> Iterator[Tuple[int, int, int, int]]:
+def iter_modes(lmax: int) -> Iterator[tuple[int, int, int, int]]:
     """Yield (tau, l, m, idx) in CELES order."""
     lmax = int(lmax)
     Ns = n_scalar(lmax)

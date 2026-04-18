@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Compatibility facade for source models and projection helpers.
 
 Canonical implementations live in:
@@ -7,6 +5,8 @@ Canonical implementations live in:
 - `pyceles.core.conversions`
 - `pyceles.core.projection`
 """
+
+from __future__ import annotations
 
 from .conversions import (
     angular_spectrum_to_svwf_regular,
@@ -46,26 +46,26 @@ __all__ = [
     "BesselBeam",
     "CartesianPolarizedBesselBeam",
     "CartesianPolarizedFocusedLaguerreGaussianBeam",
-    "DipoleSource",
     "DipoleCollection",
+    "DipoleSource",
     "FocusedLaguerreGaussianBeam",
     "GaussianBeam",
     "JonesPolarizedSource",
     "LaguerreGaussianBeam",
     "PlaneWave",
-    "SLMSource",
     "Polarization",
     "PolarizationInput",
+    "SLMSource",
     "Source",
-    "pwp_to_svwf_regular",
     "angular_spectrum_to_svwf_regular",
-    "svwf_regular_to_pwp",
-    "svwf_outgoing_to_pwp",
     "incident_coeffs_planewave",
     "incident_coeffs_wavebundle_normal_incidence",
     "is_normal_incidence",
     "polarization_to_jones",
     "project_source_basis_to_svwf",
     "project_source_to_svwf",
+    "pwp_to_svwf_regular",
+    "svwf_outgoing_to_pwp",
+    "svwf_regular_to_pwp",
     "transformation_coefficients",
 ]

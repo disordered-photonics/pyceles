@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Benchmark FP32/FP64 GPU penalty for simple and transcendental-heavy kernels.
 
 This script is a small hardware diagnostic for users deciding whether to run
@@ -13,6 +11,8 @@ It reports:
 The transcendental-heavy ratio is often a practical upper bound for kernels
 that spend substantial time in angle/phase setup.
 """
+
+from __future__ import annotations
 
 import argparse
 import json

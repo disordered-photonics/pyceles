@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Sequence
 
 import numpy as np
 
@@ -49,12 +49,15 @@ def classify_internal_points(
 
     n_medium_c = complex(n_medium)
     for particle in particles:
-        if isinstance(particle, Sphere) and complex(particle.refractive_index) == n_medium_c:
-            idx = np.zeros((0,), dtype=np.intp)
-        elif isinstance(particle, Spheroid) and complex(particle.refractive_index) == n_medium_c:
-            idx = np.zeros((0,), dtype=np.intp)
-        elif isinstance(particle, LayeredSphere) and all(
-            complex(n_layer) == n_medium_c for n_layer in particle.layer_refractive_indices
+        if (
+            (isinstance(particle, Sphere) and complex(particle.refractive_index) == n_medium_c)
+            or (isinstance(particle, Spheroid) and complex(particle.refractive_index) == n_medium_c)
+            or (
+                isinstance(particle, LayeredSphere)
+                and all(
+                    complex(n_layer) == n_medium_c for n_layer in particle.layer_refractive_indices
+                )
+            )
         ):
             idx = np.zeros((0,), dtype=np.intp)
         else:

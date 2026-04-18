@@ -1,14 +1,15 @@
-from __future__ import annotations
-
 """Native CuPy Krylov implementations used by pyceles.
 
 This module keeps restarted GMRES state on device memory and avoids delegating
 inner-iteration linear-algebra work to host-side SciPy/NumPy routines.
 """
 
+from __future__ import annotations
+
 import inspect
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Literal
+from typing import Any, Literal
 
 import numpy as np
 import numpy.typing as npt
@@ -1782,12 +1783,12 @@ def block_gmres_cupy_native(
 
 
 __all__ = [
-    "CuPyGMRESNativeResult",
-    "CuPyBlockGMRESNativeResult",
     "CuPyBiCGSTABNativeResult",
-    "block_gmres_cupy_native",
-    "gmres_cupy_native",
-    "fgmres_cupy_native",
-    "lgmres_cupy_native",
+    "CuPyBlockGMRESNativeResult",
+    "CuPyGMRESNativeResult",
     "bicgstab_cupy_native",
+    "block_gmres_cupy_native",
+    "fgmres_cupy_native",
+    "gmres_cupy_native",
+    "lgmres_cupy_native",
 ]

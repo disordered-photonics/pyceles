@@ -137,10 +137,7 @@ def _render_quick_ldos_map(
         (ldos_avg, "Orientation-averaged enhancement"),
     ]
     finite_vals = np.concatenate([arr[np.isfinite(arr)] for arr, _ in panel_data])
-    if finite_vals.size > 0:
-        delta = max(1e-6, float(np.max(np.abs(finite_vals - 1.0))))
-    else:
-        delta = 1e-3
+    delta = max(1e-06, float(np.max(np.abs(finite_vals - 1.0)))) if finite_vals.size > 0 else 0.001
     vmin = 1.0 - delta
     vmax = 1.0 + delta
     norm = mcolors.TwoSlopeNorm(vmin=vmin, vcenter=1.0, vmax=vmax)
@@ -152,7 +149,7 @@ def _render_quick_ldos_map(
         (ldos_pz, "LDOS enhancement (pz)"),
         (ldos_avg, "LDOS enhancement (avg)"),
     ]
-    for ax, (data, title) in zip(np.ravel(axes), panel_data):
+    for ax, (data, title) in zip(np.ravel(axes), panel_data, strict=True):
         im = pcl.io.plot_field_component(
             ax,
             xx,

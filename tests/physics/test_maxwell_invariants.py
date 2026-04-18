@@ -6,11 +6,13 @@ import pyceles as pcl
 
 
 def _div(field: np.ndarray, h: float) -> complex:
-    return (
-        np.gradient(field[..., 0], h, axis=0)
-        + np.gradient(field[..., 1], h, axis=1)
-        + np.gradient(field[..., 2], h, axis=2)
-    ).mean()
+    return complex(
+        (
+            np.gradient(field[..., 0], h, axis=0)
+            + np.gradient(field[..., 1], h, axis=1)
+            + np.gradient(field[..., 2], h, axis=2)
+        ).mean()
+    )
 
 
 def _curl(field: np.ndarray, h: float) -> np.ndarray:

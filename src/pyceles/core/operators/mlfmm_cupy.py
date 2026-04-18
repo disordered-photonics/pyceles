@@ -1,16 +1,17 @@
-from __future__ import annotations
-
 """CuPy-side prepared-data wrappers for the NumPy MLFMM reference plan.
 
 CPU build/planning remains the single source of truth in `mlfmm.py`.
 This module validates and uploads repeated-apply structures to device memory.
 """
 
+from __future__ import annotations
+
 import time
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field, fields, is_dataclass, replace
 from functools import cache
 from importlib import import_module
-from typing import Any, Iterable, Iterator, Literal, cast
+from typing import Any, Literal, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -33,6 +34,8 @@ from .mlfmm import (
 )
 from .mlfmm_directional import MLFMMDirectionalTransforms
 from .mlfmm_partition import MLFMMPartition
+
+COMPLEX128_DTYPE = np.dtype(np.complex128)
 
 Offset3 = tuple[int, int, int]
 # CuPy production runs use on-the-fly leaf apply; dense leaf payloads remain
@@ -950,7 +953,7 @@ def build_leaf_box_maps_cupy(
     nmodes_in = int(n_modes(lmax_in))
     nmodes_out = int(n_modes(lmax_out))
     leaves = tuple(sorted(partition.leaves, key=lambda leaf: int(leaf.id)))
-    n_leaves = int(len(leaves))
+    n_leaves = len(leaves)
     if n_leaves == 0:
         return tuple(), tuple()
 
@@ -1402,7 +1405,7 @@ def _build_host_leaf_otf_payload(
 
     positions_arr = np.asarray(positions, dtype=float).reshape(-1, 3)
     leaves = tuple(sorted(partition.leaves, key=lambda leaf: int(leaf.id)))
-    n_leaves = int(len(leaves))
+    n_leaves = len(leaves)
     leaf_by_id = {int(leaf.id): leaf for leaf in leaves}
     for leaf_id in range(n_leaves):
         if leaf_id not in leaf_by_id:
@@ -1897,7 +1900,7 @@ def _upload_leaf_apply_groups_dense(
 ) -> tuple[int, tuple[CuPyLeafApplyGroupData, ...]]:
     """Upload grouped leaf operators with uniform occupancy for batched GEMM."""
 
-    n_leaves = int(len(aggregation))
+    n_leaves = len(aggregation)
     offsets = partition.leaf_particle_offsets_host
     flat_indices = partition.leaf_particle_indices_host
     if int(offsets.size) != n_leaves + 1:
@@ -2280,7 +2283,7 @@ def _upload_multilevel(
             )
         n_leaves = int(partition.leaf_particle_offsets_host.size - 1)
         leaf_level_idx = int(multilevel.leaf_level)
-        if leaf_level_idx < 0 or leaf_level_idx >= int(len(multilevel.levels)):
+        if leaf_level_idx < 0 or leaf_level_idx >= len(multilevel.levels):
             raise ValueError(
                 f"multilevel leaf_level index {leaf_level_idx} out of bounds for levels payload."
             )
@@ -4900,7 +4903,7 @@ def _accumulate_stream_seconds(
         dict[str, dict[str, float]],
         stream_stats.setdefault("timings_seconds_by_level", {}),
     )
-    level_timings = cast(dict[str, float], timings_by_level.setdefault(str(level_idx), {}))
+    level_timings = timings_by_level.setdefault(str(level_idx), {})
     level_timings[str(key)] = float(level_timings.get(str(key), 0.0) + float(seconds))
 
 
@@ -4920,7 +4923,7 @@ def _record_same_level_source_union_stats(
         dict[str, dict[str, float | int]],
         stream_stats.setdefault("same_level_source_union_stats", {}),
     )
-    level_stats = cast(dict[str, float | int], union_stats_by_level.setdefault(str(level_idx), {}))
+    level_stats = union_stats_by_level.setdefault(str(level_idx), {})
     n_source_ids = int(source_ids.size)
     level_stats["count"] = int(level_stats.get("count", 0)) + 1
     level_stats["box_sum"] = int(level_stats.get("box_sum", 0)) + int(n_source_ids)
@@ -5065,7 +5068,7 @@ def _apply_same_level_far_streamed_chunk_group(
             fast_counts = cast(
                 dict[str, int], stream_stats.setdefault("full_level_outgoing_reuse_count", {})
             )
-            fast_counts[str(level_idx)] = int(fast_counts.get(str(level_idx), 0) + int(len(chunks)))
+            fast_counts[str(level_idx)] = int(fast_counts.get(str(level_idx), 0) + len(chunks))
     filtered_by_chunk: list[list[tuple[Offset3, Any, Any]]] = []
     source_batches: list[Any] = []
     for box_ids, _incoming in chunks:
@@ -5092,7 +5095,7 @@ def _apply_same_level_far_streamed_chunk_group(
             key="same_level_subset_filter",
             seconds=time.perf_counter() - subset_filter_started,
         )
-        for (_box_ids, incoming), filtered_offsets in zip(chunks, filtered_by_chunk):
+        for (_box_ids, incoming), filtered_offsets in zip(chunks, filtered_by_chunk, strict=True):
             current_incoming = cupy.asarray(incoming, dtype=cupy.complex128)
             for offset, source_ids_all, dst_local_all in filtered_offsets:
                 matched = _filter_query_ids_to_sorted_chunk(
@@ -5167,7 +5170,9 @@ def _apply_same_level_far_streamed_chunk_group(
             cupy=cupy,
             stream_stats=stream_stats,
         )
-        for (_box_ids, incoming), offset_matches in zip(chunks, source_matches_by_chunk):
+        for (_box_ids, incoming), offset_matches in zip(
+            chunks, source_matches_by_chunk, strict=True
+        ):
             current_incoming = cupy.asarray(incoming, dtype=cupy.complex128)
             for offset, dst_local_all, source_matches in offset_matches:
                 matched = source_matches.get(int(source_chunk_idx))
@@ -5335,9 +5340,7 @@ def _build_outgoing_subset_streamed(
             dict[str, dict[str, int]],
             stream_stats.setdefault("outgoing_build_count_by_reason", {}),
         )
-        level_reason_counts = cast(
-            dict[str, int], build_reason_counts.setdefault(str(level_idx), {})
-        )
+        level_reason_counts = build_reason_counts.setdefault(str(level_idx), {})
         level_reason_counts[str(build_reason)] = int(
             level_reason_counts.get(str(build_reason), 0) + 1
         )
@@ -6213,9 +6216,9 @@ class CuPyMLFMMCouplingOperator:
     host_cache: CuPyMLFMMHostCacheData | None = field(default=None, repr=False)
     host_cache_summary: dict[str, object] | None = field(default=None, repr=False)
     host_cache_policy: CuPyMLFMMHostCachePolicy = field(default_factory=CuPyMLFMMHostCachePolicy)
-    dtype: np.dtype = np.dtype(np.complex128)
-    near_dtype: np.dtype = np.dtype(np.complex128)
-    far_dtype: np.dtype = np.dtype(np.complex128)
+    dtype: np.dtype = COMPLEX128_DTYPE
+    near_dtype: np.dtype = COMPLEX128_DTYPE
+    far_dtype: np.dtype = COMPLEX128_DTYPE
     _receive_adjoint_cache: dict[int, Any] = field(default_factory=dict, init=False, repr=False)
     _leaf_otf_pair_blocks_scratch: dict[str, Any] = field(
         default_factory=dict, init=False, repr=False
@@ -6466,9 +6469,9 @@ class CuPyMLFMMCouplingOperator:
                 "total_bytes": int(total_bytes),
             },
             "workspace_cache_entries": {
-                "near": int(len(self._near_workspace_cache)),
-                "single_level": int(len(self._single_level_workspace_cache)),
-                "multilevel": int(len(self._multilevel_workspace_cache)),
+                "near": len(self._near_workspace_cache),
+                "single_level": len(self._single_level_workspace_cache),
+                "multilevel": len(self._multilevel_workspace_cache),
             },
             "workspace_bytes": {
                 "near_total_bytes": int(near_ws_total),
@@ -6837,13 +6840,13 @@ def prepare_mlfmm_cupy_data(
 
 
 __all__ = [
-    "CuPyMLFMMHostCacheData",
-    "CuPyMLFMMHostCachePolicy",
-    "CuPyMLFMMCouplingOperator",
     "CuPyDirectionalGridData",
     "CuPyDirectionalInterpolationData",
     "CuPyDirectionalTransformsData",
     "CuPyLeafApplyGroupData",
+    "CuPyMLFMMCouplingOperator",
+    "CuPyMLFMMHostCacheData",
+    "CuPyMLFMMHostCachePolicy",
     "CuPyMLFMMLevelData",
     "CuPyMLFMMMultilevelData",
     "CuPyMLFMMNearPairData",

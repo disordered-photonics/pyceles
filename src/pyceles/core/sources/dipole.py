@@ -67,7 +67,7 @@ class DipoleSource:
         self,
         *,
         moment_magnitude: complex = 1.0 + 0j,
-    ) -> dict[str, "DipoleSource"]:
+    ) -> dict[str, DipoleSource]:
         m = complex(moment_magnitude)
         if not np.isfinite(m.real) or not np.isfinite(m.imag):
             raise ValueError(f"`moment_magnitude` must be finite. Got {moment_magnitude!r}.")

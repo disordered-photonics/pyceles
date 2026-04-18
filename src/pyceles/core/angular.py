@@ -1,10 +1,10 @@
-from __future__ import annotations
-
 """Canonical angular-quadrature and beam-frame helpers.
 
 This module centralizes utilities shared by source projection and near-field
 integration so that numerical-policy fixes apply consistently across code paths.
 """
+
+from __future__ import annotations
 
 import numpy as np
 
@@ -83,9 +83,6 @@ def beam_axis_and_frame(
     ref = basis[int(np.argmin(np.abs(basis @ n0)))]
     u = ref - float(np.dot(ref, n0)) * n0
     nu = float(np.linalg.norm(u))
-    if nu == 0.0:
-        u = np.array([0.0, 1.0, 0.0], dtype=float)
-    else:
-        u = u / nu
+    u = np.array([0.0, 1.0, 0.0], dtype=float) if nu == 0.0 else u / nu
     v = np.cross(n0, u)
     return n0, u, v

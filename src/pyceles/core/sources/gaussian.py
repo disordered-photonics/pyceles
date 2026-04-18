@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Tuple
 
 import numpy as np
 import numpy.typing as npt
@@ -29,7 +28,7 @@ class GaussianBeam:
     polar_angle: float = 0.0
     azimuthal_angle: float = 0.0
     beam_width: float = np.inf
-    focal_point: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+    focal_point: tuple[float, float, float] = (0.0, 0.0, 0.0)
     amplitude: float = 1.0
 
     def __post_init__(self) -> None:
@@ -46,7 +45,7 @@ class GaussianBeam:
     def jones_coefficients(self) -> tuple[complex, complex]:
         return polarization_to_jones(self.polarization)
 
-    def with_polarization(self, polarization: PolarizationInput) -> "GaussianBeam":
+    def with_polarization(self, polarization: PolarizationInput) -> GaussianBeam:
         return replace(self, polarization=polarization)
 
     def has_finite_incident_power(self) -> bool:
@@ -115,7 +114,7 @@ class LaguerreGaussianBeam:
     polar_angle: float = 0.0
     azimuthal_angle: float = 0.0
     beam_width: float = 2000.0
-    focal_point: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+    focal_point: tuple[float, float, float] = (0.0, 0.0, 0.0)
     amplitude: float = 1.0
     azimuthal_phase: float = 0.0
 
@@ -149,7 +148,7 @@ class LaguerreGaussianBeam:
     def jones_coefficients(self) -> tuple[complex, complex]:
         return polarization_to_jones(self.polarization)
 
-    def with_polarization(self, polarization: PolarizationInput) -> "LaguerreGaussianBeam":
+    def with_polarization(self, polarization: PolarizationInput) -> LaguerreGaussianBeam:
         return replace(self, polarization=polarization)
 
     def has_finite_incident_power(self) -> bool:
@@ -210,7 +209,7 @@ class FocusedLaguerreGaussianBeam:
     beam_width: float = 1000.0
     focal_length: float = 1000.0
     numerical_aperture: float = 0.8
-    focal_point: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+    focal_point: tuple[float, float, float] = (0.0, 0.0, 0.0)
     amplitude: float = 1.0
     azimuthal_phase: float = 0.0
     sine_condition_apodization: bool = True
@@ -258,7 +257,7 @@ class FocusedLaguerreGaussianBeam:
     def jones_coefficients(self) -> tuple[complex, complex]:
         return polarization_to_jones(self.polarization)
 
-    def with_polarization(self, polarization: PolarizationInput) -> "FocusedLaguerreGaussianBeam":
+    def with_polarization(self, polarization: PolarizationInput) -> FocusedLaguerreGaussianBeam:
         return replace(self, polarization=polarization)
 
     def has_finite_incident_power(self) -> bool:
@@ -323,7 +322,7 @@ class CartesianPolarizedFocusedLaguerreGaussianBeam:
     beam_width: float = 1000.0
     focal_length: float = 1000.0
     numerical_aperture: float = 0.8
-    focal_point: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+    focal_point: tuple[float, float, float] = (0.0, 0.0, 0.0)
     amplitude: float = 1.0
     azimuthal_phase: float = 0.0
     sine_condition_apodization: bool = True

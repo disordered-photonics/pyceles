@@ -1,9 +1,9 @@
-from __future__ import annotations
-
 """Core operator protocols and prepared-operator boundary."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import Protocol, cast, runtime_checkable
 
 import numpy as np
 
@@ -12,6 +12,7 @@ from pyceles._optional import coerce_array
 from .single_body import ParticleTOperator
 
 Array = np.ndarray
+COMPLEX128_DTYPE = np.dtype(np.complex128)
 
 
 @runtime_checkable
@@ -37,7 +38,7 @@ class PreparedOperator:
     positions: Array
     particle_t: ParticleTOperator
     coupling: CouplingOperator
-    dtype: np.dtype = np.dtype(np.complex128)
+    dtype: np.dtype = COMPLEX128_DTYPE
 
     def apply_W(self, x: Array) -> Array:
         return self.coupling.apply(x)
@@ -45,7 +46,7 @@ class PreparedOperator:
     def apply_A(self, x: Array) -> Array:
         wx = self.apply_W(x)
         x_arr = coerce_array(x, dtype=self.dtype, prefer_cupy=False)
-        return x_arr - self.particle_t.apply(wx)
+        return cast(Array, x_arr - self.particle_t.apply(wx))
 
     def rhs(self, b: Array) -> Array:
         return self.particle_t.rhs(b)

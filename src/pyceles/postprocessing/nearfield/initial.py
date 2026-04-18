@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from importlib import import_module
 
 import numpy as np
@@ -246,14 +247,17 @@ def _compute_initial_field_gaussian_normal_incidence_analytic(
             accum_dtype, copy=False
         )
 
-    beta_iter = active_beta
     if show_progress:
         hemi_total = int(np.count_nonzero(hemi_mask))
         desc = f"Initial field (non-zero {hemi_label} betas {int(active_beta.size)}/{hemi_total})"
-        beta_iter = tqdm(active_beta, desc=desc, total=int(active_beta.size))
+        beta_iter: Iterable[int] = (
+            int(ib) for ib in tqdm(active_beta, desc=desc, total=int(active_beta.size))
+        )
+    else:
+        beta_iter = (int(ib) for ib in active_beta)
 
     for ib_raw in beta_iter:
-        ib = int(ib_raw)
+        ib = ib_raw
         bw = beta_weighted[ib]
         if bw == 0.0:
             continue
@@ -551,7 +555,7 @@ def _compute_initial_field_general(
         pts_gpu = cupy.asarray(pts, dtype=cupy.float64)
         e_gpu = cupy.zeros((pts.shape[0], 3), dtype=accum_dtype_cp)
         h_gpu = cupy.zeros_like(e_gpu)
-        alpha_iter = range(n_alpha)
+        alpha_iter: Iterable[int] = range(n_alpha)
         if show_progress:
             alpha_iter = tqdm(
                 range(n_alpha),

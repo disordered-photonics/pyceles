@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Fused CuPy pairwise coupling for direct GPU matvecs.
 
 We explicitly ship the CuPy direct backend as a fused RawKernel rather than as
@@ -12,6 +10,8 @@ competitive.
 The shipped CuPy path therefore keeps the translation tables on device and
 accumulates the pairwise coupling inside the fused kernel.
 """
+
+from __future__ import annotations
 
 from dataclasses import dataclass, field
 from functools import cache
@@ -26,6 +26,8 @@ from pyceles.core.translation import (
     _translation_ab5_compact_tables,
     _translation_plm_coeff_table,
 )
+
+COMPLEX128_DTYPE = np.dtype(np.complex128)
 
 
 @cache
@@ -327,7 +329,7 @@ class CuPyPairwiseCouplingOperator:
     positions: np.ndarray
     ab5: np.ndarray
     radial_lut: RadialLUT
-    dtype: np.dtype = np.dtype(np.complex128)
+    dtype: np.dtype = COMPLEX128_DTYPE
     _positions_gpu: Any | None = field(default=None, init=False, repr=False)
     _compact_re_ab_gpu: Any | None = field(default=None, init=False, repr=False)
     _compact_im_ab_gpu: Any | None = field(default=None, init=False, repr=False)
@@ -441,10 +443,7 @@ class CuPyPairwiseCouplingOperator:
         # (`nmodes=48`) by forcing on the 5k-particle c64 benchmark did not bring
         # any material advantage over the default policy, so we keep the leaner
         # mode-count-capped heuristic.
-        if self.dtype == np.dtype(np.complex128):
-            target_threads = warp_size
-        else:
-            target_threads = 2 * warp_size
+        target_threads = warp_size if self.dtype == np.dtype(np.complex128) else 2 * warp_size
         threads_per_block = max(warp_size, min(max_threads, target_threads, nmodes_total))
         blocks_x = (nmodes_total + threads_per_block - 1) // threads_per_block
         max_grid_y = int(props["maxGridSize"][1])

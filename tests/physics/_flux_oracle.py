@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Validation-only circumsphere flux oracle for local absorption checks.
 
 This helper is intentionally test-scoped and not part of the public
@@ -12,7 +10,10 @@ Assumptions/limits:
 - surfaces must remain in host medium (best suited to isolated/sparse cases).
 """
 
-from typing import Any, Sequence
+from __future__ import annotations
+
+from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
 import numpy.typing as npt

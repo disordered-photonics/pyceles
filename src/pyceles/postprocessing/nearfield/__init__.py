@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Canonical near-field implementation package.
 
 The package surface mirrors the physical decomposition used throughout
@@ -7,6 +5,8 @@ The package surface mirrors the physical decomposition used throughout
 and point-classification utilities used to decide which contribution is valid
 at each observation point.
 """
+
+from __future__ import annotations
 
 from .classification import InternalPointClassification, classify_internal_points
 from .common import clear_caches

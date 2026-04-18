@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Postprocessing-phase helpers for solved simulation channels."""
+
+from __future__ import annotations
 
 from dataclasses import replace
 from typing import TYPE_CHECKING, cast
@@ -62,7 +62,7 @@ def _is_numerically_lossless_cluster(
 
 
 def _build_exciting_scattered_flat_generic_route(
-    sim: "Simulation",
+    sim: Simulation,
     *,
     initial_coeffs: np.ndarray,
     coeffs: np.ndarray,
@@ -97,7 +97,7 @@ def _build_exciting_scattered_flat_generic_route(
 
 
 def _plane_wave_local_absorption_generic_route(
-    sim: "Simulation",
+    sim: Simulation,
     *,
     source: Source,
     initial_coeffs: np.ndarray,
@@ -135,7 +135,7 @@ def _plane_wave_local_absorption_generic_route(
 
 
 def _local_absorbed_power_components_generic_route(
-    sim: "Simulation",
+    sim: Simulation,
     *,
     initial_coeffs: np.ndarray,
     coeffs: np.ndarray,
@@ -257,7 +257,7 @@ def mix_farfield_patterns(
 
 
 def build_single_channel_result(
-    sim: "Simulation",
+    sim: Simulation,
     *,
     source: Source,
     initial_coeffs: np.ndarray,
@@ -437,7 +437,7 @@ def build_single_channel_result(
 
 
 def postprocess_sources_impl(
-    sim: "Simulation",
+    sim: Simulation,
     solved: SolvedSourcesResult,
     *,
     include_farfield: bool = True,
@@ -523,7 +523,7 @@ def postprocess_sources_impl(
     )
 
 
-def run_impl(sim: "Simulation", *, include_farfield: bool = True) -> SimulationResult:
+def run_impl(sim: Simulation, *, include_farfield: bool = True) -> SimulationResult:
     """Run one simulation for `config.source`."""
     cfg = sim.config
     source = sim._validate_ready_to_run()

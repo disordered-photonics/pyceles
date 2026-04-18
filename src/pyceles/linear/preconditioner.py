@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable, Literal
+from typing import Literal
 
 import numpy as np
 from tqdm.auto import tqdm
@@ -197,7 +198,7 @@ class GridBlockPreconditioner:
             raise ValueError(f"Input must be 1D or 2D. Got shape {arr.shape}.")
 
         out = np.zeros_like(arr3, dtype=self.dtype)
-        for ids, (lu, piv) in zip(self.particle_blocks, self.lu_factors):
+        for ids, (lu, piv) in zip(self.particle_blocks, self.lu_factors, strict=True):
             rhs_loc = arr3[ids, :, :].reshape(ids.size * self.n_modes, -1)
             sol_loc = scipy.linalg.lu_solve((lu, piv), rhs_loc, check_finite=False)
             out[ids, :, :] = sol_loc.reshape(ids.size, self.n_modes, -1)
@@ -260,7 +261,7 @@ class CuPyGridBlockPreconditioner:
             raise ValueError(f"Input must be 1D or 2D. Got shape {arr_gpu.shape}.")
 
         out = cupy.zeros_like(arr3, dtype=self.dtype)
-        for ids, lu_payload in zip(self.particle_blocks, self.lu_factors):
+        for ids, lu_payload in zip(self.particle_blocks, self.lu_factors, strict=True):
             rhs_loc = arr3[ids, :, :].reshape(ids.size * self.n_modes, -1)
             sol_loc = cupyx.scipy.linalg.lu_solve(lu_payload, rhs_loc)
             out[ids, :, :] = sol_loc.reshape(ids.size, self.n_modes, -1)

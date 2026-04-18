@@ -52,7 +52,7 @@ def test_geometry_near_far_write(tmp_path):
     )
 
     X, Z = np.meshgrid(np.linspace(-1, 1, 5), np.linspace(-2, 2, 7), indexing="xy")
-    E = np.zeros(X.shape + (3,), dtype=np.complex128)
+    E = np.zeros((*X.shape, 3), dtype=np.complex128)
     H = np.zeros_like(E)
     inside = np.zeros(X.shape, dtype=bool)
 
@@ -132,9 +132,9 @@ def test_geometry_particle_descriptor_roundtrip(tmp_path):
 def test_near_field_components_write(tmp_path):
     path = tmp_path / "nf_components.h5"
     X, Z = np.meshgrid(np.linspace(-1, 1, 4), np.linspace(-2, 2, 3), indexing="xy")
-    E = np.zeros(X.shape + (3,), dtype=np.complex128)
+    E = np.zeros((*X.shape, 3), dtype=np.complex128)
     H = np.ones_like(E)
-    S = np.zeros(X.shape + (3,), dtype=np.float64)
+    S = np.zeros((*X.shape, 3), dtype=np.float64)
     inside = np.zeros(X.shape, dtype=bool)
 
     save_near_field_components_h5(

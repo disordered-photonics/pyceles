@@ -1,8 +1,9 @@
-from __future__ import annotations
-
 """Operator-preparation orchestration for the many-body `A = I - T W` system."""
 
-from typing import Literal, Sequence, cast
+from __future__ import annotations
+
+from collections.abc import Sequence
+from typing import Literal, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -466,7 +467,7 @@ def rhs_Tb_numpy(
         else np.asarray(T_diag, dtype=out_dtype)
     )
     r = diag * arr
-    return r.reshape(ns * nm)
+    return cast(np.ndarray, r.reshape(ns * nm))
 
 
 __all__ = ["build_T_mode_diagonal", "precompute_T_diagonal", "prepare_matvec", "rhs_Tb_numpy"]

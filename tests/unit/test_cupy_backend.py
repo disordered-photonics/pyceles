@@ -3,8 +3,9 @@ from __future__ import annotations
 import os
 import pickle
 import tempfile
+from collections.abc import Generator
 from pathlib import Path
-from typing import Generator, Literal
+from typing import Literal
 
 import numpy as np
 import pytest

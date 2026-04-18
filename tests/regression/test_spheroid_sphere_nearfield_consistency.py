@@ -1,11 +1,11 @@
-from __future__ import annotations
-
 """Regression: AR=1 spheroid near field matches canonical sphere path.
 
 This guards against convention or assembly drift in the axisymmetric
 implementation by comparing near fields against the analytically equivalent
 sphere representation for the same physical particle.
 """
+
+from __future__ import annotations
 
 import numpy as np
 

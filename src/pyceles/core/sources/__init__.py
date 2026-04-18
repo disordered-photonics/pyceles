@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Incident-source models and source-side field helpers."""
+
+from __future__ import annotations
 
 from .base import (
     AngularSpectrumSource,

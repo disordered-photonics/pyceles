@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Local regression against SMUTHI-generated isolated-spheroid observables.
 
 This test intentionally hard-codes a compact set of reference cross sections
@@ -32,6 +30,8 @@ The public pyceles regression below intentionally uses a smaller output
 sampling grid for speed. It is compared against that denser oracle, not against
 SMUTHI totals evaluated on the same coarse bins.
 """
+
+from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Literal

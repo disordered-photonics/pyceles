@@ -150,7 +150,7 @@ class SpheroidShapeProfile:
 
         a = float(self.equatorial_radius)
         c = float(self.polar_radius)
-        return (a * a * c) ** (1.0 / 3.0)
+        return float((a * a * c) ** (1.0 / 3.0))
 
     def radius_from_mu(self, mu: Array) -> Array:
         """Return the spheroid radius at `mu = cos(theta)`."""
@@ -160,7 +160,7 @@ class SpheroidShapeProfile:
         mu_arr = np.asarray(mu, dtype=float)
         sin2 = 1.0 - mu_arr * mu_arr
         denom = np.sqrt((c * c) * sin2 + (a * a) * (mu_arr * mu_arr))
-        return (a * c) / denom
+        return cast(Array, (a * c) / denom)
 
     def dr_dmu(self, mu: Array) -> Array:
         """Return `dr/dmu` for the spheroid profile."""
@@ -169,7 +169,7 @@ class SpheroidShapeProfile:
         c = float(self.polar_radius)
         mu_arr = np.asarray(mu, dtype=float)
         radius = self.radius_from_mu(mu_arr)
-        return -((a * a) - (c * c)) * mu_arr * (radius**3) / ((a * c) ** 2)
+        return cast(Array, -((a * a) - (c * c)) * mu_arr * (radius**3) / ((a * c) ** 2))
 
 
 @dataclass(frozen=True)
@@ -1142,14 +1142,22 @@ def combine_axisymmetric_parity_blocks(
                 "Axisymmetric block parity merge received incomplete internal sub-blocks "
                 f"for m={m}: missing {', '.join(missing)}."
             )
-        r11_eo = cast(Array, even_odd.R11)
-        r12_eo = cast(Array, even_odd.R12)
-        r21_eo = cast(Array, even_odd.R21)
-        r22_eo = cast(Array, even_odd.R22)
-        r11_oe = cast(Array, odd_even.R11)
-        r12_oe = cast(Array, odd_even.R12)
-        r21_oe = cast(Array, odd_even.R21)
-        r22_oe = cast(Array, odd_even.R22)
+        assert even_odd.R11 is not None
+        assert even_odd.R12 is not None
+        assert even_odd.R21 is not None
+        assert even_odd.R22 is not None
+        assert odd_even.R11 is not None
+        assert odd_even.R12 is not None
+        assert odd_even.R21 is not None
+        assert odd_even.R22 is not None
+        r11_eo = even_odd.R11
+        r12_eo = even_odd.R12
+        r21_eo = even_odd.R21
+        r22_eo = even_odd.R22
+        r11_oe = odd_even.R11
+        r12_oe = odd_even.R12
+        r21_oe = odd_even.R21
+        r22_oe = odd_even.R22
         R11 = assemble_full(r11_eo, r12_eo * 0.0, r21_eo * 0.0, r11_oe)
         R22 = assemble_full(
             r22_oe,

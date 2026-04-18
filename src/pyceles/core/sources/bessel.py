@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Tuple
 
 import numpy as np
 import numpy.typing as npt
@@ -26,7 +25,7 @@ class BesselBeam:
     polarization: PolarizationInput = "TE"
     amplitude: float = 1.0
     azimuthal_phase: float = 0.0
-    center: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+    center: tuple[float, float, float] = (0.0, 0.0, 0.0)
     forward_only: bool = True
 
     def __post_init__(self) -> None:
@@ -68,7 +67,7 @@ class BesselBeam:
     def jones_coefficients(self) -> tuple[complex, complex]:
         return polarization_to_jones(self.polarization)
 
-    def with_polarization(self, polarization: PolarizationInput) -> "BesselBeam":
+    def with_polarization(self, polarization: PolarizationInput) -> BesselBeam:
         return replace(self, polarization=polarization)
 
     def has_finite_incident_power(self) -> bool:
@@ -127,7 +126,7 @@ class CartesianPolarizedBesselBeam:
     global_polarization: tuple[complex, complex, complex] = (1.0 + 0.0j, 0.0 + 0.0j, 0.0 + 0.0j)
     amplitude: float = 1.0
     azimuthal_phase: float = 0.0
-    center: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+    center: tuple[float, float, float] = (0.0, 0.0, 0.0)
     forward_only: bool = True
 
     def __post_init__(self) -> None:

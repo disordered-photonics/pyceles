@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import cast
+
 import numpy as np
 
 from pyceles.core.conversions import (
@@ -19,7 +21,7 @@ def _angular_grid() -> tuple[np.ndarray, np.ndarray]:
 
 def _phase_factor(pwp: dict, shift: np.ndarray, *, sign: float) -> np.ndarray:
     dot = pwp["kx"] * shift[0] + pwp["ky"] * shift[1] + pwp["kz"] * shift[2]
-    return np.exp(1j * sign * dot)
+    return cast(np.ndarray, np.exp(1j * sign * dot))
 
 
 def _with_coeff_phase(pwp: dict, phase: np.ndarray) -> dict:

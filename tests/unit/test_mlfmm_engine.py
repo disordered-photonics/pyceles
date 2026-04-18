@@ -789,7 +789,7 @@ def test_mlfmm_coupling_hierarchy_diagnostics_align_with_cupy_vocabulary() -> No
 
     levels_diag = hierarchy["levels"]
     assert isinstance(levels_diag, dict)
-    assert levels_diag["n_levels"] == int(len(multilevel.levels))
+    assert levels_diag["n_levels"] == len(multilevel.levels)
     assert levels_diag["translator_orders"] == [
         int(level.translator_order) for level in multilevel.levels
     ]

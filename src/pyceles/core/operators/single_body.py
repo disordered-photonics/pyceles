@@ -1,9 +1,10 @@
-from __future__ import annotations
-
 """Prepared single-particle scattering-operator boundary."""
 
+from __future__ import annotations
+
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Protocol, Sequence
+from typing import Protocol
 
 import numpy as np
 
@@ -12,6 +13,7 @@ from pyceles.core.indexing import n_modes
 from .groups import PreparedParticleTGroup
 
 Array = np.ndarray
+COMPLEX128_DTYPE = np.dtype(np.complex128)
 
 
 class ParticleTOperator(Protocol):
@@ -39,7 +41,7 @@ class CompositeParticleTOperator:
     lmax: int
     n_particles: int
     groups: Sequence[PreparedParticleTGroup]
-    dtype: np.dtype = np.dtype(np.complex128)
+    dtype: np.dtype = COMPLEX128_DTYPE
     _particle_to_group: np.ndarray = field(init=False, repr=False)
     _particle_to_local: np.ndarray = field(init=False, repr=False)
 

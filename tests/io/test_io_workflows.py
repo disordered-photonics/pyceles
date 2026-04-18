@@ -106,7 +106,7 @@ def test_save_simulation_h5_writes_basis_and_diagnostics(tmp_path):
     )
 
     X, Z = np.meshgrid(np.linspace(-1.0, 1.0, 4), np.linspace(-1.0, 1.0, 3), indexing="xy")
-    zero = np.zeros(X.shape + (3,), dtype=np.complex128)
+    zero = np.zeros((*X.shape, 3), dtype=np.complex128)
     near = NearFieldSlice(
         axis_0=X,
         axis_1=Z,
@@ -164,7 +164,7 @@ def test_no_scatterer_run_roundtrip_io_workflow(tmp_path):
     run = sim.run()
 
     X, Z = np.meshgrid(np.linspace(-1.0, 1.0, 4), np.linspace(-1.0, 1.0, 3), indexing="xy")
-    zero = np.zeros(X.shape + (3,), dtype=np.complex128)
+    zero = np.zeros((*X.shape, 3), dtype=np.complex128)
     near = NearFieldSlice(
         axis_0=X,
         axis_1=Z,
@@ -215,7 +215,7 @@ def test_save_simulation_h5_geometry_loads_particles(tmp_path):
     run = sim.run(include_farfield=False)
 
     X, Z = np.meshgrid(np.linspace(-1.0, 1.0, 3), np.linspace(-1.0, 1.0, 3), indexing="xy")
-    zero = np.zeros(X.shape + (3,), dtype=np.complex128)
+    zero = np.zeros((*X.shape, 3), dtype=np.complex128)
     near = NearFieldSlice(
         axis_0=X,
         axis_1=Z,

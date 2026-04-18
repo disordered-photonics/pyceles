@@ -64,10 +64,27 @@ extend-exclude = ["notebooks", "outputs"]
 force-exclude = true
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "B"]
-ignore = ["E501", "E741", "E402", "E702", "B905"]
+select = ["E", "F", "I", "B", "UP", "RUF", "SIM", "NPY"]
+ignore = ["E501", "E741"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/io/test_plotting_helpers.py" = ["E402"]
 
 [tool.mypy]
 python_version = "3.12"
-ignore_missing_imports = true
 check_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_return_any = true
+no_implicit_optional = true
+strict_equality = true
+show_error_codes = true
+exclude_gitignore = true
+
+[[tool.mypy.overrides]]
+module = ["cupy", "cupy.*", "cupyx", "cupyx.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["h5py", "h5py.*"]
+ignore_missing_imports = true

@@ -1,10 +1,11 @@
-from __future__ import annotations
-
 """Simulation configuration model and angular-grid validation helpers."""
 
+from __future__ import annotations
+
 import warnings
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable, Literal
+from typing import Literal
 
 import numpy as np
 

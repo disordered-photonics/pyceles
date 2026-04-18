@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Cheap conservative geometric bounds used for LUT sizing."""
+
+from __future__ import annotations
 
 import numpy as np
 

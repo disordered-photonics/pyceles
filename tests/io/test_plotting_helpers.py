@@ -65,7 +65,7 @@ def test_far_field_intensity_from_result_unpolarized_averages_basis():
 
 def test_plot_nearfield_panels_channels_returns_expected_axes_shape():
     axis_0, axis_1 = np.meshgrid(np.linspace(-1, 1, 4), np.linspace(-1, 1, 3), indexing="xy")
-    E = np.zeros(axis_0.shape + (3,), dtype=np.complex128)
+    E = np.zeros((*axis_0.shape, 3), dtype=np.complex128)
     H = np.zeros_like(E)
     fig, axes = plot_nearfield_panels_channels(
         axis_0,
@@ -219,7 +219,7 @@ def test_plot_source_showcase_slices_returns_3x5_layout(monkeypatch):
     axis_0, axis_1 = np.meshgrid(
         np.linspace(-1.0, 1.0, 4), np.linspace(-2.0, 2.0, 3), indexing="xy"
     )
-    E = np.zeros(axis_0.shape + (3,), dtype=np.complex128)
+    E = np.zeros((*axis_0.shape, 3), dtype=np.complex128)
     E[..., 0] = 1.0 + 1.0j
     H = np.zeros_like(E)
 
