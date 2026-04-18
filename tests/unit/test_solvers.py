@@ -1369,3 +1369,83 @@ def test_gmres_warm_restart_roundtrip_from_h5(tmp_path):
     np.testing.assert_allclose(strict_warm.x, strict_cold.x, rtol=1e-7, atol=1e-7)
     # Warm restart should not require more iterations in this deterministic setup.
     assert int(strict_warm.iterations) <= int(strict_cold.iterations)
+
+
+def test_apply_operator_falls_back_to_columnwise_vector_calls():
+    calls: list[np.ndarray] = []
+
+    def _vec_only(x: np.ndarray) -> np.ndarray:
+        arr = np.asarray(x)
+        if arr.ndim != 1:
+            raise ValueError("vector-only operator")
+        calls.append(arr.copy())
+        return cast(np.ndarray, 2.0 * arr)
+
+    x = np.arange(6, dtype=np.complex128).reshape(3, 2)
+    out = solvers._apply_operator(_vec_only, x)
+    np.testing.assert_allclose(out, 2.0 * x)
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"b": np.zeros((2, 2, 2), dtype=np.complex128)}, "`b` must be 1D or 2D"),
+        (
+            {
+                "b": np.ones((2,), dtype=np.complex128),
+                "x0": np.zeros((2, 1, 1), dtype=np.complex128),
+            },
+            "`x0` must be 1D or 2D",
+        ),
+        (
+            {"b": np.ones((2, 2), dtype=np.complex128), "x0": np.ones((2, 3), dtype=np.complex128)},
+            "`x0` must match `b` shape",
+        ),
+        (
+            {"b": np.ones((2,), dtype=np.complex128), "method": "gcrotmk", "backend": "cupy"},
+            "currently supports only GMRES, FGMRES, BiCGSTAB, LGMRES, or direct solves",
+        ),
+    ],
+)
+def test_solve_linear_system_validates_public_dispatch_inputs(kwargs, match):
+    b = kwargs.pop("b")
+    with pytest.raises(ValueError, match=match):
+        solve_linear_system(lambda x: np.asarray(x), b, show_progress=False, **kwargs)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        (
+            {"b": np.zeros((2, 1, 1), dtype=np.complex128)},
+            "`b` must be 1D or 2D",
+        ),
+        (
+            {"b": np.ones((3,), dtype=np.complex128), "max_n": 2},
+            "Direct dense solve disabled",
+        ),
+        (
+            {"b": np.ones((2,), dtype=np.complex128), "A_dense": np.eye(3, dtype=np.complex128)},
+            "A_dense must have shape \\(2,2\\)",
+        ),
+        (
+            {
+                "b": np.ones((2,), dtype=np.complex128),
+                "A_factorized": (np.eye(3, dtype=np.complex128), np.array([0, 1], dtype=int)),
+            },
+            "LU matrix",
+        ),
+        (
+            {
+                "b": np.ones((2,), dtype=np.complex128),
+                "A_factorized": (np.eye(2, dtype=np.complex128), np.array([0, 1, 2], dtype=int)),
+            },
+            "pivot vector",
+        ),
+    ],
+)
+def test_direct_dense_scipy_validates_public_input_shapes(kwargs, match):
+    b = kwargs.pop("b")
+    with pytest.raises(ValueError, match=match):
+        direct_dense_scipy(lambda x: np.asarray(x), b, show_progress=False, **kwargs)
