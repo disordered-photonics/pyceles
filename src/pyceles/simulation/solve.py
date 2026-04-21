@@ -225,40 +225,40 @@ def solve_sources_core(
                     "Dense/direct NumPy solves currently require the pairwise coupling backend. "
                     "The resolved MLFMM coupling stages remain matrix-free only."
                 )
-            need_dense = (
-                sim._dense_operator_cache is None
-                or sim._dense_operator_dtype is None
-                or sim._dense_operator_dtype != compute_dtype
-            )
-            if need_dense:
-                if operator_backend == "numpy":
-                    A_dense = assemble_dense_A_numpy(
-                        prepared,
-                        show_progress=bool(cfg.verbose),
-                        use_cache=bool(cfg.cache_translation_blocks),
-                        store_blocks=False,
-                    )
-                else:
-                    if A_mv is None:
-                        raise RuntimeError(
-                            "Internal error: direct dense assembly requires prepared A_mv."
-                        )
-                    A_dense = _assemble_dense_operator_via_matvec(
-                        A_mv,
-                        n=unknowns,
-                        dtype=np.dtype(compute_dtype),
-                        show_progress=bool(cfg.verbose),
-                    )
-                sim._dense_operator_cache = A_dense
-                sim._dense_operator_dtype = np.dtype(compute_dtype)
-            else:
-                A_dense = sim._dense_operator_cache
             need_dense_lu = (
                 sim._dense_lu_cache is None
                 or sim._dense_lu_dtype is None
                 or sim._dense_lu_dtype != compute_dtype
             )
             if need_dense_lu:
+                need_dense = (
+                    sim._dense_operator_cache is None
+                    or sim._dense_operator_dtype is None
+                    or sim._dense_operator_dtype != compute_dtype
+                )
+                if need_dense:
+                    if operator_backend == "numpy":
+                        A_dense = assemble_dense_A_numpy(
+                            prepared,
+                            show_progress=bool(cfg.verbose),
+                            use_cache=bool(cfg.cache_translation_blocks),
+                            store_blocks=False,
+                        )
+                    else:
+                        if A_mv is None:
+                            raise RuntimeError(
+                                "Internal error: direct dense assembly requires prepared A_mv."
+                            )
+                        A_dense = _assemble_dense_operator_via_matvec(
+                            A_mv,
+                            n=unknowns,
+                            dtype=np.dtype(compute_dtype),
+                            show_progress=bool(cfg.verbose),
+                        )
+                    sim._dense_operator_cache = A_dense
+                    sim._dense_operator_dtype = np.dtype(compute_dtype)
+                else:
+                    A_dense = sim._dense_operator_cache
                 if A_dense is None:
                     raise RuntimeError("Internal error: direct solve requires dense operator.")
                 sim._dense_lu_cache = factorize_dense_matrix(
@@ -275,6 +275,10 @@ def solve_sources_core(
                 if operator_backend == "cupy":
                     sim._dense_operator_cache = None
                     sim._dense_operator_dtype = None
+            else:
+                # Repeated direct solves only need the cached LU payload.
+                # Reassembling dense A here would defeat the intended repeated-RHS fast path.
+                A_dense = None
             A_lu: DenseLUFactorization | None = sim._dense_lu_cache
         else:
             A_lu = None
