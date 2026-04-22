@@ -6,7 +6,7 @@ import numpy as np
 
 from pyceles._dtypes import resolve_compute_accum_dtypes
 from pyceles.core.sources import JonesPolarizedSource
-from pyceles.simulation._channels import is_pure_channel_result
+from pyceles.postprocessing._channels import is_pure_channel_result
 
 from .components import NearFieldComponents, compute_near_field_components
 from .slice import (

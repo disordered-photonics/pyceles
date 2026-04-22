@@ -14,7 +14,7 @@ from pyceles.core.particles import (
     Spheroid,
     _rotation_matrix_zyz_lab_to_body,
 )
-from pyceles.simulation._channels import is_pure_channel_result
+from pyceles.postprocessing._channels import is_pure_channel_result
 
 
 def _slice_axis_labels(plane: str) -> tuple[str, str]:

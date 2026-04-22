@@ -24,3 +24,6 @@ def is_pure_channel_result(run: object, channel: str, *, atol: float = 1e-12) ->
     if channel == "tm":
         return bool(abs(complex(a_te)) <= atol and abs(complex(a_tm)) > atol)
     return False
+
+
+__all__ = ["is_pure_channel_result"]
