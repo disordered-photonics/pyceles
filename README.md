@@ -3,7 +3,8 @@
 pyceles is a Python reimplementation of the MATLAB CELES package for electromagnetic
 simulation of large particle ensembles with the T-matrix method.
 The code keeps a NumPy + SciPy reference implementation and now also ships an
-optional CuPy backend for the direct many-body solve path.
+optional CuPy backend for the direct many-body solve path, plus a CuPy-backed
+MLFMM repeated-apply path for the current high-frequency sphere-cluster regime.
 
 This repository focuses on:
 - Correctness first (CELES conventions, reproducible examples/notebooks)
@@ -169,6 +170,22 @@ Users of pyceles are referred to the publications listed in the CELES and SMUTHI
   - one shared CELES-style default grid (`polar_angles`, `azimuthal_angles`)
   - optional split grids for source projection and far-field outputs
     (`source_*`, `farfield_*`)
+
+## Current limits / not yet landed
+
+- Embedded dipoles inside `Sphere` or `LayeredSphere` particles are not
+  supported yet in the main solver path. Current dipole workflows assume dipole
+  centers remain in the homogeneous host medium.
+- Complex host refractive indices are not supported in the current workflow.
+  This is required for beam/plane-wave sources, but it is not a fundamental
+  limitation for local dipole sources and may be revisited in the future.
+- T-matrix superposition still requires disjoint circumscribing spheres for all
+  particle families. In practice this remains especially restrictive for close
+  configurations of elongated spheroids, where alternative coupling schemes can
+  be implemented.
+- Periodic boundary conditions are not implemented yet.
+- Exterior near-field evaluation for spheroids remains unreliable at points
+  lying inside the circumscribing sphere but outside the physical particle.
 
 ## Source capability contract
 
@@ -668,8 +685,8 @@ Current scope/limits:
 - dipole `SimulationResult` objects do not carry TE/TM Jones metadata
   (`polarization_jones=None`)
 - dipole centers are expected in the homogeneous host medium (outside particle
-  circumscribing spheres). Interior-embedded dipoles are currently untested and
-  may be unreliable in the present solver path.
+  circumscribing spheres). Interior-embedded dipoles are not supported yet in
+  the present solver path.
 - dipole moments are interpreted in the same length-unit convention used by
   geometry and wavelength. A practical reference scale is
   `|p| ~ k0^-3 = (wavelength / (2*pi))^3`. For `wavelength=550` (nm units),
