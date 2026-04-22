@@ -175,7 +175,10 @@ def test_dipole_power_ldos_inside_particle_requires_explicit_override():
         verbose=False,
     )
 
-    with pytest.warns(UserWarning, match="Untested configuration: dipole center lies inside"):
+    with pytest.warns(
+        UserWarning,
+        match="Untested configuration: (dipole|local source) center lies inside",
+    ):
         run = pcl.Simulation(
             cfg,
             particles=spheres_from_arrays(

@@ -265,11 +265,14 @@ def test_builtin_sources_satisfy_capability_contract(
     expect_finite_power: bool,
     expect_jones: bool,
 ):
+    source_obj = factory()
+    expect_local = isinstance(source_obj, (DipoleSource, DipoleCollection))
     assert_source_compliance(
-        factory(),
+        source_obj,
         expect_angular_spectrum=expect_angular_spectrum,
         expect_finite_incident_power=expect_finite_power,
         expect_jones_polarization=expect_jones,
+        expect_local_expansion=expect_local,
     )
 
 

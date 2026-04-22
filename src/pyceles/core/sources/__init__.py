@@ -5,6 +5,7 @@ from __future__ import annotations
 from .base import (
     AngularSpectrumSource,
     JonesPolarizedSource,
+    LocalExpansionSource,
     Polarization,
     PolarizationInput,
     Source,
@@ -35,6 +36,7 @@ __all__ = [
     "GaussianBeam",
     "JonesPolarizedSource",
     "LaguerreGaussianBeam",
+    "LocalExpansionSource",
     "PlaneWave",
     "Polarization",
     "PolarizationInput",

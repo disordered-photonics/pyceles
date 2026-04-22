@@ -8,7 +8,7 @@ import numpy.typing as npt
 from pyceles._optional import asnumpy, import_cupy
 from pyceles.core.conversions import svwf_outgoing_to_pwp, transformation_coefficients
 from pyceles.core.indexing import iter_modes, n_modes
-from pyceles.core.sources import AngularSpectrumSource, DipoleCollection, DipoleSource, Source
+from pyceles.core.sources import AngularSpectrumSource, LocalExpansionSource, Source
 from pyceles.core.spherical import spherical_functions_trigon
 
 from .common import cast_pwp_coeff_dtype
@@ -258,12 +258,12 @@ def compute_far_field_patterns(
     p_t_te = None
     p_t_tm = None
 
-    if isinstance(source, (DipoleSource, DipoleCollection)):
-        dip_pos = np.asarray(source.dipole_positions(), dtype=float).reshape(-1, 3)
-        dip_coeffs = np.asarray(source.outgoing_coeffs(1, dtype=ctype), dtype=ctype)
+    if isinstance(source, LocalExpansionSource):
+        src_pos = np.asarray(source.source_positions(), dtype=float).reshape(-1, 3)
+        src_coeffs = np.asarray(source.outgoing_coeffs(1, dtype=ctype), dtype=ctype)
         p_i_te, p_i_tm = scattered_field_plane_wave_pattern(
-            positions=dip_pos,
-            coeffs=dip_coeffs,
+            positions=src_pos,
+            coeffs=src_coeffs,
             k=k,
             lmax=1,
             polar_angles=polar_angles,

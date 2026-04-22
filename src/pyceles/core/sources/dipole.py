@@ -46,6 +46,10 @@ class DipoleSource:
         """Beam-power diagnostics do not apply to local dipole emitters."""
         return False
 
+    def source_positions(self) -> np.ndarray:
+        """Return emitter coordinates for local outgoing-expansion workflows."""
+        return self.dipole_positions()
+
     def dipole_positions(self) -> np.ndarray:
         return _as_float_triplet("position", self.position).reshape(1, 3)
 
@@ -114,7 +118,7 @@ class DipoleSource:
         k = k0 * float(np.real(complex(self.medium_n)))
         return _incident_coeffs_from_outgoing_expansion(
             receiver_positions=pos_rcv,
-            source_positions=self.dipole_positions(),
+            source_positions=self.source_positions(),
             outgoing_coeffs=self.outgoing_coeffs(int(lmax), dtype=ctype),
             lmax=int(lmax),
             k_medium=float(k),
@@ -154,6 +158,10 @@ class DipoleCollection:
     def has_finite_incident_power(self) -> bool:
         """Beam-power diagnostics do not apply to local dipole emitters."""
         return False
+
+    def source_positions(self) -> np.ndarray:
+        """Return emitter coordinates for local outgoing-expansion workflows."""
+        return self.dipole_positions()
 
     def dipole_positions(self) -> np.ndarray:
         pos, _ = _normalize_dipole_collection_inputs(self.positions, self.dipole_moments)
@@ -220,7 +228,7 @@ class DipoleCollection:
         k = k0 * float(np.real(complex(self.medium_n)))
         return _incident_coeffs_from_outgoing_expansion(
             receiver_positions=pos_rcv,
-            source_positions=self.dipole_positions(),
+            source_positions=self.source_positions(),
             outgoing_coeffs=self.outgoing_coeffs(int(lmax), dtype=ctype),
             lmax=int(lmax),
             k_medium=float(k),

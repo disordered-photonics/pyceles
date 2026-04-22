@@ -16,9 +16,8 @@ from pyceles.core.angular import (
     trapezoidal_weights,
 )
 from pyceles.core.sources import (
-    DipoleCollection,
-    DipoleSource,
     GaussianBeam,
+    LocalExpansionSource,
     PlaneWave,
     PolarizationInput,
     is_normal_incidence,
@@ -411,13 +410,13 @@ def _compute_initial_field_general(
     pts = np.asarray(field_points, np.float64)
     n_medium_c = complex(n_medium)
 
-    if isinstance(beam, (DipoleSource, DipoleCollection)):
-        dip_pos = np.asarray(beam.dipole_positions(), dtype=float).reshape(-1, 3)
-        dip_coeffs = np.asarray(beam.outgoing_coeffs(1, dtype=compute_dtype), dtype=compute_dtype)
+    if isinstance(beam, LocalExpansionSource):
+        src_pos = np.asarray(beam.source_positions(), dtype=float).reshape(-1, 3)
+        src_coeffs = np.asarray(beam.outgoing_coeffs(1, dtype=compute_dtype), dtype=compute_dtype)
         e, h = compute_scattered_field(
             pts,
-            dip_pos,
-            dip_coeffs,
+            src_pos,
+            src_coeffs,
             k=float(k),
             lmax=1,
             n_medium=n_medium_c,
@@ -428,9 +427,9 @@ def _compute_initial_field_general(
             compute_dtype=compute_dtype,
             accum_dtype=accum_dtype,
         )
-        if dip_pos.shape[0] > 0 and pts.shape[0] > 0:
+        if src_pos.shape[0] > 0 and pts.shape[0] > 0:
             hit = np.any(
-                np.all(np.isclose(pts[:, None, :], dip_pos[None, :, :], atol=1e-12), axis=2),
+                np.all(np.isclose(pts[:, None, :], src_pos[None, :, :], atol=1e-12), axis=2),
                 axis=1,
             )
             if np.any(hit):
@@ -474,7 +473,7 @@ def _compute_initial_field_general(
         raise TypeError(
             "Initial-field evaluation is unavailable for source type "
             f"{type(beam).__name__}. Supported initial-field sources are PlaneWave, "
-            "DipoleSource/DipoleCollection, and angular-spectrum sources."
+            "local outgoing-expansion sources, and angular-spectrum sources."
         )
 
     e = np.zeros((pts.shape[0], 3), dtype=accum_dtype)

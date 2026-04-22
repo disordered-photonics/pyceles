@@ -15,6 +15,7 @@ from pyceles.core.sources import (
     GaussianBeam,
     JonesPolarizedSource,
     LaguerreGaussianBeam,
+    LocalExpansionSource,
     PlaneWave,
     SLMSource,
     Source,
@@ -189,3 +190,23 @@ def test_jones_methods_exist_only_on_jones_sources() -> None:
             assert list(sig.parameters) == ["polarization"], (
                 f"{type(source).__name__}: with_polarization signature drift"
             )
+
+
+def test_local_expansion_signature_is_uniform_for_local_sources() -> None:
+    """Local outgoing-expansion sources must expose consistent emitter APIs."""
+    for source in _all_builtin_sources():
+        if not isinstance(source, LocalExpansionSource):
+            continue
+        pos_sig = inspect.signature(source.source_positions)
+        assert list(pos_sig.parameters) == [], (
+            f"{type(source).__name__}: unexpected source_positions parameters"
+        )
+
+        coeff_sig = inspect.signature(source.outgoing_coeffs)
+        params = coeff_sig.parameters
+        names = list(params)
+        assert names == ["lmax", "dtype"], (
+            f"{type(source).__name__}: unexpected outgoing_coeffs parameters {names}"
+        )
+        assert params["dtype"].kind is inspect.Parameter.KEYWORD_ONLY
+        assert params["dtype"].default is not inspect.Parameter.empty

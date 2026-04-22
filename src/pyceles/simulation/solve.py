@@ -17,7 +17,7 @@ from pyceles.core.operators import (
     prepare_matvec,
 )
 from pyceles.core.projection import project_source_to_svwf
-from pyceles.core.sources import DipoleCollection, DipoleSource, Source
+from pyceles.core.sources import LocalExpansionSource, Source
 from pyceles.linear.preconditioner import make_grid_block_preconditioner
 from pyceles.linear.solvers import (
     DenseLUFactorization,
@@ -29,7 +29,7 @@ from pyceles.linear.solvers import (
 from .helpers import (
     make_empty_solver_result,
     print_startup_logo_once,
-    warn_dipoles_inside_circumspheres,
+    warn_local_sources_inside_circumspheres,
 )
 from .results import SolvedSourcesResult
 
@@ -81,11 +81,11 @@ def validate_source_compatibility(
     n_src = complex(source.medium_n)
     if not np.isclose(n_src, complex(cfg.n_medium), rtol=0.0, atol=0.0):
         raise ValueError(f"Source '{label}' medium_n mismatch: {n_src!r} != {cfg.n_medium!r}.")
-    if isinstance(source, (DipoleSource, DipoleCollection)):
-        dip_pos = np.asarray(source.dipole_positions(), dtype=float).reshape(-1, 3)
-        warn_dipoles_inside_circumspheres(
+    if isinstance(source, LocalExpansionSource):
+        src_pos = np.asarray(source.source_positions(), dtype=float).reshape(-1, 3)
+        warn_local_sources_inside_circumspheres(
             label=label,
-            dipole_positions=dip_pos,
+            source_positions=src_pos,
             positions=sim.positions,
             circumscribing_radii=sim.circumscribing_radii,
         )

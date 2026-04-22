@@ -41,6 +41,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `run.power["P_abs_local"]` and `run.power["P_abs_local_particles"]`.
 
 ### Changed
+- Source extensibility now includes a `LocalExpansionSource` capability for
+  local outgoing-SVWF emitters, and the far-field / initial-field local-emitter
+  paths now use that protocol instead of hard-coded dipole-source class checks.
 - Dense/direct NumPy solves now reject true MLFMM coupling stages explicitly
   instead of silently assuming the pairwise backend.
 - `solve_linear_system(..., backend="cupy", method="gmres")` now routes through

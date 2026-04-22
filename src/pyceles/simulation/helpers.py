@@ -138,26 +138,26 @@ def first_overlapping_circumscribing_pair(
     return None
 
 
-def warn_dipoles_inside_circumspheres(
+def warn_local_sources_inside_circumspheres(
     *,
     label: str,
-    dipole_positions: np.ndarray,
+    source_positions: np.ndarray,
     positions: np.ndarray,
     circumscribing_radii: np.ndarray,
 ) -> None:
-    """Warn when local dipoles lie inside particle circumscribing spheres."""
-    if dipole_positions.size == 0 or positions.shape[0] == 0:
+    """Warn when local source centers lie inside particle circumscribing spheres."""
+    if source_positions.size == 0 or positions.shape[0] == 0:
         return
-    deltas = dipole_positions[:, None, :] - positions[None, :, :]
+    deltas = source_positions[:, None, :] - positions[None, :, :]
     dist = np.linalg.norm(deltas, axis=2)
     inside = dist < circumscribing_radii[None, :]
     if np.any(inside):
         j, i = np.argwhere(inside)[0]
         warnings.warn(
-            "Untested configuration: dipole center lies inside a particle circumscribing sphere. "
-            f"Source '{label}', dipole index {int(j)}, particle index {int(i)}. "
-            "Current pyceles dipole formulation is validated for dipoles in the homogeneous host "
-            "outside particles; interior dipole placement may produce unreliable results.",
+            "Untested configuration: local source center lies inside a particle circumscribing sphere. "
+            f"Source '{label}', source index {int(j)}, particle index {int(i)}. "
+            "Current pyceles local-emitter formulation is validated for emitters in the homogeneous "
+            "host outside particles; interior placement may produce unreliable results.",
             UserWarning,
             stacklevel=3,
         )
@@ -168,5 +168,5 @@ __all__ = [
     "make_empty_solver_result",
     "normalize_particle_geometry",
     "print_startup_logo_once",
-    "warn_dipoles_inside_circumspheres",
+    "warn_local_sources_inside_circumspheres",
 ]

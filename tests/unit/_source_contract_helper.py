@@ -5,6 +5,7 @@ import numpy as np
 from pyceles.core.sources import (
     AngularSpectrumSource,
     JonesPolarizedSource,
+    LocalExpansionSource,
     Source,
 )
 
@@ -15,6 +16,7 @@ def assert_source_compliance(
     expect_angular_spectrum: bool,
     expect_finite_incident_power: bool,
     expect_jones_polarization: bool,
+    expect_local_expansion: bool,
 ) -> None:
     """Assert that one source object satisfies pyceles source capability contract."""
     assert isinstance(source, Source), (
@@ -35,6 +37,7 @@ def assert_source_compliance(
     assert isinstance(source, AngularSpectrumSource) is expect_angular_spectrum
     assert bool(source.has_finite_incident_power()) is expect_finite_incident_power
     assert isinstance(source, JonesPolarizedSource) is expect_jones_polarization
+    assert isinstance(source, LocalExpansionSource) is expect_local_expansion
 
     if expect_jones_polarization:
         if not isinstance(source, JonesPolarizedSource):
@@ -49,3 +52,11 @@ def assert_source_compliance(
     else:
         assert not callable(getattr(source, "jones_coefficients", None))
         assert not callable(getattr(source, "with_polarization", None))
+
+    if expect_local_expansion:
+        if not isinstance(source, LocalExpansionSource):
+            raise AssertionError("Expected source to satisfy LocalExpansionSource protocol.")
+        positions = np.asarray(source.source_positions(), dtype=float).reshape(-1, 3)
+        coeffs = np.asarray(source.outgoing_coeffs(1), dtype=np.complex128)
+        assert positions.ndim == 2 and positions.shape[1] == 3
+        assert coeffs.ndim == 2 and coeffs.shape[0] == positions.shape[0]

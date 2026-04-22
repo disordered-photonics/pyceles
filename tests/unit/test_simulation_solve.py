@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, cast
 
 import numpy as np
 import pytest
 
-from pyceles.core.fields import PlaneWave
+from pyceles.core.fields import LocalExpansionSource, PlaneWave
+from pyceles.core.indexing import n_modes
 from pyceles.core.particles import Sphere
 from pyceles.linear.solvers import LinearSolveResult
 from pyceles.simulation import Simulation, SimulationConfig
@@ -40,6 +42,35 @@ def _single_sphere_sim(**cfg_overrides) -> Simulation:
     )
 
 
+@dataclass(frozen=True)
+class _ToyLocalExpansionSource:
+    wavelength: float = 550.0
+    medium_n: complex = 1.0 + 0.0j
+    amplitude: float = 1.0
+
+    def has_finite_incident_power(self) -> bool:
+        return False
+
+    def incident_coeffs(
+        self,
+        positions: np.ndarray,
+        lmax: int,
+        *,
+        polar_angles: np.ndarray | None = None,
+        azimuthal_angles: np.ndarray | None = None,
+        dtype=np.complex128,
+    ) -> np.ndarray:
+        del polar_angles, azimuthal_angles
+        ns = np.asarray(positions, dtype=float).reshape(-1, 3).shape[0]
+        return np.zeros((ns, n_modes(int(lmax))), dtype=np.dtype(dtype))
+
+    def source_positions(self) -> np.ndarray:
+        return np.array([[0.0, 0.0, 0.0]], dtype=float)
+
+    def outgoing_coeffs(self, lmax: int, *, dtype=np.complex128) -> np.ndarray:
+        return np.zeros((1, n_modes(int(lmax))), dtype=np.dtype(dtype))
+
+
 def test_normalize_sources_argument_validates_mapping_duplicates_and_source_mismatch():
     sim = _single_sphere_sim()
     fn = cast(Any, sim_solve.normalize_sources_argument)
@@ -53,6 +84,16 @@ def test_normalize_sources_argument_validates_mapping_duplicates_and_source_mism
         fn(sim, {"src": _plane_wave(wavelength=551.0)})
     with pytest.raises(ValueError, match="medium_n mismatch"):
         fn(sim, {"src": _plane_wave(medium_n=1.2 + 0j)})
+
+
+def test_normalize_sources_argument_warns_for_local_expansion_source_inside_circumsphere():
+    sim = _single_sphere_sim()
+    fn = cast(Any, sim_solve.normalize_sources_argument)
+    source = _ToyLocalExpansionSource()
+    assert isinstance(source, LocalExpansionSource)
+    with pytest.warns(UserWarning, match="local source center lies inside"):
+        out = fn(sim, {"src": source})
+    assert out["src"] is source
 
 
 def test_assemble_dense_operator_via_matvec_builds_dense_columns():
