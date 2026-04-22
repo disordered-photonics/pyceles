@@ -742,11 +742,15 @@ def test_gmres_cupy_reports_nonconverged_reason(monkeypatch):
     assert str(out.converged_reason) in {"maxiter_reached", "breakdown", "happy_breakdown"}
 
 
-def test_gmres_cupy_rejects_block_rhs_at_single_rhs_entrypoint(monkeypatch):
+@pytest.mark.parametrize("solver_name", ["gmres_cupy", "fgmres_cupy", "lgmres_cupy"])
+def test_cupy_restart_solvers_reject_block_rhs_at_single_rhs_entrypoint(
+    monkeypatch, solver_name: str
+):
     monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
     b = np.eye(3, dtype=np.complex128)
+    solver = getattr(solvers, solver_name)
     with pytest.raises(ValueError, match="expects a 1D RHS"):
-        solvers.gmres_cupy(lambda x: np.asarray(x), b, show_progress=False)
+        solver(lambda x: np.asarray(x), b, show_progress=False)
 
 
 def test_solve_linear_system_cupy_block_gmres_identity_shape_and_metadata(monkeypatch):

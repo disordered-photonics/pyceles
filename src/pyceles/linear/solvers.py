@@ -337,6 +337,135 @@ def _make_progress_tracker(
     return update, close, history
 
 
+def _prepare_cupy_restarted_solver(
+    method: str,
+    b: np.ndarray,
+    *,
+    rtol: float,
+    maxiter: int | None,
+    show_progress: bool,
+    monitor: Literal["preconditioned", "true", "both"],
+    progress_residual: Literal["preconditioned", "true"],
+    callback: Callable[[float], None] | None,
+    callback_true: Callable[[float], None] | None,
+) -> tuple[
+    Any,
+    np.dtype[Any],
+    int,
+    Literal["preconditioned", "true", "both"],
+    Callable[[float], None] | None,
+    Callable[[float], None] | None,
+    Callable[[], None],
+]:
+    """Prepare shared single-RHS CuPy restarted-Krylov wrapper plumbing."""
+    b_arr = np.asarray(b)
+    if b_arr.ndim != 1:
+        raise ValueError(
+            f"`{method}_cupy` expects a 1D RHS. For block solves use "
+            "`solve_linear_system(..., method='gmres', backend='cupy')` with a 2D RHS."
+        )
+
+    cupy, _ = import_cupy()
+    n = int(b_arr.size)
+    op_dtype = np.dtype(np.result_type(b_arr.dtype, np.complex64))
+    maxiter_total = int(maxiter) if maxiter is not None else n * 10
+
+    monitor_mode = cast(
+        Literal["preconditioned", "true", "both"],
+        str(monitor).lower(),
+    )
+    if monitor_mode not in {"preconditioned", "true", "both"}:
+        raise ValueError("`monitor` must be 'preconditioned', 'true', or 'both'.")
+    progress_mode = cast(
+        Literal["preconditioned", "true"],
+        str(progress_residual).lower(),
+    )
+    if progress_mode not in {"preconditioned", "true"}:
+        raise ValueError("`progress_residual` must be 'preconditioned' or 'true'.")
+
+    progress_update, progress_close, _ = _make_progress_tracker(
+        f"{method}[cupy]",
+        show_progress=show_progress,
+        target_rel=float(rtol),
+        residual_label="pr_rel_res" if progress_mode == "preconditioned" else "true_rel_res",
+        max_iters=maxiter_total,
+    )
+
+    def _inner_callback(pr_rel: float) -> None:
+        if progress_mode == "preconditioned":
+            progress_update(pr_rel)
+        if callback is not None:
+            callback(pr_rel)
+
+    def _restart_callback(true_rel: float) -> None:
+        if progress_mode == "true":
+            progress_update(true_rel)
+        if callback_true is not None:
+            callback_true(true_rel)
+
+    native_callback = (
+        _inner_callback
+        if (callback is not None or (show_progress and progress_mode == "preconditioned"))
+        else None
+    )
+    native_restart_callback = (
+        _restart_callback
+        if (callback_true is not None or (show_progress and progress_mode == "true"))
+        else None
+    )
+    return (
+        cupy,
+        op_dtype,
+        maxiter_total,
+        monitor_mode,
+        native_callback,
+        native_restart_callback,
+        progress_close,
+    )
+
+
+def _finalize_cupy_restarted_result(
+    method: str,
+    native: Any,
+    *,
+    monitor_mode: Literal["preconditioned", "true", "both"],
+    compute_final_residual: bool,
+) -> LinearSolveResult:
+    """Build the common result payload for single-RHS CuPy restarted solvers."""
+    x_np = asnumpy(native.x)
+    if compute_final_residual:
+        residual_norm = float(native.residual_norm)
+        relative_residual = float(native.relative_residual)
+    else:
+        residual_norm = float("nan")
+        relative_residual = float("nan")
+
+    pre_hist = np.asarray(native.preconditioned_history, dtype=float)
+    true_hist = np.asarray(native.true_history, dtype=float)
+    if monitor_mode == "preconditioned":
+        residual_history: np.ndarray | None = pre_hist
+    elif monitor_mode == "true":
+        residual_history = true_hist
+    else:
+        # Keep backward-compatible single-channel field for code that still
+        # reads `residual_history`; primary channel remains preconditioned.
+        residual_history = pre_hist
+
+    return LinearSolveResult(
+        x=x_np,
+        info=int(native.info),
+        residual_norm=residual_norm,
+        relative_residual=relative_residual,
+        iterations=int(native.iterations),
+        method=f"{method}[cupy]",
+        residual_history=residual_history,
+        rhs_count=1,
+        preconditioned_residual_history=pre_hist,
+        true_residual_history=true_hist,
+        converged_reason=str(native.converged_reason),
+    )
+
+
 @dataclass(frozen=True)
 class BlockKrylovCallbackPayload:
     """Progress payload for block Krylov callbacks."""
@@ -806,107 +935,53 @@ def gmres_cupy(
     `compute_final_residual=False` disables those checks and leaves final
     true-residual scalars as `NaN`.
     """
-
-    cupy, _ = import_cupy()
-    b_arr = np.asarray(b)
-    if b_arr.ndim != 1:
-        raise ValueError(
-            "`gmres_cupy` expects a 1D RHS. For block solves use "
-            "`solve_linear_system(..., method='gmres', backend='cupy')` with a 2D RHS."
-        )
-    n = int(b_arr.size)
-    op_dtype = np.dtype(np.result_type(b_arr.dtype, np.complex64))
-    maxiter_total = int(maxiter) if maxiter is not None else n * 10
-
-    monitor_mode = str(monitor).lower()
-    if monitor_mode not in {"preconditioned", "true", "both"}:
-        raise ValueError("`monitor` must be 'preconditioned', 'true', or 'both'.")
-    progress_mode = str(progress_residual).lower()
-    if progress_mode not in {"preconditioned", "true"}:
-        raise ValueError("`progress_residual` must be 'preconditioned' or 'true'.")
-
-    progress_update, progress_close, _ = _make_progress_tracker(
-        "gmres[cupy]",
-        show_progress=show_progress,
-        target_rel=float(rtol),
-        residual_label="pr_rel_res" if progress_mode == "preconditioned" else "true_rel_res",
-        max_iters=maxiter_total,
-    )
-
-    def _inner_callback(pr_rel: float) -> None:
-        if progress_mode == "preconditioned":
-            progress_update(pr_rel)
-        if callback is not None:
-            callback(pr_rel)
-
-    def _restart_callback(true_rel: float) -> None:
-        if progress_mode == "true":
-            progress_update(true_rel)
-        if callback_true is not None:
-            callback_true(true_rel)
-
-    native_callback = (
-        _inner_callback
-        if (callback is not None or (show_progress and progress_mode == "preconditioned"))
-        else None
-    )
-    native_restart_callback = (
-        _restart_callback
-        if (callback_true is not None or (show_progress and progress_mode == "true"))
-        else None
-    )
-    native = gmres_cupy_native(
-        A_mv,
+    (
+        cupy,
+        op_dtype,
+        maxiter_total,
+        monitor_mode,
+        native_callback,
+        native_restart_callback,
+        progress_close,
+    ) = _prepare_cupy_restarted_solver(
+        "gmres",
         b,
-        cupy=cupy,
-        x0=x0,
-        preconditioner=preconditioner,
         rtol=rtol,
-        atol=atol,
-        restart=restart,
-        maxiter=maxiter_total,
-        operator_dtype=op_dtype,
-        callback=native_callback,
-        restart_callback=native_restart_callback,
-        record_preconditioned_history=monitor_mode in {"preconditioned", "both"},
-        orthogonalization=orthogonalization,
-        cgs_refinement=cgs_refinement,
-        happy_breakdown_tol=float(happy_breakdown_tol),
-        compute_final_residual=bool(compute_final_residual),
+        maxiter=maxiter,
+        show_progress=show_progress,
+        monitor=monitor,
+        progress_residual=progress_residual,
+        callback=callback,
+        callback_true=callback_true,
     )
-    progress_close()
+    try:
+        native = gmres_cupy_native(
+            A_mv,
+            b,
+            cupy=cupy,
+            x0=x0,
+            preconditioner=preconditioner,
+            rtol=rtol,
+            atol=atol,
+            restart=restart,
+            maxiter=maxiter_total,
+            operator_dtype=op_dtype,
+            callback=native_callback,
+            restart_callback=native_restart_callback,
+            record_preconditioned_history=monitor_mode in {"preconditioned", "both"},
+            orthogonalization=orthogonalization,
+            cgs_refinement=cgs_refinement,
+            happy_breakdown_tol=float(happy_breakdown_tol),
+            compute_final_residual=bool(compute_final_residual),
+        )
+    finally:
+        progress_close()
 
-    x_np = asnumpy(native.x)
-    if compute_final_residual:
-        residual_norm = float(native.residual_norm)
-        relative_residual = float(native.relative_residual)
-    else:
-        residual_norm = float("nan")
-        relative_residual = float("nan")
-
-    pre_hist = np.asarray(native.preconditioned_history, dtype=float)
-    true_hist = np.asarray(native.true_history, dtype=float)
-    if monitor_mode == "preconditioned":
-        residual_history: np.ndarray | None = pre_hist
-    elif monitor_mode == "true":
-        residual_history = true_hist
-    else:
-        # Keep backward-compatible single-channel field for code that still
-        # reads `residual_history`; primary channel remains preconditioned.
-        residual_history = pre_hist
-
-    return LinearSolveResult(
-        x=x_np,
-        info=int(native.info),
-        residual_norm=residual_norm,
-        relative_residual=relative_residual,
-        iterations=int(native.iterations),
-        method="gmres[cupy]",
-        residual_history=residual_history,
-        rhs_count=1,
-        preconditioned_residual_history=pre_hist,
-        true_residual_history=true_hist,
-        converged_reason=str(native.converged_reason),
+    return _finalize_cupy_restarted_result(
+        "gmres",
+        native,
+        monitor_mode=monitor_mode,
+        compute_final_residual=bool(compute_final_residual),
     )
 
 
@@ -941,100 +1016,53 @@ def fgmres_cupy(
     decisions. `compute_final_residual=False` disables those checks and leaves
     final true-residual scalars as `NaN`.
     """
-
-    cupy, _ = import_cupy()
-    b_arr = np.asarray(b)
-    n = int(b_arr.size)
-    op_dtype = np.dtype(np.result_type(b_arr.dtype, np.complex64))
-    maxiter_total = int(maxiter) if maxiter is not None else n * 10
-
-    monitor_mode = str(monitor).lower()
-    if monitor_mode not in {"preconditioned", "true", "both"}:
-        raise ValueError("`monitor` must be 'preconditioned', 'true', or 'both'.")
-    progress_mode = str(progress_residual).lower()
-    if progress_mode not in {"preconditioned", "true"}:
-        raise ValueError("`progress_residual` must be 'preconditioned' or 'true'.")
-
-    progress_update, progress_close, _ = _make_progress_tracker(
-        "fgmres[cupy]",
-        show_progress=show_progress,
-        target_rel=float(rtol),
-        residual_label="pr_rel_res" if progress_mode == "preconditioned" else "true_rel_res",
-        max_iters=maxiter_total,
-    )
-
-    def _inner_callback(pr_rel: float) -> None:
-        if progress_mode == "preconditioned":
-            progress_update(pr_rel)
-        if callback is not None:
-            callback(pr_rel)
-
-    def _restart_callback(true_rel: float) -> None:
-        if progress_mode == "true":
-            progress_update(true_rel)
-        if callback_true is not None:
-            callback_true(true_rel)
-
-    native_callback = (
-        _inner_callback
-        if (callback is not None or (show_progress and progress_mode == "preconditioned"))
-        else None
-    )
-    native_restart_callback = (
-        _restart_callback
-        if (callback_true is not None or (show_progress and progress_mode == "true"))
-        else None
-    )
-    native = fgmres_cupy_native(
-        A_mv,
+    (
+        cupy,
+        op_dtype,
+        maxiter_total,
+        monitor_mode,
+        native_callback,
+        native_restart_callback,
+        progress_close,
+    ) = _prepare_cupy_restarted_solver(
+        "fgmres",
         b,
-        cupy=cupy,
-        x0=x0,
-        preconditioner=preconditioner,
         rtol=rtol,
-        atol=atol,
-        restart=restart,
-        maxiter=maxiter_total,
-        operator_dtype=op_dtype,
-        callback=native_callback,
-        restart_callback=native_restart_callback,
-        record_preconditioned_history=monitor_mode in {"preconditioned", "both"},
-        orthogonalization=orthogonalization,
-        cgs_refinement=cgs_refinement,
-        happy_breakdown_tol=float(happy_breakdown_tol),
-        compute_final_residual=bool(compute_final_residual),
+        maxiter=maxiter,
+        show_progress=show_progress,
+        monitor=monitor,
+        progress_residual=progress_residual,
+        callback=callback,
+        callback_true=callback_true,
     )
-    progress_close()
+    try:
+        native = fgmres_cupy_native(
+            A_mv,
+            b,
+            cupy=cupy,
+            x0=x0,
+            preconditioner=preconditioner,
+            rtol=rtol,
+            atol=atol,
+            restart=restart,
+            maxiter=maxiter_total,
+            operator_dtype=op_dtype,
+            callback=native_callback,
+            restart_callback=native_restart_callback,
+            record_preconditioned_history=monitor_mode in {"preconditioned", "both"},
+            orthogonalization=orthogonalization,
+            cgs_refinement=cgs_refinement,
+            happy_breakdown_tol=float(happy_breakdown_tol),
+            compute_final_residual=bool(compute_final_residual),
+        )
+    finally:
+        progress_close()
 
-    x_np = asnumpy(native.x)
-    if compute_final_residual:
-        residual_norm = float(native.residual_norm)
-        relative_residual = float(native.relative_residual)
-    else:
-        residual_norm = float("nan")
-        relative_residual = float("nan")
-
-    pre_hist = np.asarray(native.preconditioned_history, dtype=float)
-    true_hist = np.asarray(native.true_history, dtype=float)
-    if monitor_mode == "preconditioned":
-        residual_history: np.ndarray | None = pre_hist
-    elif monitor_mode == "true":
-        residual_history = true_hist
-    else:
-        residual_history = pre_hist
-
-    return LinearSolveResult(
-        x=x_np,
-        info=int(native.info),
-        residual_norm=residual_norm,
-        relative_residual=relative_residual,
-        iterations=int(native.iterations),
-        method="fgmres[cupy]",
-        residual_history=residual_history,
-        rhs_count=1,
-        preconditioned_residual_history=pre_hist,
-        true_residual_history=true_hist,
-        converged_reason=str(native.converged_reason),
+    return _finalize_cupy_restarted_result(
+        "fgmres",
+        native,
+        monitor_mode=monitor_mode,
+        compute_final_residual=bool(compute_final_residual),
     )
 
 
@@ -1072,102 +1100,55 @@ def lgmres_cupy(
     decisions. `compute_final_residual=False` disables those checks and leaves
     final true-residual scalars as `NaN`.
     """
-
-    cupy, _ = import_cupy()
-    b_arr = np.asarray(b)
-    n = int(b_arr.size)
-    op_dtype = np.dtype(np.result_type(b_arr.dtype, np.complex64))
-    maxiter_total = int(maxiter) if maxiter is not None else n * 10
-
-    monitor_mode = str(monitor).lower()
-    if monitor_mode not in {"preconditioned", "true", "both"}:
-        raise ValueError("`monitor` must be 'preconditioned', 'true', or 'both'.")
-    progress_mode = str(progress_residual).lower()
-    if progress_mode not in {"preconditioned", "true"}:
-        raise ValueError("`progress_residual` must be 'preconditioned' or 'true'.")
-
-    progress_update, progress_close, _ = _make_progress_tracker(
-        "lgmres[cupy]",
-        show_progress=show_progress,
-        target_rel=float(rtol),
-        residual_label="pr_rel_res" if progress_mode == "preconditioned" else "true_rel_res",
-        max_iters=maxiter_total,
-    )
-
-    def _inner_callback(pr_rel: float) -> None:
-        if progress_mode == "preconditioned":
-            progress_update(pr_rel)
-        if callback is not None:
-            callback(pr_rel)
-
-    def _restart_callback(true_rel: float) -> None:
-        if progress_mode == "true":
-            progress_update(true_rel)
-        if callback_true is not None:
-            callback_true(true_rel)
-
-    native_callback = (
-        _inner_callback
-        if (callback is not None or (show_progress and progress_mode == "preconditioned"))
-        else None
-    )
-    native_restart_callback = (
-        _restart_callback
-        if (callback_true is not None or (show_progress and progress_mode == "true"))
-        else None
-    )
-    native = lgmres_cupy_native(
-        A_mv,
+    (
+        cupy,
+        op_dtype,
+        maxiter_total,
+        monitor_mode,
+        native_callback,
+        native_restart_callback,
+        progress_close,
+    ) = _prepare_cupy_restarted_solver(
+        "lgmres",
         b,
-        cupy=cupy,
-        x0=x0,
-        preconditioner=preconditioner,
         rtol=rtol,
-        atol=atol,
-        restart=restart,
-        maxiter=maxiter_total,
-        outer_k=int(outer_k),
-        store_outer_av=bool(store_outer_av),
-        operator_dtype=op_dtype,
-        callback=native_callback,
-        restart_callback=native_restart_callback,
-        record_preconditioned_history=monitor_mode in {"preconditioned", "both"},
-        orthogonalization=orthogonalization,
-        cgs_refinement=cgs_refinement,
-        happy_breakdown_tol=float(happy_breakdown_tol),
-        compute_final_residual=bool(compute_final_residual),
+        maxiter=maxiter,
+        show_progress=show_progress,
+        monitor=monitor,
+        progress_residual=progress_residual,
+        callback=callback,
+        callback_true=callback_true,
     )
-    progress_close()
+    try:
+        native = lgmres_cupy_native(
+            A_mv,
+            b,
+            cupy=cupy,
+            x0=x0,
+            preconditioner=preconditioner,
+            rtol=rtol,
+            atol=atol,
+            restart=restart,
+            maxiter=maxiter_total,
+            outer_k=int(outer_k),
+            store_outer_av=bool(store_outer_av),
+            operator_dtype=op_dtype,
+            callback=native_callback,
+            restart_callback=native_restart_callback,
+            record_preconditioned_history=monitor_mode in {"preconditioned", "both"},
+            orthogonalization=orthogonalization,
+            cgs_refinement=cgs_refinement,
+            happy_breakdown_tol=float(happy_breakdown_tol),
+            compute_final_residual=bool(compute_final_residual),
+        )
+    finally:
+        progress_close()
 
-    x_np = asnumpy(native.x)
-    if compute_final_residual:
-        residual_norm = float(native.residual_norm)
-        relative_residual = float(native.relative_residual)
-    else:
-        residual_norm = float("nan")
-        relative_residual = float("nan")
-
-    pre_hist = np.asarray(native.preconditioned_history, dtype=float)
-    true_hist = np.asarray(native.true_history, dtype=float)
-    if monitor_mode == "preconditioned":
-        residual_history: np.ndarray | None = pre_hist
-    elif monitor_mode == "true":
-        residual_history = true_hist
-    else:
-        residual_history = pre_hist
-
-    return LinearSolveResult(
-        x=x_np,
-        info=int(native.info),
-        residual_norm=residual_norm,
-        relative_residual=relative_residual,
-        iterations=int(native.iterations),
-        method="lgmres[cupy]",
-        residual_history=residual_history,
-        rhs_count=1,
-        preconditioned_residual_history=pre_hist,
-        true_residual_history=true_hist,
-        converged_reason=str(native.converged_reason),
+    return _finalize_cupy_restarted_result(
+        "lgmres",
+        native,
+        monitor_mode=monitor_mode,
+        compute_final_residual=bool(compute_final_residual),
     )
 
 
