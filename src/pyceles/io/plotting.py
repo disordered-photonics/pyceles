@@ -14,26 +14,7 @@ from pyceles.core.particles import (
     Spheroid,
     _rotation_matrix_zyz_lab_to_body,
 )
-from pyceles.core.sources import JonesPolarizedSource
-
-
-def _is_pure_channel_result(run, channel: str, *, atol: float = 1e-12) -> bool:
-    """Return True when `run` already represents one pure TE/TM Jones channel."""
-    src = getattr(getattr(run, "config", None), "source", None)
-    if src is None:
-        return False
-    if not isinstance(src, JonesPolarizedSource):
-        return False
-    if not hasattr(run, "polarization_jones"):
-        return False
-    if run.polarization_jones is None:
-        return False
-    a_te, a_tm = run.polarization_jones
-    if channel == "te":
-        return bool(abs(complex(a_tm)) <= atol and abs(complex(a_te)) > atol)
-    if channel == "tm":
-        return bool(abs(complex(a_te)) <= atol and abs(complex(a_tm)) > atol)
-    return False
+from pyceles.simulation._channels import is_pure_channel_result
 
 
 def _slice_axis_labels(plane: str) -> tuple[str, str]:
@@ -231,7 +212,7 @@ def far_field_intensity_from_result(run, *, channel: str = "mixed") -> np.ndarra
         if run.farfield_basis is not None and ch in run.farfield_basis:
             ff = run.farfield_basis[ch]
             return far_field_intensity(ff.scattered_te, ff.scattered_tm)
-        if _is_pure_channel_result(run, ch):
+        if is_pure_channel_result(run, ch):
             return far_field_intensity(run.farfield.scattered_te, run.farfield.scattered_tm)
         raise ValueError(
             "Requested basis far-field channel, but no TE/TM basis payload is available on this run. "

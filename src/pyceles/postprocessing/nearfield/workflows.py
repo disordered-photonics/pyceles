@@ -6,6 +6,7 @@ import numpy as np
 
 from pyceles._dtypes import resolve_compute_accum_dtypes
 from pyceles.core.sources import JonesPolarizedSource
+from pyceles.simulation._channels import is_pure_channel_result
 
 from .components import NearFieldComponents, compute_near_field_components
 from .slice import (
@@ -17,23 +18,6 @@ from .slice import (
 
 if TYPE_CHECKING:
     from pyceles.simulation import SimulationResult
-
-
-def _is_pure_channel_result(run: SimulationResult, channel: str, *, atol: float = 1e-12) -> bool:
-    """Return True when `run` already represents one pure TE/TM Jones channel."""
-    src = run.config.source
-    if src is None:
-        return False
-    if not isinstance(src, JonesPolarizedSource):
-        return False
-    if run.polarization_jones is None:
-        return False
-    a_te, a_tm = run.polarization_jones
-    if channel == "te":
-        return bool(abs(complex(a_tm)) <= atol and abs(complex(a_te)) > atol)
-    if channel == "tm":
-        return bool(abs(complex(a_te)) <= atol and abs(complex(a_tm)) > atol)
-    return False
 
 
 def _mix_complex_vector_fields(
@@ -140,7 +124,7 @@ def compute_near_field(
         if run.coeffs_basis is not None and channel_key in run.coeffs_basis:
             coeffs = run.coeffs_basis[channel_key]
             used_basis_payload = True
-        elif _is_pure_channel_result(run, channel_key):
+        elif is_pure_channel_result(run, channel_key):
             coeffs = run.coeffs
         else:
             raise ValueError(
