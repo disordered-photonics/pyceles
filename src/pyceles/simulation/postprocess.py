@@ -256,6 +256,150 @@ def mix_farfield_patterns(
     )
 
 
+def _build_channel_diagnostics(
+    sim: Simulation,
+    *,
+    source: Source,
+    initial_coeffs: np.ndarray,
+    coeffs: np.ndarray,
+    farfield: FarFieldPatterns,
+    k: float,
+    k0: float,
+    accum_dtype: np.dtype,
+) -> tuple[
+    dict[str, float | np.ndarray] | None,
+    dict[str, float] | None,
+    dict[str, float] | None,
+    dict[str, float] | None,
+]:
+    """Build optional power/cross-section diagnostics for one channel payload.
+
+    This centralizes the physics-policy branching so the single-channel path
+    and the mixed-from-basis path cannot silently drift apart when we extend
+    diagnostics in the future.
+    """
+    cfg = sim.config
+    ns = int(sim.positions.shape[0])
+
+    power: dict[str, float | np.ndarray] | None = None
+    cross_sections: dict[str, float] | None = None
+    decomposition_forward: dict[str, float] | None = None
+    decomposition_backward: dict[str, float] | None = None
+
+    if isinstance(source, PlaneWave):
+        c_abs_local = (
+            0.0
+            if _is_numerically_lossless_cluster(sim.particles)
+            else _plane_wave_local_absorption_generic_route(
+                sim,
+                source=source,
+                initial_coeffs=initial_coeffs,
+                coeffs=coeffs,
+                k0=float(k0),
+                accum_dtype=accum_dtype,
+            )
+        )
+        cross_sections = plane_wave_cross_sections(
+            source,
+            initial_coeffs,
+            coeffs,
+            k0=k0,
+            n_medium=cfg.n_medium,
+            scattered_pwp_te=farfield.scattered_te,
+            scattered_pwp_tm=farfield.scattered_tm,
+            local_absorption=c_abs_local,
+        )
+        return power, cross_sections, decomposition_forward, decomposition_backward
+
+    if (
+        farfield.initial_te is not None
+        and farfield.initial_tm is not None
+        and source.has_finite_incident_power()
+    ):
+        p_abs_diag: dict[str, float | np.ndarray] | None
+        if _is_numerically_lossless_cluster(sim.particles):
+            p_abs_diag = {
+                "P_abs_local": 0.0,
+                "P_abs_local_particles": np.zeros((ns,), dtype=np.float64),
+            }
+        else:
+            p_abs_diag = _local_absorbed_power_components_generic_route(
+                sim,
+                initial_coeffs=initial_coeffs,
+                coeffs=coeffs,
+                k0=float(k0),
+                accum_dtype=accum_dtype,
+            )
+        power_base = finite_beam_power_fractions(
+            source,
+            farfield.initial_te,
+            farfield.initial_tm,
+            farfield.scattered_te,
+            farfield.scattered_tm,
+            k0=k0,
+            k_medium=k,
+            local_absorbed_power=(
+                None if p_abs_diag is None else _as_float_scalar(p_abs_diag["P_abs_local"])
+            ),
+        )
+        power = cast(dict[str, float | np.ndarray], dict(power_base))
+        if p_abs_diag is not None:
+            p_abs_local_particles = np.asarray(
+                p_abs_diag.get("P_abs_local_particles", np.zeros((ns,), dtype=np.float64)),
+                dtype=np.float64,
+            ).reshape(ns)
+            power["P_abs_local_particles"] = p_abs_local_particles
+            power["A_local_particles"] = p_abs_local_particles / float(power["P_initial"])
+        decomposition_forward = pwp_power_decomposition(
+            direction="forward",
+            initial_pwp_te=farfield.initial_te,
+            initial_pwp_tm=farfield.initial_tm,
+            scattered_pwp_te=farfield.scattered_te,
+            scattered_pwp_tm=farfield.scattered_tm,
+            k0=k0,
+            k_medium=k,
+            source=source,
+        )
+        decomposition_backward = pwp_power_decomposition(
+            direction="backward",
+            initial_pwp_te=farfield.initial_te,
+            initial_pwp_tm=farfield.initial_tm,
+            scattered_pwp_te=farfield.scattered_te,
+            scattered_pwp_tm=farfield.scattered_tm,
+            k0=k0,
+            k_medium=k,
+            source=source,
+        )
+        return power, cross_sections, decomposition_forward, decomposition_backward
+
+    if isinstance(source, (DipoleSource, DipoleCollection)):
+        if _is_numerically_lossless_cluster(sim.particles):
+            power = {
+                "P_abs_local": 0.0,
+                "P_abs_local_particles": np.zeros((ns,), dtype=np.float64),
+            }
+        else:
+            p_abs_diag = _local_absorbed_power_components_generic_route(
+                sim,
+                initial_coeffs=initial_coeffs,
+                coeffs=coeffs,
+                k0=float(k0),
+                accum_dtype=accum_dtype,
+            )
+            if p_abs_diag is not None:
+                power = {
+                    "P_abs_local": _as_float_scalar(p_abs_diag["P_abs_local"]),
+                    "P_abs_local_particles": np.asarray(
+                        p_abs_diag.get(
+                            "P_abs_local_particles",
+                            np.zeros((ns,), dtype=np.float64),
+                        ),
+                        dtype=np.float64,
+                    ).reshape(ns),
+                }
+    return power, cross_sections, decomposition_forward, decomposition_backward
+
+
 def build_single_channel_result(
     sim: Simulation,
     *,
@@ -295,113 +439,18 @@ def build_single_channel_result(
             dtype=compute_dtype,
             show_progress=bool(cfg.verbose),
         )
-        if isinstance(source, PlaneWave):
-            c_abs_local = (
-                0.0
-                if _is_numerically_lossless_cluster(sim.particles)
-                else _plane_wave_local_absorption_generic_route(
-                    sim,
-                    source=source,
-                    initial_coeffs=initial_coeffs,
-                    coeffs=coeffs,
-                    k0=float(k0),
-                    accum_dtype=accum_dtype,
-                )
-            )
-            cross_sections = plane_wave_cross_sections(
-                source,
-                initial_coeffs,
-                coeffs,
-                k0=k0,
-                n_medium=cfg.n_medium,
-                scattered_pwp_te=ff.scattered_te,
-                scattered_pwp_tm=ff.scattered_tm,
-                local_absorption=c_abs_local,
-            )
-        elif (
-            ff.initial_te is not None
-            and ff.initial_tm is not None
-            and source.has_finite_incident_power()
-        ):
-            p_abs_diag: dict[str, float | np.ndarray] | None
-            if _is_numerically_lossless_cluster(sim.particles):
-                p_abs_diag = {
-                    "P_abs_local": 0.0,
-                    "P_abs_local_particles": np.zeros((Ns,), dtype=np.float64),
-                }
-            else:
-                p_abs_diag = _local_absorbed_power_components_generic_route(
-                    sim,
-                    initial_coeffs=initial_coeffs,
-                    coeffs=coeffs,
-                    k0=float(k0),
-                    accum_dtype=accum_dtype,
-                )
-            power_base = finite_beam_power_fractions(
-                source,
-                ff.initial_te,
-                ff.initial_tm,
-                ff.scattered_te,
-                ff.scattered_tm,
-                k0=k0,
-                k_medium=k,
-                local_absorbed_power=(
-                    None if p_abs_diag is None else _as_float_scalar(p_abs_diag["P_abs_local"])
-                ),
-            )
-            power = cast(dict[str, float | np.ndarray], dict(power_base))
-            if power is not None and p_abs_diag is not None:
-                p_abs_local_particles = np.asarray(
-                    p_abs_diag.get("P_abs_local_particles", np.zeros((Ns,), dtype=np.float64)),
-                    dtype=np.float64,
-                ).reshape(Ns)
-                power["P_abs_local_particles"] = p_abs_local_particles
-                power["A_local_particles"] = p_abs_local_particles / float(power["P_initial"])
-            decomposition_forward = pwp_power_decomposition(
-                direction="forward",
-                initial_pwp_te=ff.initial_te,
-                initial_pwp_tm=ff.initial_tm,
-                scattered_pwp_te=ff.scattered_te,
-                scattered_pwp_tm=ff.scattered_tm,
-                k0=k0,
-                k_medium=k,
+        power, cross_sections, decomposition_forward, decomposition_backward = (
+            _build_channel_diagnostics(
+                sim,
                 source=source,
-            )
-            decomposition_backward = pwp_power_decomposition(
-                direction="backward",
-                initial_pwp_te=ff.initial_te,
-                initial_pwp_tm=ff.initial_tm,
-                scattered_pwp_te=ff.scattered_te,
-                scattered_pwp_tm=ff.scattered_tm,
+                initial_coeffs=initial_coeffs,
+                coeffs=coeffs,
+                farfield=ff,
+                k=k,
                 k0=k0,
-                k_medium=k,
-                source=source,
+                accum_dtype=accum_dtype,
             )
-        elif isinstance(source, (DipoleSource, DipoleCollection)):
-            if _is_numerically_lossless_cluster(sim.particles):
-                power = {
-                    "P_abs_local": 0.0,
-                    "P_abs_local_particles": np.zeros((Ns,), dtype=np.float64),
-                }
-            else:
-                p_abs_diag = _local_absorbed_power_components_generic_route(
-                    sim,
-                    initial_coeffs=initial_coeffs,
-                    coeffs=coeffs,
-                    k0=float(k0),
-                    accum_dtype=accum_dtype,
-                )
-                if p_abs_diag is not None:
-                    power = {
-                        "P_abs_local": _as_float_scalar(p_abs_diag["P_abs_local"]),
-                        "P_abs_local_particles": np.asarray(
-                            p_abs_diag.get(
-                                "P_abs_local_particles",
-                                np.zeros((Ns,), dtype=np.float64),
-                            ),
-                            dtype=np.float64,
-                        ).reshape(Ns),
-                    }
+        )
     else:
         ff = empty_farfield_patterns(compute_dtype)
 
@@ -573,89 +622,18 @@ def run_impl(sim: Simulation, *, include_farfield: bool = True) -> SimulationRes
     decomposition_forward = None
     decomposition_backward = None
     if include_farfield:
-        if isinstance(source, PlaneWave):
-            c_abs_local = (
-                0.0
-                if _is_numerically_lossless_cluster(sim.particles)
-                else _plane_wave_local_absorption_generic_route(
-                    sim,
-                    source=source,
-                    initial_coeffs=b,
-                    coeffs=x,
-                    k0=float(run_te.k0),
-                    accum_dtype=accum_dtype,
-                )
-            )
-            cross_sections = plane_wave_cross_sections(
-                source,
-                b,
-                x,
-                k0=run_te.k0,
-                n_medium=cfg.n_medium,
-                scattered_pwp_te=ff.scattered_te,
-                scattered_pwp_tm=ff.scattered_tm,
-                local_absorption=c_abs_local,
-            )
-        elif (
-            ff.initial_te is not None
-            and ff.initial_tm is not None
-            and source.has_finite_incident_power()
-        ):
-            ns = int(sim.positions.shape[0])
-            p_abs_diag: dict[str, float | np.ndarray] | None
-            if _is_numerically_lossless_cluster(sim.particles):
-                p_abs_diag = {
-                    "P_abs_local": 0.0,
-                    "P_abs_local_particles": np.zeros((ns,), dtype=np.float64),
-                }
-            else:
-                p_abs_diag = _local_absorbed_power_components_generic_route(
-                    sim,
-                    initial_coeffs=b,
-                    coeffs=x,
-                    k0=float(run_te.k0),
-                    accum_dtype=accum_dtype,
-                )
-            power_base = finite_beam_power_fractions(
-                source,
-                ff.initial_te,
-                ff.initial_tm,
-                ff.scattered_te,
-                ff.scattered_tm,
-                k0=run_te.k0,
-                k_medium=run_te.k,
-                local_absorbed_power=(
-                    None if p_abs_diag is None else _as_float_scalar(p_abs_diag["P_abs_local"])
-                ),
-            )
-            power = cast(dict[str, float | np.ndarray], dict(power_base))
-            if power is not None and p_abs_diag is not None:
-                p_abs_local_particles = np.asarray(
-                    p_abs_diag.get("P_abs_local_particles", np.zeros((ns,), dtype=np.float64)),
-                    dtype=np.float64,
-                ).reshape(ns)
-                power["P_abs_local_particles"] = p_abs_local_particles
-                power["A_local_particles"] = p_abs_local_particles / float(power["P_initial"])
-            decomposition_forward = pwp_power_decomposition(
-                direction="forward",
-                initial_pwp_te=ff.initial_te,
-                initial_pwp_tm=ff.initial_tm,
-                scattered_pwp_te=ff.scattered_te,
-                scattered_pwp_tm=ff.scattered_tm,
-                k0=run_te.k0,
-                k_medium=run_te.k,
+        power, cross_sections, decomposition_forward, decomposition_backward = (
+            _build_channel_diagnostics(
+                sim,
                 source=source,
-            )
-            decomposition_backward = pwp_power_decomposition(
-                direction="backward",
-                initial_pwp_te=ff.initial_te,
-                initial_pwp_tm=ff.initial_tm,
-                scattered_pwp_te=ff.scattered_te,
-                scattered_pwp_tm=ff.scattered_tm,
+                initial_coeffs=b,
+                coeffs=x,
+                farfield=ff,
+                k=run_te.k,
                 k0=run_te.k0,
-                k_medium=run_te.k,
-                source=source,
+                accum_dtype=accum_dtype,
             )
+        )
 
     power_basis = None
     cross_sections_basis = None
