@@ -400,6 +400,119 @@ def _build_channel_diagnostics(
     return power, cross_sections, decomposition_forward, decomposition_backward
 
 
+def _basis_channel_payloads(
+    run_te: SimulationResult,
+    run_tm: SimulationResult,
+) -> tuple[
+    dict[str, dict[str, float | np.ndarray]] | None,
+    dict[str, dict[str, float]] | None,
+    dict[str, dict[str, float]] | None,
+    dict[str, dict[str, float]] | None,
+    dict[str, dict[str, float]] | None,
+]:
+    """Collect basis-channel diagnostics and incoherent unpolarized averages."""
+    power_basis = None
+    cross_sections_basis = None
+    decomposition_forward_basis = None
+    decomposition_backward_basis = None
+    unpolarized = None
+
+    if run_te.power is not None and run_tm.power is not None:
+        power_basis = {"te": run_te.power, "tm": run_tm.power}
+        unpolarized = dict(unpolarized or {})
+        unpolarized["power"] = avg_numeric_dict(run_te.power, run_tm.power)
+    if run_te.cross_sections is not None and run_tm.cross_sections is not None:
+        cross_sections_basis = {"te": run_te.cross_sections, "tm": run_tm.cross_sections}
+        unpolarized = dict(unpolarized or {})
+        unpolarized["cross_sections"] = avg_numeric_dict(
+            run_te.cross_sections, run_tm.cross_sections
+        )
+    if run_te.decomposition_forward is not None and run_tm.decomposition_forward is not None:
+        decomposition_forward_basis = {
+            "te": run_te.decomposition_forward,
+            "tm": run_tm.decomposition_forward,
+        }
+    if run_te.decomposition_backward is not None and run_tm.decomposition_backward is not None:
+        decomposition_backward_basis = {
+            "te": run_te.decomposition_backward,
+            "tm": run_tm.decomposition_backward,
+        }
+    return (
+        power_basis,
+        cross_sections_basis,
+        unpolarized,
+        decomposition_forward_basis,
+        decomposition_backward_basis,
+    )
+
+
+def _assemble_simulation_result(
+    sim: Simulation,
+    *,
+    source: Source,
+    initial_coeffs: np.ndarray,
+    rhs: np.ndarray,
+    coeffs: np.ndarray,
+    solver_result,
+    k: float,
+    k0: float,
+    compute_dtype: np.dtype,
+    accum_dtype: np.dtype,
+    farfield: FarFieldPatterns,
+    power: dict[str, float | np.ndarray] | None,
+    cross_sections: dict[str, float] | None,
+    decomposition_forward: dict[str, float] | None,
+    decomposition_backward: dict[str, float] | None,
+    initial_coeffs_basis: dict[str, np.ndarray] | None = None,
+    coeffs_basis: dict[str, np.ndarray] | None = None,
+    solver_result_basis=None,
+    farfield_basis: dict[str, FarFieldPatterns] | None = None,
+    power_basis: dict[str, dict[str, float | np.ndarray]] | None = None,
+    cross_sections_basis: dict[str, dict[str, float]] | None = None,
+    unpolarized: dict[str, dict[str, float]] | None = None,
+    decomposition_forward_basis: dict[str, dict[str, float]] | None = None,
+    decomposition_backward_basis: dict[str, dict[str, float]] | None = None,
+    polarization_jones: tuple[complex, complex] | None = None,
+) -> SimulationResult:
+    """Assemble the canonical completed-run payload from solved coefficients."""
+    cfg = sim.config
+    ns = int(sim.positions.shape[0])
+    nm = int(n_modes(cfg.lmax))
+    pol_jones = (
+        source.jones_coefficients()
+        if polarization_jones is None and isinstance(source, JonesPolarizedSource)
+        else polarization_jones
+    )
+    config_out = cfg if cfg.source is source else replace(cfg, source=source)
+    return SimulationResult(
+        config=config_out,
+        particles=sim.particles,
+        k=k,
+        k0=k0,
+        coeffs=np.asarray(coeffs),
+        rhs=np.asarray(rhs).reshape(ns, nm),
+        initial_coeffs=np.asarray(initial_coeffs),
+        initial_coeffs_basis=initial_coeffs_basis,
+        coeffs_basis=coeffs_basis,
+        solver_result=solver_result,
+        solver_result_basis=solver_result_basis,
+        farfield=farfield,
+        farfield_basis=farfield_basis,
+        power=power,
+        power_basis=power_basis,
+        cross_sections=cross_sections,
+        cross_sections_basis=cross_sections_basis,
+        unpolarized=unpolarized,
+        decomposition_forward=decomposition_forward,
+        decomposition_backward=decomposition_backward,
+        decomposition_forward_basis=decomposition_forward_basis,
+        decomposition_backward_basis=decomposition_backward_basis,
+        polarization_jones=pol_jones,
+        compute_dtype=str(compute_dtype),
+        accum_dtype=str(accum_dtype),
+    )
+
+
 def build_single_channel_result(
     sim: Simulation,
     *,
@@ -454,34 +567,22 @@ def build_single_channel_result(
     else:
         ff = empty_farfield_patterns(compute_dtype)
 
-    pol_jones = source.jones_coefficients() if isinstance(source, JonesPolarizedSource) else None
-    config_out = cfg if cfg.source is source else replace(cfg, source=source)
-    return SimulationResult(
-        config=config_out,
-        particles=sim.particles,
+    return _assemble_simulation_result(
+        sim,
+        source=source,
         k=k,
         k0=k0,
-        coeffs=np.asarray(coeffs),
+        coeffs=coeffs,
         rhs=np.asarray(rhs_flat).reshape(Ns, Nm),
-        initial_coeffs=np.asarray(initial_coeffs),
-        initial_coeffs_basis=None,
-        coeffs_basis=None,
+        initial_coeffs=initial_coeffs,
         solver_result=solver_result,
-        solver_result_basis=None,
+        compute_dtype=compute_dtype,
+        accum_dtype=accum_dtype,
         farfield=ff,
-        farfield_basis=None,
         power=power,
-        power_basis=None,
         cross_sections=cross_sections,
-        cross_sections_basis=None,
-        unpolarized=None,
         decomposition_forward=decomposition_forward,
         decomposition_backward=decomposition_backward,
-        decomposition_forward_basis=None,
-        decomposition_backward_basis=None,
-        polarization_jones=pol_jones,
-        compute_dtype=str(compute_dtype),
-        accum_dtype=str(accum_dtype),
     )
 
 
@@ -635,58 +736,40 @@ def run_impl(sim: Simulation, *, include_farfield: bool = True) -> SimulationRes
             )
         )
 
-    power_basis = None
-    cross_sections_basis = None
-    decomposition_forward_basis = None
-    decomposition_backward_basis = None
-    unpolarized = None
-    if run_te.power is not None and run_tm.power is not None:
-        power_basis = {"te": run_te.power, "tm": run_tm.power}
-        unpolarized = dict(unpolarized or {})
-        unpolarized["power"] = avg_numeric_dict(run_te.power, run_tm.power)
-    if run_te.cross_sections is not None and run_tm.cross_sections is not None:
-        cross_sections_basis = {"te": run_te.cross_sections, "tm": run_tm.cross_sections}
-        unpolarized = dict(unpolarized or {})
-        unpolarized["cross_sections"] = avg_numeric_dict(
-            run_te.cross_sections, run_tm.cross_sections
-        )
-    if run_te.decomposition_forward is not None and run_tm.decomposition_forward is not None:
-        decomposition_forward_basis = {
-            "te": run_te.decomposition_forward,
-            "tm": run_tm.decomposition_forward,
-        }
-    if run_te.decomposition_backward is not None and run_tm.decomposition_backward is not None:
-        decomposition_backward_basis = {
-            "te": run_te.decomposition_backward,
-            "tm": run_tm.decomposition_backward,
-        }
+    (
+        power_basis,
+        cross_sections_basis,
+        unpolarized,
+        decomposition_forward_basis,
+        decomposition_backward_basis,
+    ) = _basis_channel_payloads(run_te, run_tm)
 
-    return SimulationResult(
-        config=cfg,
-        particles=sim.particles,
+    return _assemble_simulation_result(
+        sim,
+        source=source,
         k=run_te.k,
         k0=run_te.k0,
         coeffs=x,
         rhs=rhs,
         initial_coeffs=b,
-        initial_coeffs_basis={"te": b_te, "tm": b_tm},
-        coeffs_basis={"te": x_te, "tm": x_tm},
         solver_result=basis_solved.solver_result,
-        solver_result_basis=basis_solved.solver_result,
+        compute_dtype=compute_dtype,
+        accum_dtype=accum_dtype,
         farfield=ff,
-        farfield_basis=ff_basis,
         power=power,
-        power_basis=power_basis,
         cross_sections=cross_sections,
-        cross_sections_basis=cross_sections_basis,
-        unpolarized=unpolarized,
         decomposition_forward=decomposition_forward,
         decomposition_backward=decomposition_backward,
+        initial_coeffs_basis={"te": b_te, "tm": b_tm},
+        coeffs_basis={"te": x_te, "tm": x_tm},
+        solver_result_basis=basis_solved.solver_result,
+        farfield_basis=ff_basis,
+        power_basis=power_basis,
+        cross_sections_basis=cross_sections_basis,
+        unpolarized=unpolarized,
         decomposition_forward_basis=decomposition_forward_basis,
         decomposition_backward_basis=decomposition_backward_basis,
         polarization_jones=(a_te, a_tm),
-        compute_dtype=str(compute_dtype),
-        accum_dtype=str(accum_dtype),
     )
 
 
