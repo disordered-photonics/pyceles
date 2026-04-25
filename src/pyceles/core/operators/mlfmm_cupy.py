@@ -34,6 +34,11 @@ from .mlfmm import (
 )
 from .mlfmm_directional import MLFMMDirectionalTransforms
 from .mlfmm_partition import MLFMMPartition
+from .mode_metadata import (
+    mode_m_table,
+    mode_pair_p_range_tables,
+    mode_tau_l_tables,
+)
 
 COMPLEX128_DTYPE = np.dtype(np.complex128)
 
@@ -566,59 +571,6 @@ def _pack_index_lists(
     return offsets, flat
 
 
-@cache
-def _mode_metadata_tables(lmax: int) -> np.ndarray:
-    """Return CELES/SMUTHI `m` mode indices indexed by flattened mode id."""
-
-    mode_m = np.zeros((n_modes(lmax),), dtype=np.int32)
-    for _tau_i, _l_i, m_i, idx in iter_modes(lmax):
-        mode_m[idx] = m_i
-    mode_m.setflags(write=False)
-    return mode_m
-
-
-@cache
-def _mode_tau_l_tables(lmax: int) -> tuple[np.ndarray, np.ndarray]:
-    """Return CELES/SMUTHI `tau` and `l` mode metadata indexed by flattened mode id."""
-
-    mode_tau = np.zeros((n_modes(lmax),), dtype=np.int32)
-    mode_l = np.zeros((n_modes(lmax),), dtype=np.int32)
-    for tau_i, l_i, _m_i, idx in iter_modes(lmax):
-        mode_tau[idx] = tau_i
-        mode_l[idx] = l_i
-    mode_tau.setflags(write=False)
-    mode_l.setflags(write=False)
-    return mode_tau, mode_l
-
-
-@cache
-def _mode_pair_tables(lmax: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return compact p-range metadata for each `(n1, n2)` mode pair."""
-
-    nmodes_total = n_modes(lmax)
-    mode_m = _mode_metadata_tables(lmax)
-    mode_tau, mode_l = _mode_tau_l_tables(lmax)
-    pair_offset = np.zeros((nmodes_total, nmodes_total), dtype=np.int32)
-    pair_pmin = np.zeros_like(pair_offset)
-    pair_pcount = np.zeros_like(pair_offset)
-    offset = 0
-    for n1 in range(nmodes_total):
-        for n2 in range(nmodes_total):
-            p_min = max(
-                abs(int(mode_m[n1]) - int(mode_m[n2])),
-                abs(int(mode_l[n1]) - int(mode_l[n2])) + abs(int(mode_tau[n1]) - int(mode_tau[n2])),
-            )
-            p_count = int(mode_l[n1]) + int(mode_l[n2]) - p_min + 1
-            pair_offset[n1, n2] = offset
-            pair_pmin[n1, n2] = p_min
-            pair_pcount[n1, n2] = p_count
-            offset += p_count
-    pair_offset.setflags(write=False)
-    pair_pmin.setflags(write=False)
-    pair_pcount.setflags(write=False)
-    return pair_offset, pair_pmin, pair_pcount
-
-
 def _leaf_rect_pair_tables_and_ab(
     *,
     full_order: int,
@@ -641,8 +593,8 @@ def _leaf_rect_pair_tables_and_ab(
     if n_out <= 0 or n_in <= 0:
         raise ValueError("Rectangular leaf translation tables require non-empty mode index sets.")
 
-    mode_m_full = _mode_metadata_tables(full)
-    mode_tau_full, mode_l_full = _mode_tau_l_tables(full)
+    mode_m_full = mode_m_table(full)
+    mode_tau_full, mode_l_full = mode_tau_l_tables(full)
     mode_m_out = np.ascontiguousarray(mode_m_full[out_idx], dtype=np.int32)
     mode_m_in = np.ascontiguousarray(mode_m_full[in_idx], dtype=np.int32)
 
@@ -2408,8 +2360,8 @@ def _resolve_exact_near_static_tables_from_host_cache(
         lmax, dtype=np.complex128
     )
     plm_coeffs_raw = _translation_plm_coeff_table(lmax, dtype=np.float64).reshape(-1)
-    mode_m = _mode_metadata_tables(lmax)
-    pair_offset_raw, pair_pmin_raw, pair_pcount_raw = _mode_pair_tables(lmax)
+    mode_m = mode_m_table(lmax)
+    pair_offset_raw, pair_pmin_raw, pair_pcount_raw = mode_pair_p_range_tables(lmax)
     return (
         np.ascontiguousarray(plm_coeffs_raw, dtype=real_dtype),
         np.ascontiguousarray(compact_re_ab_raw, dtype=real_dtype),

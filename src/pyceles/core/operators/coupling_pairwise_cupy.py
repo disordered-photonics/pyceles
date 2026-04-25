@@ -20,12 +20,14 @@ from typing import Any
 import numpy as np
 
 from pyceles._optional import asnumpy, coerce_array, import_cupy, is_cupy_array
-from pyceles.core.indexing import iter_modes, n_modes
+from pyceles.core.indexing import n_modes
 from pyceles.core.translation import (
     RadialLUT,
     _translation_ab5_compact_tables,
     _translation_plm_coeff_table,
 )
+
+from .mode_metadata import mode_metadata_tables, mode_pair_p_range_tables
 
 COMPLEX128_DTYPE = np.dtype(np.complex128)
 
@@ -258,62 +260,6 @@ def _translation_matvec_raw_kernel(lmax: int, dtype_str: str):
     return cupy.RawKernel(source, kernel_name)
 
 
-@cache
-def _mode_metadata_tables(lmax: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return CELES/SMUTHI mode metadata arrays indexed by flattened mode id.
-
-    The raw kernel works with the canonical flattened mode index `n`. These
-    small lookup arrays recover `(tau, l, m)` without rebuilding the indexing
-    logic on device.
-    """
-    tau = np.zeros((n_modes(lmax),), dtype=np.int32)
-    ell = np.zeros_like(tau)
-    m = np.zeros_like(tau)
-    for tau_i, l_i, m_i, idx in iter_modes(lmax):
-        tau[idx] = tau_i
-        ell[idx] = l_i
-        m[idx] = m_i
-    tau.setflags(write=False)
-    ell.setflags(write=False)
-    m.setflags(write=False)
-    return tau, ell, m
-
-
-@cache
-def _mode_pair_tables(lmax: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return compact p-range metadata for every `(n1, n2)` mode pair.
-
-    For each destination/source mode pair we store:
-    - the starting offset into the flattened `ab5` tables,
-    - the first admissible translation order `p_min`,
-    - the number of consecutive `p` values to visit.
-
-    This encodes the CELES/SMUTHI triangular coupling rules on CPU once so the
-    GPU kernel can walk a tight contiguous interval in its hot loop.
-    """
-    nmodes_total = n_modes(lmax)
-    tau, ell, m = _mode_metadata_tables(lmax)
-    pair_offset = np.zeros((nmodes_total, nmodes_total), dtype=np.int32)
-    pair_pmin = np.zeros_like(pair_offset)
-    pair_pcount = np.zeros_like(pair_offset)
-    offset = 0
-    for n1 in range(nmodes_total):
-        for n2 in range(nmodes_total):
-            p_min = max(
-                abs(int(m[n1]) - int(m[n2])),
-                abs(int(ell[n1]) - int(ell[n2])) + abs(int(tau[n1]) - int(tau[n2])),
-            )
-            p_count = int(ell[n1]) + int(ell[n2]) - p_min + 1
-            pair_offset[n1, n2] = offset
-            pair_pmin[n1, n2] = p_min
-            pair_pcount[n1, n2] = p_count
-            offset += p_count
-    pair_offset.setflags(write=False)
-    pair_pmin.setflags(write=False)
-    pair_pcount.setflags(write=False)
-    return pair_offset, pair_pmin, pair_pcount
-
-
 @dataclass
 class CuPyPairwiseCouplingOperator:
     """Direct GPU pairwise coupling using dtype-specific fused RawKernels.
@@ -386,7 +332,7 @@ class CuPyPairwiseCouplingOperator:
                 dtype=real_dtype,
             )
         if self._mode_tau_gpu is None or self._mode_l_gpu is None or self._mode_m_gpu is None:
-            mode_tau, mode_l, mode_m = _mode_metadata_tables(self.lmax)
+            mode_tau, mode_l, mode_m = mode_metadata_tables(self.lmax)
             self._mode_tau_gpu = cupy.asarray(mode_tau)
             self._mode_l_gpu = cupy.asarray(mode_l)
             self._mode_m_gpu = cupy.asarray(mode_m)
@@ -395,7 +341,7 @@ class CuPyPairwiseCouplingOperator:
             or self._pair_pmin_gpu is None
             or self._pair_pcount_gpu is None
         ):
-            pair_offset, pair_pmin, pair_pcount = _mode_pair_tables(self.lmax)
+            pair_offset, pair_pmin, pair_pcount = mode_pair_p_range_tables(self.lmax)
             self._pair_offset_gpu = cupy.asarray(pair_offset.reshape(-1))
             self._pair_pmin_gpu = cupy.asarray(pair_pmin.reshape(-1))
             self._pair_pcount_gpu = cupy.asarray(pair_pcount.reshape(-1))
