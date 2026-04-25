@@ -8,6 +8,7 @@ policies can grow without collapsing the workflow layer back into one file.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from typing import Any
 
 import numpy as np
 
@@ -50,6 +51,7 @@ class Simulation:
         self._dense_operator_dtype: np.dtype | None = None
         self._dense_lu_cache: DenseLUFactorization | None = None
         self._dense_lu_dtype: np.dtype | None = None
+        self._solve_backend_handoffs: dict[int, dict[str, Any]] = {}
         if bool(self.config.check_circumscribing_sphere_overlap):
             overlap = first_overlapping_circumscribing_pair(
                 self.positions,
@@ -86,6 +88,20 @@ class Simulation:
             self,
             labeled,
             solver_compute_final_residual=solver_compute_final_residual,
+        )
+
+    def _solve_sources_for_immediate_postprocess(
+        self,
+        sources: Mapping[str, Source],
+        *,
+        solver_compute_final_residual: bool | None = None,
+    ) -> SolvedSourcesResult:
+        labeled = normalize_sources_argument(self, sources)
+        return solve_sources_core(
+            self,
+            labeled,
+            solver_compute_final_residual=solver_compute_final_residual,
+            retain_backend_handoff=True,
         )
 
     def postprocess_sources(

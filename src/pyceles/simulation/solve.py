@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from tqdm.auto import tqdm
@@ -21,6 +21,8 @@ from pyceles.core.sources import LocalExpansionSource, Source
 from pyceles.linear.preconditioner import make_grid_block_preconditioner
 from pyceles.linear.solvers import (
     DenseLUFactorization,
+    _finish_backend_solution_capture,
+    _start_backend_solution_capture,
     estimate_dense_matrix_bytes,
     factorize_dense_matrix,
     solve_linear_system,
@@ -113,6 +115,7 @@ def solve_sources_core(
     labeled_sources: Mapping[str, Source],
     *,
     solver_compute_final_residual: bool | None = None,
+    retain_backend_handoff: bool = False,
 ) -> SolvedSourcesResult:
     """Solve labeled sources with one shared operator build (solve-only)."""
     cfg = sim.config
@@ -349,6 +352,7 @@ def solve_sources_core(
                 f"particles/block(min,mean,max)=({sizes.min()},{sizes.mean():.1f},{sizes.max()})"
             )
 
+    backend_capture: dict[str, Any] | None = None
     if unknowns == 0:
         solver_result = make_empty_solver_result(
             dtype=compute_dtype, nrhs=n_channels, method=cfg.solver_method
@@ -357,24 +361,48 @@ def solve_sources_core(
     else:
         if A_mv is None:
             raise RuntimeError("Internal error: A_mv not prepared for non-empty system.")
-        solver_result = solve_linear_system(
-            A_mv,
-            rhs_arg,
-            method=cfg.solver_method,
-            A_dense=A_dense,
-            A_factorized=A_lu,
-            x0=warm_start,
-            preconditioner=solver_preconditioner,
-            rtol=float(cfg.solver_rtol),
-            atol=0.0,
-            restart=int(cfg.solver_restart),
-            maxiter=int(cfg.solver_maxiter),
-            direct_max_n=int(cfg.solver_direct_max_n),
-            dtype=compute_dtype,
-            backend=operator_backend,
-            show_progress=bool(cfg.verbose),
-            compute_final_residual=compute_final_residual,
-        )
+        if operator_backend == "cupy" and bool(retain_backend_handoff):
+            token, backend_capture = _start_backend_solution_capture()
+            try:
+                solver_result = solve_linear_system(
+                    A_mv,
+                    rhs_arg,
+                    method=cfg.solver_method,
+                    A_dense=A_dense,
+                    A_factorized=A_lu,
+                    x0=warm_start,
+                    preconditioner=solver_preconditioner,
+                    rtol=float(cfg.solver_rtol),
+                    atol=0.0,
+                    restart=int(cfg.solver_restart),
+                    maxiter=int(cfg.solver_maxiter),
+                    direct_max_n=int(cfg.solver_direct_max_n),
+                    dtype=compute_dtype,
+                    backend=operator_backend,
+                    show_progress=bool(cfg.verbose),
+                    compute_final_residual=compute_final_residual,
+                )
+            finally:
+                _finish_backend_solution_capture(token)
+        else:
+            solver_result = solve_linear_system(
+                A_mv,
+                rhs_arg,
+                method=cfg.solver_method,
+                A_dense=A_dense,
+                A_factorized=A_lu,
+                x0=warm_start,
+                preconditioner=solver_preconditioner,
+                rtol=float(cfg.solver_rtol),
+                atol=0.0,
+                restart=int(cfg.solver_restart),
+                maxiter=int(cfg.solver_maxiter),
+                direct_max_n=int(cfg.solver_direct_max_n),
+                dtype=compute_dtype,
+                backend=operator_backend,
+                show_progress=bool(cfg.verbose),
+                compute_final_residual=compute_final_residual,
+            )
         x_arr = np.asarray(solver_result.x)
         x_matrix = (
             x_arr.reshape(unknowns, 1) if n_channels == 1 else x_arr.reshape(unknowns, n_channels)
@@ -382,12 +410,24 @@ def solve_sources_core(
 
     coeffs: dict[str, np.ndarray] = {}
     rhs_out: dict[str, np.ndarray] = {}
+    backend_coeffs: dict[str, Any] | None = None
+    backend_x = None if backend_capture is None else backend_capture.get("x")
+    if backend_x is not None and unknowns > 0:
+        x_backend_arr = backend_x
+        x_backend_matrix = (
+            x_backend_arr.reshape(unknowns, 1)
+            if n_channels == 1
+            else x_backend_arr.reshape(unknowns, n_channels)
+        )
+        backend_coeffs = {}
     for j, label in enumerate(labels):
         x_col = x_matrix[:, j].reshape(Ns, Nm)
         coeffs[label] = x_col
         rhs_out[label] = np.asarray(rhs_flat[label]).reshape(Ns, Nm)
+        if backend_coeffs is not None:
+            backend_coeffs[label] = x_backend_matrix[:, j].reshape(Ns, Nm)
 
-    return SolvedSourcesResult(
+    solved = SolvedSourcesResult(
         labels=labels,
         sources=dict(labeled_sources),
         solver_result=solver_result,
@@ -399,6 +439,9 @@ def solve_sources_core(
         compute_dtype=str(compute_dtype),
         accum_dtype=str(accum_dtype),
     )
+    if backend_coeffs is not None:
+        sim._solve_backend_handoffs[id(solved)] = {"coeffs": backend_coeffs}
+    return solved
 
 
 __all__ = ["normalize_sources_argument", "solve_sources_core", "validate_source_compatibility"]

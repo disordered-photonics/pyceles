@@ -5,7 +5,7 @@ import pickle
 import tempfile
 from collections.abc import Generator
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 import pytest
@@ -507,6 +507,112 @@ def _sim_cfg(
         accum_dtype="complex128",
         verbose=False,
     )
+
+
+def test_cupy_local_absorption_postprocess_uses_backend_coefficients(monkeypatch) -> None:
+    import pyceles.simulation.postprocess as simulation_postprocess
+
+    cupy, _ = import_cupy()
+    seen_backend_payloads: list[tuple[bool, bool]] = []
+    build_payload_real = simulation_postprocess._build_exciting_scattered_flat_generic_route
+
+    def _build_payload_wrapped(
+        sim: Any,
+        *,
+        initial_coeffs: Any,
+        coeffs: Any,
+        accum_dtype: np.dtype,
+    ) -> Any:
+        seen_backend_payloads.append(
+            (
+                isinstance(initial_coeffs, cupy.ndarray),
+                isinstance(coeffs, cupy.ndarray),
+            )
+        )
+        return build_payload_real(
+            sim,
+            initial_coeffs=initial_coeffs,
+            coeffs=coeffs,
+            accum_dtype=accum_dtype,
+        )
+
+    monkeypatch.setattr(
+        simulation_postprocess,
+        "_build_exciting_scattered_flat_generic_route",
+        _build_payload_wrapped,
+    )
+
+    wavelength = 550.0
+    source = _plane_wave_source(wavelength, 1.0 + 0j)
+    cfg = pcl.SimulationConfig(
+        wavelength=wavelength,
+        n_medium=1.0 + 0j,
+        lmax=2,
+        source=source,
+        polar_angles=pcl.core.uniform_polar_grid(91),
+        azimuthal_angles=pcl.core.uniform_periodic_azimuth_grid(24),
+        radial_lut_dr=0.5,
+        solver_method="direct",
+        operator_backend="cupy",
+        postprocessing_backend="cupy",
+        compute_dtype="complex128",
+        accum_dtype="complex128",
+        verbose=False,
+    )
+    particles = (
+        pcl.Sphere(
+            position=(0.0, 0.0, 0.0),
+            radius=60.0,
+            refractive_index=1.5 + 0.01j,
+        ),
+    )
+
+    try:
+        sim = pcl.Simulation(cfg, particles=particles)
+        run = sim.run(include_farfield=True)
+    except Exception as exc:
+        _skip_on_cupy_temp_permission(exc)
+        raise
+
+    assert run.cross_sections is not None
+    assert seen_backend_payloads
+    assert seen_backend_payloads[-1] == (False, True)
+    assert not hasattr(run.solver_result, "backend_x")
+    assert sim._solve_backend_handoffs == {}
+
+
+def test_cupy_public_solve_sources_does_not_retain_backend_handoff() -> None:
+    wavelength = 550.0
+    source = _plane_wave_source(wavelength, 1.0 + 0j)
+    cfg = pcl.SimulationConfig(
+        wavelength=wavelength,
+        n_medium=1.0 + 0j,
+        lmax=2,
+        source=source,
+        radial_lut_dr=0.5,
+        solver_method="direct",
+        operator_backend="cupy",
+        compute_dtype="complex128",
+        accum_dtype="complex128",
+        verbose=False,
+    )
+    particles = (
+        pcl.Sphere(
+            position=(0.0, 0.0, 0.0),
+            radius=60.0,
+            refractive_index=1.5 + 0.01j,
+        ),
+    )
+    sim = pcl.Simulation(cfg, particles=particles)
+
+    try:
+        solved = sim.solve_sources({"mixed": source})
+    except Exception as exc:
+        _skip_on_cupy_temp_permission(exc)
+        raise
+
+    assert not hasattr(solved.solver_result, "backend_x")
+    assert sim._solve_backend_handoffs == {}
 
 
 @pytest.mark.parametrize("collect_stream_stats", [False, True])

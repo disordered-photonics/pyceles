@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable, Iterable
+from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
@@ -58,6 +59,27 @@ class LinearSolveResult:
 
 GmresResult = LinearSolveResult
 DenseLUFactorization = tuple[object, object]
+_BACKEND_SOLUTION_CAPTURE: ContextVar[dict[str, Any] | None] = ContextVar(
+    "_BACKEND_SOLUTION_CAPTURE", default=None
+)
+
+
+def _start_backend_solution_capture() -> tuple[Token[dict[str, Any] | None], dict[str, Any]]:
+    """Start capturing backend-native solver output for internal postprocess handoff."""
+    payload: dict[str, Any] = {}
+    token = _BACKEND_SOLUTION_CAPTURE.set(payload)
+    return token, payload
+
+
+def _finish_backend_solution_capture(token: Token[dict[str, Any] | None]) -> None:
+    """Stop capturing backend-native solver output."""
+    _BACKEND_SOLUTION_CAPTURE.reset(token)
+
+
+def _record_backend_solution(x: Any) -> None:
+    payload = _BACKEND_SOLUTION_CAPTURE.get()
+    if payload is not None:
+        payload["x"] = x
 
 
 def estimate_dense_matrix_bytes(n: int, *, dtype: npt.DTypeLike = np.complex128) -> int:
@@ -977,6 +999,7 @@ def gmres_cupy(
     finally:
         progress_close()
 
+    _record_backend_solution(native.x)
     return _finalize_cupy_restarted_result(
         "gmres",
         native,
@@ -1058,6 +1081,7 @@ def fgmres_cupy(
     finally:
         progress_close()
 
+    _record_backend_solution(native.x)
     return _finalize_cupy_restarted_result(
         "fgmres",
         native,
@@ -1144,6 +1168,7 @@ def lgmres_cupy(
     finally:
         progress_close()
 
+    _record_backend_solution(native.x)
     return _finalize_cupy_restarted_result(
         "lgmres",
         native,
@@ -1211,6 +1236,7 @@ def bicgstab_cupy(
     )
     progress_close()
 
+    _record_backend_solution(native.x)
     x_np = asnumpy(native.x)
     if compute_final_residual:
         residual_norm = float(native.residual_norm)
@@ -1613,6 +1639,7 @@ def direct_dense_cupy(
         dt = time.perf_counter() - t0
         print(f"[solver] Direct dense solve [cupy] completed in {dt:.3f} s")
 
+    _record_backend_solution(x_gpu[:, 0] if squeezed else x_gpu)
     x_mat = asnumpy(x_gpu)
     residual_op = (lambda v: A_for_residual @ np.asarray(v)) if A_for_residual is not None else A_mv
     if squeezed:

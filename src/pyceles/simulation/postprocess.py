@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 
@@ -64,12 +64,12 @@ def _is_numerically_lossless_cluster(
 def _build_exciting_scattered_flat_generic_route(
     sim: Simulation,
     *,
-    initial_coeffs: np.ndarray,
-    coeffs: np.ndarray,
+    initial_coeffs: Any,
+    coeffs: Any,
     accum_dtype: np.dtype,
 ):
     """Build flattened `(e, x)` payload for generic post-solve local-dissipation routes."""
-    coeffs_size = int(getattr(coeffs, "size", np.asarray(coeffs).size))
+    coeffs_size = int(getattr(coeffs, "size", 0))
     if coeffs_size == 0:
         return np.zeros((0,), dtype=np.dtype(accum_dtype)), np.zeros(
             (0,), dtype=np.dtype(accum_dtype)
@@ -84,6 +84,9 @@ def _build_exciting_scattered_flat_generic_route(
     )
     if use_cupy:
         cupy, _ = import_cupy()
+        # Solved coefficients may arrive through a private CuPy handoff, while
+        # incident coefficients are public host payloads. Upload the latter only
+        # when a local-dissipation route actually needs them.
         x_flat = cupy.asarray(coeffs, dtype=accum_dtype).reshape(-1)
         b_flat = cupy.asarray(initial_coeffs, dtype=accum_dtype).reshape(-1)
         wx = prepared.apply_W(x_flat)
@@ -100,8 +103,8 @@ def _plane_wave_local_absorption_generic_route(
     sim: Simulation,
     *,
     source: Source,
-    initial_coeffs: np.ndarray,
-    coeffs: np.ndarray,
+    initial_coeffs: Any,
+    coeffs: Any,
     k0: float,
     accum_dtype: np.dtype,
 ) -> float | None:
@@ -110,9 +113,9 @@ def _plane_wave_local_absorption_generic_route(
     For CuPy runs this keeps the extra post-solve `W x` apply and local reduction
     on-device, returning only the final scalar to host.
 
-    Note: solver outputs are currently materialized as NumPy arrays in
-    `solve_sources_core()`, so the CuPy path still performs a host->device
-    upload for this postprocess route before `apply_W(...)`.
+    CuPy solve outputs are retained as backend-native side payloads during
+    immediate postprocessing, so this route can avoid re-uploading solved
+    coefficients after the public NumPy result arrays have been materialized.
     """
     if not isinstance(source, PlaneWave):
         return None
@@ -137,8 +140,8 @@ def _plane_wave_local_absorption_generic_route(
 def _local_absorbed_power_components_generic_route(
     sim: Simulation,
     *,
-    initial_coeffs: np.ndarray,
-    coeffs: np.ndarray,
+    initial_coeffs: Any,
+    coeffs: Any,
     k0: float,
     accum_dtype: np.dtype,
 ) -> dict[str, float | np.ndarray] | None:
@@ -262,6 +265,8 @@ def _build_channel_diagnostics(
     source: Source,
     initial_coeffs: np.ndarray,
     coeffs: np.ndarray,
+    local_initial_coeffs: Any | None = None,
+    local_coeffs: Any | None = None,
     farfield: FarFieldPatterns,
     k: float,
     k0: float,
@@ -280,6 +285,8 @@ def _build_channel_diagnostics(
     """
     cfg = sim.config
     ns = int(sim.positions.shape[0])
+    local_b = initial_coeffs if local_initial_coeffs is None else local_initial_coeffs
+    local_x = coeffs if local_coeffs is None else local_coeffs
 
     power: dict[str, float | np.ndarray] | None = None
     cross_sections: dict[str, float] | None = None
@@ -293,8 +300,8 @@ def _build_channel_diagnostics(
             else _plane_wave_local_absorption_generic_route(
                 sim,
                 source=source,
-                initial_coeffs=initial_coeffs,
-                coeffs=coeffs,
+                initial_coeffs=local_b,
+                coeffs=local_x,
                 k0=float(k0),
                 accum_dtype=accum_dtype,
             )
@@ -325,8 +332,8 @@ def _build_channel_diagnostics(
         else:
             p_abs_diag = _local_absorbed_power_components_generic_route(
                 sim,
-                initial_coeffs=initial_coeffs,
-                coeffs=coeffs,
+                initial_coeffs=local_b,
+                coeffs=local_x,
                 k0=float(k0),
                 accum_dtype=accum_dtype,
             )
@@ -381,8 +388,8 @@ def _build_channel_diagnostics(
         else:
             p_abs_diag = _local_absorbed_power_components_generic_route(
                 sim,
-                initial_coeffs=initial_coeffs,
-                coeffs=coeffs,
+                initial_coeffs=local_b,
+                coeffs=local_x,
                 k0=float(k0),
                 accum_dtype=accum_dtype,
             )
@@ -521,6 +528,7 @@ def build_single_channel_result(
     rhs_flat: np.ndarray,
     coeffs: np.ndarray,
     solver_result,
+    backend_coeffs: Any | None = None,
     k: float,
     k0: float,
     compute_dtype: np.dtype,
@@ -558,6 +566,8 @@ def build_single_channel_result(
                 source=source,
                 initial_coeffs=initial_coeffs,
                 coeffs=coeffs,
+                local_initial_coeffs=None,
+                local_coeffs=backend_coeffs,
                 farfield=ff,
                 k=k,
                 k0=k0,
@@ -619,6 +629,8 @@ def postprocess_sources_impl(
     accum_dtype = np.dtype(solved.accum_dtype)
 
     runs: dict[str, SimulationResult] = {}
+    backend_handoff = sim._solve_backend_handoffs.pop(id(solved), {})
+    backend_coeffs_by_label = backend_handoff.get("coeffs")
     for j, label in enumerate(labels):
         if label not in solved.sources:
             raise KeyError(f"Missing source payload for label '{label}'.")
@@ -646,6 +658,7 @@ def postprocess_sources_impl(
             if n_channels == 1
             else single_rhs_result_from_multi(solved.solver_result, j)
         )
+        backend_coeffs = None if backend_coeffs_by_label is None else backend_coeffs_by_label[label]
         runs[label] = build_single_channel_result(
             sim,
             source=solved.sources[label],
@@ -653,6 +666,7 @@ def postprocess_sources_impl(
             rhs_flat=np.asarray(rhs_col, dtype=accum_dtype).reshape(Ns * Nm),
             coeffs=x_col,
             solver_result=solver_col,
+            backend_coeffs=backend_coeffs,
             k=float(solved.k),
             k0=float(solved.k0),
             compute_dtype=compute_dtype,
@@ -679,9 +693,12 @@ def run_impl(sim: Simulation, *, include_farfield: bool = True) -> SimulationRes
     source = sim._validate_ready_to_run()
 
     if not bool(cfg.solve_polarization_basis):
-        solved = sim.solve_sources({"mixed": source})
-        multi = sim.postprocess_sources(solved, include_farfield=include_farfield)
-        return multi["mixed"]
+        solved = sim._solve_sources_for_immediate_postprocess({"mixed": source})
+        try:
+            multi = sim.postprocess_sources(solved, include_farfield=include_farfield)
+            return multi["mixed"]
+        finally:
+            sim._solve_backend_handoffs.pop(id(solved), None)
     if not isinstance(source, JonesPolarizedSource):
         raise ValueError(
             "`solve_polarization_basis=True` is only defined for TE/TM polarization sources "
@@ -691,8 +708,12 @@ def run_impl(sim: Simulation, *, include_farfield: bool = True) -> SimulationRes
     src_te = source.with_polarization("TE")
     src_tm = source.with_polarization("TM")
 
-    basis_solved = sim.solve_sources({"te": src_te, "tm": src_tm})
-    basis_multi = sim.postprocess_sources(basis_solved, include_farfield=include_farfield)
+    basis_solved = sim._solve_sources_for_immediate_postprocess({"te": src_te, "tm": src_tm})
+    try:
+        basis_backend_handoff = sim._solve_backend_handoffs.get(id(basis_solved), {})
+        basis_multi = sim.postprocess_sources(basis_solved, include_farfield=include_farfield)
+    finally:
+        sim._solve_backend_handoffs.pop(id(basis_solved), None)
     run_te = basis_multi["te"]
     run_tm = basis_multi["tm"]
     compute_dtype = np.dtype(run_te.compute_dtype)
@@ -708,6 +729,11 @@ def run_impl(sim: Simulation, *, include_farfield: bool = True) -> SimulationRes
     b = a_te * b_te + a_tm * b_tm
     rhs = a_te * rhs_te + a_tm * rhs_tm
     x = a_te * x_te + a_tm * x_tm
+    local_b: Any = b
+    local_x: Any = x
+    backend_coeffs_by_label = basis_backend_handoff.get("coeffs")
+    if backend_coeffs_by_label is not None:
+        local_x = a_te * backend_coeffs_by_label["te"] + a_tm * backend_coeffs_by_label["tm"]
 
     ff_basis = {"te": run_te.farfield, "tm": run_tm.farfield}
     ff = (
@@ -729,6 +755,8 @@ def run_impl(sim: Simulation, *, include_farfield: bool = True) -> SimulationRes
                 source=source,
                 initial_coeffs=b,
                 coeffs=x,
+                local_initial_coeffs=local_b,
+                local_coeffs=local_x,
                 farfield=ff,
                 k=run_te.k,
                 k0=run_te.k0,
