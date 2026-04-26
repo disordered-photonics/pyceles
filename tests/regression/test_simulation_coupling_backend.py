@@ -84,7 +84,9 @@ def prepared_multilevel_mlfmm():
     )
 
 
-def test_simulation_direct_solve_rejects_true_mlfmm_coupling(prepared_multilevel_mlfmm) -> None:
+def test_simulation_direct_solve_uses_matvec_fallback_for_true_mlfmm_coupling(
+    prepared_multilevel_mlfmm,
+) -> None:
     lmax, _, particles = _mlfmm_multilevel_problem()
     cfg = SimulationConfig(
         wavelength=550.0,
@@ -102,8 +104,10 @@ def test_simulation_direct_solve_rejects_true_mlfmm_coupling(prepared_multilevel
     sim._prepared_operator_cache = prepared_multilevel_mlfmm
     sim._prepared_operator_dtype = np.dtype(np.complex128)
 
-    with pytest.raises(NotImplementedError, match="pairwise coupling backend"):
-        solve_sources_core(sim, {"source": _plane_wave()})
+    out = solve_sources_core(sim, {"source": _plane_wave()})
+
+    assert out.solver_result.method == "direct"
+    assert out.coeffs["source"].shape == (len(particles), 6)
 
 
 def test_prepare_matvec_accepts_numpy_mlfmm_complex64_operator_dtype() -> None:

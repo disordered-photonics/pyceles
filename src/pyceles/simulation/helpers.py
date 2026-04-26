@@ -11,6 +11,7 @@ from tqdm.auto import tqdm
 
 from pyceles._logo import print_logo
 from pyceles._version import __version__
+from pyceles.core.lattice import RectangularLattice2D
 from pyceles.core.particles import LayeredSphere, Particle, Sphere, Spheroid
 from pyceles.linear.solvers import LinearSolveResult
 
@@ -138,6 +139,37 @@ def first_overlapping_circumscribing_pair(
     return None
 
 
+def first_periodic_overlapping_circumscribing_pair(
+    positions: np.ndarray,
+    radii: np.ndarray,
+    *,
+    lattice: RectangularLattice2D,
+    atol: float = 0.0,
+) -> tuple[int, int, int, int, float, float] | None:
+    """Return first circumsphere overlap across nearest periodic images."""
+    pos = np.asarray(positions, dtype=float).reshape(-1, 3)
+    rad = np.asarray(radii, dtype=float).reshape(-1)
+    n = int(rad.size)
+    if n == 0:
+        return None
+    atol_f = float(atol)
+    shifts = (-1, 0, 1)
+    for p in shifts:
+        for q in shifts:
+            shift = lattice.lattice_vector(p, q)
+            for i in range(n):
+                for j in range(n):
+                    if p == 0 and q == 0 and j <= i:
+                        continue
+                    if i == j and p == 0 and q == 0:
+                        continue
+                    rsum = float(rad[i]) + float(rad[j])
+                    d = float(np.linalg.norm(pos[i] - pos[j] - shift))
+                    if d + atol_f < rsum:
+                        return int(i), int(j), int(p), int(q), d, rsum
+    return None
+
+
 def warn_local_sources_inside_circumspheres(
     *,
     label: str,
@@ -165,6 +197,7 @@ def warn_local_sources_inside_circumspheres(
 
 __all__ = [
     "first_overlapping_circumscribing_pair",
+    "first_periodic_overlapping_circumscribing_pair",
     "make_empty_solver_result",
     "normalize_particle_geometry",
     "print_startup_logo_once",

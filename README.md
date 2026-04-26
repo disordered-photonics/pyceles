@@ -396,7 +396,8 @@ Current MLFMM scope/limits:
 - CuPy MLFMM prepared-cache payloads are compact host payloads; device-resident
   prepared data is rebuilt on load instead of being pickled directly
 - matrix-free iterative solves for true MLFMM stages
-- dense/direct solves remain pairwise-only (MLFMM stages are matrix-free)
+- dense/direct solves use fast pairwise assembly when available and otherwise
+  fall back to generic dense assembly through repeated matrix-free applies
 - the current implementation targets the high-frequency regime only
 - the octree policy is uniform-depth rather than adaptive
 

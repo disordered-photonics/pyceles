@@ -24,6 +24,7 @@ from .fields import (
     svwf_outgoing_to_pwp,
     svwf_regular_to_pwp,
 )
+from .lattice import DiffractionOrder2D, RectangularLattice2D
 from .operators import (
     AxisymmetricTGroup,
     CompositeParticleTOperator,
@@ -56,6 +57,7 @@ from .particles import (
     spheres_from_arrays,
     spheroids_from_arrays,
 )
+from .periodic import PeriodicOptions, PeriodicSpec, plane_wave_k_parallel
 from .spherical import clear_caches as _clear_spherical_caches
 from .svwf_rotation import clear_caches as _clear_svwf_rotation_caches
 from .svwf_rotation import rotate_svwf_tmatrix_block, svwf_rotation_matrix
@@ -97,6 +99,7 @@ __all__ = [
     "CouplingOperator",
     "DenseTGroup",
     "DiagonalTGroup",
+    "DiffractionOrder2D",
     "DipoleCollection",
     "DipoleSource",
     "FocusedLaguerreGaussianBeam",
@@ -109,8 +112,11 @@ __all__ = [
     "ParticleTGroupFactories",
     "ParticleTGroupPlan",
     "ParticleTPreparationContext",
+    "PeriodicOptions",
+    "PeriodicSpec",
     "PlaneWave",
     "PreparedOperator",
+    "RectangularLattice2D",
     "SLMSource",
     "Source",
     "Sphere",
@@ -134,6 +140,7 @@ __all__ = [
     "particle_T_matrix_blocks",
     "particle_internal_ratios",
     "plan_particle_t_groups",
+    "plane_wave_k_parallel",
     "polarization_to_jones",
     "precompute_T_diagonal",
     "prepare_matvec",

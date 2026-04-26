@@ -16,8 +16,9 @@ from pyceles.core.operators import (
     assemble_dense_A_numpy,
     prepare_matvec,
 )
+from pyceles.core.periodic import plane_wave_k_parallel
 from pyceles.core.projection import project_source_to_svwf
-from pyceles.core.sources import LocalExpansionSource, Source
+from pyceles.core.sources import LocalExpansionSource, PlaneWave, Source
 from pyceles.linear.solvers import (
     DenseLUFactorization,
     _finish_backend_solution_capture,
@@ -106,7 +107,39 @@ def normalize_sources_argument(sim: Simulation, sources: Mapping[str, Source]) -
         raise ValueError("`sources` must contain at least one source.")
     for label, src in out.items():
         validate_source_compatibility(sim, src, label=label)
+    periodic_shared_k_parallel(sim, out)
     return out
+
+
+def periodic_shared_k_parallel(
+    sim: Simulation,
+    labeled_sources: Mapping[str, Source],
+) -> np.ndarray | None:
+    """Return shared periodic Bloch wavevector or reject unsupported source sets."""
+    if sim.config.periodic is None:
+        return None
+    ref_label: str | None = None
+    ref_kp: np.ndarray | None = None
+    for label, source in labeled_sources.items():
+        if not isinstance(source, PlaneWave):
+            raise NotImplementedError(
+                "Periodic workflows currently support PlaneWave excitation only. "
+                f"Source '{label}' is {type(source).__name__}."
+            )
+        kp = plane_wave_k_parallel(source)
+        if ref_kp is None:
+            ref_label = str(label)
+            ref_kp = kp
+            continue
+        if not np.allclose(kp, ref_kp, rtol=1e-12, atol=1e-12):
+            raise NotImplementedError(
+                "Periodic multi-source solves require all PlaneWave sources to share "
+                f"one in-plane Bloch wavevector. Source '{label}' differs from "
+                f"source '{ref_label}'."
+            )
+    if ref_kp is None:
+        raise ValueError("Periodic source mapping must contain at least one source.")
+    return ref_kp
 
 
 def solve_sources_core(
@@ -140,6 +173,12 @@ def solve_sources_core(
 
     solver_name = str(cfg.solver_method).lower()
     operator_backend = cfg.operator_backend
+    k_parallel = periodic_shared_k_parallel(sim, labeled_sources)
+    periodic_key = (
+        None
+        if k_parallel is None
+        else (float(np.asarray(k_parallel)[0]), float(np.asarray(k_parallel)[1]))
+    )
     will_use_direct = solver_name == "direct" or (
         solver_name == "auto" and unknowns <= int(cfg.solver_direct_max_n)
     )
@@ -191,6 +230,7 @@ def solve_sources_core(
             sim._prepared_operator_cache is None
             or sim._prepared_operator_dtype is None
             or sim._prepared_operator_dtype != compute_dtype
+            or sim._prepared_operator_periodic_key != periodic_key
         )
         if need_prepared:
             prepared = prepare_matvec(
@@ -203,11 +243,14 @@ def solve_sources_core(
                 operator_dtype=compute_dtype,
                 coupling_backend=cfg.coupling_backend,
                 mlfmm_options=cfg.mlfmm_options,
+                periodic=cfg.periodic,
+                k_parallel=k_parallel,
                 backend=operator_backend,
                 show_progress=bool(cfg.verbose),
             )
             sim._prepared_operator_cache = prepared
             sim._prepared_operator_dtype = np.dtype(compute_dtype)
+            sim._prepared_operator_periodic_key = periodic_key
             sim._dense_operator_cache = None
             sim._dense_operator_dtype = None
             sim._dense_lu_cache = None
@@ -220,13 +263,6 @@ def solve_sources_core(
         for label in labels:
             rhs_flat[label] = prepared.rhs_Tb(initial_coeffs[label].reshape(Ns * Nm))
         if will_use_direct:
-            if operator_backend == "numpy" and not isinstance(
-                prepared.coupling, PairwiseCouplingOperator
-            ):
-                raise NotImplementedError(
-                    "Dense/direct NumPy solves currently require the pairwise coupling backend. "
-                    "The resolved MLFMM coupling stages remain matrix-free only."
-                )
             need_dense_lu = (
                 sim._dense_lu_cache is None
                 or sim._dense_lu_dtype is None
@@ -239,7 +275,9 @@ def solve_sources_core(
                     or sim._dense_operator_dtype != compute_dtype
                 )
                 if need_dense:
-                    if operator_backend == "numpy":
+                    if operator_backend == "numpy" and isinstance(
+                        prepared.coupling, PairwiseCouplingOperator
+                    ):
                         A_dense = assemble_dense_A_numpy(
                             prepared,
                             show_progress=bool(cfg.verbose),
@@ -419,4 +457,9 @@ def solve_sources_core(
     return solved
 
 
-__all__ = ["normalize_sources_argument", "solve_sources_core", "validate_source_compatibility"]
+__all__ = [
+    "normalize_sources_argument",
+    "periodic_shared_k_parallel",
+    "solve_sources_core",
+    "validate_source_compatibility",
+]

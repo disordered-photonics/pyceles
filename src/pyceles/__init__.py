@@ -15,6 +15,7 @@ from pyceles.core.fields import (
     project_source_basis_to_svwf,
     project_source_to_svwf,
 )
+from pyceles.core.lattice import RectangularLattice2D
 from pyceles.core.particles import (
     LayeredSphere,
     Particle,
@@ -24,6 +25,7 @@ from pyceles.core.particles import (
     spheres_from_arrays,
     spheroids_from_arrays,
 )
+from pyceles.core.periodic import PeriodicOptions, PeriodicSpec
 from pyceles.io.workflows import load_simulation_h5, save_simulation_h5
 from pyceles.postprocessing.dipole_metrics import (
     DipolePowerLDOSResult,
@@ -59,7 +61,10 @@ __all__ = [
     "MultiSourceSimulationResult",
     "NearFieldSlice",
     "Particle",
+    "PeriodicOptions",
+    "PeriodicSpec",
     "PlaneWave",
+    "RectangularLattice2D",
     "SLMSource",
     "Simulation",
     "SimulationConfig",

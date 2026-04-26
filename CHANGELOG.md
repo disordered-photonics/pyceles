@@ -39,6 +39,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - sampled-far MLFMM interactions stay on `complex128` for both NumPy and CuPy
 - Added absolute local absorbed-power diagnostics for dipole-source runs:
   `run.power["P_abs_local"]` and `run.power["P_abs_local_particles"]`.
+- Added initial rectangular-lattice periodic configuration scaffolding:
+  `RectangularLattice2D`, `PeriodicSpec`, `PeriodicOptions`, source
+  `k_parallel` validation, periodic overlap checks, and a periodic operator
+  placeholder. Periodic coupling evaluation and periodic outputs are not
+  implemented yet.
 
 ### Removed
 - The built-in regular-grid block preconditioner from the high-level
@@ -49,8 +54,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Source extensibility now includes a `LocalExpansionSource` capability for
   local outgoing-SVWF emitters, and the far-field / initial-field local-emitter
   paths now use that protocol instead of hard-coded dipole-source class checks.
-- Dense/direct NumPy solves now reject true MLFMM coupling stages explicitly
-  instead of silently assuming the pairwise backend.
+- Dense/direct NumPy solves now use fast pairwise dense assembly when available
+  and otherwise fall back to generic dense assembly through repeated
+  matrix-free applies.
 - `solve_linear_system(..., backend="cupy", method="gmres")` now routes through
   pyceles' native CuPy GMRES path (instead of delegating to CuPy built-in
   GMRES), improving convergence observability within restart cycles.

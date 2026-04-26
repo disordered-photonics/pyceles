@@ -606,6 +606,11 @@ def postprocess_sources_impl(
 ) -> MultiSourceSimulationResult:
     """Postprocess solved channels into per-channel `SimulationResult` payloads."""
     cfg = sim.config
+    if cfg.periodic is not None:
+        raise NotImplementedError(
+            "Periodic postprocessing outputs are not implemented yet. "
+            "Diffraction-order and R/T/A result payloads are not available yet."
+        )
     labels = tuple(solved.labels)
     n_channels = len(labels)
 

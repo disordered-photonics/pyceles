@@ -18,7 +18,11 @@ from pyceles.core.sources import Source
 from pyceles.linear.solvers import DenseLUFactorization
 
 from .config import SimulationConfig
-from .helpers import first_overlapping_circumscribing_pair, normalize_particle_geometry
+from .helpers import (
+    first_overlapping_circumscribing_pair,
+    first_periodic_overlapping_circumscribing_pair,
+    normalize_particle_geometry,
+)
 from .postprocess import postprocess_sources_impl, run_impl
 from .results import MultiSourceSimulationResult, SimulationResult, SolvedSourcesResult
 from .solve import normalize_sources_argument, solve_sources_core
@@ -51,23 +55,46 @@ class Simulation:
         self._dense_operator_dtype: np.dtype | None = None
         self._dense_lu_cache: DenseLUFactorization | None = None
         self._dense_lu_dtype: np.dtype | None = None
+        self._prepared_operator_periodic_key: tuple[float, float] | None = None
         self._solve_backend_handoffs: dict[int, dict[str, Any]] = {}
         if bool(self.config.check_circumscribing_sphere_overlap):
-            overlap = first_overlapping_circumscribing_pair(
-                self.positions,
-                self.circumscribing_radii,
-                atol=float(self.config.circumscribing_sphere_overlap_atol),
-                show_progress=bool(self.config.verbose),
-            )
-            if overlap is not None:
-                i, j, d, rsum = overlap
-                raise ValueError(
-                    "Invalid geometry: circumscribing spheres overlap for particle pair "
-                    f"({i}, {j}) with center distance {d:.6g} and required minimum {rsum:.6g}. "
-                    "The current T-matrix formulation requires disjoint circumscribing spheres. "
-                    "If this is intentional for an experimental workflow, set "
-                    "`check_circumscribing_sphere_overlap=False`."
+            if self.config.periodic is None:
+                finite_overlap = first_overlapping_circumscribing_pair(
+                    self.positions,
+                    self.circumscribing_radii,
+                    atol=float(self.config.circumscribing_sphere_overlap_atol),
+                    show_progress=bool(self.config.verbose),
                 )
+                if finite_overlap is not None:
+                    i, j, d, rsum = finite_overlap
+                    detail = f"particle pair ({i}, {j}) with center distance {d:.6g}"
+                    raise ValueError(
+                        "Invalid geometry: circumscribing spheres overlap for "
+                        f"{detail} and required minimum {rsum:.6g}. "
+                        "The current T-matrix formulation requires disjoint circumscribing spheres. "
+                        "If this is intentional for an experimental workflow, set "
+                        "`check_circumscribing_sphere_overlap=False`."
+                    )
+            else:
+                periodic_overlap = first_periodic_overlapping_circumscribing_pair(
+                    self.positions,
+                    self.circumscribing_radii,
+                    lattice=self.config.periodic.lattice,
+                    atol=float(self.config.circumscribing_sphere_overlap_atol),
+                )
+                if periodic_overlap is not None:
+                    i, j, p, q, d, rsum = periodic_overlap
+                    detail = (
+                        f"particle pair ({i}, {j}) under lattice shift ({p}, {q}) "
+                        f"with image distance {d:.6g}"
+                    )
+                    raise ValueError(
+                        "Invalid geometry: circumscribing spheres overlap for "
+                        f"{detail} and required minimum {rsum:.6g}. "
+                        "The current T-matrix formulation requires disjoint circumscribing spheres. "
+                        "If this is intentional for an experimental workflow, set "
+                        "`check_circumscribing_sphere_overlap=False`."
+                    )
 
     def _validate_ready_to_run(self) -> Source:
         if self.config.source is None:

@@ -12,12 +12,14 @@ from pyceles._optional import import_cupy
 from pyceles.core.geometry_bounds import conservative_set_diameter
 from pyceles.core.indexing import n_modes
 from pyceles.core.particles import Particle, Sphere, particle_t_signature
+from pyceles.core.periodic import PeriodicSpec
 from pyceles.core.tmatrix import particle_T_diagonal, particle_T_matrix_blocks, sphere_T_diagonal
 from pyceles.core.translation import RadialLUT, translation_ab5_table
 
 from .base import CouplingOperator, PreparedOperator
 from .coupling_pairwise import PairwiseCouplingOperator
 from .coupling_pairwise_cupy import CuPyPairwiseCouplingOperator
+from .coupling_periodic import PeriodicCouplingOperator
 from .groups import (
     AxisymmetricTGroup,
     DenseTGroup,
@@ -232,6 +234,8 @@ def prepare_matvec(
     particle_t_group_factories: ParticleTGroupFactories | None = None,
     coupling_backend: Literal["pairwise", "mlfmm"] = "pairwise",
     mlfmm_options: MLFMMOptions | None = None,
+    periodic: PeriodicSpec | None = None,
+    k_parallel: npt.ArrayLike | None = None,
     backend: Literal["numpy", "cupy"] = "numpy",
     show_progress: bool = False,
 ) -> PreparedOperator:
@@ -247,6 +251,20 @@ def prepare_matvec(
     coupling_name = str(coupling_backend).lower()
     op_dtype = np.dtype(operator_dtype)
     k_f = float(k)
+    periodic_spec = periodic
+    k_parallel_arr: np.ndarray | None = None
+    if periodic_spec is not None:
+        if backend != "numpy":
+            raise NotImplementedError("Periodic operator preparation is currently CPU/NumPy-only.")
+        if coupling_name != "pairwise":
+            raise NotImplementedError("Periodic MLFMM coupling is not implemented yet.")
+        if cache_translation_blocks:
+            raise NotImplementedError(
+                "Periodic coupling does not support translation-block caching yet."
+            )
+        if k_parallel is None:
+            raise ValueError("`k_parallel` is required when preparing a periodic operator.")
+        k_parallel_arr = np.asarray(k_parallel, dtype=float).reshape(2)
 
     dr_user = float(radial_lut_dr)
     if dr_user < 0.0:
@@ -269,7 +287,19 @@ def prepare_matvec(
             dtype=op_dtype,
             group_factories=particle_t_group_factories,
         )
-        if coupling_name == "pairwise":
+        if periodic_spec is not None:
+            if k_parallel_arr is None:
+                raise RuntimeError("Internal error: periodic k_parallel was not normalized.")
+            coupling = PeriodicCouplingOperator(
+                lmax=int(lmax),
+                k=k_f,
+                positions=positions,
+                lattice=periodic_spec.lattice,
+                periodic=periodic_spec,
+                k_parallel=k_parallel_arr,
+                dtype=op_dtype,
+            )
+        elif coupling_name == "pairwise":
             ab5 = translation_ab5_table(int(lmax), dtype=op_dtype)
             coupling = PairwiseCouplingOperator(
                 lmax=int(lmax),

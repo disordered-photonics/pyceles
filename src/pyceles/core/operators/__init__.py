@@ -22,6 +22,7 @@ from .coupling_pairwise import (
     require_pairwise_coupling,
 )
 from .coupling_pairwise_cupy import CuPyPairwiseCouplingOperator
+from .coupling_periodic import PeriodicCouplingOperator
 from .groups import (
     AxisymmetricTGroup,
     DenseTGroup,
@@ -76,6 +77,7 @@ __all__ = [
     "ParticleTGroupPlan",
     "ParticleTOperator",
     "ParticleTPreparationContext",
+    "PeriodicCouplingOperator",
     "PrecomputableCouplingOperator",
     "PreparedOperator",
     "PreparedParticleTGroup",

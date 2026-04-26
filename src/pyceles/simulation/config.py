@@ -12,7 +12,8 @@ import numpy as np
 from pyceles._dtypes import resolve_compute_accum_dtypes
 from pyceles.core.angular import uniform_periodic_azimuth_grid, uniform_polar_grid
 from pyceles.core.operators.mlfmm import MLFMMOptions
-from pyceles.core.sources import Source
+from pyceles.core.periodic import PeriodicSpec
+from pyceles.core.sources import PlaneWave, Source
 
 
 def _as_1d_float_array(name: str, values: np.ndarray) -> np.ndarray:
@@ -135,6 +136,7 @@ class SimulationConfig:
     solver_preconditioner: Callable[[np.ndarray], np.ndarray] | None = None
     operator_backend: Literal["numpy", "cupy"] = "numpy"
     coupling_backend: Literal["pairwise", "mlfmm"] = "pairwise"
+    periodic: PeriodicSpec | None = None
     postprocessing_backend: Literal["inherit", "numpy", "cupy"] = "inherit"
     mlfmm_options: MLFMMOptions | None = None
     compute_dtype: Literal["complex64", "complex128"] = "complex128"
@@ -207,6 +209,16 @@ class SimulationConfig:
                 "`coupling_backend` must be one of {'pairwise', 'mlfmm'}. "
                 f"Got {self.coupling_backend!r}."
             )
+        if self.periodic is not None:
+            if not isinstance(self.periodic, PeriodicSpec):
+                raise TypeError(
+                    "`periodic` must be a PeriodicSpec instance or None. "
+                    f"Got {type(self.periodic).__name__}."
+                )
+            if backend != "numpy":
+                raise NotImplementedError("Periodic workflows are currently CPU/NumPy-only.")
+            if coupling_backend != "pairwise":
+                raise NotImplementedError("Periodic MLFMM coupling is not implemented yet.")
         post_backend = str(self.postprocessing_backend).lower()
         if post_backend not in {"inherit", "numpy", "cupy"}:
             raise ValueError(
@@ -266,6 +278,10 @@ class SimulationConfig:
                     "`source` must satisfy the pyceles Source protocol "
                     "(wavelength/medium_n + incident_coeffs + has_finite_incident_power APIs). "
                     f"Got {type(self.source).__name__}."
+                )
+            if self.periodic is not None and not isinstance(self.source, PlaneWave):
+                raise NotImplementedError(
+                    "Periodic workflows currently support PlaneWave excitation only."
                 )
             source_wavelength = float(self.source.wavelength)
             source_n_medium = complex(self.source.medium_n)
