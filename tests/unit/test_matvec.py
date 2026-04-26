@@ -36,7 +36,6 @@ from pyceles.core.particles import (
 )
 from pyceles.core.tmatrix import particle_T_diagonal, sphere_T_diagonal
 from pyceles.core.translation import RadialLUT, translation_ab5_table
-from pyceles.linear.preconditioner import make_grid_block_preconditioner
 
 
 @dataclass(frozen=True)
@@ -877,24 +876,3 @@ def test_prepare_matvec_mlfmm_direct_stage_returns_pairwise_coupling() -> None:
     )
 
     assert isinstance(prepared.coupling, PairwiseCouplingOperator)
-
-
-def test_grid_block_preconditioner_still_works_for_mlfmm_direct_fallback() -> None:
-    lmax, k, _, particles = _mlfmm_direct_fallback_problem()
-    prepared = prepare_matvec(
-        lmax=lmax,
-        k=k,
-        particles=particles,
-        n_medium=1.0 + 0j,
-        radial_lut_dr=0.5,
-        cache_translation_blocks=False,
-        coupling_backend="mlfmm",
-    )
-
-    precond = make_grid_block_preconditioner(
-        prepared,
-        subdivisions=1,
-        cubic_bbox=True,
-        show_progress=False,
-    )
-    assert precond.n_blocks == 1

@@ -97,18 +97,6 @@ def test_simulation_config_accepts_mlfmm_complex64(backend: str) -> None:
         ({"solver_maxiter": 0}, "solver_maxiter"),
         ({"solver_direct_max_n": 0}, "solver_direct_max_n"),
         ({"solver_preconditioner": object()}, "callable"),
-        ({"solver_preconditioner_kind": "bad"}, "solver_preconditioner_kind"),
-        (
-            {
-                "solver_preconditioner": lambda x: np.asarray(x),
-                "solver_preconditioner_kind": "grid_block",
-            },
-            "either custom",
-        ),
-        ({"solver_preconditioner_subdivisions": 0}, "must be >= 1"),
-        ({"solver_preconditioner_subdivisions": (1, 0, 1)}, "tuple entries must be >= 1"),
-        ({"solver_preconditioner_subdivisions": (1, 2)}, "int or length-3 tuple/list"),
-        ({"solver_preconditioner_max_block_unknowns": 0}, "must be >= 1 when set"),
         ({"solver_warm_start": np.zeros((1, 1, 1))}, "1D, 2D, or None"),
     ],
 )

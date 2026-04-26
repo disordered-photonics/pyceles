@@ -162,8 +162,6 @@ Users of pyceles are referred to the publications listed in the CELES and SMUTHI
   - matrix-matrix solves (`A @ X`) with multiple RHS columns
   - warm start vectors/matrices (`solver_warm_start`)
   - preconditioner hook (`solver_preconditioner`)
-  - built-in CELES-style regular-grid block-diagonal preconditioner
-    (`solver_preconditioner_kind='grid_block'`) on both NumPy and CuPy backends
   - inherited postprocessing backend policy via
     `SimulationConfig(postprocessing_backend="inherit" | "numpy" | "cupy")`
 - Angular-grid API:
@@ -331,7 +329,7 @@ Outputs are written in:
 CELES is fast because it:
 - runs translation/matvec on GPU
 - reuses cached translation tables + radial Hankel LUTs
-- uses a block-diagonal preconditioner
+- uses solver/preconditioner tuning around the matrix-free operator
 
 pyceles now ships two direct backends for the same many-body operator:
 - a NumPy/SciPy reference path,
@@ -402,12 +400,6 @@ Current MLFMM scope/limits:
 - the current implementation targets the high-frequency regime only
 - the octree policy is uniform-depth rather than adaptive
 
-CuPy also supports the built-in grid-block preconditioner now, but current
-tests on dilute benchmark clusters show that this should be treated as a
-case-dependent option rather than a default speed win. On the tested low-volume-
-fraction sphere clouds, restarted CuPy GMRES often benefited more from choosing
-an adequate restart dimension than from enabling the grid-block preconditioner.
-
 Practical CuPy notes for dense systems:
 - CuPy GMRES in pyceles now uses a native implementation by default for
   `solve_linear_system(..., backend="cupy", method="gmres")`.
@@ -430,9 +422,9 @@ Practical CuPy notes for dense systems:
     for robust stop decisions
 - pyceles does not expose a public runtime toggle to swap back to built-in
   CuPy GMRES in the simulation API
-- CuPy block-GMRES now runs with native 2D operator/preconditioner applies on
-  prepared CuPy paths, with per-column fallback only when user callables expose
-  legacy 1D interfaces.
+- CuPy block-GMRES now runs with native 2D operator applies on prepared CuPy
+  paths and keeps generic low-level preconditioner plumbing available for
+  experimental solver calls.
 - Block-GMRES speedup remains workload-dependent. Dense multi-RHS cases can now
   outperform sequential solves, while small or weakly coupled RHS sets may stay
   near parity or slightly slower; profile on your workload before assuming gains.
@@ -445,9 +437,9 @@ Practical CuPy notes for dense systems:
   an order of magnitude larger than `2x` for transcendental-heavy kernels.
 - Use `examples/benchmark_cupy_precision_ratio.py` to measure machine-local
   FP64/FP32 penalty quickly before choosing production dtypes.
-- On dense/non-normal systems, left-preconditioned restarted GMRES can be very
-  restart-sensitive. Small restart values may stagnate even with a reasonable
-  block preconditioner; larger restart values can recover convergence.
+- On dense/non-normal systems, restarted GMRES can be very restart-sensitive.
+  Small restart values may stagnate; larger restart values can recover
+  convergence.
 
 In internal solver sweeps on representative pairwise CuPy cases, restarted
 GMRES-family methods remained restart-sensitive at small restart budgets,
@@ -456,9 +448,6 @@ much smaller solver-state footprint than restarted GMRES-family methods.
 For memory-aware large-scale CuPy runs, `bicgstab` is therefore a sensible
 first solver choice unless a specific geometry shows better behavior with a
 restarted method.
-- Treat the CuPy grid-block preconditioner as a tuning knob, not an always-on
-  accelerator. Validate both residual trend and wall time for your geometry.
-
 Postprocessing follows the solve backend by default through
 `postprocessing_backend="inherit"`. The current CuPy postprocessing slices are:
 - scattered far-field SVWF-to-PWP assembly,
@@ -500,18 +489,13 @@ Common benchmark parameters:
 - angular grids: `n_beta=3601`, `n_alpha=180`
 - near-field slice: plane `y=0`, `x=[-4000, 4000]`, `z=[-3000, 5000]`, `dx=40` (201 x 201 points)
 - solver: `gmres`, `rtol=1e-4`, `restart=25`, `maxiter=100`
-- grid-block preconditioner default for these runs: subdivisions=`3`
 
 Reproduce:
 ```bash
-python examples/profile_pyceles_phases.py --n-particles 500 --lmax 3 --dx 40 --operator-backend numpy --compute-dtype complex128 --accum-dtype complex128 --cache-mode off --preconditioner-mode none --solver-restart 25 --solver-maxiter 100 --out-dir outputs/profile_matrix_cpu_c128_none --quiet
-python examples/profile_pyceles_phases.py --n-particles 500 --lmax 3 --dx 40 --operator-backend numpy --compute-dtype complex128 --accum-dtype complex128 --cache-mode off --preconditioner-mode grid_block --preconditioner-subdivisions 3 --solver-restart 25 --solver-maxiter 100 --out-dir outputs/profile_matrix_cpu_c128_grid3 --quiet
-python examples/profile_pyceles_phases.py --n-particles 500 --lmax 3 --dx 40 --operator-backend numpy --compute-dtype complex64 --accum-dtype complex128 --cache-mode off --preconditioner-mode none --solver-restart 25 --solver-maxiter 100 --out-dir outputs/profile_matrix_cpu_c64_none --quiet
-python examples/profile_pyceles_phases.py --n-particles 500 --lmax 3 --dx 40 --operator-backend numpy --compute-dtype complex64 --accum-dtype complex128 --cache-mode off --preconditioner-mode grid_block --preconditioner-subdivisions 3 --solver-restart 25 --solver-maxiter 100 --out-dir outputs/profile_matrix_cpu_c64_grid3 --quiet
-python examples/profile_pyceles_phases.py --n-particles 500 --lmax 3 --dx 40 --operator-backend cupy --postprocessing-backend inherit --compute-dtype complex128 --accum-dtype complex128 --cache-mode off --preconditioner-mode none --solver-restart 25 --solver-maxiter 100 --out-dir outputs/profile_matrix_cupy_c128_none --quiet
-python examples/profile_pyceles_phases.py --n-particles 500 --lmax 3 --dx 40 --operator-backend cupy --postprocessing-backend inherit --compute-dtype complex128 --accum-dtype complex128 --cache-mode off --preconditioner-mode grid_block --preconditioner-subdivisions 3 --solver-restart 25 --solver-maxiter 100 --out-dir outputs/profile_matrix_cupy_c128_grid3 --quiet
-python examples/profile_pyceles_phases.py --n-particles 500 --lmax 3 --dx 40 --operator-backend cupy --postprocessing-backend inherit --compute-dtype complex64 --accum-dtype complex128 --cache-mode off --preconditioner-mode none --solver-restart 25 --solver-maxiter 100 --out-dir outputs/profile_matrix_cupy_c64_none --quiet
-python examples/profile_pyceles_phases.py --n-particles 500 --lmax 3 --dx 40 --operator-backend cupy --postprocessing-backend inherit --compute-dtype complex64 --accum-dtype complex128 --cache-mode off --preconditioner-mode grid_block --preconditioner-subdivisions 3 --solver-restart 25 --solver-maxiter 100 --out-dir outputs/profile_matrix_cupy_c64_grid3 --quiet
+python examples/profile_pyceles_phases.py --n-particles 500 --lmax 3 --dx 40 --operator-backend numpy --compute-dtype complex128 --accum-dtype complex128 --cache-mode off --solver-restart 25 --solver-maxiter 100 --out-dir outputs/profile_matrix_cpu_c128_none --quiet
+python examples/profile_pyceles_phases.py --n-particles 500 --lmax 3 --dx 40 --operator-backend numpy --compute-dtype complex64 --accum-dtype complex128 --cache-mode off --solver-restart 25 --solver-maxiter 100 --out-dir outputs/profile_matrix_cpu_c64_none --quiet
+python examples/profile_pyceles_phases.py --n-particles 500 --lmax 3 --dx 40 --operator-backend cupy --postprocessing-backend inherit --compute-dtype complex128 --accum-dtype complex128 --cache-mode off --solver-restart 25 --solver-maxiter 100 --out-dir outputs/profile_matrix_cupy_c128_none --quiet
+python examples/profile_pyceles_phases.py --n-particles 500 --lmax 3 --dx 40 --operator-backend cupy --postprocessing-backend inherit --compute-dtype complex64 --accum-dtype complex128 --cache-mode off --solver-restart 25 --solver-maxiter 100 --out-dir outputs/profile_matrix_cupy_c64_none --quiet
 ```
 
 Phase wall times:
@@ -519,45 +503,23 @@ Phase wall times:
   - Solver: `389.8 s`
   - Far-field: `21.9 s`
   - Near-field: `181.2 s`
-- NumPy, `complex128/complex128`, `grid_block`, subdivisions=`3`:
-  - Solver: `310.5 s`
-  - Far-field: `21.6 s`
-  - Near-field: `181.5 s`
 - NumPy, `complex64/complex128`, no preconditioner:
   - Solver: `324.9 s`
   - Far-field: `19.6 s`
   - Near-field: `146.7 s`
-- NumPy, `complex64/complex128`, `grid_block`, subdivisions=`3`:
-  - Solver: `254.0 s`
-  - Far-field: `19.3 s`
-  - Near-field: `146.0 s`
 - CuPy, `complex128/complex128`, no preconditioner:
   - Solver: `11.4 s`
   - Far-field: `1.9 s`
   - Near-field: `14.6 s`
-- CuPy, `complex128/complex128`, `grid_block`, subdivisions=`3`:
-  - Solver: `14.0 s`
-  - Far-field: `1.9 s`
-  - Near-field: `14.3 s`
 - CuPy, `complex64/complex128`, no preconditioner:
   - Solver: `1.16 s`
   - Far-field: `0.89 s`
   - Near-field: `4.53 s`
-- CuPy, `complex64/complex128`, `grid_block`, subdivisions=`3`:
-  - Solver: `0.89 s`
-  - Far-field: `0.70 s`
-  - Near-field: `3.30 s`
 
 On this benchmark, native CuPy GMRES reduced restart overshoot on the
 no-preconditioner runs (from `40` to `22` iterations at `rtol=1e-4`,
 `restart=25`), which is where the largest runtime gain appears for
 `complex128`.
-
-On this public `500`-particle benchmark, the updated `3x3x3` grid-block
-preconditioner remains useful on the NumPy reference path, but it is not a
-speed win on the CuPy path: restarted CuPy GMRES with the raw-kernel backend is
-already strong enough here that the preconditioner build/apply overhead makes
-the solve slower.
 
 ## Cumulative Optimization Notes
 
@@ -850,18 +812,6 @@ cfg = pcl.SimulationConfig(
 )
 ```
 
-Built-in regular-grid block preconditioner:
-
-```python
-cfg = pcl.SimulationConfig(
-    source=source,
-    solver_method="gmres",
-    solver_preconditioner_kind="grid_block",
-    solver_preconditioner_subdivisions=2,   # or (nx, ny, nz)
-    solver_preconditioner_cubic_bbox=True,  # cube (True) or bbox (False)
-)
-```
-
 Notes:
 - `direct_max_n` (or `max_n` in low-level direct solver) limits the matrix size `n`
   of the linear system, not the number of RHS columns.
@@ -881,8 +831,8 @@ Notes:
   verification.
 - `Simulation.solve_sources(..., solver_compute_final_residual=...)` can override
   the above per call.
-- If `solver_preconditioner` (custom callable) is set, keep
-  `solver_preconditioner_kind="none"` to avoid ambiguous configuration.
+- `solver_preconditioner` is a custom callable hook. pyceles no longer ships a
+  built-in grid-block preconditioner in the high-level simulation API.
 
 ## HDF5 Output With Basis Channels
 

@@ -18,7 +18,6 @@ from pyceles.core.operators import (
 )
 from pyceles.core.projection import project_source_to_svwf
 from pyceles.core.sources import LocalExpansionSource, Source
-from pyceles.linear.preconditioner import make_grid_block_preconditioner
 from pyceles.linear.solvers import (
     DenseLUFactorization,
     _finish_backend_solution_capture,
@@ -323,34 +322,10 @@ def solve_sources_core(
     solver_preconditioner = cfg.solver_preconditioner
     if operator_backend == "cupy" and solver_preconditioner is not None:
         raise NotImplementedError(
-            "The CuPy operator backend does not support yet custom preconditioner callables. "
-            "Use the built-in `solver_preconditioner_kind='grid_block'` path instead."
+            "The high-level CuPy simulation path does not support custom "
+            "preconditioner callables yet. Use the low-level linear solver "
+            "API for backend-native experimental preconditioners."
         )
-    if (
-        solver_preconditioner is None
-        and cfg.solver_preconditioner_kind == "grid_block"
-        and not will_use_direct
-        and unknowns > 0
-    ):
-        if prepared is None:
-            raise RuntimeError(
-                "Internal error: prepared matvec is required for grid preconditioner."
-            )
-        solver_preconditioner = make_grid_block_preconditioner(
-            prepared,
-            backend=operator_backend,
-            subdivisions=cfg.solver_preconditioner_subdivisions,
-            cubic_bbox=bool(cfg.solver_preconditioner_cubic_bbox),
-            max_block_unknowns=cfg.solver_preconditioner_max_block_unknowns,
-            show_progress=bool(cfg.verbose),
-        )
-        if cfg.verbose:
-            sizes = np.asarray(solver_preconditioner.block_sizes, dtype=int)
-            print(
-                "Preconditioner grid_block:"
-                f" blocks={solver_preconditioner.n_blocks} "
-                f"particles/block(min,mean,max)=({sizes.min()},{sizes.mean():.1f},{sizes.max()})"
-            )
 
     backend_capture: dict[str, Any] | None = None
     if unknowns == 0:

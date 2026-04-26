@@ -40,6 +40,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added absolute local absorbed-power diagnostics for dipole-source runs:
   `run.power["P_abs_local"]` and `run.power["P_abs_local_particles"]`.
 
+### Removed
+- The built-in regular-grid block preconditioner from the high-level
+  simulation API. The generic low-level linear-solver `preconditioner=...`
+  callable hook remains available for custom experiments.
+
 ### Changed
 - Source extensibility now includes a `LocalExpansionSource` capability for
   local outgoing-SVWF emitters, and the far-field / initial-field local-emitter
@@ -218,8 +223,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--operator-backend {numpy,cupy}` and
   `--postprocessing-backend {inherit,numpy,cupy}`, and synchronizes GPU work
   when timing the solver phase so CuPy wall times are meaningful.
-- The built-in grid-block preconditioner default is now `3x3x3` subdivisions,
-  reflecting current benchmark guidance for moderate block sizes.
 - Source capability contract now includes
   `Source.has_finite_incident_power()`, used as the canonical policy gate for
   finite-beam-only diagnostics across simulation and far-field workflows.

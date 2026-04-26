@@ -133,10 +133,6 @@ class SimulationConfig:
     solver_maxiter: int = 1000
     solver_warm_start: np.ndarray | None = None
     solver_preconditioner: Callable[[np.ndarray], np.ndarray] | None = None
-    solver_preconditioner_kind: Literal["none", "grid_block"] = "none"
-    solver_preconditioner_subdivisions: int | tuple[int, int, int] = 3
-    solver_preconditioner_cubic_bbox: bool = True
-    solver_preconditioner_max_block_unknowns: int | None = None
     operator_backend: Literal["numpy", "cupy"] = "numpy"
     coupling_backend: Literal["pairwise", "mlfmm"] = "pairwise"
     postprocessing_backend: Literal["inherit", "numpy", "cupy"] = "inherit"
@@ -184,42 +180,6 @@ class SimulationConfig:
             )
         if self.solver_preconditioner is not None and not callable(self.solver_preconditioner):
             raise ValueError("`solver_preconditioner` must be callable or None.")
-        if self.solver_preconditioner_kind not in {"none", "grid_block"}:
-            raise ValueError(
-                "`solver_preconditioner_kind` must be one of {'none', 'grid_block'}. "
-                f"Got {self.solver_preconditioner_kind!r}."
-            )
-        if self.solver_preconditioner is not None and self.solver_preconditioner_kind != "none":
-            raise ValueError(
-                "Set either custom `solver_preconditioner` or built-in "
-                "`solver_preconditioner_kind`, not both."
-            )
-        subdiv = self.solver_preconditioner_subdivisions
-        if isinstance(subdiv, (int, np.integer)):
-            if int(subdiv) < 1:
-                raise ValueError(
-                    "`solver_preconditioner_subdivisions` must be >= 1. "
-                    f"Got {self.solver_preconditioner_subdivisions!r}."
-                )
-        elif isinstance(subdiv, (tuple, list)) and len(subdiv) == 3:
-            if any(int(v) < 1 for v in subdiv):
-                raise ValueError(
-                    "`solver_preconditioner_subdivisions` tuple entries must be >= 1. "
-                    f"Got {self.solver_preconditioner_subdivisions!r}."
-                )
-        else:
-            raise ValueError(
-                "`solver_preconditioner_subdivisions` must be an int or length-3 tuple/list. "
-                f"Got {self.solver_preconditioner_subdivisions!r}."
-            )
-        if (
-            self.solver_preconditioner_max_block_unknowns is not None
-            and int(self.solver_preconditioner_max_block_unknowns) < 1
-        ):
-            raise ValueError(
-                "`solver_preconditioner_max_block_unknowns` must be >= 1 when set. "
-                f"Got {self.solver_preconditioner_max_block_unknowns!r}."
-            )
         if self.solver_warm_start is not None:
             ws = np.asarray(self.solver_warm_start)
             if ws.ndim not in (1, 2):

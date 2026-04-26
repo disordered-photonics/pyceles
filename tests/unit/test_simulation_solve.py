@@ -109,12 +109,10 @@ def test_assemble_dense_operator_via_matvec_builds_dense_columns():
 
 def test_solve_sources_core_reuses_prepared_cache_and_broadcasts_warm_start(monkeypatch):
     sim = _single_sphere_sim(
-        solver_preconditioner_kind="grid_block",
         solver_warm_start=np.arange(6, dtype=np.complex128).reshape(6, 1),
     )
     prepare_calls = {"count": 0}
     recorded: dict[str, object] = {}
-    sentinel_preconditioner = object()
 
     class _Prepared:
         def __init__(self) -> None:
@@ -138,10 +136,6 @@ def test_solve_sources_core_reuses_prepared_cache_and_broadcasts_warm_start(monk
             positions.shape[0], nm
         )
 
-    def _fake_make_grid_block_preconditioner(prepared, **kwargs):
-        del prepared, kwargs
-        return sentinel_preconditioner
-
     def _fake_solve_linear_system(A_mv, b, **kwargs):
         del A_mv
         recorded["b_shape"] = np.asarray(b).shape
@@ -160,9 +154,6 @@ def test_solve_sources_core_reuses_prepared_cache_and_broadcasts_warm_start(monk
 
     monkeypatch.setattr(sim_solve, "prepare_matvec", _fake_prepare_matvec)
     monkeypatch.setattr(sim_solve, "project_source_to_svwf", _fake_project_source_to_svwf)
-    monkeypatch.setattr(
-        sim_solve, "make_grid_block_preconditioner", _fake_make_grid_block_preconditioner
-    )
     monkeypatch.setattr(sim_solve, "solve_linear_system", _fake_solve_linear_system)
 
     sources = {"first": _plane_wave(), "second": _plane_wave()}
@@ -173,7 +164,7 @@ def test_solve_sources_core_reuses_prepared_cache_and_broadcasts_warm_start(monk
     assert recorded["b_shape"] == (6, 2)
     warm_start = cast(np.ndarray, sim.config.solver_warm_start)
     np.testing.assert_allclose(np.asarray(recorded["x0"]), np.repeat(warm_start, 2, axis=1))
-    assert recorded["preconditioner"] is sentinel_preconditioner
+    assert recorded["preconditioner"] is None
     assert out0.coeffs["first"].shape == (1, 6)
     assert out0.coeffs["second"].shape == (1, 6)
     assert out1.rhs["first"].shape == (1, 6)
@@ -406,5 +397,5 @@ def test_solve_sources_core_rejects_custom_preconditioner_on_cupy_backend(monkey
         ),
     )
 
-    with pytest.raises(NotImplementedError, match="does not support yet custom preconditioner"):
+    with pytest.raises(NotImplementedError, match="does not support custom preconditioner"):
         sim_solve.solve_sources_core(sim, {"src": _plane_wave()})

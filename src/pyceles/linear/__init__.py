@@ -6,12 +6,6 @@ from .krylov_cupy import (
     gmres_cupy_native,
     lgmres_cupy_native,
 )
-from .preconditioner import (
-    CuPyGridBlockPreconditioner,
-    GridBlockPreconditioner,
-    make_grid_block_preconditioner,
-    regular_grid_partition,
-)
 from .solvers import (
     BlockKrylovCallbackPayload,
     DenseLUFactorization,
@@ -36,10 +30,8 @@ __all__ = [
     "BlockKrylovCallbackPayload",
     "CuPyBiCGSTABNativeResult",
     "CuPyGMRESNativeResult",
-    "CuPyGridBlockPreconditioner",
     "DenseLUFactorization",
     "GmresResult",
-    "GridBlockPreconditioner",
     "LinearSolveResult",
     "bicgstab_cupy",
     "bicgstab_cupy_native",
@@ -57,7 +49,5 @@ __all__ = [
     "lgmres_cupy",
     "lgmres_cupy_native",
     "lgmres_scipy",
-    "make_grid_block_preconditioner",
-    "regular_grid_partition",
     "solve_linear_system",
 ]
