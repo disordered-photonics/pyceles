@@ -266,14 +266,22 @@ def prepare_matvec(
             raise ValueError("`k_parallel` is required when preparing a periodic operator.")
         k_parallel_arr = np.asarray(k_parallel, dtype=float).reshape(2)
 
+    k_abs = float(abs(k_f))
+    if k_abs <= 0.0:
+        raise ValueError(f"`k` must be non-zero for operator preparation. Got {k_f!r}.")
     dr_user = float(radial_lut_dr)
     if dr_user < 0.0:
         raise ValueError(f"radial_lut_dr must be >= 0, got {dr_user}.")
-    k_abs = float(abs(k_f))
-    if k_abs <= 0.0:
-        raise ValueError(f"`k` must be non-zero for radial LUT setup. Got {k_f!r}.")
-    dr = (1.0e-2 / k_abs) if dr_user == 0.0 else dr_user
-    lut = RadialLUT(lmax=int(lmax), k=k_f, r_max=_infer_rmax(positions), dr=dr, dtype=op_dtype)
+
+    def make_radial_lut() -> RadialLUT:
+        dr = (1.0e-2 / k_abs) if dr_user == 0.0 else dr_user
+        return RadialLUT(
+            lmax=int(lmax),
+            k=k_f,
+            r_max=_infer_rmax(positions),
+            dr=dr,
+            dtype=op_dtype,
+        )
 
     backend_name = backend
     particle_t: ParticleTOperator
@@ -301,6 +309,7 @@ def prepare_matvec(
                 dtype=op_dtype,
             )
         elif coupling_name == "pairwise":
+            lut = make_radial_lut()
             ab5 = translation_ab5_table(int(lmax), dtype=op_dtype)
             coupling = PairwiseCouplingOperator(
                 lmax=int(lmax),
@@ -312,6 +321,7 @@ def prepare_matvec(
                 cache_translation_blocks=bool(cache_translation_blocks),
             )
         elif coupling_name == "mlfmm":
+            lut = make_radial_lut()
             coupling = prepare_mlfmm_coupling(
                 lmax=int(lmax),
                 k=k_f,
@@ -363,6 +373,7 @@ def prepare_matvec(
             ),
         )
         if coupling_name == "pairwise":
+            lut = make_radial_lut()
             ab5 = translation_ab5_table(int(lmax), dtype=op_dtype)
             coupling = cast(
                 CouplingOperator,
@@ -379,6 +390,7 @@ def prepare_matvec(
             resolved_mlfmm_options = (
                 _CUPY_MLFMM_DEFAULT_OPTIONS if mlfmm_options is None else mlfmm_options
             )
+            lut = make_radial_lut()
             cpu_mlfmm = prepare_mlfmm_coupling(
                 lmax=int(lmax),
                 k=k_f,

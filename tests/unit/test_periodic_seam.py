@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 from typing import Literal
 
 import numpy as np
@@ -169,6 +170,32 @@ def test_prepare_matvec_periodic_returns_operator_stub() -> None:
     )
     with pytest.raises(NotImplementedError, match="Ewald periodic coupling"):
         prepared.apply_W(np.zeros((6,), dtype=np.complex128))
+
+
+def test_prepare_matvec_periodic_does_not_build_radial_lut(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = pcl.PeriodicSpec(lattice=pcl.RectangularLattice2D(300.0, 400.0))
+    source = _plane_wave(polar_angle=0.2, azimuthal_angle=0.3)
+    prepare_module = importlib.import_module("pyceles.core.operators.prepare")
+
+    def fail_radial_lut(*args: object, **kwargs: object) -> None:
+        raise AssertionError("periodic preparation should not build a RadialLUT")
+
+    monkeypatch.setattr(prepare_module, "RadialLUT", fail_radial_lut)
+
+    prepared = prepare_module.prepare_matvec(
+        lmax=1,
+        k=2.0 * np.pi / 550.0,
+        particles=[_sphere(radius=10.0)],
+        n_medium=1.0 + 0j,
+        radial_lut_dr=1.0,
+        periodic=spec,
+        k_parallel=pcl.core.plane_wave_k_parallel(source),
+        show_progress=False,
+    )
+
+    assert isinstance(prepared.coupling, PeriodicCouplingOperator)
 
 
 def test_periodic_direct_sum_window_zero_matches_pairwise_reference() -> None:
