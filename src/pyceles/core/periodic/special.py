@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from typing import Literal
 
 import numpy as np
 import numpy.typing as npt
@@ -12,6 +13,7 @@ Array = np.ndarray
 
 _KAMBE_SERIES_TERMS = 32
 _SMALL_COMPLEX = 1e-14
+ShiftedReciprocalRegime = Literal["same_plane", "small_shift", "regular_shift"]
 
 
 def _integer_or_half_integer_twice(value: float) -> int:
@@ -187,6 +189,23 @@ def kambe_integral(order: int, z: complex, eta: complex) -> complex:
     return eval_order(n)
 
 
+def shifted_reciprocal_regime(
+    gamma: npt.ArrayLike,
+    z_offset: float,
+    *,
+    same_plane_atol: float = 0.0,
+    small_shift_atol: float = _SMALL_COMPLEX,
+) -> ShiftedReciprocalRegime:
+    """Classify the reciprocal integral regime for one off-plane scalar sequence."""
+    cz = float(z_offset)
+    if abs(cz) <= float(same_plane_atol):
+        return "same_plane"
+    scaled = np.asarray(gamma, dtype=np.complex128) * cz
+    if np.any(np.abs(scaled) <= float(small_shift_atol)):
+        return "small_shift"
+    return "regular_shift"
+
+
 def shifted_delta_sequence(
     max_order: int,
     gamma: npt.ArrayLike,
@@ -197,9 +216,15 @@ def shifted_delta_sequence(
 ) -> Array:
     """Evaluate shifted reciprocal-space Ewald integrals for nonzero height offsets.
 
-    This helper covers the off-plane particle-pair path. Same-plane or nearly
-    same-plane cases should use the unshifted reciprocal formula instead of
-    forcing the shifted recurrence into its unstable small-offset limit.
+    This helper is the scalar analogue of the shifted reciprocal-space
+    integral sequence used in SMUTHI-style periodic Ewald formulations. It is
+    intended for off-plane particle-pair coupling only.
+
+    The reciprocal scalar layer has three regimes: same-plane pairs use the
+    unshifted formula, small scaled offsets need a stabilized evaluator that is
+    still pending, and regular shifted pairs can use this recurrence. The
+    current implementation deliberately rejects the first two regimes instead
+    of forcing the regular recurrence into its singular limit.
     """
     n_max = int(max_order)
     if n_max < 0:
@@ -209,11 +234,21 @@ def shifted_delta_sequence(
         raise ValueError(f"`eta` must be finite and positive. Got {eta!r}.")
     cz = float(z_offset)
     gamma_arr = np.asarray(gamma, dtype=np.complex128)
-    scaled = gamma_arr * cz
-    if np.any(np.abs(scaled) <= float(singular_atol)):
+    regime = shifted_reciprocal_regime(
+        gamma_arr,
+        cz,
+        small_shift_atol=float(singular_atol),
+    )
+    if regime == "same_plane":
         raise ValueError(
             "shifted reciprocal integrals require a nonzero scaled height offset; "
             "use the same-plane reciprocal formula for this pair."
+        )
+    scaled = gamma_arr * cz
+    if regime == "small_shift":
+        raise ValueError(
+            "shifted reciprocal integrals are in the unresolved small-shift regime; "
+            "use the same-plane formula when applicable or add a stabilized small-shift path."
         )
     x = -(gamma_arr * gamma_arr) / (4.0 * eta_f * eta_f)
     if np.any(np.abs(x) <= float(singular_atol)):
@@ -247,5 +282,6 @@ __all__ = [
     "kambe_integral",
     "reduced_incomplete_gamma_int_or_halfint",
     "shifted_delta_sequence",
+    "shifted_reciprocal_regime",
     "upper_incomplete_gamma_int_or_halfint",
 ]
