@@ -107,7 +107,6 @@ def normalize_sources_argument(sim: Simulation, sources: Mapping[str, Source]) -
         raise ValueError("`sources` must contain at least one source.")
     for label, src in out.items():
         validate_source_compatibility(sim, src, label=label)
-    periodic_shared_k_parallel(sim, out)
     return out
 
 

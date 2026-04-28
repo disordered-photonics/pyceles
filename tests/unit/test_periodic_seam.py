@@ -6,7 +6,8 @@ import numpy as np
 import pytest
 
 import pyceles as pcl
-from pyceles.core.operators import PeriodicCouplingOperator, prepare_matvec
+from pyceles.core.operators import PeriodicCouplingOperator, apply_W_numpy, prepare_matvec
+from pyceles.core.translation import translation_ab5_table
 from pyceles.simulation import Simulation, SimulationConfig
 from pyceles.simulation.solve import periodic_shared_k_parallel
 
@@ -161,9 +162,92 @@ def test_prepare_matvec_periodic_returns_operator_stub() -> None:
     )
 
     assert isinstance(prepared.coupling, PeriodicCouplingOperator)
+    assert prepared.coupling.periodic is spec
     np.testing.assert_allclose(
         prepared.coupling.k_parallel,
         pcl.core.plane_wave_k_parallel(source),
     )
-    with pytest.raises(NotImplementedError, match="Periodic coupling application"):
+    with pytest.raises(NotImplementedError, match="Ewald periodic coupling"):
         prepared.apply_W(np.zeros((6,), dtype=np.complex128))
+
+
+def test_periodic_direct_sum_window_zero_matches_pairwise_reference() -> None:
+    spec = pcl.PeriodicSpec(
+        lattice=pcl.RectangularLattice2D(500.0, 500.0),
+        options=pcl.PeriodicOptions(method="directsum", directsum_window=0),
+    )
+    particles = [_sphere(radius=10.0), _sphere(radius=10.0, x=90.0)]
+    k = 2.0 * np.pi / 550.0
+    k_parallel = np.array([0.001, 0.002])
+    periodic_prepared = prepare_matvec(
+        lmax=1,
+        k=k,
+        particles=particles,
+        n_medium=1.0 + 0j,
+        radial_lut_dr=1.0,
+        periodic=spec,
+        k_parallel=k_parallel,
+        show_progress=False,
+    )
+    positions = np.asarray([p.position for p in particles], dtype=float)
+    x = np.arange(12, dtype=np.float64).astype(np.complex128) + 0.5j
+
+    np.testing.assert_allclose(
+        periodic_prepared.apply_W(x),
+        apply_W_numpy(
+            1,
+            k,
+            positions,
+            x,
+            translation_ab5_table(1, dtype=np.complex128),
+            dtype=np.complex128,
+            radial_lut=None,
+        ),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+
+
+def test_periodic_direct_sum_includes_self_images() -> None:
+    spec = pcl.PeriodicSpec(
+        lattice=pcl.RectangularLattice2D(300.0, 320.0),
+        options=pcl.PeriodicOptions(method="directsum", directsum_window=1),
+    )
+    source = _plane_wave(polar_angle=0.25, azimuthal_angle=0.4)
+    prepared = prepare_matvec(
+        lmax=1,
+        k=2.0 * np.pi / 550.0,
+        particles=[_sphere(radius=10.0)],
+        n_medium=1.0 + 0j,
+        radial_lut_dr=1.0,
+        periodic=spec,
+        k_parallel=pcl.core.plane_wave_k_parallel(source),
+        show_progress=False,
+    )
+    x = np.arange(6, dtype=np.float64).astype(np.complex128) + 1.0j
+
+    y = prepared.apply_W(x)
+
+    assert np.linalg.norm(y) > 0.0
+
+
+def test_periodic_direct_sum_solve_runs_through_dense_fallback() -> None:
+    source = _plane_wave()
+    spec = pcl.PeriodicSpec(
+        lattice=pcl.RectangularLattice2D(300.0, 300.0),
+        options=pcl.PeriodicOptions(method="directsum", directsum_window=0),
+    )
+    cfg = SimulationConfig(
+        wavelength=550.0,
+        n_medium=1.0 + 0j,
+        lmax=1,
+        periodic=spec,
+        solver_method="direct",
+        source=source,
+        verbose=False,
+    )
+    sim = Simulation(cfg, particles=[_sphere(radius=10.0)])
+
+    solved = sim.solve_sources({"pw": source})
+
+    np.testing.assert_allclose(solved.coeffs["pw"], solved.rhs["pw"])

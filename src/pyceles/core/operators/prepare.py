@@ -290,11 +290,12 @@ def prepare_matvec(
         if periodic_spec is not None:
             if k_parallel_arr is None:
                 raise RuntimeError("Internal error: periodic k_parallel was not normalized.")
+            ab5 = translation_ab5_table(int(lmax), dtype=op_dtype)
             coupling = PeriodicCouplingOperator(
                 lmax=int(lmax),
                 k=k_f,
                 positions=positions,
-                lattice=periodic_spec.lattice,
+                ab5=ab5,
                 periodic=periodic_spec,
                 k_parallel=k_parallel_arr,
                 dtype=op_dtype,
