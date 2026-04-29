@@ -8,6 +8,7 @@ import pytest
 
 import pyceles as pcl
 from pyceles.core.operators import PeriodicCouplingOperator, apply_W_numpy, prepare_matvec
+from pyceles.core.periodic.ewald import periodic_ewald_block
 from pyceles.core.translation import translation_ab5_table
 from pyceles.simulation import Simulation, SimulationConfig
 from pyceles.simulation.solve import periodic_shared_k_parallel
@@ -68,6 +69,17 @@ def test_periodic_config_accepts_rectangular_lattice_spec() -> None:
 
     assert cfg.periodic is not None
     assert cfg.periodic.lattice.area == 120_000.0
+
+
+def test_periodic_options_reject_invalid_numerical_policy() -> None:
+    with pytest.raises(ValueError, match="eta"):
+        pcl.PeriodicOptions(eta=-0.1)
+    with pytest.raises(ValueError, match="real_shells"):
+        pcl.PeriodicOptions(real_shells=-1)
+    with pytest.raises(ValueError, match="reciprocal_shells"):
+        pcl.PeriodicOptions(reciprocal_shells=1.5)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="directsum_window"):
+        pcl.PeriodicOptions(directsum_window=-1)
 
 
 def test_periodic_config_rejects_unimplemented_backend_combinations() -> None:
@@ -146,14 +158,18 @@ def test_periodic_shared_k_parallel_rejects_mismatched_sources() -> None:
         )
 
 
-def test_prepare_matvec_periodic_returns_operator_stub() -> None:
-    spec = pcl.PeriodicSpec(lattice=pcl.RectangularLattice2D(300.0, 400.0))
+def test_prepare_matvec_periodic_returns_ewald_operator() -> None:
+    spec = pcl.PeriodicSpec(
+        lattice=pcl.RectangularLattice2D(300.0, 400.0),
+        options=pcl.PeriodicOptions(method="ewald", eta=0.02, real_shells=6, reciprocal_shells=6),
+    )
     source = _plane_wave(polar_angle=0.2, azimuthal_angle=0.3)
     particles = [_sphere(radius=10.0)]
+    k = 2.0 * np.pi / 550.0
 
     prepared = prepare_matvec(
         lmax=1,
-        k=2.0 * np.pi / 550.0,
+        k=k,
         particles=particles,
         n_medium=1.0 + 0j,
         radial_lut_dr=1.0,
@@ -168,8 +184,25 @@ def test_prepare_matvec_periodic_returns_operator_stub() -> None:
         prepared.coupling.k_parallel,
         pcl.core.plane_wave_k_parallel(source),
     )
-    with pytest.raises(NotImplementedError, match="Ewald periodic coupling"):
-        prepared.apply_W(np.zeros((6,), dtype=np.complex128))
+    x = np.arange(6, dtype=np.float64).astype(np.complex128) + 0.25j
+    expected = (
+        periodic_ewald_block(
+            lmax=1,
+            k=k,
+            destination=np.asarray(particles[0].position, dtype=float),
+            source=np.asarray(particles[0].position, dtype=float),
+            lattice=spec.lattice,
+            k_parallel=pcl.core.plane_wave_k_parallel(source),
+            eta=0.02,
+            real_shells=6,
+            reciprocal_shells=6,
+            ab5=translation_ab5_table(1, dtype=np.complex128),
+            dtype=np.complex128,
+            exclude_zero_shift=True,
+        )
+        @ x
+    )
+    np.testing.assert_allclose(prepared.apply_W(x), expected, rtol=1e-12, atol=1e-12)
 
 
 def test_prepare_matvec_periodic_does_not_build_radial_lut(
@@ -278,3 +311,25 @@ def test_periodic_direct_sum_solve_runs_through_dense_fallback() -> None:
     solved = sim.solve_sources({"pw": source})
 
     np.testing.assert_allclose(solved.coeffs["pw"], solved.rhs["pw"])
+
+
+def test_periodic_ewald_solve_runs_through_dense_fallback() -> None:
+    source = _plane_wave()
+    spec = pcl.PeriodicSpec(
+        lattice=pcl.RectangularLattice2D(300.0, 300.0),
+        options=pcl.PeriodicOptions(method="ewald", eta=0.02, real_shells=6, reciprocal_shells=6),
+    )
+    cfg = SimulationConfig(
+        wavelength=550.0,
+        n_medium=1.0 + 0j,
+        lmax=1,
+        periodic=spec,
+        solver_method="direct",
+        source=source,
+        verbose=False,
+    )
+    sim = Simulation(cfg, particles=[_sphere(radius=10.0)])
+
+    solved = sim.solve_sources({"pw": source})
+
+    assert np.all(np.isfinite(solved.coeffs["pw"]))

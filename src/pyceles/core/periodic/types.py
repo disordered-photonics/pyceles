@@ -17,8 +17,8 @@ class PeriodicOptions:
 
     method: Literal["ewald", "directsum"] = "ewald"
     eta: float | None = None
-    real_cutoff: float | None = None
-    reciprocal_cutoff: float | None = None
+    real_shells: int = 12
+    reciprocal_shells: int = 12
     directsum_window: int = 3
 
     def __post_init__(self) -> None:
@@ -26,12 +26,16 @@ class PeriodicOptions:
             raise ValueError(
                 f"`method` must be one of {{'ewald', 'directsum'}}. Got {self.method!r}."
             )
-        for name in ("eta", "real_cutoff", "reciprocal_cutoff"):
-            value = getattr(self, name)
-            if value is not None and (not np.isfinite(float(value)) or float(value) <= 0.0):
-                raise ValueError(f"`{name}` must be finite and positive when set. Got {value!r}.")
-        if int(self.directsum_window) < 0:
-            raise ValueError(f"`directsum_window` must be >= 0. Got {self.directsum_window!r}.")
+        if self.eta is not None and (not np.isfinite(float(self.eta)) or float(self.eta) <= 0.0):
+            raise ValueError(f"`eta` must be finite and positive when set. Got {self.eta!r}.")
+        for name in ("real_shells", "reciprocal_shells", "directsum_window"):
+            raw = getattr(self, name)
+            value = int(raw)
+            if value != raw:
+                raise ValueError(f"`{name}` must be an integer. Got {raw!r}.")
+            if value < 0:
+                raise ValueError(f"`{name}` must be >= 0. Got {raw!r}.")
+            object.__setattr__(self, name, value)
 
 
 @dataclass(frozen=True)

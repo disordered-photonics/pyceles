@@ -8,12 +8,19 @@ import numpy as np
 import numpy.typing as npt
 from scipy import special
 
+from pyceles.core.indexing import n_modes
 from pyceles.core.lattice import RectangularLattice2D
 from pyceles.core.spherical import legendre_normalized_trigon_scalar
 
 from .special import shifted_delta_sequence, upper_incomplete_gamma_int_or_halfint
+from .structural import block_from_structural_sums
 
 Array = np.ndarray
+
+
+def default_ewald_eta(lattice: RectangularLattice2D) -> float:
+    """Return the default real/reciprocal Ewald split for a 2D unit cell."""
+    return float(np.sqrt(np.pi / lattice.area))
 
 
 def _validated_shells(value: int, *, name: str) -> int:
@@ -436,4 +443,95 @@ def ewald_structural_sums_2d(
     return np.asarray(sums, dtype=out_dtype)
 
 
-__all__ = ["ewald_structural_constant_2d", "ewald_structural_sums_2d"]
+def periodic_ewald_block(
+    *,
+    lmax: int,
+    k: float,
+    destination: Array,
+    source: Array,
+    lattice: RectangularLattice2D,
+    k_parallel: Array,
+    eta: float,
+    real_shells: int,
+    reciprocal_shells: int,
+    ab5: Array,
+    dtype: npt.DTypeLike = np.complex128,
+    exclude_zero_shift: bool = False,
+) -> Array:
+    """Assemble one periodic SVWF coupling block from Ewald structural constants."""
+    sums = ewald_structural_sums_2d(
+        lmax=int(lmax),
+        k=float(k),
+        destination=destination,
+        source=source,
+        lattice=lattice,
+        k_parallel=k_parallel,
+        eta=float(eta),
+        real_shells=int(real_shells),
+        reciprocal_shells=int(reciprocal_shells),
+        exclude_zero_shift=bool(exclude_zero_shift),
+        dtype=np.complex128,
+    )
+    return block_from_structural_sums(
+        lmax=int(lmax),
+        structural_sums=sums,
+        ab5=ab5,
+        dtype=dtype,
+    )
+
+
+def apply_periodic_ewald_sum(
+    *,
+    lmax: int,
+    k: float,
+    positions: Array,
+    x: Array,
+    lattice: RectangularLattice2D,
+    k_parallel: Array,
+    eta: float,
+    real_shells: int,
+    reciprocal_shells: int,
+    ab5: Array,
+    dtype: npt.DTypeLike = np.complex128,
+    block_cache: dict[tuple[int, int], Array] | None = None,
+) -> Array:
+    """Apply the Ewald Bloch image sum to stacked SVWF coefficients."""
+    out_dtype = np.dtype(dtype)
+    pos = np.asarray(positions, dtype=float).reshape(-1, 3)
+    ns = pos.shape[0]
+    nm = n_modes(int(lmax))
+    arr = np.asarray(x, dtype=out_dtype).reshape(ns, nm)
+    y = np.zeros_like(arr, dtype=out_dtype)
+
+    for i in range(ns):
+        for j in range(ns):
+            key = (i, j)
+            wij = block_cache.get(key) if block_cache is not None else None
+            if wij is None:
+                wij = periodic_ewald_block(
+                    lmax=int(lmax),
+                    k=float(k),
+                    destination=pos[i],
+                    source=pos[j],
+                    lattice=lattice,
+                    k_parallel=k_parallel,
+                    eta=float(eta),
+                    real_shells=int(real_shells),
+                    reciprocal_shells=int(reciprocal_shells),
+                    ab5=ab5,
+                    dtype=out_dtype,
+                    exclude_zero_shift=(i == j),
+                )
+                if block_cache is not None:
+                    block_cache[key] = wij
+            y[i] += wij @ arr[j]
+    return y.reshape(ns * nm)
+
+
+__all__ = [
+    "apply_periodic_ewald_sum",
+    "default_ewald_eta",
+    "ewald_structural_constant_2d",
+    "ewald_structural_sums_2d",
+    "periodic_ewald_block",
+]
