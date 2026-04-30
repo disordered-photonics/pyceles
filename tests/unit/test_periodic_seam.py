@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 import pyceles as pcl
+from pyceles.core.indexing import n_modes
 from pyceles.core.operators import PeriodicCouplingOperator, apply_W_numpy, prepare_matvec
 from pyceles.core.periodic.ewald import periodic_ewald_block
 from pyceles.core.translation import translation_ab5_table
@@ -203,6 +204,84 @@ def test_prepare_matvec_periodic_returns_ewald_operator() -> None:
         @ x
     )
     np.testing.assert_allclose(prepared.apply_W(x), expected, rtol=1e-12, atol=1e-12)
+
+
+def test_periodic_ewald_operator_matches_explicit_blocks_for_two_particle_cell() -> None:
+    spec = pcl.PeriodicSpec(
+        lattice=pcl.RectangularLattice2D(360.0, 390.0),
+        options=pcl.PeriodicOptions(method="ewald", eta=0.02, real_shells=4, reciprocal_shells=4),
+    )
+    source = _plane_wave(polar_angle=0.25, azimuthal_angle=0.4)
+    particles = [
+        _sphere(radius=10.0),
+        pcl.Sphere(position=(85.0, 24.0, 31.0), radius=9.0, refractive_index=1.45 + 0j),
+    ]
+    k = 2.0 * np.pi / 550.0
+    prepared = prepare_matvec(
+        lmax=1,
+        k=k,
+        particles=particles,
+        n_medium=1.0 + 0j,
+        radial_lut_dr=1.0,
+        periodic=spec,
+        k_parallel=pcl.core.plane_wave_k_parallel(source),
+        show_progress=False,
+    )
+    positions = np.asarray([p.position for p in particles], dtype=float)
+    nm = n_modes(1)
+    x = (np.arange(2 * nm, dtype=np.float64) + 0.5j).astype(np.complex128)
+    arr = x.reshape(2, nm)
+    ab5 = translation_ab5_table(1, dtype=np.complex128)
+    expected = np.zeros_like(arr)
+    for i in range(2):
+        for j in range(2):
+            expected[i] += (
+                periodic_ewald_block(
+                    lmax=1,
+                    k=k,
+                    destination=positions[i],
+                    source=positions[j],
+                    lattice=spec.lattice,
+                    k_parallel=pcl.core.plane_wave_k_parallel(source),
+                    eta=0.02,
+                    real_shells=4,
+                    reciprocal_shells=4,
+                    ab5=ab5,
+                    dtype=np.complex128,
+                    exclude_zero_shift=(i == j),
+                )
+                @ arr[j]
+            )
+
+    np.testing.assert_allclose(
+        prepared.apply_W(x), expected.reshape(2 * nm), rtol=1e-12, atol=1e-12
+    )
+
+
+def test_periodic_ewald_coupling_populate_fills_private_block_cache() -> None:
+    spec = pcl.PeriodicSpec(
+        lattice=pcl.RectangularLattice2D(360.0, 390.0),
+        options=pcl.PeriodicOptions(method="ewald", eta=0.02, real_shells=4, reciprocal_shells=4),
+    )
+    source = _plane_wave(polar_angle=0.25, azimuthal_angle=0.4)
+    prepared = prepare_matvec(
+        lmax=1,
+        k=2.0 * np.pi / 550.0,
+        particles=[
+            _sphere(radius=10.0),
+            pcl.Sphere(position=(85.0, 24.0, 31.0), radius=9.0, refractive_index=1.45 + 0j),
+        ],
+        n_medium=1.0 + 0j,
+        radial_lut_dr=1.0,
+        periodic=spec,
+        k_parallel=pcl.core.plane_wave_k_parallel(source),
+        show_progress=False,
+    )
+    assert isinstance(prepared.coupling, PeriodicCouplingOperator)
+
+    prepared.populate_coupling(show_progress=False)
+
+    assert set(prepared.coupling._ewald_block_cache) == {(0, 0), (0, 1), (1, 0), (1, 1)}
 
 
 def test_prepare_matvec_periodic_does_not_build_radial_lut(
