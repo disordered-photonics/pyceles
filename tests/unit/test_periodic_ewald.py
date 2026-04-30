@@ -5,14 +5,27 @@ import pytest
 
 import pyceles as pcl
 from pyceles.core.periodic.ewald import (
+    _self_correction,
     ewald_structural_constant_2d,
     ewald_structural_sums_2d,
 )
+from pyceles.core.periodic.special import upper_incomplete_gamma_int_or_halfint
 from pyceles.core.periodic.structural import direct_structural_sums_2d
 
 
 def _lattice() -> pcl.RectangularLattice2D:
     return pcl.RectangularLattice2D(ax=430.0, ay=470.0)
+
+
+def test_self_correction_uses_smuthi_d3_00_half_integer_order() -> None:
+    """SMUTHI's D3_00 indexes Gamma(-1/2, x), not plain Gamma(0, x)."""
+    k = 2.0 * np.pi / 550.0
+    eta = 0.02
+    x = -(k * k) / (4.0 * eta * eta)
+
+    expected = upper_incomplete_gamma_int_or_halfint(-0.5, x) / (4.0 * np.pi)
+
+    assert _self_correction(k, eta) == pytest.approx(expected, rel=1e-15, abs=1e-15)
 
 
 def test_off_plane_ewald_structural_constants_match_stabilized_references() -> None:

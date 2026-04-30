@@ -193,10 +193,10 @@ def _same_plane_real_sum(
 
 
 def _self_correction(k: float, eta: float) -> complex:
-    return complex(
-        upper_incomplete_gamma_int_or_halfint(0.0, -float(k) * float(k) / (4.0 * eta * eta))
-        / (4.0 * math.pi)
-    )
+    """Return the same-particle Ewald central-point correction."""
+    eta_f = float(eta)
+    x = -(float(k) * float(k)) / (4.0 * eta_f * eta_f)
+    return complex(upper_incomplete_gamma_int_or_halfint(-0.5, x) / (4.0 * math.pi))
 
 
 def _shifted_reciprocal_sum(
