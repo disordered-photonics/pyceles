@@ -480,6 +480,65 @@ def load_mapping_h5(path: str | Path, *, group: str = "diagnostics") -> dict[str
         return _read_mapping_recursive(h5[group])
 
 
+def _periodic_to_mapping(periodic: Any) -> dict[str, Any]:
+    """Normalize periodic payload objects to a mapping for HDF5 serialization."""
+    if isinstance(periodic, Mapping):
+        return dict(periodic)
+    keys = (
+        "lattice_a1",
+        "lattice_a2",
+        "unit_cell_area",
+        "incident_k_parallel",
+        "output_bmax",
+        "order_mn",
+        "order_k_parallel",
+        "order_kz",
+        "order_propagating",
+        "reflected_amplitudes",
+        "transmitted_amplitudes",
+        "reflected_power_per_order",
+        "transmitted_power_per_order",
+        "incident_power_per_area",
+        "reflectance",
+        "transmittance",
+        "absorptance",
+    )
+    out: dict[str, Any] = {}
+    for key in keys:
+        if hasattr(periodic, key):
+            out[key] = getattr(periodic, key)
+    if not out:
+        raise TypeError(
+            "Unsupported periodic payload. Expected mapping or object with periodic fields."
+        )
+    return out
+
+
+def save_periodic_h5(
+    path: str | Path,
+    *,
+    periodic: Any,
+    group: str = "periodic",
+    mode: str = "a",
+    attrs: Mapping[str, Any] | None = None,
+    compression: str | None = "gzip",
+) -> None:
+    """Save periodic diffraction-order payload in a dedicated HDF5 group."""
+    save_mapping_h5(
+        path,
+        mapping=_periodic_to_mapping(periodic),
+        group=group,
+        mode=mode,
+        attrs=attrs,
+        compression=compression,
+    )
+
+
+def load_periodic_h5(path: str | Path, *, group: str = "periodic") -> dict[str, Any]:
+    """Load periodic diffraction-order payload saved via `save_periodic_h5`."""
+    return load_mapping_h5(path, group=group)
+
+
 def save_far_field_h5(
     path: str | Path,
     *,

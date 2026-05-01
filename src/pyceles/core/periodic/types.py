@@ -20,6 +20,7 @@ class PeriodicOptions:
     real_shells: int = 12
     reciprocal_shells: int = 12
     directsum_window: int = 3
+    output_bmax: float | None = None
 
     def __post_init__(self) -> None:
         if self.method not in {"ewald", "directsum"}:
@@ -28,6 +29,13 @@ class PeriodicOptions:
             )
         if self.eta is not None and (not np.isfinite(float(self.eta)) or float(self.eta) <= 0.0):
             raise ValueError(f"`eta` must be finite and positive when set. Got {self.eta!r}.")
+        if self.output_bmax is not None:
+            bmax = float(self.output_bmax)
+            if not np.isfinite(bmax) or bmax <= 0.0:
+                raise ValueError(
+                    f"`output_bmax` must be finite and positive when set. Got {self.output_bmax!r}."
+                )
+            object.__setattr__(self, "output_bmax", bmax)
         for name in ("real_shells", "reciprocal_shells", "directsum_window"):
             raw = getattr(self, name)
             value = int(raw)

@@ -11,6 +11,7 @@ from pyceles.core.indexing import n_modes
 from pyceles.core.operators import PeriodicCouplingOperator, apply_W_numpy, prepare_matvec
 from pyceles.core.periodic.ewald import periodic_ewald_block
 from pyceles.core.translation import translation_ab5_table
+from pyceles.io import load_periodic_h5, save_periodic_h5
 from pyceles.simulation import Simulation, SimulationConfig
 from pyceles.simulation.solve import periodic_shared_k_parallel
 
@@ -81,6 +82,8 @@ def test_periodic_options_reject_invalid_numerical_policy() -> None:
         pcl.PeriodicOptions(reciprocal_shells=1.5)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="directsum_window"):
         pcl.PeriodicOptions(directsum_window=-1)
+    with pytest.raises(ValueError, match="output_bmax"):
+        pcl.PeriodicOptions(output_bmax=0.0)
 
 
 def test_periodic_config_rejects_unimplemented_backend_combinations() -> None:
@@ -412,3 +415,107 @@ def test_periodic_ewald_solve_runs_through_dense_fallback() -> None:
     solved = sim.solve_sources({"pw": source})
 
     assert np.all(np.isfinite(solved.coeffs["pw"]))
+
+
+def test_periodic_postprocess_populates_periodic_result_payload() -> None:
+    source = _plane_wave(polar_angle=0.2, azimuthal_angle=0.3, polarization="TE")
+    spec = pcl.PeriodicSpec(
+        lattice=pcl.RectangularLattice2D(300.0, 320.0),
+        options=pcl.PeriodicOptions(method="ewald", eta=0.02, real_shells=4, reciprocal_shells=4),
+    )
+    cfg = SimulationConfig(
+        wavelength=550.0,
+        n_medium=1.0 + 0j,
+        lmax=1,
+        periodic=spec,
+        solver_method="direct",
+        source=source,
+        verbose=False,
+    )
+    sim = Simulation(cfg, particles=[_sphere(radius=10.0)])
+
+    solved = sim.solve_sources({"pw": source})
+    multi = sim.postprocess_sources(solved, include_farfield=False)
+    run = multi["pw"]
+
+    assert run.periodic is not None
+    periodic = run.periodic
+    assert periodic.order_mn.shape[1] == 2
+    assert periodic.order_k_parallel.shape[0] == periodic.order_mn.shape[0]
+    assert periodic.order_kz.shape[0] == periodic.order_mn.shape[0]
+    assert periodic.reflected_amplitudes.shape == periodic.transmitted_amplitudes.shape
+    assert periodic.reflected_amplitudes.shape[1] == 2
+    assert np.any((periodic.order_mn[:, 0] == 0) & (periodic.order_mn[:, 1] == 0))
+    assert bool(np.all(periodic.order_propagating))
+    assert periodic.output_bmax is None
+    assert np.isfinite(periodic.reflectance)
+    assert np.isfinite(periodic.transmittance)
+    assert np.isfinite(periodic.absorptance)
+    assert run.farfield.scattered_te["coeff"].shape == (0, 0)
+
+
+def test_periodic_postprocess_output_bmax_includes_evanescent_orders() -> None:
+    source = _plane_wave(polar_angle=0.2, azimuthal_angle=0.3, polarization="TE")
+    spec = pcl.PeriodicSpec(
+        lattice=pcl.RectangularLattice2D(300.0, 320.0),
+        options=pcl.PeriodicOptions(output_bmax=0.05),
+    )
+    cfg = SimulationConfig(
+        wavelength=550.0,
+        n_medium=1.0 + 0j,
+        lmax=1,
+        periodic=spec,
+        solver_method="direct",
+        source=source,
+        verbose=False,
+    )
+    sim = Simulation(cfg, particles=[_sphere(radius=10.0)])
+
+    run = sim.run(include_farfield=False)
+    assert run.periodic is not None
+    periodic = run.periodic
+    assert periodic.output_bmax == pytest.approx(0.05)
+    assert periodic.order_mn.shape[0] > int(np.count_nonzero(periodic.order_propagating))
+
+
+def test_periodic_run_rejects_polarization_basis_mode() -> None:
+    source = _plane_wave(polar_angle=0.2, azimuthal_angle=0.3, polarization="TE")
+    spec = pcl.PeriodicSpec(lattice=pcl.RectangularLattice2D(300.0, 320.0))
+    cfg = SimulationConfig(
+        wavelength=550.0,
+        n_medium=1.0 + 0j,
+        lmax=1,
+        periodic=spec,
+        solver_method="direct",
+        source=source,
+        solve_polarization_basis=True,
+        verbose=False,
+    )
+    sim = Simulation(cfg, particles=[_sphere(radius=10.0)])
+    with pytest.raises(NotImplementedError, match="solve_polarization_basis"):
+        sim.run(include_farfield=False)
+
+
+def test_periodic_hdf5_roundtrip(tmp_path) -> None:
+    source = _plane_wave(polar_angle=0.2, azimuthal_angle=0.3, polarization="TE")
+    spec = pcl.PeriodicSpec(lattice=pcl.RectangularLattice2D(300.0, 320.0))
+    cfg = SimulationConfig(
+        wavelength=550.0,
+        n_medium=1.0 + 0j,
+        lmax=1,
+        periodic=spec,
+        solver_method="direct",
+        source=source,
+        verbose=False,
+    )
+    sim = Simulation(cfg, particles=[_sphere(radius=10.0)])
+    run = sim.run(include_farfield=False)
+    assert run.periodic is not None
+
+    path = tmp_path / "periodic_payload.h5"
+    save_periodic_h5(path, periodic=run.periodic, group="periodic", mode="w")
+    loaded = load_periodic_h5(path, group="periodic")
+
+    assert "order_mn" in loaded
+    assert "reflectance" in loaded
+    assert int(np.asarray(loaded["order_mn"]).shape[1]) == 2

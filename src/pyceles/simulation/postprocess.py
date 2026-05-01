@@ -19,6 +19,7 @@ from pyceles.core.sources import (
 )
 from pyceles.postprocessing.farfield import (
     FarFieldPatterns,
+    PeriodicFarFieldPayload,
     compute_far_field_patterns,
     finite_beam_power_fractions,
     local_absorbed_power_components_from_exciting,
@@ -26,6 +27,7 @@ from pyceles.postprocessing.farfield import (
     plane_wave_cross_sections,
     pwp_power_decomposition,
 )
+from pyceles.postprocessing.farfield.periodic import periodic_plane_wave_orders
 
 from .config import validate_angular_grid_pair
 from .results import (
@@ -169,6 +171,34 @@ def _as_float_scalar(value: float | np.ndarray) -> float:
     """Convert a scalar-like numeric payload to Python float."""
     arr = np.asarray(value, dtype=np.float64).reshape(())
     return float(arr)
+
+
+def _build_periodic_result(
+    sim: Simulation,
+    *,
+    source: Source,
+    coeffs: np.ndarray,
+    k: float,
+) -> PeriodicFarFieldPayload:
+    """Compute periodic diffraction-order amplitudes and unit-cell `R/T/A`."""
+    periodic = sim.config.periodic
+    if periodic is None:
+        raise RuntimeError("Internal error: periodic postprocess called without periodic config.")
+    if not isinstance(source, PlaneWave):
+        raise NotImplementedError(
+            "Periodic postprocessing currently supports PlaneWave excitation only."
+        )
+
+    return periodic_plane_wave_orders(
+        source=source,
+        lattice=periodic.lattice,
+        positions=sim.positions,
+        coeffs=coeffs,
+        lmax=int(sim.config.lmax),
+        k=float(k),
+        n_medium=sim.config.n_medium,
+        output_bmax=periodic.options.output_bmax,
+    )
 
 
 def _mix_pwp_dict(
@@ -480,6 +510,7 @@ def _assemble_simulation_result(
     decomposition_forward_basis: dict[str, dict[str, float]] | None = None,
     decomposition_backward_basis: dict[str, dict[str, float]] | None = None,
     polarization_jones: tuple[complex, complex] | None = None,
+    periodic: PeriodicFarFieldPayload | None = None,
 ) -> SimulationResult:
     """Assemble the canonical completed-run payload from solved coefficients."""
     cfg = sim.config
@@ -514,6 +545,7 @@ def _assemble_simulation_result(
         decomposition_backward=decomposition_backward,
         decomposition_forward_basis=decomposition_forward_basis,
         decomposition_backward_basis=decomposition_backward_basis,
+        periodic=periodic,
         polarization_jones=pol_jones,
         compute_dtype=str(compute_dtype),
         accum_dtype=str(accum_dtype),
@@ -606,13 +638,81 @@ def postprocess_sources_impl(
 ) -> MultiSourceSimulationResult:
     """Postprocess solved channels into per-channel `SimulationResult` payloads."""
     cfg = sim.config
-    if cfg.periodic is not None:
-        raise NotImplementedError(
-            "Periodic postprocessing outputs are not implemented yet. "
-            "Diffraction-order and R/T/A result payloads are not available yet."
-        )
     labels = tuple(solved.labels)
     n_channels = len(labels)
+    periodic_run = cfg.periodic is not None
+
+    Ns = sim.positions.shape[0]
+    Nm = n_modes(cfg.lmax)
+    compute_dtype = np.dtype(solved.compute_dtype)
+    accum_dtype = np.dtype(solved.accum_dtype)
+
+    if periodic_run:
+        periodic_runs: dict[str, SimulationResult] = {}
+        sim._solve_backend_handoffs.pop(id(solved), None)
+        for j, label in enumerate(labels):
+            if label not in solved.sources:
+                raise KeyError(f"Missing source payload for label '{label}'.")
+            if label not in solved.initial_coeffs:
+                raise KeyError(f"Missing initial coefficients for label '{label}'.")
+            if label not in solved.rhs:
+                raise KeyError(f"Missing RHS payload for label '{label}'.")
+            if label not in solved.coeffs:
+                raise KeyError(f"Missing solved coefficients for label '{label}'.")
+
+            x_col = solved.coeffs[label]
+            if tuple(np.shape(x_col)) != (Ns, Nm):
+                raise ValueError(
+                    f"Solved coefficients for label '{label}' must have shape {(Ns, Nm)}. "
+                    f"Got {np.shape(x_col)}."
+                )
+            rhs_col = solved.rhs[label]
+            if tuple(np.shape(rhs_col)) != (Ns, Nm):
+                raise ValueError(
+                    f"Solved RHS for label '{label}' must have shape {(Ns, Nm)}. "
+                    f"Got {np.shape(rhs_col)}."
+                )
+            solver_col = (
+                solved.solver_result
+                if n_channels == 1
+                else single_rhs_result_from_multi(solved.solver_result, j)
+            )
+            periodic_payload = _build_periodic_result(
+                sim,
+                source=solved.sources[label],
+                coeffs=np.asarray(x_col),
+                k=float(solved.k),
+            )
+            periodic_runs[label] = _assemble_simulation_result(
+                sim,
+                source=solved.sources[label],
+                k=float(solved.k),
+                k0=float(solved.k0),
+                coeffs=np.asarray(x_col),
+                rhs=np.asarray(rhs_col, dtype=accum_dtype).reshape(Ns, Nm),
+                initial_coeffs=np.asarray(solved.initial_coeffs[label]),
+                solver_result=solver_col,
+                compute_dtype=compute_dtype,
+                accum_dtype=accum_dtype,
+                # Periodic runs expose far-field observables through
+                # `SimulationResult.periodic`; keep finite-cluster PWP families
+                # as intentional empty placeholders.
+                farfield=empty_farfield_patterns(compute_dtype),
+                power=None,
+                cross_sections=None,
+                decomposition_forward=None,
+                decomposition_backward=None,
+                periodic=periodic_payload,
+            )
+        return MultiSourceSimulationResult(
+            labels=labels,
+            sources=dict(solved.sources),
+            runs=periodic_runs,
+            solver_result=solved.solver_result,
+            initial_coeffs=dict(solved.initial_coeffs),
+            rhs=dict(solved.rhs),
+            coeffs=dict(solved.coeffs),
+        )
 
     if (farfield_polar_angles is None) != (farfield_azimuthal_angles is None):
         raise ValueError(
@@ -627,11 +727,6 @@ def postprocess_sources_impl(
             polar_values=np.asarray(farfield_polar_angles),
             azimuthal_values=np.asarray(farfield_azimuthal_angles),
         )
-
-    Ns = sim.positions.shape[0]
-    Nm = n_modes(cfg.lmax)
-    compute_dtype = np.dtype(solved.compute_dtype)
-    accum_dtype = np.dtype(solved.accum_dtype)
 
     runs: dict[str, SimulationResult] = {}
     backend_handoff = sim._solve_backend_handoffs.pop(id(solved), {})
@@ -696,6 +791,10 @@ def run_impl(sim: Simulation, *, include_farfield: bool = True) -> SimulationRes
     """Run one simulation for `config.source`."""
     cfg = sim.config
     source = sim._validate_ready_to_run()
+    if cfg.periodic is not None and bool(cfg.solve_polarization_basis):
+        raise NotImplementedError(
+            "`solve_polarization_basis=True` is not implemented for periodic postprocessing yet."
+        )
 
     if not bool(cfg.solve_polarization_basis):
         solved = sim._solve_sources_for_immediate_postprocess({"mixed": source})

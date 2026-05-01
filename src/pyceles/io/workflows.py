@@ -11,11 +11,13 @@ from .hdf5 import (
     load_geometry_h5,
     load_mapping_h5,
     load_near_field_components_h5,
+    load_periodic_h5,
     load_solution_h5,
     save_far_field_h5,
     save_geometry_h5,
     save_mapping_h5,
     save_near_field_components_h5,
+    save_periodic_h5,
     save_solution_h5,
 )
 
@@ -37,9 +39,13 @@ def save_simulation_h5(
     - basis far-field families (`far_field_basis/te`, `far_field_basis/tm`)
     - basis and unpolarized diagnostics under `diagnostics`.
 
+    For periodic runs (`run.periodic is not None`), this workflow stores the
+    periodic diffraction-order payload under the dedicated `periodic` group
+    instead of serializing finite far-field families.
+
     For `Simulation.solve_sources(...)` + `Simulation.postprocess_sources(...)`,
-    save each channel result
-    individually (for example `save_simulation_h5(multi["te"], ...)`).
+    save each channel result individually (for example
+    `save_simulation_h5(multi["te"], ...)`).
     """
     out_h5 = Path(out_h5)
     out_h5.parent.mkdir(parents=True, exist_ok=True)
@@ -96,74 +102,86 @@ def save_simulation_h5(
         },
     )
 
-    ff = run.farfield
-    source_beta, source_alpha = run.config.source_angular_grids()
-    farfield_beta, farfield_alpha = run.config.farfield_angular_grids()
-    k_medium = 2.0 * np.pi / float(run.config.wavelength) * float(np.real(run.config.n_medium))
-    patterns = {"scattered": {"te": ff.scattered_te, "tm": ff.scattered_tm}}
-    if ff.initial_te is not None and ff.initial_tm is not None:
-        patterns["initial"] = {"te": ff.initial_te, "tm": ff.initial_tm}
-    if ff.total_te is not None and ff.total_tm is not None:
-        patterns["total"] = {"te": ff.total_te, "tm": ff.total_tm}
-    save_far_field_h5(
-        out_h5,
-        patterns=patterns,
-        attrs={
-            "k_medium": float(k_medium),
-            "source_beta_points": int(source_beta.size),
-            "source_alpha_points": int(source_alpha.size),
-            "farfield_beta_points": int(farfield_beta.size),
-            "farfield_alpha_points": int(farfield_alpha.size),
-            "source_farfield_grid_equal": bool(
-                np.array_equal(source_beta, farfield_beta)
-                and np.array_equal(source_alpha, farfield_alpha)
-            ),
-        },
-    )
+    diagnostics: dict[str, object] = {}
+    if run.periodic is None:
+        ff = run.farfield
+        source_beta, source_alpha = run.config.source_angular_grids()
+        farfield_beta, farfield_alpha = run.config.farfield_angular_grids()
+        k_medium = 2.0 * np.pi / float(run.config.wavelength) * float(np.real(run.config.n_medium))
+        patterns = {"scattered": {"te": ff.scattered_te, "tm": ff.scattered_tm}}
+        if ff.initial_te is not None and ff.initial_tm is not None:
+            patterns["initial"] = {"te": ff.initial_te, "tm": ff.initial_tm}
+        if ff.total_te is not None and ff.total_tm is not None:
+            patterns["total"] = {"te": ff.total_te, "tm": ff.total_tm}
+        save_far_field_h5(
+            out_h5,
+            patterns=patterns,
+            attrs={
+                "k_medium": float(k_medium),
+                "source_beta_points": int(source_beta.size),
+                "source_alpha_points": int(source_alpha.size),
+                "farfield_beta_points": int(farfield_beta.size),
+                "farfield_alpha_points": int(farfield_alpha.size),
+                "source_farfield_grid_equal": bool(
+                    np.array_equal(source_beta, farfield_beta)
+                    and np.array_equal(source_alpha, farfield_alpha)
+                ),
+            },
+        )
 
-    if run.farfield_basis is not None:
-        for pol, ff_pol in run.farfield_basis.items():
-            patt_pol = {"scattered": {"te": ff_pol.scattered_te, "tm": ff_pol.scattered_tm}}
-            if ff_pol.initial_te is not None and ff_pol.initial_tm is not None:
-                patt_pol["initial"] = {"te": ff_pol.initial_te, "tm": ff_pol.initial_tm}
-            if ff_pol.total_te is not None and ff_pol.total_tm is not None:
-                patt_pol["total"] = {"te": ff_pol.total_te, "tm": ff_pol.total_tm}
-            save_far_field_h5(
-                out_h5,
-                patterns=patt_pol,
-                group=f"far_field_basis/{pol}",
-                mode="a",
-                attrs={
-                    "polarization_channel": pol,
-                    "k_medium": float(k_medium),
-                    "source_beta_points": int(source_beta.size),
-                    "source_alpha_points": int(source_alpha.size),
-                    "farfield_beta_points": int(farfield_beta.size),
-                    "farfield_alpha_points": int(farfield_alpha.size),
-                    "source_farfield_grid_equal": bool(
-                        np.array_equal(source_beta, farfield_beta)
-                        and np.array_equal(source_alpha, farfield_alpha)
-                    ),
-                },
-            )
+        if run.farfield_basis is not None:
+            for pol, ff_pol in run.farfield_basis.items():
+                patt_pol = {"scattered": {"te": ff_pol.scattered_te, "tm": ff_pol.scattered_tm}}
+                if ff_pol.initial_te is not None and ff_pol.initial_tm is not None:
+                    patt_pol["initial"] = {"te": ff_pol.initial_te, "tm": ff_pol.initial_tm}
+                if ff_pol.total_te is not None and ff_pol.total_tm is not None:
+                    patt_pol["total"] = {"te": ff_pol.total_te, "tm": ff_pol.total_tm}
+                save_far_field_h5(
+                    out_h5,
+                    patterns=patt_pol,
+                    group=f"far_field_basis/{pol}",
+                    mode="a",
+                    attrs={
+                        "polarization_channel": pol,
+                        "k_medium": float(k_medium),
+                        "source_beta_points": int(source_beta.size),
+                        "source_alpha_points": int(source_alpha.size),
+                        "farfield_beta_points": int(farfield_beta.size),
+                        "farfield_alpha_points": int(farfield_alpha.size),
+                        "source_farfield_grid_equal": bool(
+                            np.array_equal(source_beta, farfield_beta)
+                            and np.array_equal(source_alpha, farfield_alpha)
+                        ),
+                    },
+                )
 
-    same_source_farfield_grids = bool(
-        np.array_equal(source_beta, farfield_beta) and np.array_equal(source_alpha, farfield_alpha)
-    )
-    angular_grids: dict[str, object] = {
-        "source_farfield_grid_equal": same_source_farfield_grids,
-    }
-    if same_source_farfield_grids:
-        # Common path: one shared grid is enough for both source projection and far-field output.
-        angular_grids["beta"] = np.asarray(source_beta, dtype=float)
-        angular_grids["alpha"] = np.asarray(source_alpha, dtype=float)
+        same_source_farfield_grids = bool(
+            np.array_equal(source_beta, farfield_beta)
+            and np.array_equal(source_alpha, farfield_alpha)
+        )
+        angular_grids: dict[str, object] = {
+            "source_farfield_grid_equal": same_source_farfield_grids,
+        }
+        if same_source_farfield_grids:
+            # Common path: one shared grid is enough for both source projection and far-field output.
+            angular_grids["beta"] = np.asarray(source_beta, dtype=float)
+            angular_grids["alpha"] = np.asarray(source_alpha, dtype=float)
+        else:
+            angular_grids["source_beta"] = np.asarray(source_beta, dtype=float)
+            angular_grids["source_alpha"] = np.asarray(source_alpha, dtype=float)
+            angular_grids["farfield_beta"] = np.asarray(farfield_beta, dtype=float)
+            angular_grids["farfield_alpha"] = np.asarray(farfield_alpha, dtype=float)
+        diagnostics["angular_grids"] = angular_grids
     else:
-        angular_grids["source_beta"] = np.asarray(source_beta, dtype=float)
-        angular_grids["source_alpha"] = np.asarray(source_alpha, dtype=float)
-        angular_grids["farfield_beta"] = np.asarray(farfield_beta, dtype=float)
-        angular_grids["farfield_alpha"] = np.asarray(farfield_alpha, dtype=float)
-
-    diagnostics: dict[str, object] = {"angular_grids": angular_grids}
+        # Periodic runs store order-resolved observables under `periodic`.
+        # `run.farfield` intentionally stays empty in this workflow.
+        save_periodic_h5(out_h5, periodic=run.periodic, group="periodic", mode="a")
+        diagnostics["periodic"] = {
+            "order_count": int(np.asarray(run.periodic.order_mn).shape[0]),
+            "reflectance": float(run.periodic.reflectance),
+            "transmittance": float(run.periodic.transmittance),
+            "absorptance": float(run.periodic.absorptance),
+        }
     if run.polarization_jones is not None:
         diagnostics["polarization_jones"] = {
             "a_te_real": float(np.real(run.polarization_jones[0])),
@@ -197,7 +215,8 @@ def load_simulation_h5(path: str | Path) -> dict[str, object]:
     """Load saved simulation artifacts from HDF5 into a plain dictionary.
 
     This is a lightweight loader for analysis/post-processing workflows that do
-    not need to reconstruct a full `SimulationResult` instance.
+    not need to reconstruct a full `SimulationResult` instance. Periodic runs
+    include a `periodic` payload group when present.
     """
     p = Path(path)
     out: dict[str, object] = {
@@ -208,6 +227,7 @@ def load_simulation_h5(path: str | Path) -> dict[str, object]:
     with h5py.File(str(p), "r") as h5:
         has_near_field_components = "near_field_components" in h5
         has_far_field = "far_field" in h5
+        has_periodic = "periodic" in h5
         has_diagnostics = "diagnostics" in h5
         has_solution_basis = "solution_basis" in h5
         has_far_field_basis = "far_field_basis" in h5
@@ -218,6 +238,8 @@ def load_simulation_h5(path: str | Path) -> dict[str, object]:
         )
     if has_far_field:
         out["far_field"] = load_far_field_h5(p, group="far_field")
+    if has_periodic:
+        out["periodic"] = load_periodic_h5(p, group="periodic")
     if has_diagnostics:
         out["diagnostics"] = load_mapping_h5(p, group="diagnostics")
 

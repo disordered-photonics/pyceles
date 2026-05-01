@@ -17,14 +17,18 @@ import numpy.typing as npt
 from pyceles.core.particles import Particle
 from pyceles.core.sources import Source
 from pyceles.linear.solvers import LinearSolveResult
-from pyceles.postprocessing.farfield import FarFieldPatterns
+from pyceles.postprocessing.farfield import FarFieldPatterns, PeriodicFarFieldPayload
 
 from .config import SimulationConfig
 
 
 @dataclass(frozen=True)
 class SimulationResult:
-    """Container for solved multipole coefficients and derived observables."""
+    """Container for solved multipole coefficients and derived observables.
+
+    For periodic runs, finite-cluster far-field payloads remain empty placeholders
+    and periodic diffraction-order observables live under `periodic`.
+    """
 
     config: SimulationConfig
     k: float
@@ -48,6 +52,7 @@ class SimulationResult:
     decomposition_forward_basis: dict[str, dict[str, float]] | None
     decomposition_backward_basis: dict[str, dict[str, float]] | None
     particles: tuple[Particle, ...]
+    periodic: PeriodicFarFieldPayload | None = None
     polarization_jones: tuple[complex, complex] | None = None
     compute_dtype: str = "complex128"
     accum_dtype: str = "complex128"

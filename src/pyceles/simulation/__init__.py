@@ -8,7 +8,11 @@ the `Simulation` orchestrator itself.
 from __future__ import annotations
 
 from .config import SimulationConfig
-from .results import MultiSourceSimulationResult, SimulationResult, SolvedSourcesResult
+from .results import (
+    MultiSourceSimulationResult,
+    SimulationResult,
+    SolvedSourcesResult,
+)
 from .workflow import Simulation
 
 __all__ = [
