@@ -341,15 +341,28 @@ def test_compute_periodic_near_field_accepts_configured_output_bmax():
     assert np.all(np.isfinite(nf.H_total))
 
 
-def test_compute_periodic_near_field_rejects_slab_points_until_local_evaluator_lands():
+def test_compute_periodic_near_field_interior_returns_finite_outside_circumspheres():
     run = _make_periodic_run(polar_angle=0.4, azimuthal_angle=0.7)
-    with pytest.raises(NotImplementedError, match="local \\(in-slab\\)"):
-        pcl.compute_periodic_near_field(
-            run,
-            points=np.array([[220.0, 180.0, 120.0]], dtype=float),
-            channel="mixed",
-            field_bmax=0.05,
-        )
+    nf = pcl.compute_periodic_near_field(
+        run,
+        points=np.array([[0.0, 0.0, 120.0]], dtype=float),
+        channel="mixed",
+    )
+    assert nf.inside_mask.tolist() == [False]
+    assert np.all(np.isfinite(nf.E_total))
+    assert np.all(np.isfinite(nf.H_total))
+
+
+def test_compute_periodic_near_field_marks_points_inside_periodic_circumspheres():
+    run = _make_periodic_run(polar_angle=0.4, azimuthal_angle=0.7)
+    nf = pcl.compute_periodic_near_field(
+        run,
+        points=np.array([[220.0, 180.0, 140.0]], dtype=float),
+        channel="mixed",
+    )
+    assert nf.inside_mask.tolist() == [True]
+    assert not np.all(np.isfinite(nf.E_total))
+    assert not np.all(np.isfinite(nf.H_total))
 
 
 def test_periodic_supercell_replication_matches_fundamental_cell_observables():
