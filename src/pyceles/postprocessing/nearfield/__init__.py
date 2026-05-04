@@ -18,6 +18,7 @@ from .components import (
 )
 from .initial import compute_initial_field
 from .internal import compute_internal_field
+from .periodic import compute_periodic_near_field, compute_periodic_near_field_slice
 from .scattered import NearFieldRadialLUT, compute_scattered_field
 from .slice import NearFieldSlice
 from .workflows import (
@@ -39,6 +40,8 @@ __all__ = [
     "compute_near_field",
     "compute_near_field_components",
     "compute_near_field_slice",
+    "compute_periodic_near_field",
+    "compute_periodic_near_field_slice",
     "compute_scattered_field",
     "compute_total_field",
     "mix_near_field_components",

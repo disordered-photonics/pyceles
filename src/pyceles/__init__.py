@@ -37,6 +37,8 @@ from pyceles.postprocessing.nearfield import (
     NearFieldSlice,
     compute_near_field,
     compute_near_field_slice,
+    compute_periodic_near_field,
+    compute_periodic_near_field_slice,
     mix_near_field_components,
     mix_near_field_slices,
 )
@@ -79,6 +81,8 @@ __all__ = [
     "compute_dipole_power_ldos",
     "compute_near_field",
     "compute_near_field_slice",
+    "compute_periodic_near_field",
+    "compute_periodic_near_field_slice",
     "core",
     "io",
     "layered_spheres_from_arrays",

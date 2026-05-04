@@ -39,6 +39,34 @@ class PeriodicFarFieldPayload:
     absorptance: float
 
 
+@dataclass(frozen=True)
+class PeriodicOrderAmplitudes:
+    """Order-domain periodic amplitudes before flux normalization.
+
+    The scattered payload is expressed on the two longitudinal branches:
+    - `scattered_up_amplitudes`: order waves with `+kz`
+    - `scattered_down_amplitudes`: order waves with `-kz`
+
+    `reflected_amplitudes` and `transmitted_amplitudes` are derived from the
+    branch amplitudes plus incidence direction bookkeeping, and include the
+    incident `(m, n) = (0, 0)` component in `transmitted_amplitudes`.
+    """
+
+    order_mn: np.ndarray
+    order_k_parallel: np.ndarray
+    order_kz: np.ndarray
+    order_propagating: np.ndarray
+    scattered_up_amplitudes: np.ndarray
+    scattered_down_amplitudes: np.ndarray
+    reflected_amplitudes: np.ndarray
+    transmitted_amplitudes: np.ndarray
+    incident_polarization: np.ndarray
+    incidence_sign: float
+    incident_k_parallel: np.ndarray
+    unit_cell_area: float
+    output_bmax: float | None
+
+
 def _order_mode_coefficients(
     *,
     lmax: int,
@@ -78,7 +106,7 @@ def _order_mode_coefficients(
     return b_up_te, b_up_tm, b_down_te, b_down_tm
 
 
-def periodic_plane_wave_orders(
+def periodic_order_amplitudes(
     *,
     source: PlaneWave,
     lattice: RectangularLattice2D,
@@ -86,27 +114,22 @@ def periodic_plane_wave_orders(
     coeffs: np.ndarray,
     lmax: int,
     k: float,
-    n_medium: complex,
     output_bmax: float | None = None,
-) -> PeriodicFarFieldPayload:
-    """Compute periodic reflected/transmitted order amplitudes and `R/T/A`.
+) -> PeriodicOrderAmplitudes:
+    """Compute branch-resolved periodic order amplitudes.
 
-    This follows the CELES/SMUTHI SVWF-to-PVWF convention for periodic orders:
-    each order coefficient uses the `2*pi/(A*k*kz)` prefactor, where `A` is
-    unit-cell area and `kz` is the branch-selected longitudinal wavevector with
-    non-negative imaginary part.
+    This returns the reusable periodic-order payload used by both:
+    - periodic far-field power diagnostics (`R/T/A`),
+    - periodic exterior near-field evaluation via Rayleigh sums.
 
-    `output_bmax=None` selects the propagating-order table only (`|k_parallel|<=k`).
-    Set `output_bmax` explicitly to include evanescent orders in the output basis.
+    The SVWF-to-PVWF prefactor follows the CELES/SMUTHI convention:
+    `2*pi / (A * k * kz)`, where `A` is the unit-cell area.
     """
     pos = np.asarray(positions, dtype=float).reshape(-1, 3)
     x = np.asarray(coeffs, dtype=np.complex128).reshape(pos.shape[0], -1)
     k_f = float(k)
     if k_f <= 0.0 or not np.isfinite(k_f):
         raise ValueError(f"`k` must be finite and positive. Got {k!r}.")
-    n_real = float(np.real(complex(n_medium)))
-    if n_real <= 0.0:
-        raise ValueError(f"`n_medium` must be positive and real. Got {n_medium!r}.")
 
     kp_inc = plane_wave_k_parallel(source)
     orders = enumerate_diffraction_orders_rectangular(
@@ -159,17 +182,78 @@ def periodic_plane_wave_orders(
     if matches_incident.size:
         transmitted[int(matches_incident[0]), :] += incident_pol
 
+    return PeriodicOrderAmplitudes(
+        order_mn=np.column_stack((orders.m, orders.n)).astype(np.int32, copy=False),
+        order_k_parallel=np.asarray(orders.k_parallel, dtype=float).reshape(n_orders, 2),
+        order_kz=np.asarray(orders.kz, dtype=np.complex128).reshape(n_orders),
+        order_propagating=np.asarray(orders.propagating, dtype=bool).reshape(n_orders),
+        scattered_up_amplitudes=np.asarray(scattered_up, dtype=np.complex128),
+        scattered_down_amplitudes=np.asarray(scattered_down, dtype=np.complex128),
+        reflected_amplitudes=np.asarray(reflected, dtype=np.complex128),
+        transmitted_amplitudes=np.asarray(transmitted, dtype=np.complex128),
+        incident_polarization=np.asarray(incident_pol, dtype=np.complex128).reshape(2),
+        incidence_sign=float(inc_sign),
+        incident_k_parallel=np.asarray(kp_inc, dtype=float).reshape(2),
+        unit_cell_area=float(area),
+        output_bmax=(None if output_bmax is None else float(output_bmax)),
+    )
+
+
+def periodic_plane_wave_orders(
+    *,
+    source: PlaneWave,
+    lattice: RectangularLattice2D,
+    positions: np.ndarray,
+    coeffs: np.ndarray,
+    lmax: int,
+    k: float,
+    n_medium: complex,
+    output_bmax: float | None = None,
+) -> PeriodicFarFieldPayload:
+    """Compute periodic reflected/transmitted order amplitudes and `R/T/A`.
+
+    This follows the CELES/SMUTHI SVWF-to-PVWF convention for periodic orders:
+    each order coefficient uses the `2*pi/(A*k*kz)` prefactor, where `A` is
+    unit-cell area and `kz` is the branch-selected longitudinal wavevector with
+    non-negative imaginary part.
+
+    `output_bmax=None` selects the propagating-order table only (`|k_parallel|<=k`).
+    Set `output_bmax` explicitly to include evanescent orders in the output basis.
+    """
+    k_f = float(k)
+    if k_f <= 0.0 or not np.isfinite(k_f):
+        raise ValueError(f"`k` must be finite and positive. Got {k!r}.")
+    n_real = float(np.real(complex(n_medium)))
+    if n_real <= 0.0:
+        raise ValueError(f"`n_medium` must be positive and real. Got {n_medium!r}.")
+
+    orders_payload = periodic_order_amplitudes(
+        source=source,
+        lattice=lattice,
+        positions=positions,
+        coeffs=coeffs,
+        lmax=int(lmax),
+        k=k_f,
+        output_bmax=output_bmax,
+    )
+
+    n_orders = int(orders_payload.order_mn.shape[0])
+    reflected = np.asarray(orders_payload.reflected_amplitudes, dtype=np.complex128)
+    transmitted = np.asarray(orders_payload.transmitted_amplitudes, dtype=np.complex128)
+    order_kz = np.asarray(orders_payload.order_kz, dtype=np.complex128)
+    order_propagating = np.asarray(orders_payload.order_propagating, dtype=bool)
+
     reflected_power = np.zeros((n_orders,), dtype=np.float64)
     transmitted_power = np.zeros((n_orders,), dtype=np.float64)
     for i in range(n_orders):
-        if not bool(orders.propagating[i]):
+        if not bool(order_propagating[i]):
             continue
-        kz_abs = float(abs(np.real(orders.kz[i])))
+        kz_abs = float(abs(np.real(order_kz[i])))
         pref = n_real * kz_abs / (2.0 * k_f)
         reflected_power[i] = float(pref * np.sum(np.abs(reflected[i, :]) ** 2))
         transmitted_power[i] = float(pref * np.sum(np.abs(transmitted[i, :]) ** 2))
 
-    incident_norm = float(abs(amp) ** 2 * (abs(a_te) ** 2 + abs(a_tm) ** 2))
+    incident_norm = float(np.sum(np.abs(orders_payload.incident_polarization) ** 2))
     incident_power = n_real * abs(float(np.cos(float(source.polar_angle)))) * incident_norm / 2.0
     if incident_power <= 0.0 or not np.isfinite(incident_power):
         raise ValueError("Incident periodic power normalization is non-finite or non-positive.")
@@ -180,13 +264,17 @@ def periodic_plane_wave_orders(
     return PeriodicFarFieldPayload(
         lattice_a1=np.asarray(lattice.a1, dtype=float),
         lattice_a2=np.asarray(lattice.a2, dtype=float),
-        unit_cell_area=float(area),
-        incident_k_parallel=np.asarray(kp_inc, dtype=float).reshape(2),
-        output_bmax=(None if output_bmax is None else float(output_bmax)),
-        order_mn=np.column_stack((orders.m, orders.n)).astype(np.int32, copy=False),
-        order_k_parallel=np.asarray(orders.k_parallel, dtype=float).reshape(n_orders, 2),
-        order_kz=np.asarray(orders.kz, dtype=np.complex128).reshape(n_orders),
-        order_propagating=np.asarray(orders.propagating, dtype=bool).reshape(n_orders),
+        unit_cell_area=float(orders_payload.unit_cell_area),
+        incident_k_parallel=np.asarray(orders_payload.incident_k_parallel, dtype=float).reshape(2),
+        output_bmax=orders_payload.output_bmax,
+        order_mn=np.asarray(orders_payload.order_mn, dtype=np.int32).reshape(n_orders, 2),
+        order_k_parallel=np.asarray(orders_payload.order_k_parallel, dtype=float).reshape(
+            n_orders, 2
+        ),
+        order_kz=np.asarray(orders_payload.order_kz, dtype=np.complex128).reshape(n_orders),
+        order_propagating=np.asarray(orders_payload.order_propagating, dtype=bool).reshape(
+            n_orders
+        ),
         reflected_amplitudes=np.asarray(reflected, dtype=np.complex128),
         transmitted_amplitudes=np.asarray(transmitted, dtype=np.complex128),
         reflected_power_per_order=np.asarray(reflected_power, dtype=np.float64),
@@ -198,4 +286,9 @@ def periodic_plane_wave_orders(
     )
 
 
-__all__ = ["PeriodicFarFieldPayload", "periodic_plane_wave_orders"]
+__all__ = [
+    "PeriodicFarFieldPayload",
+    "PeriodicOrderAmplitudes",
+    "periodic_order_amplitudes",
+    "periodic_plane_wave_orders",
+]

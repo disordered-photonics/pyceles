@@ -31,11 +31,12 @@ import json
 import math
 import re
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+from scipy.interpolate import RegularGridInterpolator
 
 
 @dataclass(frozen=True)
@@ -84,6 +85,7 @@ class RunConfig:
     mie_epsilon: float | None = None
     max_iterations: int = 10000
     run_pyceles: bool = True
+    pyceles_nearfield_bmax: float | None = None
 
 
 _NUMERIC_TOKEN_RE = re.compile(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eEdD][+-]?\d+)?")
@@ -197,6 +199,12 @@ def _write_mstm_input(
     k0 = 2.0 * np.pi / float(case.vacuum_wavelength)
     mie_eps = -float(case.lmax) if cfg.mie_epsilon is None else float(cfg.mie_epsilon)
 
+    host_n = float(np.real(case.medium_refractive_index))
+    if host_n <= 0.0:
+        raise ValueError(
+            f"Host refractive index must be positive real. Got {case.medium_refractive_index!r}."
+        )
+
     lines: list[str] = [
         "output_file",
         output_filename,
@@ -210,23 +218,31 @@ def _write_mstm_input(
     ]
     for sphere in case.spheres:
         x, y, z = sphere.center
-        nr = sphere.refractive_index.real
-        ni = sphere.refractive_index.imag
+        # MSTM periodic inputs combine a global refractive-index scale factor with
+        # per-sphere relative refractive indices.
+        n_rel = complex(sphere.refractive_index) / complex(host_n, 0.0)
+        nr = float(np.real(n_rel))
+        ni = float(np.imag(n_rel))
         lines.append(
             f"{_fmt_d(x)},{_fmt_d(y)},{_fmt_d(z)},{_fmt_d(sphere.radius)},({_fmt_d(nr)},{_fmt_d(ni)})"
         )
     lines += [
         "end_of_sphere_data",
-        # Homogeneous host, no interfaces. The benchmark keeps the host at n=1.
+        # Homogeneous host, no interfaces.
         "number_plane_boundaries",
         "0",
+        # Periodic scattering in MSTM uses layer_ref_index(...) as host RI for
+        # normalization/propagation; keep it aligned with ref_index_scale_factor.
+        "layer_ref_index",
+        f"({_fmt_d(host_n)},0.0d0)",
         # Positions, radii, and cell widths are specified in physical units and
         # converted internally by MSTM through this scale factor.
         "length_scale_factor",
         _fmt_d(k0),
-        # Sphere refractive indices are already explicit in sphere_data.
+        # Sphere refractive indices are written relative to host and then scaled
+        # back to absolute values through this factor.
         "ref_index_scale_factor",
-        "(1.0d0,0.0d0)",
+        f"({_fmt_d(host_n)},0.0d0)",
         "periodic_lattice",
         "t",
         "cell_width",
@@ -300,7 +316,11 @@ def _parse_block(output_text: str, pattern: str) -> list[float]:
     match = re.search(pattern, output_text, flags=re.IGNORECASE)
     if not match:
         raise RuntimeError(f"Could not find output block matching pattern: {pattern!r}")
-    return [_float_d(tok) for tok in match.group(1).split()]
+    raw = match.group(1)
+    tokens = _extract_float_tokens(raw)
+    if tokens:
+        return tokens
+    return [_float_d(tok) for tok in raw.split()]
 
 
 def _parse_periodic_scattering(text: str) -> dict[str, dict[str, np.ndarray]]:
@@ -560,6 +580,223 @@ def _save_nearfield_npz(path: Path, nearfield: dict[str, Any], wavelength: float
     )
 
 
+def _grid_payload(
+    slice_cfg: NearFieldSliceConfig,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    x = np.arange(
+        float(slice_cfg.minimum_border[0]),
+        float(slice_cfg.maximum_border[0]) + 0.5 * float(slice_cfg.step_size),
+        float(slice_cfg.step_size),
+    )
+    y = np.arange(
+        float(slice_cfg.minimum_border[1]),
+        float(slice_cfg.maximum_border[1]) + 0.5 * float(slice_cfg.step_size),
+        float(slice_cfg.step_size),
+    )
+    z = np.arange(
+        float(slice_cfg.minimum_border[2]),
+        float(slice_cfg.maximum_border[2]) + 0.5 * float(slice_cfg.step_size),
+        float(slice_cfg.step_size),
+    )
+    xx, yy, zz = np.meshgrid(x, y, z, indexing="ij")
+    coords = np.column_stack((xx.reshape(-1), yy.reshape(-1), zz.reshape(-1)))
+    dims = np.array([x.size, y.size, z.size], dtype=np.int64)
+    return (
+        np.asarray(coords, dtype=float),
+        dims,
+        np.asarray(slice_cfg.minimum_border, dtype=float),
+        np.asarray(slice_cfg.maximum_border, dtype=float),
+    )
+
+
+def _count_nonfinite_complex(array: np.ndarray) -> int:
+    values = np.asarray(array, dtype=np.complex128)
+    valid = np.isfinite(values.real) & np.isfinite(values.imag)
+    return int(np.count_nonzero(~valid))
+
+
+def _intersecting_spheres(
+    spheres: tuple[SphereRow, ...],
+    slice_cfg: NearFieldSliceConfig,
+) -> np.ndarray:
+    min_b = np.asarray(slice_cfg.minimum_border, dtype=float)
+    max_b = np.asarray(slice_cfg.maximum_border, dtype=float)
+    fixed_axes = np.where(np.isclose(min_b, max_b, rtol=0.0, atol=1e-12))[0]
+    rows: list[list[float]] = []
+    for sphere in spheres:
+        center = np.asarray(sphere.center, dtype=float)
+        radius = float(sphere.radius)
+        if fixed_axes.size == 0:
+            continue
+        intersects = True
+        for axis in fixed_axes:
+            intersects = intersects and (abs(float(center[axis]) - float(min_b[axis])) <= radius)
+        if intersects:
+            rows.append([float(center[0]), float(center[1]), float(center[2]), radius])
+    if not rows:
+        return np.zeros((0, 4), dtype=float)
+    return np.asarray(rows, dtype=float)
+
+
+def _axis_from_coords(coords: np.ndarray, axis: int) -> np.ndarray:
+    return np.unique(np.round(np.asarray(coords[:, axis], dtype=float), 10))
+
+
+def _prepare_points_for_grid(
+    points: np.ndarray, axes: tuple[np.ndarray, np.ndarray, np.ndarray]
+) -> np.ndarray:
+    q = np.asarray(points, dtype=float).copy()
+    for i, axis in enumerate(axes):
+        if axis.size == 1:
+            q[:, i] = float(axis[0])
+        else:
+            q[:, i] = np.clip(q[:, i], float(axis.min()), float(axis.max()))
+    return q
+
+
+def _interpolate_complex_vector_field(
+    field_npz: Any,
+    key: str,
+    points: np.ndarray,
+) -> np.ndarray:
+    dims = tuple(int(v) for v in np.asarray(field_npz["grid_dims"], dtype=np.int64).tolist())
+    values = np.asarray(field_npz[key], dtype=np.complex128).reshape(*dims, 3)
+    coords = np.asarray(field_npz["coords_physical"], dtype=float)
+    axes = (
+        _axis_from_coords(coords, 0),
+        _axis_from_coords(coords, 1),
+        _axis_from_coords(coords, 2),
+    )
+    q = _prepare_points_for_grid(points, axes)
+    out = np.zeros((q.shape[0], 3), dtype=np.complex128)
+    for comp in range(3):
+        re_interp = RegularGridInterpolator(
+            axes,
+            values[..., comp].real,
+            bounds_error=False,
+            fill_value=np.nan,
+        )
+        im_interp = RegularGridInterpolator(
+            axes,
+            values[..., comp].imag,
+            bounds_error=False,
+            fill_value=np.nan,
+        )
+        out[:, comp] = re_interp(q) + 1j * im_interp(q)
+    return out
+
+
+def _complex_similarity_metrics(model: np.ndarray, reference: np.ndarray) -> dict[str, Any]:
+    a = np.asarray(model, dtype=np.complex128).reshape(-1)
+    b = np.asarray(reference, dtype=np.complex128).reshape(-1)
+    valid = np.isfinite(a.real) & np.isfinite(a.imag) & np.isfinite(b.real) & np.isfinite(b.imag)
+    a = a[valid]
+    b = b[valid]
+    if a.size == 0:
+        return {"n_valid": 0}
+    den = np.vdot(a, a)
+    scale = np.vdot(a, b) / den if abs(den) > 0.0 else 0.0 + 0.0j
+    norm_b = float(np.linalg.norm(b))
+    denom_b = norm_b if norm_b > 1e-30 else 1e-30
+    rel = float(np.linalg.norm(a - b) / denom_b)
+    rel_scaled = float(np.linalg.norm(scale * a - b) / denom_b)
+    ia = np.abs(a) ** 2
+    ib = np.abs(b) ** 2
+    den_i = float(np.dot(ia, ia))
+    scale_i = float(np.dot(ia, ib) / den_i) if den_i > 0.0 else 0.0
+    norm_ib = float(np.linalg.norm(ib))
+    denom_ib = norm_ib if norm_ib > 1e-30 else 1e-30
+    rel_i = float(np.linalg.norm(ia - ib) / denom_ib)
+    rel_i_scaled = float(np.linalg.norm(scale_i * ia - ib) / denom_ib)
+    corr = float(np.corrcoef(ia, ib)[0, 1]) if ia.size > 1 else 1.0
+    return {
+        "n_valid": int(a.size),
+        "rel_l2": rel,
+        "rel_l2_best_complex_scale": rel_scaled,
+        "best_complex_scale": {"real": float(np.real(scale)), "imag": float(np.imag(scale))},
+        "intensity_rel_l2": rel_i,
+        "intensity_rel_l2_best_scalar": rel_i_scaled,
+        "best_intensity_scale": scale_i,
+        "intensity_corrcoef": corr,
+    }
+
+
+def _vector_intensity_plane(values: np.ndarray, dims: tuple[int, int, int]) -> np.ndarray:
+    # MSTM near-field rows are emitted in Fortran-style traversal order.
+    # All interpolated comparison arrays are built in the same reference-point order,
+    # so we preserve that ordering when regridding for visualization.
+    tensor = np.asarray(values, dtype=np.complex128).reshape(*dims, 3, order="F")
+    intensity = np.sum(np.abs(tensor) ** 2, axis=-1)
+    nx, ny, nz = dims
+    if nz == 1:
+        return np.asarray(intensity[:, :, 0], dtype=float)
+    if ny == 1:
+        return np.asarray(intensity[:, 0, :], dtype=float)
+    if nx == 1:
+        return np.asarray(intensity[0, :, :], dtype=float)
+    raise ValueError(f"Expected planar slice with one singleton axis, got dims={dims!r}.")
+
+
+def _plane_axes_from_reference(ref_npz: Any) -> tuple[np.ndarray, np.ndarray, str, str]:
+    coords = np.asarray(ref_npz["coords_physical"], dtype=float)
+    dims_arr = np.asarray(ref_npz["grid_dims"], dtype=np.int64).reshape(3)
+    dims: tuple[int, int, int] = (int(dims_arr[0]), int(dims_arr[1]), int(dims_arr[2]))
+    x = _axis_from_coords(coords, 0)
+    y = _axis_from_coords(coords, 1)
+    z = _axis_from_coords(coords, 2)
+    nx, ny, nz = dims
+    if nz == 1:
+        return x, y, "x", "y"
+    if ny == 1:
+        return x, z, "x", "z"
+    if nx == 1:
+        return y, z, "y", "z"
+    raise ValueError(f"Expected planar slice with one singleton axis, got dims={dims!r}.")
+
+
+def _plot_bipanel_intensity(
+    *,
+    axis_h: np.ndarray,
+    axis_v: np.ndarray,
+    mstm_values: np.ndarray,
+    pyceles_values: np.ndarray,
+    out_path: Path,
+    title: str,
+    axis_h_label: str,
+    axis_v_label: str,
+) -> None:
+    import matplotlib.pyplot as plt
+
+    extent = [
+        float(np.min(axis_h)),
+        float(np.max(axis_h)),
+        float(np.min(axis_v)),
+        float(np.max(axis_v)),
+    ]
+    fig, axs = plt.subplots(1, 2, figsize=(9.4, 4.2), constrained_layout=True)
+    panels = [
+        ("MSTM", mstm_values),
+        ("pyceles", pyceles_values),
+    ]
+    for ax, (label, data) in zip(axs, panels, strict=True):
+        im = ax.imshow(
+            np.asarray(data, dtype=float).T,
+            origin="lower",
+            extent=extent,
+            aspect="auto",
+            cmap="viridis",
+        )
+        ax.set_title(label)
+        ax.set_xlabel(axis_h_label)
+        ax.set_ylabel(axis_v_label)
+        colorbar = fig.colorbar(im, ax=ax)
+        colorbar.set_label(r"$|F|^2$")
+    fig.suptitle(title)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=170)
+    plt.close(fig)
+
+
 def _jsonable_case(case: PeriodicBenchmarkCase) -> dict[str, Any]:
     return {
         "name": case.name,
@@ -686,7 +923,9 @@ def _save_pyceles_periodic_npz(path: Path, periodic: Any) -> None:
     )
 
 
-def _run_pyceles_case(case: PeriodicBenchmarkCase, outdir_case: Path) -> dict[str, Any]:
+def _run_pyceles_case(
+    case: PeriodicBenchmarkCase, outdir_case: Path, *, nearfield_bmax: float | None
+) -> dict[str, Any]:
     import pyceles as pcl
 
     beta = math.radians(float(case.incidence_polar_deg))
@@ -704,6 +943,7 @@ def _run_pyceles_case(case: PeriodicBenchmarkCase, outdir_case: Path) -> dict[st
     ]
 
     channels: dict[str, dict[str, Any]] = {}
+    runs: dict[str, Any] = {}
     for pol in ("TE", "TM"):
         source = pcl.PlaneWave(
             wavelength=float(case.vacuum_wavelength),
@@ -728,7 +968,8 @@ def _run_pyceles_case(case: PeriodicBenchmarkCase, outdir_case: Path) -> dict[st
         periodic_payload = run.periodic
         npz_path = outdir_case / f"pyceles_orders_{pol.lower()}.npz"
         _save_pyceles_periodic_npz(npz_path, periodic_payload)
-        channels[pol.lower()] = {
+        key = pol.lower()
+        channels[key] = {
             "npz": str(npz_path),
             "R": float(periodic_payload.reflectance),
             "T": float(periodic_payload.transmittance),
@@ -738,6 +979,76 @@ def _run_pyceles_case(case: PeriodicBenchmarkCase, outdir_case: Path) -> dict[st
                 np.count_nonzero(np.asarray(periodic_payload.order_propagating))
             ),
         }
+        runs[key] = run
+
+    nearfield_artifacts: dict[str, dict[str, Any]] = {}
+    slice_jobs: list[NearFieldSliceConfig] = []
+    if case.nearfield_xy is not None:
+        slice_jobs.append(case.nearfield_xy)
+    if case.nearfield_xz is not None:
+        slice_jobs.append(case.nearfield_xz)
+
+    k0 = 2.0 * np.pi / float(case.vacuum_wavelength)
+    run_te = runs["te"]
+    run_tm = runs["tm"]
+    for slice_cfg in slice_jobs:
+        coords, dims, min_b, max_b = _grid_payload(slice_cfg)
+        try:
+            nf_te = pcl.compute_periodic_near_field(
+                run_te,
+                points=coords,
+                channel="mixed",
+                field_bmax=nearfield_bmax,
+            )
+            nf_tm = pcl.compute_periodic_near_field(
+                run_tm,
+                points=coords,
+                channel="mixed",
+                field_bmax=nearfield_bmax,
+            )
+        except NotImplementedError as exc:
+            nearfield_artifacts[slice_cfg.name] = {
+                "status": "not_implemented",
+                "reason": str(exc),
+                "n_points": int(coords.shape[0]),
+                "grid_dims": np.asarray(dims, dtype=np.int64).tolist(),
+                "field_bmax": None if nearfield_bmax is None else float(nearfield_bmax),
+            }
+            continue
+        e_par = np.asarray(nf_tm.E_total, dtype=np.complex128).reshape(-1, 3)
+        h_par = np.asarray(nf_tm.H_total, dtype=np.complex128).reshape(-1, 3)
+        e_perp = np.asarray(nf_te.E_total, dtype=np.complex128).reshape(-1, 3)
+        h_perp = np.asarray(nf_te.H_total, dtype=np.complex128).reshape(-1, 3)
+        npz_path = outdir_case / f"pyceles_nearfield_{slice_cfg.name}.npz"
+        np.savez_compressed(
+            npz_path,
+            coords_physical=np.asarray(coords, dtype=float),
+            coords_dimless=np.asarray(coords, dtype=float) * float(k0),
+            grid_dims=np.asarray(dims, dtype=np.int64),
+            grid_min_dimless=np.asarray(min_b, dtype=float) * float(k0),
+            grid_max_dimless=np.asarray(max_b, dtype=float) * float(k0),
+            E_par=e_par,
+            H_par=h_par,
+            E_perp=e_perp,
+            H_perp=h_perp,
+            intersecting_spheres=_intersecting_spheres(case.spheres, slice_cfg),
+            intersecting_boundaries_z=np.zeros((0,), dtype=float),
+        )
+        nearfield_artifacts[slice_cfg.name] = {
+            "npz": str(npz_path),
+            "n_points": int(coords.shape[0]),
+            "grid_dims": np.asarray(dims, dtype=np.int64).tolist(),
+            "mapping_convention": {"parallel": "tm", "perpendicular": "te"},
+            "field_kind": "total (periodic exterior Rayleigh orders)",
+            "field_bmax": None if nearfield_bmax is None else float(nearfield_bmax),
+            "periodic_consistency": "Exterior periodic-order evaluator",
+            "nonfinite_values": {
+                "E_par": _count_nonfinite_complex(e_par),
+                "H_par": _count_nonfinite_complex(h_par),
+                "E_perp": _count_nonfinite_complex(e_perp),
+                "H_perp": _count_nonfinite_complex(h_perp),
+            },
+        }
 
     return {
         "channels": channels,
@@ -746,6 +1057,8 @@ def _run_pyceles_case(case: PeriodicBenchmarkCase, outdir_case: Path) -> dict[st
             "T": float(0.5 * (channels["te"]["T"] + channels["tm"]["T"])),
             "A": float(0.5 * (channels["te"]["A"] + channels["tm"]["A"])),
         },
+        "nearfield": nearfield_artifacts,
+        "mapping_convention": {"parallel": "tm", "perpendicular": "te"},
     }
 
 
@@ -825,7 +1138,15 @@ def run_case(case: PeriodicBenchmarkCase, cfg: RunConfig) -> dict[str, Any]:
             },
         }
 
-    pyceles_output = _run_pyceles_case(case, outdir_case) if cfg.run_pyceles else None
+    pyceles_output = (
+        _run_pyceles_case(
+            case,
+            outdir_case,
+            nearfield_bmax=cfg.pyceles_nearfield_bmax,
+        )
+        if cfg.run_pyceles
+        else None
+    )
 
     summary = _build_summary(
         case,
@@ -840,6 +1161,82 @@ def run_case(case: PeriodicBenchmarkCase, cfg: RunConfig) -> dict[str, Any]:
     summary_path = outdir_case / "summary.json"
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     return summary
+
+
+def _compare_and_plot_bipanel_nearfield(
+    *,
+    outdir_case: Path,
+    generate_plots: bool,
+) -> Path:
+    summary_path = outdir_case / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    mstm_nf = summary.get("mstm", {}).get("nearfield", {})
+    py_nf = summary.get("pyceles", {}).get("nearfield", {})
+    if not isinstance(mstm_nf, dict) or not isinstance(py_nf, dict):
+        raise RuntimeError("Missing MSTM/pyceles nearfield payload in benchmark summary.")
+
+    report: dict[str, Any] = {
+        "case": str(summary.get("case", {}).get("name", "")),
+        "reference": "mstm",
+        "notes": ["Pyceles nearfield payload uses the periodic exterior-order evaluator."],
+    }
+    plot_dir = outdir_case / "bipanel_maps"
+
+    for tag in ("xy", "xz"):
+        m_meta = mstm_nf.get(tag)
+        p_meta = py_nf.get(tag)
+        if not isinstance(m_meta, dict) or not isinstance(p_meta, dict):
+            continue
+        if "npz" not in m_meta:
+            continue
+        if "npz" not in p_meta:
+            report[tag] = {
+                "status": str(p_meta.get("status", "missing")),
+                "reason": str(p_meta.get("reason", "")),
+            }
+            continue
+        m_path = Path(str(m_meta["npz"]))
+        p_path = Path(str(p_meta["npz"]))
+        m = np.load(m_path)
+        p = np.load(p_path)
+        ref_points = np.asarray(m["coords_physical"], dtype=float)
+        dims_arr = np.asarray(m["grid_dims"], dtype=np.int64).reshape(3)
+        dims: tuple[int, int, int] = (int(dims_arr[0]), int(dims_arr[1]), int(dims_arr[2]))
+        axis_h, axis_v, axis_h_label, axis_v_label = _plane_axes_from_reference(m)
+        keys = ("E_par", "E_perp", "H_par", "H_perp")
+
+        block: dict[str, Any] = {
+            "mstm_points": int(ref_points.shape[0]),
+            "pyceles_points": int(np.asarray(p["coords_physical"]).shape[0]),
+            "pyceles_vs_mstm": {},
+            "plots": {},
+        }
+        for key in keys:
+            m_vec = np.asarray(m[key], dtype=np.complex128)
+            p_vec_on_m = _interpolate_complex_vector_field(p, key, ref_points)
+
+            block["pyceles_vs_mstm"][key] = _complex_similarity_metrics(m_vec, p_vec_on_m)
+
+            m_int = _vector_intensity_plane(m_vec, dims)
+            p_int = _vector_intensity_plane(p_vec_on_m, dims)
+            if generate_plots:
+                out_path = plot_dir / f"{tag}_{key}_intensity_bipanel.png"
+                _plot_bipanel_intensity(
+                    axis_h=axis_h,
+                    axis_v=axis_v,
+                    mstm_values=m_int,
+                    pyceles_values=p_int,
+                    out_path=out_path,
+                    title=f"{tag.upper()} {key} intensity",
+                    axis_h_label=axis_h_label,
+                    axis_v_label=axis_v_label,
+                )
+                block["plots"][key] = str(out_path)
+        report[tag] = block
+
+    report_path = outdir_case / "map_level_parity_report.json"
+    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    return report_path
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -889,6 +1286,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="MSTM max_iterations.",
     )
     parser.add_argument(
+        "--medium-n-real",
+        type=float,
+        default=None,
+        help="Optional homogeneous host refractive index override (real, positive).",
+    )
+    parser.add_argument(
         "--parse-only-mstm",
         action="store_true",
         help="Skip launching MSTM and only parse existing files in --workdir.",
@@ -908,6 +1311,17 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip the pyceles periodic run and write MSTM-only artifacts.",
     )
+    parser.add_argument(
+        "--pyceles-nearfield-bmax",
+        type=float,
+        default=None,
+        help="Optional pyceles periodic near-field reciprocal-radius cutoff.",
+    )
+    parser.add_argument(
+        "--plot-map-panels",
+        action="store_true",
+        help="Generate MSTM-vs-pyceles nearfield intensity panel plots.",
+    )
     return parser
 
 
@@ -916,8 +1330,19 @@ def main() -> None:
     args = parser.parse_args()
     if not args.parse_only_mstm and args.mstm_exe is None:
         parser.error("--mstm-exe is required unless --parse-only-mstm is used.")
+    if args.pyceles_nearfield_bmax is not None and float(args.pyceles_nearfield_bmax) <= 0.0:
+        parser.error("--pyceles-nearfield-bmax must be > 0 when provided.")
+    if not bool(args.skip_pyceles) and args.pyceles_nearfield_bmax is None:
+        parser.error(
+            "--pyceles-nearfield-bmax is required for benchmark runs that include pyceles near-field payloads."
+        )
 
     case = CASES[args.case]
+    if args.medium_n_real is not None:
+        n_host = float(args.medium_n_real)
+        if n_host <= 0.0:
+            parser.error("--medium-n-real must be > 0.")
+        case = replace(case, medium_refractive_index=complex(n_host, 0.0))
     cfg = RunConfig(
         mstm_exe=args.mstm_exe,
         workdir=args.workdir,
@@ -929,8 +1354,17 @@ def main() -> None:
         mie_epsilon=None if args.mie_epsilon is None else float(args.mie_epsilon),
         max_iterations=int(args.max_iterations),
         run_pyceles=not bool(args.skip_pyceles),
+        pyceles_nearfield_bmax=(
+            None if args.pyceles_nearfield_bmax is None else float(args.pyceles_nearfield_bmax)
+        ),
     )
     summary = run_case(case, cfg)
+    map_report_path: Path | None = None
+    if bool(args.plot_map_panels) and not bool(args.skip_pyceles):
+        map_report_path = _compare_and_plot_bipanel_nearfield(
+            outdir_case=cfg.outdir / case.name,
+            generate_plots=True,
+        )
     payload = {
         "summary_json": str(Path(summary["mstm"]["outdir"]) / "summary.json"),
         "rta": summary["mstm"].get("main", {}).get("rta"),
@@ -944,6 +1378,9 @@ def main() -> None:
         payload["pyceles"] = summary["pyceles"]
     if "comparison" in summary:
         payload["comparison"] = summary["comparison"]
+    if map_report_path is not None:
+        payload["map_parity_report_json"] = str(map_report_path)
+        payload["map_parity_bipanel_dir"] = str(cfg.outdir / case.name / "bipanel_maps")
     print(json.dumps(payload, indent=2))
 
 

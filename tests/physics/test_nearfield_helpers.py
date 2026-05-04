@@ -6,6 +6,7 @@ import pytest
 import pyceles as pcl
 from pyceles.core.fields import PlaneWave
 from pyceles.core.particles import LayeredSphere, Sphere
+from pyceles.core.periodic import plane_wave_k_parallel
 from pyceles.postprocessing.nearfield import compute_near_field_components
 
 
@@ -213,3 +214,223 @@ def test_index_matched_sphere_total_field_matches_incident_plane_wave(n_medium: 
     assert not np.any(nf.inside_mask)
     np.testing.assert_allclose(nf.E_total, e_expected, rtol=1e-12, atol=1e-12)
     np.testing.assert_allclose(nf.H_total, h_expected, rtol=1e-12, atol=1e-12)
+
+
+def _make_periodic_run(*, polar_angle: float = 0.0, azimuthal_angle: float = 0.0):
+    source = PlaneWave(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        polarization="TE",
+        polar_angle=float(polar_angle),
+        azimuthal_angle=float(azimuthal_angle),
+        focal_point=(0.0, 0.0, 0.0),
+        amplitude=1.0,
+    )
+    cfg = pcl.SimulationConfig(
+        wavelength=550.0,
+        n_medium=1.0 + 0j,
+        lmax=2,
+        source=source,
+        periodic=pcl.PeriodicSpec(lattice=pcl.RectangularLattice2D(ax=700.0, ay=700.0)),
+        solver_method="direct",
+        verbose=False,
+    )
+    sim = pcl.Simulation(
+        cfg,
+        particles=[
+            Sphere(position=(220.0, 180.0, 140.0), radius=90.0, refractive_index=1.5 + 0.0j)
+        ],
+    )
+    return sim.run(include_farfield=False)
+
+
+def test_compute_periodic_near_field_rejects_nonperiodic_run():
+    source = PlaneWave(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        polarization="TE",
+        polar_angle=0.0,
+        azimuthal_angle=0.0,
+        focal_point=(0.0, 0.0, 0.0),
+        amplitude=1.0,
+    )
+    cfg = pcl.SimulationConfig(
+        wavelength=550.0,
+        n_medium=1.0 + 0j,
+        lmax=1,
+        source=source,
+        solver_method="direct",
+        verbose=False,
+    )
+    run = pcl.Simulation(
+        cfg,
+        particles=[Sphere(position=(0.0, 0.0, 0.0), radius=80.0, refractive_index=1.5 + 0.0j)],
+    ).run(include_farfield=False)
+
+    with pytest.raises(ValueError, match="requires a periodic simulation result"):
+        pcl.compute_periodic_near_field(run, points=np.array([[0.0, 0.0, 200.0]]))
+
+
+def test_compute_periodic_near_field_exterior_returns_finite_components():
+    run = _make_periodic_run()
+    points = np.array(
+        [
+            [120.0, 180.0, -250.0],
+            [320.0, 250.0, 860.0],
+            [610.0, 410.0, 900.0],
+        ],
+        dtype=float,
+    )
+
+    nf_periodic = pcl.compute_periodic_near_field(
+        run,
+        points=points,
+        channel="mixed",
+        field_bmax=0.05,
+    )
+
+    assert not np.any(nf_periodic.inside_mask)
+    assert np.all(np.isfinite(nf_periodic.E_total))
+    assert np.all(np.isfinite(nf_periodic.H_total))
+
+
+def test_compute_periodic_near_field_requires_explicit_output_basis():
+    run = _make_periodic_run()
+    with pytest.raises(ValueError, match="requires an explicit reciprocal output basis"):
+        pcl.compute_periodic_near_field(
+            run,
+            points=np.array([[120.0, 180.0, 900.0]], dtype=float),
+            channel="mixed",
+        )
+
+
+def test_compute_periodic_near_field_accepts_configured_output_bmax():
+    source = PlaneWave(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        polarization="TE",
+        polar_angle=0.2,
+        azimuthal_angle=0.3,
+        focal_point=(0.0, 0.0, 0.0),
+        amplitude=1.0,
+    )
+    cfg = pcl.SimulationConfig(
+        wavelength=550.0,
+        n_medium=1.0 + 0j,
+        lmax=2,
+        source=source,
+        periodic=pcl.PeriodicSpec(
+            lattice=pcl.RectangularLattice2D(ax=700.0, ay=700.0),
+            options=pcl.PeriodicOptions(output_bmax=0.05),
+        ),
+        solver_method="direct",
+        verbose=False,
+    )
+    run = pcl.Simulation(
+        cfg,
+        particles=[
+            Sphere(position=(220.0, 180.0, 140.0), radius=90.0, refractive_index=1.5 + 0.0j)
+        ],
+    ).run(include_farfield=False)
+    nf = pcl.compute_periodic_near_field(
+        run,
+        points=np.array([[120.0, 180.0, 900.0]], dtype=float),
+        channel="mixed",
+    )
+    assert np.all(np.isfinite(nf.E_total))
+    assert np.all(np.isfinite(nf.H_total))
+
+
+def test_compute_periodic_near_field_rejects_slab_points_until_local_evaluator_lands():
+    run = _make_periodic_run(polar_angle=0.4, azimuthal_angle=0.7)
+    with pytest.raises(NotImplementedError, match="local \\(in-slab\\)"):
+        pcl.compute_periodic_near_field(
+            run,
+            points=np.array([[220.0, 180.0, 120.0]], dtype=float),
+            channel="mixed",
+            field_bmax=0.05,
+        )
+
+
+def test_periodic_supercell_replication_matches_fundamental_cell_observables():
+    wavelength = 550.0
+    n_medium = 1.0 + 0j
+    ax = 680.0
+    ay = 620.0
+    beta = 0.35
+    alpha = 0.6
+
+    source_fund = PlaneWave(
+        wavelength=wavelength,
+        medium_n=n_medium,
+        polarization="TE",
+        polar_angle=beta,
+        azimuthal_angle=alpha,
+        focal_point=(0.0, 0.0, 0.0),
+        amplitude=1.0,
+    )
+    run_fund = pcl.Simulation(
+        pcl.SimulationConfig(
+            wavelength=wavelength,
+            n_medium=n_medium,
+            lmax=2,
+            source=source_fund,
+            periodic=pcl.PeriodicSpec(lattice=pcl.RectangularLattice2D(ax=ax, ay=ay)),
+            solver_method="direct",
+            verbose=False,
+        ),
+        particles=[
+            Sphere(position=(210.0, 190.0, 160.0), radius=70.0, refractive_index=1.5 + 0.0j)
+        ],
+    ).run(include_farfield=False)
+
+    source_super = PlaneWave(
+        wavelength=wavelength,
+        medium_n=n_medium,
+        polarization="TE",
+        polar_angle=beta,
+        azimuthal_angle=alpha,
+        focal_point=(0.0, 0.0, 0.0),
+        amplitude=1.0,
+    )
+    run_super = pcl.Simulation(
+        pcl.SimulationConfig(
+            wavelength=wavelength,
+            n_medium=n_medium,
+            lmax=2,
+            source=source_super,
+            periodic=pcl.PeriodicSpec(lattice=pcl.RectangularLattice2D(ax=2.0 * ax, ay=ay)),
+            solver_method="direct",
+            verbose=False,
+        ),
+        particles=[
+            Sphere(position=(210.0, 190.0, 160.0), radius=70.0, refractive_index=1.5 + 0.0j),
+            Sphere(
+                position=(210.0 + ax, 190.0, 160.0),
+                radius=70.0,
+                refractive_index=1.5 + 0.0j,
+            ),
+        ],
+    ).run(include_farfield=False)
+
+    coeff_super = np.asarray(run_super.coeffs, dtype=np.complex128)
+    k_parallel = plane_wave_k_parallel(source_super)
+    phase = np.exp(1j * float(k_parallel[0]) * float(ax))
+    np.testing.assert_allclose(coeff_super[1], phase * coeff_super[0], rtol=1e-11, atol=1e-11)
+
+    if run_fund.periodic is None or run_super.periodic is None:
+        raise RuntimeError("Periodic runs must populate SimulationResult.periodic.")
+    np.testing.assert_allclose(
+        [
+            float(run_super.periodic.reflectance),
+            float(run_super.periodic.transmittance),
+            float(run_super.periodic.absorptance),
+        ],
+        [
+            float(run_fund.periodic.reflectance),
+            float(run_fund.periodic.transmittance),
+            float(run_fund.periodic.absorptance),
+        ],
+        rtol=1e-10,
+        atol=1e-10,
+    )
