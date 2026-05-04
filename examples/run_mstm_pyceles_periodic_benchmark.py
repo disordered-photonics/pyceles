@@ -583,21 +583,19 @@ def _save_nearfield_npz(path: Path, nearfield: dict[str, Any], wavelength: float
 def _grid_payload(
     slice_cfg: NearFieldSliceConfig,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    x = np.arange(
-        float(slice_cfg.minimum_border[0]),
-        float(slice_cfg.maximum_border[0]) + 0.5 * float(slice_cfg.step_size),
-        float(slice_cfg.step_size),
-    )
-    y = np.arange(
-        float(slice_cfg.minimum_border[1]),
-        float(slice_cfg.maximum_border[1]) + 0.5 * float(slice_cfg.step_size),
-        float(slice_cfg.step_size),
-    )
-    z = np.arange(
-        float(slice_cfg.minimum_border[2]),
-        float(slice_cfg.maximum_border[2]) + 0.5 * float(slice_cfg.step_size),
-        float(slice_cfg.step_size),
-    )
+    step = float(slice_cfg.step_size)
+
+    def _axis_samples(vmin: float, vmax: float) -> np.ndarray:
+        if np.isclose(vmin, vmax, rtol=0.0, atol=1e-12):
+            return np.asarray([vmin], dtype=float)
+        values = np.arange(vmin, vmax, step, dtype=float)
+        if values.size == 0:
+            return np.asarray([vmin], dtype=float)
+        return values
+
+    x = _axis_samples(float(slice_cfg.minimum_border[0]), float(slice_cfg.maximum_border[0]))
+    y = _axis_samples(float(slice_cfg.minimum_border[1]), float(slice_cfg.maximum_border[1]))
+    z = _axis_samples(float(slice_cfg.minimum_border[2]), float(slice_cfg.maximum_border[2]))
     xx, yy, zz = np.meshgrid(x, y, z, indexing="ij")
     coords = np.column_stack((xx.reshape(-1), yy.reshape(-1), zz.reshape(-1)))
     dims = np.array([x.size, y.size, z.size], dtype=np.int64)
@@ -1039,9 +1037,9 @@ def _run_pyceles_case(
             "n_points": int(coords.shape[0]),
             "grid_dims": np.asarray(dims, dtype=np.int64).tolist(),
             "mapping_convention": {"parallel": "tm", "perpendicular": "te"},
-            "field_kind": "total (periodic exterior Rayleigh orders)",
+            "field_kind": "total (periodic near-field evaluator)",
             "field_bmax": None if nearfield_bmax is None else float(nearfield_bmax),
-            "periodic_consistency": "Exterior periodic-order evaluator",
+            "periodic_consistency": "Automatic exterior/interior periodic evaluator dispatch",
             "nonfinite_values": {
                 "E_par": _count_nonfinite_complex(e_par),
                 "H_par": _count_nonfinite_complex(h_par),
@@ -1178,7 +1176,7 @@ def _compare_and_plot_bipanel_nearfield(
     report: dict[str, Any] = {
         "case": str(summary.get("case", {}).get("name", "")),
         "reference": "mstm",
-        "notes": ["Pyceles nearfield payload uses the periodic exterior-order evaluator."],
+        "notes": ["Pyceles nearfield payload uses automatic periodic exterior/interior dispatch."],
     }
     plot_dir = outdir_case / "bipanel_maps"
 
