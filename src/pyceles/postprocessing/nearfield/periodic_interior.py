@@ -6,6 +6,12 @@ from typing import TYPE_CHECKING, Literal
 import numpy as np
 
 from pyceles.core.indexing import iter_modes, n_modes
+from pyceles.core.particles import (
+    LayeredSphere,
+    Sphere,
+    Spheroid,
+    particle_contains_points,
+)
 from pyceles.core.periodic import PeriodicSpec, plane_wave_k_parallel
 from pyceles.core.periodic.ewald import default_ewald_eta
 from pyceles.core.periodic.scalar import (
@@ -20,7 +26,9 @@ from pyceles.core.periodic.special import shifted_delta_sequence, shifted_recipr
 from pyceles.core.spherical import legendre_normalized_trigon
 from pyceles.core.translation import translation_ab5_table
 
+from .classification import InternalPointClassification
 from .components import NearFieldComponents
+from .internal import compute_internal_field
 from .periodic_exterior import _initial_plane_wave_field, _resolve_periodic_channel_payload
 from .slice import reshape_field_points
 
@@ -28,50 +36,98 @@ if TYPE_CHECKING:
     from pyceles.simulation import SimulationResult
 
 
-def _nearest_rectangular_image_distance(
+def _wrap_points_to_nearest_rectangular_image(
     *,
     points: np.ndarray,
     center: np.ndarray,
     lattice_ax: float,
     lattice_ay: float,
-) -> np.ndarray:
-    """Return distance to the nearest rectangular-lattice image of one center."""
-    dx = np.asarray(points[:, 0], dtype=float) - float(center[0])
-    dy = np.asarray(points[:, 1], dtype=float) - float(center[1])
-    dz = np.asarray(points[:, 2], dtype=float) - float(center[2])
-    nx = np.rint(dx / float(lattice_ax))
-    ny = np.rint(dy / float(lattice_ay))
-    dx_wrap = dx - nx * float(lattice_ax)
-    dy_wrap = dy - ny * float(lattice_ay)
-    return np.sqrt(dx_wrap * dx_wrap + dy_wrap * dy_wrap + dz * dz)
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Wrap points to the nearest rectangular-lattice image of one center."""
+    pts = np.asarray(points, dtype=float).reshape(-1, 3)
+    ctr = np.asarray(center, dtype=float).reshape(3)
+    dx = pts[:, 0] - float(ctr[0])
+    dy = pts[:, 1] - float(ctr[1])
+    nx = np.rint(dx / float(lattice_ax)).astype(np.int64, copy=False)
+    ny = np.rint(dy / float(lattice_ay)).astype(np.int64, copy=False)
+    wrapped = np.asarray(pts, dtype=float).copy()
+    wrapped[:, 0] -= nx.astype(float) * float(lattice_ax)
+    wrapped[:, 1] -= ny.astype(float) * float(lattice_ay)
+    return wrapped, nx, ny
 
 
-def _inside_periodic_circumspheres(
+def _classify_periodic_internal_particle_points(
     *,
     points: np.ndarray,
-    positions: np.ndarray,
-    radii: np.ndarray,
+    particles,
     lattice_ax: float,
     lattice_ay: float,
-    atol: float,
-) -> np.ndarray:
-    """Classify points that fall inside any periodic circumscribing-sphere image."""
+    k_parallel: np.ndarray,
+    n_medium: complex,
+) -> tuple[InternalPointClassification, np.ndarray, np.ndarray]:
+    """Classify points inside periodic particle images and wrap them to the reference cell.
+
+    Returns
+    -------
+    classification, wrapped_points, bloch_phase
+        `classification` uses reference-cell particle ownership, `wrapped_points`
+        stores the corresponding image-wrapped coordinates for owned points, and
+        `bloch_phase` contains the phase factor of the selected image.
+    """
     pts = np.asarray(points, dtype=float).reshape(-1, 3)
-    pos = np.asarray(positions, dtype=float).reshape(-1, 3)
-    rad = np.asarray(radii, dtype=float).reshape(-1)
-    if pts.shape[0] == 0 or pos.shape[0] == 0:
-        return np.zeros((pts.shape[0],), dtype=bool)
-    out = np.zeros((pts.shape[0],), dtype=bool)
-    tol = float(max(0.0, atol))
-    for j in range(pos.shape[0]):
-        d = _nearest_rectangular_image_distance(
-            points=pts,
-            center=pos[j],
+    n_points = int(pts.shape[0])
+    wrapped_points = np.asarray(pts, dtype=float).copy()
+    bloch_phase = np.ones((n_points,), dtype=np.complex128)
+    inside_any = np.zeros((n_points,), dtype=bool)
+    point_indices_by_particle: list[np.ndarray] = []
+    kpar = np.asarray(k_parallel, dtype=float).reshape(2)
+
+    for _particle in particles:
+        point_indices_by_particle.append(np.empty((0,), dtype=np.intp))
+
+    n_medium_c = complex(n_medium)
+
+    for j, particle in enumerate(particles):
+        if (
+            (isinstance(particle, Sphere) and complex(particle.refractive_index) == n_medium_c)
+            or (isinstance(particle, Spheroid) and complex(particle.refractive_index) == n_medium_c)
+            or (
+                isinstance(particle, LayeredSphere)
+                and all(
+                    complex(n_layer) == n_medium_c for n_layer in particle.layer_refractive_indices
+                )
+            )
+        ):
+            continue
+        remaining = np.flatnonzero(~inside_any)
+        if remaining.size == 0:
+            break
+        wrapped_remain, nx, ny = _wrap_points_to_nearest_rectangular_image(
+            points=pts[remaining],
+            center=np.asarray(particle.position, dtype=float),
             lattice_ax=float(lattice_ax),
             lattice_ay=float(lattice_ay),
         )
-        out |= d <= (float(rad[j]) + tol)
-    return out
+        mask = np.asarray(particle_contains_points(particle, wrapped_remain), dtype=bool)
+        if not np.any(mask):
+            continue
+        owned = remaining[mask]
+        point_indices_by_particle[j] = owned.astype(np.intp, copy=False)
+        inside_any[owned] = True
+        wrapped_points[owned] = wrapped_remain[mask]
+        phase_arg = kpar[0] * nx[mask].astype(float) * float(lattice_ax) + kpar[1] * ny[
+            mask
+        ].astype(float) * float(lattice_ay)
+        bloch_phase[owned] = np.exp(1j * phase_arg)
+
+    return (
+        InternalPointClassification(
+            inside_any=inside_any,
+            point_indices_by_particle=tuple(point_indices_by_particle),
+        ),
+        wrapped_points,
+        bloch_phase,
+    )
 
 
 @cache
@@ -627,10 +683,9 @@ def compute_periodic_near_field_interior(
 
     Notes
     -----
-    This implementation intentionally excludes points that lie inside any
-    periodic circumscribing-sphere image. Those points are marked in
-    `inside_mask` and their scattered/total fields are returned as non-finite
-    values.
+    Points inside physical periodic particle images reuse the canonical finite-cluster
+    internal-field machinery on wrapped reference-cell coordinates, with the
+    corresponding Bloch phase applied to the result.
     """
     periodic = run.config.periodic
     if periodic is None:
@@ -670,15 +725,37 @@ def compute_periodic_near_field_interior(
     if n_points > 0 and run.n_particles > 0:
         ax = float(periodic.lattice.ax)
         ay = float(periodic.lattice.ay)
-        sphere_atol = max(1.0e-12, 64.0 * np.finfo(np.dtype(run.accum_dtype)).eps)
-        inside_mask = _inside_periodic_circumspheres(
-            points=pts_flat,
-            positions=run.positions,
-            radii=run.circumscribing_radii,
-            lattice_ax=ax,
-            lattice_ay=ay,
-            atol=sphere_atol,
+        k_parallel = np.asarray(plane_wave_k_parallel(source), dtype=float)
+        internal_classification, wrapped_points, internal_phase = (
+            _classify_periodic_internal_particle_points(
+                points=pts_flat,
+                particles=run.particles,
+                lattice_ax=ax,
+                lattice_ay=ay,
+                k_parallel=k_parallel,
+                n_medium=run.config.n_medium,
+            )
         )
+        inside_mask = np.asarray(internal_classification.inside_any, dtype=bool)
+
+        if np.any(inside_mask):
+            e_int_ref, h_int_ref, _ = compute_internal_field(
+                wrapped_points,
+                coeffs,
+                k=float(run.k),
+                lmax=int(run.config.lmax),
+                particles=run.particles,
+                _point_classification=internal_classification,
+                n_medium=run.config.n_medium,
+                show_progress=False,
+                backend=run.config.resolved_postprocessing_backend(),
+                compute_dtype=np.dtype(run.config.compute_dtype),
+                accum_dtype=np.dtype(run.accum_dtype),
+            )
+            phase = internal_phase[:, None]
+            e_internal = np.asarray(phase * e_int_ref, dtype=np.complex128)
+            h_internal = np.asarray(phase * h_int_ref, dtype=np.complex128)
+
         valid_idx = np.flatnonzero(~inside_mask)
         if valid_idx.size > 0:
             local_l1 = _periodic_local_regular_l1_coeffs(
@@ -688,7 +765,7 @@ def compute_periodic_near_field_interior(
                 lmax=int(run.config.lmax),
                 k=float(run.k),
                 periodic=periodic,
-                k_parallel=np.asarray(plane_wave_k_parallel(source), dtype=float),
+                k_parallel=k_parallel,
             )
             e_valid, h_valid = _local_regular_l1_fields_at_center(
                 local_l1_coeffs=local_l1,
@@ -699,10 +776,13 @@ def compute_periodic_near_field_interior(
             h_scat[valid_idx, :] = h_valid
 
     if np.any(inside_mask):
-        e_scat[inside_mask, :] = np.nan + 0.0j
-        h_scat[inside_mask, :] = np.nan + 0.0j
+        e_scat[inside_mask, :] = 0.0 + 0.0j
+        h_scat[inside_mask, :] = 0.0 + 0.0j
     e_total = e_initial + e_scat
     h_total = h_initial + h_scat
+    if np.any(inside_mask):
+        e_total[inside_mask, :] = e_internal[inside_mask, :]
+        h_total[inside_mask, :] = h_internal[inside_mask, :]
 
     if lead_shape == ():
         vec_shape: tuple[int, ...] = (3,)

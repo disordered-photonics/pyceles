@@ -353,7 +353,7 @@ def test_compute_periodic_near_field_interior_returns_finite_outside_circumspher
     assert np.all(np.isfinite(nf.H_total))
 
 
-def test_compute_periodic_near_field_marks_points_inside_periodic_circumspheres():
+def test_compute_periodic_near_field_returns_internal_fields_inside_particles():
     run = _make_periodic_run(polar_angle=0.4, azimuthal_angle=0.7)
     nf = pcl.compute_periodic_near_field(
         run,
@@ -361,8 +361,113 @@ def test_compute_periodic_near_field_marks_points_inside_periodic_circumspheres(
         channel="mixed",
     )
     assert nf.inside_mask.tolist() == [True]
-    assert not np.all(np.isfinite(nf.E_total))
-    assert not np.all(np.isfinite(nf.H_total))
+    assert np.all(np.isfinite(nf.E_internal))
+    assert np.all(np.isfinite(nf.H_internal))
+    assert np.all(np.isfinite(nf.E_total))
+    assert np.all(np.isfinite(nf.H_total))
+    assert np.allclose(nf.E_scattered, 0.0)
+    assert np.allclose(nf.H_scattered, 0.0)
+    assert np.allclose(nf.E_total, nf.E_internal)
+    assert np.allclose(nf.H_total, nf.H_internal)
+
+
+def test_compute_periodic_near_field_returns_internal_fields_inside_layered_spheres():
+    source = PlaneWave(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        polarization="TE",
+        polar_angle=0.3,
+        azimuthal_angle=0.2,
+        focal_point=(0.0, 0.0, 0.0),
+        amplitude=1.0,
+    )
+    cfg = pcl.SimulationConfig(
+        wavelength=550.0,
+        n_medium=1.0 + 0j,
+        lmax=2,
+        source=source,
+        periodic=pcl.PeriodicSpec(
+            lattice=pcl.RectangularLattice2D(ax=700.0, ay=700.0),
+            options=pcl.PeriodicOptions(output_bmax=0.05),
+        ),
+        solver_method="direct",
+        verbose=False,
+    )
+    particle = LayeredSphere(
+        position=(220.0, 180.0, 140.0),
+        layer_radii=(45.0, 90.0),
+        layer_refractive_indices=(1.8 + 0j, 1.4 + 0j),
+    )
+    run = pcl.Simulation(cfg, particles=[particle]).run(include_farfield=False)
+    nf = pcl.compute_periodic_near_field(
+        run,
+        points=np.array([[220.0, 180.0, 140.0]], dtype=float),
+        channel="mixed",
+    )
+    assert nf.inside_mask.tolist() == [True]
+    assert np.all(np.isfinite(nf.E_internal))
+    assert np.all(np.isfinite(nf.H_internal))
+    assert np.allclose(nf.E_total, nf.E_internal)
+    assert np.allclose(nf.H_total, nf.H_internal)
+
+
+def test_compute_periodic_near_field_internal_fields_respect_bloch_image_phase():
+    run = _make_periodic_run(polar_angle=0.4, azimuthal_angle=0.7)
+    point_ref = np.array([[240.0, 180.0, 140.0]], dtype=float)
+    ax = float(run.config.periodic.lattice.ax)
+    point_img = point_ref + np.array([[ax, 0.0, 0.0]], dtype=float)
+
+    nf_ref = pcl.compute_periodic_near_field(run, points=point_ref, channel="mixed")
+    nf_img = pcl.compute_periodic_near_field(run, points=point_img, channel="mixed")
+
+    assert nf_ref.inside_mask.tolist() == [True]
+    assert nf_img.inside_mask.tolist() == [True]
+
+    kpar = plane_wave_k_parallel(run.config.source)
+    phase = np.exp(1j * float(kpar[0]) * ax)
+    assert np.allclose(nf_img.E_internal, phase * nf_ref.E_internal, atol=1e-10, rtol=1e-10)
+    assert np.allclose(nf_img.H_internal, phase * nf_ref.H_internal, atol=1e-10, rtol=1e-10)
+    assert np.allclose(nf_img.E_total, phase * nf_ref.E_total, atol=1e-10, rtol=1e-10)
+    assert np.allclose(nf_img.H_total, phase * nf_ref.H_total, atol=1e-10, rtol=1e-10)
+
+
+def test_compute_periodic_near_field_ignores_index_matched_particle_interiors():
+    source = PlaneWave(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        polarization="TE",
+        polar_angle=0.35,
+        azimuthal_angle=0.5,
+        focal_point=(0.0, 0.0, 0.0),
+        amplitude=1.0,
+    )
+    cfg = pcl.SimulationConfig(
+        wavelength=550.0,
+        n_medium=1.0 + 0j,
+        lmax=2,
+        source=source,
+        periodic=pcl.PeriodicSpec(
+            lattice=pcl.RectangularLattice2D(ax=700.0, ay=700.0),
+            options=pcl.PeriodicOptions(output_bmax=0.05),
+        ),
+        solver_method="direct",
+        verbose=False,
+    )
+    run = pcl.Simulation(
+        cfg,
+        particles=[
+            Sphere(position=(220.0, 180.0, 140.0), radius=90.0, refractive_index=1.0 + 0.0j)
+        ],
+    ).run(include_farfield=False)
+
+    point = np.array([[221.0, 180.0, 140.0]], dtype=float)
+    nf_periodic = pcl.compute_periodic_near_field(run, points=point, channel="mixed")
+    nf_finite = pcl.compute_near_field(run, points=point, channel="mixed", show_progress=False)
+
+    assert nf_periodic.inside_mask.tolist() == [False]
+    assert nf_finite.inside_mask.tolist() == [False]
+    assert np.all(np.isfinite(nf_periodic.E_total))
+    assert np.all(np.isfinite(nf_periodic.H_total))
 
 
 def test_compute_periodic_near_field_interior_requires_ewald_method():
