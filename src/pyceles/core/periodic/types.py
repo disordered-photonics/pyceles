@@ -13,7 +13,18 @@ from pyceles.core.sources import PlaneWave
 
 @dataclass(frozen=True)
 class PeriodicOptions:
-    """Numerical policy for periodic coupling evaluation."""
+    """Numerical policy for periodic coupling and output evaluation.
+
+    ``eta`` is an inverse-length Ewald splitting parameter. Leaving it as
+    ``None`` selects pyceles's canonical 2D rectangular-lattice default
+    ``sqrt(pi / area)``. ``real_shells`` and ``reciprocal_shells`` are
+    explicit square-shell truncation counts.
+
+    ``output_bmax`` controls optional evanescent diffraction orders in periodic
+    output bases. ``None`` means propagating orders only for far-field power
+    balances; near-field exterior evaluation still requires an explicit output
+    basis because evanescent content is an expert convergence knob.
+    """
 
     method: Literal["ewald", "directsum"] = "ewald"
     eta: float | None = None

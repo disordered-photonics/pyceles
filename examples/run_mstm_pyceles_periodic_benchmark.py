@@ -80,7 +80,7 @@ class RunConfig:
     parse_only_mstm: bool = False
     enable_nearfield_xy: bool = True
     enable_nearfield_xz: bool = True
-    solution_epsilon: float = 1.0e-8
+    solution_epsilon: float = 1.0e-9
     mie_epsilon: float | None = None
     max_iterations: int = 10000
     run_pyceles: bool = True
@@ -117,15 +117,15 @@ def _fifteen_spheres_homogeneous_case() -> PeriodicBenchmarkCase:
     # - xz plane through the cell center for a cross-sectional field view.
     nearfield_xy = NearFieldSliceConfig(
         name="xy",
-        minimum_border=(0.0, 0.0, 2700.0),
-        maximum_border=(1001.0, 1001.0, 2700.0),
-        step_size=20.0,
+        minimum_border=(0.0, 0.0, 3000.0),
+        maximum_border=(1001.0, 1001.0, 3000.0),
+        step_size=10.0,
     )
     nearfield_xz = NearFieldSliceConfig(
         name="xz",
-        minimum_border=(0.0, 500.5, 0.0),
-        maximum_border=(1001.0, 500.5, 2700.0),
-        step_size=20.0,
+        minimum_border=(0.0, 500.5, -200.0),
+        maximum_border=(1001.0, 500.5, 3200.0),
+        step_size=10.0,
     )
     return PeriodicBenchmarkCase(
         name="fifteen_spheres_homogeneous",
@@ -746,7 +746,7 @@ def _plot_bipanel_intensity(
         colorbar.set_label(r"$|F|^2$")
     fig.suptitle(title)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=170)
+    fig.savefig(out_path, dpi=180)
     plt.close(fig)
 
 

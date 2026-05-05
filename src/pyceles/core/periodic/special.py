@@ -13,7 +13,7 @@ Array = np.ndarray
 
 _KAMBE_SERIES_TERMS = 32
 _SMALL_COMPLEX = 1e-14
-ShiftedReciprocalRegime = Literal["same_plane", "small_shift", "regular_shift"]
+ShiftedReciprocalRegime = Literal["same_plane", "rayleigh_limit", "shifted"]
 
 
 def _integer_or_half_integer_twice(value: float) -> int:
@@ -194,16 +194,16 @@ def shifted_reciprocal_regime(
     z_offset: float,
     *,
     same_plane_atol: float = 0.0,
-    small_shift_atol: float = _SMALL_COMPLEX,
+    rayleigh_atol: float = _SMALL_COMPLEX,
 ) -> ShiftedReciprocalRegime:
     """Classify the reciprocal integral regime for one off-plane scalar sequence."""
     cz = float(z_offset)
     if abs(cz) <= float(same_plane_atol):
         return "same_plane"
     scaled = np.asarray(gamma, dtype=np.complex128) * cz
-    if np.any(np.abs(scaled) <= float(small_shift_atol)):
-        return "small_shift"
-    return "regular_shift"
+    if np.any(np.abs(scaled) <= float(rayleigh_atol)):
+        return "rayleigh_limit"
+    return "shifted"
 
 
 def shifted_delta_sequence(
@@ -216,15 +216,11 @@ def shifted_delta_sequence(
 ) -> Array:
     """Evaluate shifted reciprocal-space Ewald integrals for nonzero height offsets.
 
-    This helper is the scalar analogue of the shifted reciprocal-space
-    integral sequence used in SMUTHI-style periodic Ewald formulations. It is
-    intended for off-plane particle-pair coupling only.
-
-    The reciprocal scalar layer has three regimes: same-plane pairs use the
-    unshifted formula, small scaled offsets need a stabilized evaluator that is
-    still pending, and regular shifted pairs can use this recurrence. The
-    current implementation deliberately rejects the first two regimes instead
-    of forcing the regular recurrence into its singular limit.
+    This is the Kambe shifted reciprocal integral sequence used by the 2D
+    periodic spherical-wave Ewald sums. Exact same-plane pairs must use the
+    lower-dimensional same-plane formula. Near ``gamma * z_offset == 0`` the
+    shifted recurrence is singular and needs a separate limiting prescription,
+    so this helper rejects that Rayleigh-threshold limit explicitly.
     """
     n_max = int(max_order)
     if n_max < 0:
@@ -237,7 +233,7 @@ def shifted_delta_sequence(
     regime = shifted_reciprocal_regime(
         gamma_arr,
         cz,
-        small_shift_atol=float(singular_atol),
+        rayleigh_atol=float(singular_atol),
     )
     if regime == "same_plane":
         raise ValueError(
@@ -245,10 +241,11 @@ def shifted_delta_sequence(
             "use the same-plane reciprocal formula for this pair."
         )
     scaled = gamma_arr * cz
-    if regime == "small_shift":
+    if regime == "rayleigh_limit":
         raise ValueError(
-            "shifted reciprocal integrals are in the unresolved small-shift regime; "
-            "use the same-plane formula when applicable or add a stabilized small-shift path."
+            "shifted reciprocal integrals are singular in the Rayleigh-threshold limit; "
+            "use the exact same-plane formula when applicable, otherwise avoid evaluating "
+            "exactly at gamma*z_offset == 0 until a limiting formula is implemented."
         )
     x = -(gamma_arr * gamma_arr) / (4.0 * eta_f * eta_f)
     if np.any(np.abs(x) <= float(singular_atol)):

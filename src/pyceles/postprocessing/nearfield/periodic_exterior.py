@@ -248,9 +248,11 @@ def compute_periodic_near_field_exterior(
         below_mask = np.asarray(pts_flat[:, 2] < (z_min - tol), dtype=bool)
         slab_mask = ~(above_mask | below_mask)
     if np.any(slab_mask):
-        raise NotImplementedError(
-            "Periodic near-field local (in-slab) evaluation is not implemented yet. "
-            f"Requested {int(np.count_nonzero(slab_mask))} point(s) inside or intersecting the slab."
+        raise ValueError(
+            "Periodic exterior near-field evaluation received "
+            f"{int(np.count_nonzero(slab_mask))} point(s) inside or intersecting the slab. "
+            "Call `compute_periodic_near_field` for slab-aware dispatch, or restrict "
+            "points to the exterior half spaces."
         )
 
     k = float(run.k)

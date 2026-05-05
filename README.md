@@ -181,7 +181,8 @@ Users of pyceles are referred to the publications listed in the CELES and SMUTHI
   particle families. In practice this remains especially restrictive for close
   configurations of elongated spheroids, where alternative coupling schemes can
   be implemented.
-- Periodic boundary conditions are not implemented yet.
+- Periodic boundary conditions is still work in progress.
+- At the moment, particles in a simulation need to share the same `lmax`.
 - Exterior near-field evaluation for spheroids remains unreliable at points
   lying inside the circumscribing sphere but outside the physical particle.
 
@@ -884,6 +885,8 @@ Related references for validation of present and future features:
 - Markkanen and Yuffa, *Fast superposition T-matrix solution for clusters with arbitrarily shaped constituent particles*, JQSRT 189 (2017) 181-188. https://doi.org/10.1016/j.jqsrt.2016.11.004
 - Stilgoe et al., *Computational toolbox for scattering of focused light from flattened or elongated particles using spheroidal wavefunctions*, JQSRT 331 (2025) 109267. https://doi.org/10.1016/j.jqsrt.2024.109267
 - Gumerov and Duraiswami, *Fast Multipole Methods on Graphics Processors* Journal of Computational Physics 227.18 (2008) 8290-8313. https://doi.org/10.1016/j.jcp.2008.05.023
+- Beutel et al., *Unified lattice sums accommodating multiple sublattices for solutions of the Helmholtz equation in two and three dimensions* Phys Rev A  107 (2023) 013508. https://doi.org/10.1103/PhysRevA.107.013508
+- Beutel et al., *treams – a T-matrix-based scattering code for nanophotonics* Computer Physics Communications 297 (2024) 109076. https://doi.org/10.1016/j.cpc.2023.109076
 
 ## License
 

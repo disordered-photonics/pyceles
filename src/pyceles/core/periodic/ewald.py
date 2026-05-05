@@ -27,7 +27,11 @@ Array = np.ndarray
 
 
 def default_ewald_eta(lattice: RectangularLattice2D) -> float:
-    """Return the default real/reciprocal Ewald split for a 2D unit cell."""
+    """Return the canonical dimensional Ewald split for a 2D unit cell.
+
+    The value ``sqrt(pi / area)`` balances direct- and reciprocal-lattice
+    shell scales for a rectangular 2D lattice.
+    """
     return float(np.sqrt(np.pi / lattice.area))
 
 

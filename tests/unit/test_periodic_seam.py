@@ -133,6 +133,18 @@ def test_periodic_overlap_validator_accepts_separated_reference_cell() -> None:
     assert sim.n_particles == 2
 
 
+def test_periodic_overlap_validator_uses_minimum_image_for_unwrapped_positions() -> None:
+    spec = pcl.PeriodicSpec(lattice=pcl.RectangularLattice2D(100.0, 200.0))
+    cfg = SimulationConfig(source=_plane_wave(), periodic=spec, verbose=False)
+    particles = [
+        pcl.Sphere(position=(0.0, 0.0, 0.0), radius=30.0, refractive_index=1.5 + 0j),
+        pcl.Sphere(position=(250.0, 0.0, 0.0), radius=30.0, refractive_index=1.5 + 0j),
+    ]
+
+    with pytest.raises(ValueError, match="lattice shift"):
+        Simulation(cfg, particles=particles)
+
+
 def test_periodic_shared_k_parallel_accepts_matching_plane_wave_sources() -> None:
     spec = pcl.PeriodicSpec(lattice=pcl.RectangularLattice2D(300.0, 300.0))
     cfg = SimulationConfig(periodic=spec, verbose=False)

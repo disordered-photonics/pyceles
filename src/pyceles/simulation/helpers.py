@@ -139,6 +139,22 @@ def first_overlapping_circumscribing_pair(
     return None
 
 
+def _periodic_shift_candidates_for_pair(
+    *,
+    delta_xy: np.ndarray,
+    lattice: RectangularLattice2D,
+    include_zero_cell: bool,
+) -> list[tuple[int, int]]:
+    """Return image shifts that can minimize a rectangular periodic separation."""
+    base = {(p, q) for p in (-1, 0, 1) for q in (-1, 0, 1)}
+    nearest_p = int(np.rint(float(delta_xy[0]) / float(lattice.ax)))
+    nearest_q = int(np.rint(float(delta_xy[1]) / float(lattice.ay)))
+    candidates = base | {(nearest_p + dp, nearest_q + dq) for dp in (-1, 0, 1) for dq in (-1, 0, 1)}
+    if not include_zero_cell:
+        candidates.discard((0, 0))
+    return sorted(candidates, key=lambda item: (max(abs(item[0]), abs(item[1])), item[0], item[1]))
+
+
 def first_periodic_overlapping_circumscribing_pair(
     positions: np.ndarray,
     radii: np.ndarray,
@@ -146,27 +162,32 @@ def first_periodic_overlapping_circumscribing_pair(
     lattice: RectangularLattice2D,
     atol: float = 0.0,
 ) -> tuple[int, int, int, int, float, float] | None:
-    """Return first circumsphere overlap across nearest periodic images."""
+    """Return first circumsphere overlap across rectangular periodic images.
+
+    The search includes the nearest-image shifts implied by the actual particle
+    coordinates, not only the adjacent ``(-1, 0, 1)^2`` cells. This keeps the
+    validator robust if a caller uses a shifted unit-cell origin or temporarily
+    supplies unwrapped reference positions.
+    """
     pos = np.asarray(positions, dtype=float).reshape(-1, 3)
     rad = np.asarray(radii, dtype=float).reshape(-1)
     n = int(rad.size)
     if n == 0:
         return None
     atol_f = float(atol)
-    shifts = (-1, 0, 1)
-    for p in shifts:
-        for q in shifts:
-            shift = lattice.lattice_vector(p, q)
-            for i in range(n):
-                for j in range(n):
-                    if p == 0 and q == 0 and j <= i:
-                        continue
-                    if i == j and p == 0 and q == 0:
-                        continue
-                    rsum = float(rad[i]) + float(rad[j])
-                    d = float(np.linalg.norm(pos[i] - pos[j] - shift))
-                    if d + atol_f < rsum:
-                        return int(i), int(j), int(p), int(q), d, rsum
+    for i in range(n):
+        for j in range(i, n):
+            include_zero = bool(i != j)
+            for p, q in _periodic_shift_candidates_for_pair(
+                delta_xy=np.asarray(pos[i, :2] - pos[j, :2], dtype=float),
+                lattice=lattice,
+                include_zero_cell=include_zero,
+            ):
+                shift = lattice.lattice_vector(p, q)
+                rsum = float(rad[i]) + float(rad[j])
+                d = float(np.linalg.norm(pos[i] - pos[j] - shift))
+                if d + atol_f < rsum:
+                    return int(i), int(j), int(p), int(q), d, rsum
     return None
 
 

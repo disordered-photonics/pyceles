@@ -96,11 +96,11 @@ def test_shifted_delta_sequence_rejects_same_plane_limit() -> None:
 
 
 def test_shifted_delta_sequence_rejects_regular_recurrence_near_singularity() -> None:
-    with pytest.raises(ValueError, match="small-shift regime"):
+    with pytest.raises(ValueError, match="Rayleigh-threshold"):
         shifted_delta_sequence(2, np.array([1.0e-16 + 0.0j]), z_offset=0.5, eta=1.2)
 
 
 def test_shifted_reciprocal_regime_classifies_scaled_offsets() -> None:
     assert shifted_reciprocal_regime(np.array([1.0 + 0.0j]), 0.0) == "same_plane"
-    assert shifted_reciprocal_regime(np.array([1.0e-16 + 0.0j]), 0.5) == "small_shift"
-    assert shifted_reciprocal_regime(np.array([0.7 + 0.1j]), 0.6) == "regular_shift"
+    assert shifted_reciprocal_regime(np.array([1.0e-16 + 0.0j]), 0.5) == "rayleigh_limit"
+    assert shifted_reciprocal_regime(np.array([0.7 + 0.1j]), 0.6) == "shifted"
