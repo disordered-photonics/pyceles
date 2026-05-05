@@ -7,14 +7,14 @@ import numpy as np
 
 from pyceles.core.indexing import iter_modes, n_modes
 from pyceles.core.periodic import PeriodicSpec, plane_wave_k_parallel
-from pyceles.core.periodic.ewald import (
-    _factorial,
-    _real_integral_sequence,
-    _reciprocal_gamma,
-    _spherical_harmonic_normalization,
-    _square_shell_indices,
-    _upper_gamma_sequence,
-    default_ewald_eta,
+from pyceles.core.periodic.ewald import default_ewald_eta
+from pyceles.core.periodic.scalar import (
+    factorial_int,
+    real_integral_sequence,
+    reciprocal_gamma,
+    square_shell_indices,
+    structural_sum_m_normalization,
+    upper_gamma_sequence,
 )
 from pyceles.core.periodic.special import shifted_delta_sequence, shifted_reciprocal_regime
 from pyceles.core.periodic.structural import direct_structural_sums_2d
@@ -155,24 +155,26 @@ def _same_plane_reciprocal_sums_batch(
     if (l - abs(m)) % 2:
         return out
 
-    root = np.sqrt(2 * l + 1.0) * np.sqrt(_factorial(l - m)) * np.sqrt(_factorial(l + m))
+    root = np.sqrt(2 * l + 1.0) * np.sqrt(factorial_int(l - m)) * np.sqrt(factorial_int(l + m))
     prefactor = (1j) ** m * root / (lattice.area * float(k) * (2.0 * float(k)) ** l)
     kp0 = np.asarray(k_parallel, dtype=float).reshape(2)
     n_vals = np.arange((l - abs(m)) // 2 + 1, dtype=np.int64)
     max_n = int(n_vals[-1]) if n_vals.size else 0
 
     for shell in range(int(shells) + 1):
-        indices = _square_shell_indices(shell)
+        indices = square_shell_indices(shell)
         reciprocal = np.asarray([p * lattice.b1 + q * lattice.b2 for p, q in indices], dtype=float)
         kgt = kp0[None, :] + reciprocal
         rho = np.linalg.norm(kgt, axis=1)
         phi = np.arctan2(kgt[:, 1], kgt[:, 0])
-        gamma = _reciprocal_gamma(float(k), rho)
+        gamma = reciprocal_gamma(float(k), rho)
         gamma_arg = -(gamma * gamma) / (4.0 * float(eta) * float(eta))
-        gamma_fun = _upper_gamma_sequence(max_n, gamma_arg)
+        gamma_fun = upper_gamma_sequence(max_n, gamma_arg)
         inner = np.zeros_like(gamma, dtype=np.complex128)
         for n in n_vals:
-            denom = _factorial(n) * _factorial((l + m) // 2 - n) * _factorial((l - m) // 2 - n)
+            denom = (
+                factorial_int(n) * factorial_int((l + m) // 2 - n) * factorial_int((l - m) // 2 - n)
+            )
             inner += (
                 gamma_fun[:, int(n)] * gamma ** (2 * int(n) - 1) * rho ** (l - 2 * int(n)) / denom
             )
@@ -216,7 +218,7 @@ def _shifted_reciprocal_sums_batch(
     if np.all(same_plane):
         return out
 
-    root = np.sqrt(2 * l + 1.0) * np.sqrt(_factorial(l - m)) * np.sqrt(_factorial(l + m))
+    root = np.sqrt(2 * l + 1.0) * np.sqrt(factorial_int(l - m)) * np.sqrt(factorial_int(l + m))
     prefactor = (-1j) ** m * root / (((-2.0) ** l) * lattice.area * float(k) * float(k))
     kp0 = np.asarray(k_parallel, dtype=float).reshape(2)
     n_vals = np.arange(0, l - abs(m) + 1, dtype=np.int64)
@@ -230,12 +232,12 @@ def _shifted_reciprocal_sums_batch(
     unique_cz, inverse = np.unique(cz_vals, return_inverse=True)
 
     for shell in range(int(shells) + 1):
-        indices = _square_shell_indices(shell)
+        indices = square_shell_indices(shell)
         reciprocal = np.asarray([p * lattice.b1 + q * lattice.b2 for p, q in indices], dtype=float)
         kgt = kp0[None, :] + reciprocal
         rho = np.linalg.norm(kgt, axis=1)
         phi = np.arctan2(kgt[:, 1], kgt[:, 0])
-        gamma = _reciprocal_gamma(float(k), rho)
+        gamma = reciprocal_gamma(float(k), rho)
         phase_all = np.exp(-1j * (np.asarray(c[work_idx, :2], dtype=float) @ kgt.T))
 
         for group_id, cz in enumerate(unique_cz):
@@ -269,10 +271,10 @@ def _shifted_reciprocal_sums_batch(
                 terms = np.zeros_like(rho, dtype=np.complex128)
                 for s in s_vals:
                     denom = (
-                        _factorial(2 * int(n) - int(s))
-                        * _factorial(int(s) - int(n))
-                        * _factorial((l + abs(m) - int(s)) // 2)
-                        * _factorial((l - abs(m) - int(s)) // 2)
+                        factorial_int(2 * int(n) - int(s))
+                        * factorial_int(int(s) - int(n))
+                        * factorial_int((l + abs(m) - int(s)) // 2)
+                        * factorial_int((l - abs(m) - int(s)) // 2)
                     )
                     terms += (
                         (-float(k) * float(cz)) ** (2 * int(n) - int(s))
@@ -314,7 +316,7 @@ def _shifted_real_sums_batch(
 
     kp = np.asarray(k_parallel, dtype=float).reshape(2)
     for shell in range(int(shells) + 1):
-        indices = _square_shell_indices(shell)
+        indices = square_shell_indices(shell)
         shifts = np.asarray([p * lattice.a1 + q * lattice.a2 for p, q in indices], dtype=float)
         shifted = -(shifts[None, :, :] + c[:, None, :])
         radii = np.linalg.norm(shifted, axis=2)
@@ -329,10 +331,8 @@ def _shifted_real_sums_batch(
         phi = np.arctan2(shifted_valid[:, 1], shifted_valid[:, 0])
         plm = np.asarray(legendre_normalized_trigon(ct, st, max(1, l)), dtype=np.float64)
         phase_shell = np.exp(1j * (np.asarray(shifts[shell_idx, :2], dtype=float) @ kp))
-        integral = (0.5) ** (l + 1.5) * _real_integral_sequence(
-            l, float(eta), float(k), radii_valid
-        )
-        angular = plm[l, abs(m), :] * np.exp(1j * m * phi) / _spherical_harmonic_normalization(m)
+        integral = (0.5) ** (l + 1.5) * real_integral_sequence(l, float(eta), float(k), radii_valid)
+        angular = plm[l, abs(m), :] * np.exp(1j * m * phi) / structural_sum_m_normalization(m)
         contrib = phase_shell * (float(k) * radii_valid) ** l * angular * integral
         np.add.at(out, point_idx, contrib)
     return np.asarray(-1j * np.sqrt(2.0 / np.pi) * out, dtype=np.complex128)
@@ -370,17 +370,17 @@ def _ewald_structural_sums_batch(
     max_same_n = max(0, order // 2)
     unique_cz, inverse_cz = np.unique(cz, return_inverse=True)
     for shell in range(int(reciprocal_shells) + 1):
-        indices = _square_shell_indices(shell)
+        indices = square_shell_indices(shell)
         reciprocal = np.asarray([p * lattice.b1 + q * lattice.b2 for p, q in indices], dtype=float)
         kgt = kp0[None, :] + reciprocal
         rho = np.linalg.norm(kgt, axis=1)
         phi = np.arctan2(kgt[:, 1], kgt[:, 0])
-        gamma = _reciprocal_gamma(float(k), rho)
+        gamma = reciprocal_gamma(float(k), rho)
         phase_all = np.exp(-1j * (cxy @ kgt.T))
         exp_m_phi = {m: np.exp(1j * m * phi) for m in range(-order, order + 1)}
 
         xarg = -(gamma * gamma) / (4.0 * float(eta) * float(eta))
-        gamma_fun = _upper_gamma_sequence(max_same_n, xarg)
+        gamma_fun = upper_gamma_sequence(max_same_n, xarg)
 
         for group_id, cz_val in enumerate(unique_cz):
             point_mask = inverse_cz == group_id
@@ -396,8 +396,8 @@ def _ewald_structural_sums_batch(
                             continue
                         root = (
                             np.sqrt(2 * degree + 1.0)
-                            * np.sqrt(_factorial(degree - m))
-                            * np.sqrt(_factorial(degree + m))
+                            * np.sqrt(factorial_int(degree - m))
+                            * np.sqrt(factorial_int(degree + m))
                         )
                         prefactor = (
                             (1j) ** m
@@ -408,9 +408,9 @@ def _ewald_structural_sums_batch(
                         inner = np.zeros_like(gamma, dtype=np.complex128)
                         for n in n_vals:
                             denom = (
-                                _factorial(n)
-                                * _factorial((degree + m) // 2 - n)
-                                * _factorial((degree - m) // 2 - n)
+                                factorial_int(n)
+                                * factorial_int((degree + m) // 2 - n)
+                                * factorial_int((degree - m) // 2 - n)
                             )
                             inner += (
                                 gamma_fun[:, int(n)]
@@ -420,7 +420,7 @@ def _ewald_structural_sums_batch(
                             )
                         vec = exp_m_phi[m] * inner
                         sums[point_mask, degree, m + offset] += (
-                            _spherical_harmonic_normalization(m) * prefactor * (phase @ vec)
+                            structural_sum_m_normalization(m) * prefactor * (phase @ vec)
                         )
                 continue
 
@@ -436,8 +436,8 @@ def _ewald_structural_sums_batch(
                 for m in range(-degree, degree + 1):
                     root = (
                         np.sqrt(2 * degree + 1.0)
-                        * np.sqrt(_factorial(degree - m))
-                        * np.sqrt(_factorial(degree + m))
+                        * np.sqrt(factorial_int(degree - m))
+                        * np.sqrt(factorial_int(degree + m))
                     )
                     prefactor = (
                         (-1j) ** m
@@ -462,10 +462,10 @@ def _ewald_structural_sums_batch(
                         terms = np.zeros_like(rho, dtype=np.complex128)
                         for s in s_vals:
                             denom = (
-                                _factorial(2 * int(n) - int(s))
-                                * _factorial(int(s) - int(n))
-                                * _factorial((degree + abs(m) - int(s)) // 2)
-                                * _factorial((degree - abs(m) - int(s)) // 2)
+                                factorial_int(2 * int(n) - int(s))
+                                * factorial_int(int(s) - int(n))
+                                * factorial_int((degree + abs(m) - int(s)) // 2)
+                                * factorial_int((degree - abs(m) - int(s)) // 2)
                             )
                             terms += (
                                 (-float(k) * cz_f) ** (2 * int(n) - int(s))
@@ -478,12 +478,12 @@ def _ewald_structural_sums_batch(
                         axis=1,
                     )
                     sums[point_mask, degree, m + offset] += (
-                        _spherical_harmonic_normalization(m) * prefactor * (phase @ vec)
+                        structural_sum_m_normalization(m) * prefactor * (phase @ vec)
                     )
 
     # Real-space part: reuse shell phases and vectorized normalized Legendre values.
     for shell in range(int(real_shells) + 1):
-        indices = _square_shell_indices(shell)
+        indices = square_shell_indices(shell)
         shifts = np.asarray([p * lattice.a1 + q * lattice.a2 for p, q in indices], dtype=float)
         shifted = -(shifts[None, :, :] + c[:, None, :])
         radii = np.linalg.norm(shifted, axis=2)
@@ -501,21 +501,19 @@ def _ewald_structural_sums_batch(
         exp_m_phi = {m: np.exp(1j * m * phi) for m in range(-order, order + 1)}
         kz_r = float(k) * radii_valid
         for degree in range(order + 1):
-            integral = (0.5) ** (degree + 1.5) * _real_integral_sequence(
+            integral = (0.5) ** (degree + 1.5) * real_integral_sequence(
                 degree, float(eta), float(k), radii_valid
             )
             radial = phase_shell * kz_r**degree * integral
             for m in range(-degree, degree + 1):
                 if np.all(np.isclose(cz, 0.0, atol=0.0, rtol=0.0)) and (degree - abs(m)) % 2:
                     continue
-                angular = (
-                    plm[degree, abs(m), :] * exp_m_phi[m] / _spherical_harmonic_normalization(m)
-                )
+                angular = plm[degree, abs(m), :] * exp_m_phi[m] / structural_sum_m_normalization(m)
                 contrib = -1j * np.sqrt(2.0 / np.pi) * radial * angular
                 np.add.at(
                     sums[:, degree, m + offset],
                     point_idx,
-                    _spherical_harmonic_normalization(m) * contrib,
+                    structural_sum_m_normalization(m) * contrib,
                 )
     return sums
 

@@ -6,12 +6,20 @@ import math
 
 import numpy as np
 import numpy.typing as npt
-from scipy import special
 
 from pyceles.core.indexing import n_modes
 from pyceles.core.lattice import RectangularLattice2D
 from pyceles.core.spherical import legendre_normalized_trigon_scalar
 
+from .scalar import (
+    factorial_int,
+    real_integral_sequence,
+    reciprocal_gamma,
+    square_shell_indices,
+    structural_sum_m_normalization,
+    upper_gamma_sequence,
+    validate_shell_count,
+)
 from .special import shifted_delta_sequence, upper_incomplete_gamma_int_or_halfint
 from .structural import block_from_structural_sums
 
@@ -21,81 +29,6 @@ Array = np.ndarray
 def default_ewald_eta(lattice: RectangularLattice2D) -> float:
     """Return the default real/reciprocal Ewald split for a 2D unit cell."""
     return float(np.sqrt(np.pi / lattice.area))
-
-
-def _validated_shells(value: int, *, name: str) -> int:
-    shells = int(value)
-    if shells < 0:
-        raise ValueError(f"`{name}` must be >= 0. Got {value!r}.")
-    return shells
-
-
-def _square_shell_indices(shell: int) -> tuple[tuple[int, int], ...]:
-    """Return rectangular-lattice index pairs on one square shell."""
-    s = int(shell)
-    if s < 0:
-        raise ValueError(f"`shell` must be >= 0. Got {shell!r}.")
-    if s == 0:
-        return ((0, 0),)
-    out: list[tuple[int, int]] = []
-    for p in (-s, s):
-        for q in range(-s, s + 1):
-            out.append((p, q))
-    for p in range(-s + 1, s):
-        for q in (-s, s):
-            out.append((p, q))
-    return tuple(out)
-
-
-def _factorial(value: int | np.integer) -> int:
-    return math.factorial(int(value))
-
-
-def _spherical_harmonic_normalization(order: int) -> float:
-    """Return the SMUTHI-to-pyceles scalar normalization for order `M`."""
-    m = int(order)
-    if m >= 0:
-        return math.sqrt(2.0 * math.pi) * ((-1.0) ** (-m))
-    return math.sqrt(2.0 * math.pi)
-
-
-def _reciprocal_gamma(k: float, rho: Array) -> Array:
-    gamma = np.sqrt((float(k) * float(k) - np.asarray(rho, dtype=float) ** 2) + 0.0j)
-    gamma[np.where(gamma == 0.0)[0]] += 1.0e-10j
-    return np.asarray(gamma, dtype=np.complex128)
-
-
-def _upper_gamma_sequence(max_index: int, z: Array) -> Array:
-    n_max = int(max_index)
-    z_arr = np.asarray(z, dtype=np.complex128).reshape(-1)
-    out = np.zeros((z_arr.size, n_max + 1), dtype=np.complex128)
-    for idx, zc in enumerate(z_arr):
-        for n in range(n_max + 1):
-            out[idx, n] = upper_incomplete_gamma_int_or_halfint(0.5 - float(n), zc)
-    return out
-
-
-def _real_integral_sequence(degree: int, eta: float, k: float, radii: Array) -> Array:
-    """Evaluate the real-space integral sequence used by the Kambe summand."""
-    l = int(degree)
-    r = np.asarray(radii, dtype=float).reshape(-1)
-    if np.any(r <= 0.0):
-        raise ValueError("Real-space Ewald radii must be positive.")
-    alpha = float(k) * float(k) / (4.0 * float(eta) * float(eta))
-    root_alpha = np.sqrt(alpha)
-    w = special.wofz(root_alpha + 1j * float(k) * r / (2.0 * root_alpha))
-    exp_term = np.exp(alpha - (float(k) * r) ** 2 / (4.0 * alpha))
-
-    vals = np.zeros((r.size, l + 2), dtype=np.complex128)
-    vals[:, 0] = math.sqrt(math.pi) * exp_term * w.imag
-    vals[:, 1] = math.sqrt(math.pi) * 2.0 / (float(k) * r) * exp_term * w.real
-    for idx in range(2, l + 2):
-        vals[:, idx] = (2.0 / (float(k) * r)) ** 2 * (
-            0.5 * float(2 * (idx - 2) + 1) * vals[:, idx - 1]
-            - vals[:, idx - 2]
-            + alpha ** (-(idx - 2) - 0.5) * exp_term
-        )
-    return vals[:, -1]
 
 
 def _same_plane_reciprocal_sum(
@@ -113,14 +46,14 @@ def _same_plane_reciprocal_sum(
     m = int(order)
     if (l - abs(m)) % 2:
         return 0.0 + 0.0j
-    root = math.sqrt(2 * l + 1) * math.sqrt(_factorial(l - m)) * math.sqrt(_factorial(l + m))
+    root = math.sqrt(2 * l + 1) * math.sqrt(factorial_int(l - m)) * math.sqrt(factorial_int(l + m))
     prefactor = (1j) ** m * root / (lattice.area * float(k) * (2.0 * float(k)) ** l)
 
     kp0 = np.asarray(k_parallel, dtype=float).reshape(2)
     cxy = np.asarray(c_xy, dtype=float).reshape(2)
     acc = 0.0 + 0.0j
-    for shell in range(_validated_shells(shells, name="reciprocal_shells") + 1):
-        indices = _square_shell_indices(shell)
+    for shell in range(validate_shell_count(shells, name="reciprocal_shells") + 1):
+        indices = square_shell_indices(shell)
         reciprocal = np.asarray(
             [p * lattice.b1 + q * lattice.b2 for p, q in indices],
             dtype=float,
@@ -128,13 +61,15 @@ def _same_plane_reciprocal_sum(
         kgt = kp0 + reciprocal
         rho = np.linalg.norm(kgt, axis=1)
         phi = np.arctan2(kgt[:, 1], kgt[:, 0])
-        gamma = _reciprocal_gamma(float(k), rho)
+        gamma = reciprocal_gamma(float(k), rho)
         gamma_arg = -(gamma * gamma) / (4.0 * float(eta) * float(eta))
         n_values = np.arange((l - abs(m)) // 2 + 1, dtype=np.int64)
-        gamma_fun = _upper_gamma_sequence(int(n_values[-1]), gamma_arg)
+        gamma_fun = upper_gamma_sequence(int(n_values[-1]), gamma_arg)
         inner = np.zeros_like(gamma, dtype=np.complex128)
         for n in n_values:
-            denom = _factorial(n) * _factorial((l + m) // 2 - n) * _factorial((l - m) // 2 - n)
+            denom = (
+                factorial_int(n) * factorial_int((l + m) // 2 - n) * factorial_int((l - m) // 2 - n)
+            )
             inner += (
                 gamma_fun[:, int(n)] * gamma ** (2 * int(n) - 1) * rho ** (l - 2 * int(n)) / denom
             )
@@ -162,22 +97,22 @@ def _same_plane_real_sum(
     frac = (
         -1j
         * ((-1.0) ** ((l + m) // 2))
-        / (2.0 ** (l + 1) * math.pi * _factorial((l - m) // 2) * _factorial((l + m) // 2))
+        / (2.0 ** (l + 1) * math.pi * factorial_int((l - m) // 2) * factorial_int((l + m) // 2))
     )
-    root = math.sqrt(2 * l + 1) * math.sqrt(_factorial(l - m)) * math.sqrt(_factorial(l + m))
+    root = math.sqrt(2 * l + 1) * math.sqrt(factorial_int(l - m)) * math.sqrt(factorial_int(l + m))
     prefactor = frac * root
 
     kp = np.asarray(k_parallel, dtype=float).reshape(2)
     acc = 0.0 + 0.0j
-    for shell in range(1, _validated_shells(shells, name="real_shells") + 1):
-        indices = _square_shell_indices(shell)
+    for shell in range(1, validate_shell_count(shells, name="real_shells") + 1):
+        indices = square_shell_indices(shell)
         shifts_xy = np.asarray(
             [(p * lattice.a1 + q * lattice.a2)[:2] for p, q in indices],
             dtype=float,
         )
         radii = np.linalg.norm(shifts_xy, axis=1)
         phi = np.arctan2(shifts_xy[:, 1], shifts_xy[:, 0])
-        integral = (float(k) * float(k) / 4.0) ** (l + 0.5) * _real_integral_sequence(
+        integral = (float(k) * float(k) / 4.0) ** (l + 0.5) * real_integral_sequence(
             l,
             float(eta),
             float(k),
@@ -225,13 +160,13 @@ def _shifted_reciprocal_sum(
             c_xy=c[:2],
         )
 
-    root = math.sqrt(2 * l + 1) * math.sqrt(_factorial(l - m)) * math.sqrt(_factorial(l + m))
+    root = math.sqrt(2 * l + 1) * math.sqrt(factorial_int(l - m)) * math.sqrt(factorial_int(l + m))
     prefactor = (-1j) ** m * root / (((-2.0) ** l) * lattice.area * float(k) * float(k))
 
     kp0 = np.asarray(k_parallel, dtype=float).reshape(2)
     acc = 0.0 + 0.0j
-    for shell in range(_validated_shells(shells, name="reciprocal_shells") + 1):
-        indices = _square_shell_indices(shell)
+    for shell in range(validate_shell_count(shells, name="reciprocal_shells") + 1):
+        indices = square_shell_indices(shell)
         reciprocal = np.asarray(
             [p * lattice.b1 + q * lattice.b2 for p, q in indices],
             dtype=float,
@@ -239,7 +174,7 @@ def _shifted_reciprocal_sum(
         kgt = kp0 + reciprocal
         rho = np.linalg.norm(kgt, axis=1)
         phi = np.arctan2(kgt[:, 1], kgt[:, 0])
-        gamma = _reciprocal_gamma(float(k), rho)
+        gamma = reciprocal_gamma(float(k), rho)
         n_values = np.arange(0, l - abs(m) + 1, dtype=np.int64)
         inner = np.zeros((rho.size, n_values.size), dtype=np.complex128)
         for n in n_values:
@@ -253,10 +188,10 @@ def _shifted_reciprocal_sum(
             terms = np.zeros_like(rho, dtype=np.complex128)
             for s in s_values:
                 denom = (
-                    _factorial(2 * int(n) - int(s))
-                    * _factorial(int(s) - int(n))
-                    * _factorial((l + abs(m) - int(s)) // 2)
-                    * _factorial((l - abs(m) - int(s)) // 2)
+                    factorial_int(2 * int(n) - int(s))
+                    * factorial_int(int(s) - int(n))
+                    * factorial_int((l + abs(m) - int(s)) // 2)
+                    * factorial_int((l - abs(m) - int(s)) // 2)
                 )
                 terms += (
                     (-float(k) * c[2]) ** (2 * int(n) - int(s))
@@ -292,8 +227,8 @@ def _shifted_real_sum(
 
     kp = np.asarray(k_parallel, dtype=float).reshape(2)
     acc = 0.0 + 0.0j
-    for shell in range(_validated_shells(shells, name="real_shells") + 1):
-        indices = _square_shell_indices(shell)
+    for shell in range(validate_shell_count(shells, name="real_shells") + 1):
+        indices = square_shell_indices(shell)
         shifts = np.asarray([p * lattice.a1 + q * lattice.a2 for p, q in indices], dtype=float)
         shifted = -(shifts + c)
         radii = np.linalg.norm(shifted, axis=1)
@@ -311,12 +246,10 @@ def _shifted_real_sum(
         for idx, (ct_i, st_i, phi_i) in enumerate(zip(ct, st, phi, strict=True)):
             plm = legendre_normalized_trigon_scalar(float(ct_i), float(st_i), max(1, l))
             angular[idx] = (
-                plm[l, abs(m)]
-                * np.exp(1j * m * float(phi_i))
-                / _spherical_harmonic_normalization(m)
+                plm[l, abs(m)] * np.exp(1j * m * float(phi_i)) / structural_sum_m_normalization(m)
             )
 
-        integral = (0.5) ** (l + 1.5) * _real_integral_sequence(
+        integral = (0.5) ** (l + 1.5) * real_integral_sequence(
             l,
             float(eta),
             float(k),
@@ -401,7 +334,7 @@ def ewald_structural_constant_2d(
             eta=eta_f,
             shells=int(real_shells),
         )
-    return complex(_spherical_harmonic_normalization(m) * value)
+    return complex(structural_sum_m_normalization(m) * value)
 
 
 def ewald_structural_sums_2d(
