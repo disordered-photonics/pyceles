@@ -36,7 +36,6 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from scipy.interpolate import RegularGridInterpolator
 
 
 @dataclass(frozen=True)
@@ -640,50 +639,6 @@ def _axis_from_coords(coords: np.ndarray, axis: int) -> np.ndarray:
     return np.unique(np.round(np.asarray(coords[:, axis], dtype=float), 10))
 
 
-def _prepare_points_for_grid(
-    points: np.ndarray, axes: tuple[np.ndarray, np.ndarray, np.ndarray]
-) -> np.ndarray:
-    q = np.asarray(points, dtype=float).copy()
-    for i, axis in enumerate(axes):
-        if axis.size == 1:
-            q[:, i] = float(axis[0])
-        else:
-            q[:, i] = np.clip(q[:, i], float(axis.min()), float(axis.max()))
-    return q
-
-
-def _interpolate_complex_vector_field(
-    field_npz: Any,
-    key: str,
-    points: np.ndarray,
-) -> np.ndarray:
-    dims = tuple(int(v) for v in np.asarray(field_npz["grid_dims"], dtype=np.int64).tolist())
-    values = np.asarray(field_npz[key], dtype=np.complex128).reshape(*dims, 3)
-    coords = np.asarray(field_npz["coords_physical"], dtype=float)
-    axes = (
-        _axis_from_coords(coords, 0),
-        _axis_from_coords(coords, 1),
-        _axis_from_coords(coords, 2),
-    )
-    q = _prepare_points_for_grid(points, axes)
-    out = np.zeros((q.shape[0], 3), dtype=np.complex128)
-    for comp in range(3):
-        re_interp = RegularGridInterpolator(
-            axes,
-            values[..., comp].real,
-            bounds_error=False,
-            fill_value=np.nan,
-        )
-        im_interp = RegularGridInterpolator(
-            axes,
-            values[..., comp].imag,
-            bounds_error=False,
-            fill_value=np.nan,
-        )
-        out[:, comp] = re_interp(q) + 1j * im_interp(q)
-    return out
-
-
 def _complex_similarity_metrics(model: np.ndarray, reference: np.ndarray) -> dict[str, Any]:
     a = np.asarray(model, dtype=np.complex128).reshape(-1)
     b = np.asarray(reference, dtype=np.complex128).reshape(-1)
@@ -721,7 +676,7 @@ def _complex_similarity_metrics(model: np.ndarray, reference: np.ndarray) -> dic
 
 def _vector_intensity_plane(values: np.ndarray, dims: tuple[int, int, int]) -> np.ndarray:
     # MSTM near-field rows are emitted in Fortran-style traversal order.
-    # All interpolated comparison arrays are built in the same reference-point order,
+    # Pyceles and MSTM arrays are evaluated on the same reference-point order,
     # so we preserve that ordering when regridding for visualization.
     tensor = np.asarray(values, dtype=np.complex128).reshape(*dims, 3, order="F")
     intensity = np.sum(np.abs(tensor) ** 2, axis=-1)
@@ -922,7 +877,11 @@ def _save_pyceles_periodic_npz(path: Path, periodic: Any) -> None:
 
 
 def _run_pyceles_case(
-    case: PeriodicBenchmarkCase, outdir_case: Path, *, nearfield_bmax: float | None
+    case: PeriodicBenchmarkCase,
+    outdir_case: Path,
+    *,
+    nearfield_bmax: float | None,
+    nearfield_reference: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     import pyceles as pcl
 
@@ -990,7 +949,19 @@ def _run_pyceles_case(
     run_te = runs["te"]
     run_tm = runs["tm"]
     for slice_cfg in slice_jobs:
-        coords, dims, min_b, max_b = _grid_payload(slice_cfg)
+        ref_meta = None if nearfield_reference is None else nearfield_reference.get(slice_cfg.name)
+        if ref_meta is None:
+            coords, dims, min_b, max_b = _grid_payload(slice_cfg)
+        else:
+            coords = np.asarray(ref_meta["coords_physical"], dtype=float)
+            dims_arr = np.asarray(ref_meta["grid_dims"], dtype=np.int64).reshape(3)
+            dims = np.asarray(
+                (int(dims_arr[0]), int(dims_arr[1]), int(dims_arr[2])), dtype=np.int64
+            )
+            min_dimless = np.asarray(ref_meta["grid_min_dimless"], dtype=float).reshape(3)
+            max_dimless = np.asarray(ref_meta["grid_max_dimless"], dtype=float).reshape(3)
+            min_b = np.asarray([float(v) / float(k0) for v in min_dimless], dtype=float)
+            max_b = np.asarray([float(v) / float(k0) for v in max_dimless], dtype=float)
         try:
             nf_te = pcl.compute_periodic_near_field(
                 run_te,
@@ -1040,6 +1011,7 @@ def _run_pyceles_case(
             "field_kind": "total (periodic near-field evaluator)",
             "field_bmax": None if nearfield_bmax is None else float(nearfield_bmax),
             "periodic_consistency": "Automatic exterior/interior periodic evaluator dispatch",
+            "grid_source": "mstm_reference" if ref_meta is not None else "pyceles_slice_config",
             "nonfinite_values": {
                 "E_par": _count_nonfinite_complex(e_par),
                 "H_par": _count_nonfinite_complex(h_par),
@@ -1119,6 +1091,7 @@ def run_case(case: PeriodicBenchmarkCase, cfg: RunConfig) -> dict[str, Any]:
     _save_periodic_scattering_npz(scattering_npz, main_output["periodic_scattering"])
 
     nearfield_artifacts: dict[str, dict[str, Any]] = {}
+    nearfield_reference: dict[str, dict[str, Any]] = {}
     for tag, _ in nf_jobs:
         nf_data = workdir_case / f"mstm_periodic_nf_{tag}_field.dat"
         nf_out = workdir_case / f"mstm_periodic_nf_{tag}.dat"
@@ -1126,6 +1099,14 @@ def run_case(case: PeriodicBenchmarkCase, cfg: RunConfig) -> dict[str, Any]:
         nf_npz = outdir_case / f"nearfield_{tag}.npz"
         _save_nearfield_npz(nf_npz, nf_parsed, case.vacuum_wavelength)
         nf_meta = _parse_mstm_output(nf_out)
+        nearfield_reference[tag] = {
+            "coords_physical": _mstm_dimless_to_physical(
+                nf_parsed["coords_dimless"], case.vacuum_wavelength
+            ),
+            "grid_dims": np.asarray(nf_parsed["grid_dims"], dtype=np.int64).tolist(),
+            "grid_min_dimless": np.asarray(nf_parsed["grid_min_dimless"], dtype=float).tolist(),
+            "grid_max_dimless": np.asarray(nf_parsed["grid_max_dimless"], dtype=float).tolist(),
+        }
         nearfield_artifacts[tag] = {
             "npz": str(nf_npz),
             "run_number": int(nf_parsed["run_number"]),
@@ -1141,6 +1122,7 @@ def run_case(case: PeriodicBenchmarkCase, cfg: RunConfig) -> dict[str, Any]:
             case,
             outdir_case,
             nearfield_bmax=cfg.pyceles_nearfield_bmax,
+            nearfield_reference=nearfield_reference,
         )
         if cfg.run_pyceles
         else None
@@ -1176,7 +1158,10 @@ def _compare_and_plot_bipanel_nearfield(
     report: dict[str, Any] = {
         "case": str(summary.get("case", {}).get("name", "")),
         "reference": "mstm",
-        "notes": ["Pyceles nearfield payload uses automatic periodic exterior/interior dispatch."],
+        "notes": [
+            "Pyceles nearfield payload uses automatic periodic exterior/interior dispatch.",
+            "Pyceles nearfield maps are evaluated on the exact MSTM coordinates.",
+        ],
     }
     plot_dir = outdir_case / "bipanel_maps"
 
@@ -1211,12 +1196,26 @@ def _compare_and_plot_bipanel_nearfield(
         }
         for key in keys:
             m_vec = np.asarray(m[key], dtype=np.complex128)
-            p_vec_on_m = _interpolate_complex_vector_field(p, key, ref_points)
+            p_points = np.asarray(p["coords_physical"], dtype=float)
+            if p_points.shape != ref_points.shape or not np.allclose(
+                p_points, ref_points, rtol=0.0, atol=1e-12
+            ):
+                raise RuntimeError(
+                    f"Pyceles near-field grid for {tag} does not match the MSTM reference grid; "
+                    "benchmark comparison requires identical coordinates."
+                )
+            p_dims_arr = np.asarray(p["grid_dims"], dtype=np.int64).reshape(3)
+            p_dims = (int(p_dims_arr[0]), int(p_dims_arr[1]), int(p_dims_arr[2]))
+            if p_dims != dims:
+                raise RuntimeError(
+                    f"Pyceles near-field grid dims for {tag} do not match the MSTM reference dims: {p_dims} vs {dims}."
+                )
+            p_vec = np.asarray(p[key], dtype=np.complex128)
 
-            block["pyceles_vs_mstm"][key] = _complex_similarity_metrics(m_vec, p_vec_on_m)
+            block["pyceles_vs_mstm"][key] = _complex_similarity_metrics(m_vec, p_vec)
 
             m_int = _vector_intensity_plane(m_vec, dims)
-            p_int = _vector_intensity_plane(p_vec_on_m, dims)
+            p_int = _vector_intensity_plane(p_vec, dims)
             if generate_plots:
                 out_path = plot_dir / f"{tag}_{key}_intensity_bipanel.png"
                 _plot_bipanel_intensity(
