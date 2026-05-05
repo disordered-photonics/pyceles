@@ -365,6 +365,42 @@ def test_compute_periodic_near_field_marks_points_inside_periodic_circumspheres(
     assert not np.all(np.isfinite(nf.H_total))
 
 
+def test_compute_periodic_near_field_interior_requires_ewald_method():
+    source = PlaneWave(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        polarization="TE",
+        polar_angle=0.4,
+        azimuthal_angle=0.7,
+        focal_point=(0.0, 0.0, 0.0),
+        amplitude=1.0,
+    )
+    cfg = pcl.SimulationConfig(
+        wavelength=550.0,
+        n_medium=1.0 + 0j,
+        lmax=2,
+        source=source,
+        periodic=pcl.PeriodicSpec(
+            lattice=pcl.RectangularLattice2D(ax=700.0, ay=700.0),
+            options=pcl.PeriodicOptions(method="directsum", output_bmax=0.05),
+        ),
+        solver_method="direct",
+        verbose=False,
+    )
+    run = pcl.Simulation(
+        cfg,
+        particles=[
+            Sphere(position=(220.0, 180.0, 140.0), radius=90.0, refractive_index=1.5 + 0.0j)
+        ],
+    ).run(include_farfield=False)
+    with pytest.raises(NotImplementedError, match=r"requires `periodic\.options\.method='ewald'`"):
+        pcl.compute_periodic_near_field(
+            run,
+            points=np.array([[0.0, 0.0, 120.0]], dtype=float),
+            channel="mixed",
+        )
+
+
 def test_periodic_supercell_replication_matches_fundamental_cell_observables():
     wavelength = 550.0
     n_medium = 1.0 + 0j

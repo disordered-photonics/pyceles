@@ -17,7 +17,6 @@ from pyceles.core.periodic.scalar import (
     upper_gamma_sequence,
 )
 from pyceles.core.periodic.special import shifted_delta_sequence, shifted_reciprocal_regime
-from pyceles.core.periodic.structural import direct_structural_sums_2d
 from pyceles.core.spherical import legendre_normalized_trigon
 from pyceles.core.translation import translation_ab5_table
 
@@ -545,52 +544,36 @@ def _periodic_local_regular_l1_coeffs(
     coeff_arr = np.asarray(coeffs, dtype=np.complex128).reshape(pos.shape[0], nm)
     lmax_struct, _m_offset, kernel, _row_idx = _l1_projection_data(lmax_i)
     method = str(periodic.options.method)
-    batch = max(1, int(point_batch_size))
-
-    if method == "ewald":
-        eta = (
-            default_ewald_eta(periodic.lattice)
-            if periodic.options.eta is None
-            else float(periodic.options.eta)
+    if method != "ewald":
+        raise NotImplementedError(
+            "Periodic in-slab near-field evaluation currently requires "
+            "`periodic.options.method='ewald'`."
         )
-        for s in range(0, pts.shape[0], batch):
-            e = min(pts.shape[0], s + batch)
-            pts_batch = np.asarray(pts[s:e], dtype=float)
-            acc = np.zeros((pts_batch.shape[0], 6), dtype=np.complex128)
-            for j in range(pos.shape[0]):
-                sums = _ewald_structural_sums_batch(
-                    lmax_struct=lmax_struct,
-                    k=float(k),
-                    destinations=pts_batch,
-                    source=pos[j],
-                    lattice=periodic.lattice,
-                    k_parallel=k_parallel,
-                    eta=float(eta),
-                    real_shells=int(periodic.options.real_shells),
-                    reciprocal_shells=int(periodic.options.reciprocal_shells),
-                )
-                acc += _reduce_structural_sums_to_l1(sums, coeff_arr[j], kernel=kernel)
-            out[s:e, :] = acc
-        return out
 
-    # Direct-sum remains a slower oracle path. It is retained for debugging and
-    # tests, but the production benchmark path should use Ewald.
-    for i, dst in enumerate(pts):
-        acc = np.zeros((6,), dtype=np.complex128)
-        for j, src in enumerate(pos):
-            sums = direct_structural_sums_2d(
-                lmax=lmax_struct,
+    batch = max(1, int(point_batch_size))
+    eta = (
+        default_ewald_eta(periodic.lattice)
+        if periodic.options.eta is None
+        else float(periodic.options.eta)
+    )
+    for s in range(0, pts.shape[0], batch):
+        e = min(pts.shape[0], s + batch)
+        pts_batch = np.asarray(pts[s:e], dtype=float)
+        acc = np.zeros((pts_batch.shape[0], 6), dtype=np.complex128)
+        for j in range(pos.shape[0]):
+            sums = _ewald_structural_sums_batch(
+                lmax_struct=lmax_struct,
                 k=float(k),
-                destination=dst,
-                source=src,
+                destinations=pts_batch,
+                source=pos[j],
                 lattice=periodic.lattice,
                 k_parallel=k_parallel,
-                window=int(periodic.options.directsum_window),
-                exclude_zero_shift=False,
-                dtype=np.complex128,
+                eta=float(eta),
+                real_shells=int(periodic.options.real_shells),
+                reciprocal_shells=int(periodic.options.reciprocal_shells),
             )
-            acc += _reduce_structural_sums_to_l1(sums[None, ...], coeff_arr[j], kernel=kernel)[0]
-        out[i, :] = acc
+            acc += _reduce_structural_sums_to_l1(sums, coeff_arr[j], kernel=kernel)
+        out[s:e, :] = acc
     return out
 
 
