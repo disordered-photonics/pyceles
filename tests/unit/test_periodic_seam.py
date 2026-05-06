@@ -13,7 +13,10 @@ from pyceles.core.periodic.ewald import periodic_ewald_block
 from pyceles.core.translation import translation_ab5_table
 from pyceles.io import load_periodic_h5, save_periodic_h5
 from pyceles.simulation import Simulation, SimulationConfig
-from pyceles.simulation.solve import periodic_shared_k_parallel
+from pyceles.simulation.solve import (
+    _assemble_dense_operator_for_prepared,
+    periodic_shared_k_parallel,
+)
 
 
 def _plane_wave(
@@ -73,6 +76,15 @@ def test_periodic_config_accepts_rectangular_lattice_spec() -> None:
     assert cfg.periodic.lattice.area == 120_000.0
 
 
+def test_periodic_options_default_to_adaptive_ewald_shells() -> None:
+    options = pcl.PeriodicOptions()
+
+    assert options.real_shells is None
+    assert options.reciprocal_shells is None
+    assert options.shell_tolerance == pytest.approx(1.0e-10)
+    assert options.max_shells == 32
+
+
 def test_periodic_options_reject_invalid_numerical_policy() -> None:
     with pytest.raises(ValueError, match="eta"):
         pcl.PeriodicOptions(eta=-0.1)
@@ -82,6 +94,12 @@ def test_periodic_options_reject_invalid_numerical_policy() -> None:
         pcl.PeriodicOptions(reciprocal_shells=1.5)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="directsum_window"):
         pcl.PeriodicOptions(directsum_window=-1)
+    with pytest.raises(ValueError, match="shell_tolerance"):
+        pcl.PeriodicOptions(shell_tolerance=0.0)
+    with pytest.raises(ValueError, match="max_shells"):
+        pcl.PeriodicOptions(max_shells=-1)
+    with pytest.raises(ValueError, match="max_shells"):
+        pcl.PeriodicOptions(max_shells=0)
     with pytest.raises(ValueError, match="output_bmax"):
         pcl.PeriodicOptions(output_bmax=0.0)
 
@@ -288,6 +306,7 @@ def test_periodic_ewald_coupling_populate_fills_private_block_cache() -> None:
         ],
         n_medium=1.0 + 0j,
         radial_lut_dr=1.0,
+        cache_translation_blocks=True,
         periodic=spec,
         k_parallel=pcl.core.plane_wave_k_parallel(source),
         show_progress=False,
@@ -297,6 +316,67 @@ def test_periodic_ewald_coupling_populate_fills_private_block_cache() -> None:
     prepared.populate_coupling(show_progress=False)
 
     assert set(prepared.coupling._ewald_block_cache) == {(0, 0), (0, 1), (1, 0), (1, 1)}
+
+
+def test_periodic_ewald_apply_keeps_block_cache_empty_when_disabled() -> None:
+    spec = pcl.PeriodicSpec(
+        lattice=pcl.RectangularLattice2D(360.0, 390.0),
+        options=pcl.PeriodicOptions(method="ewald", eta=0.02, real_shells=2, reciprocal_shells=2),
+    )
+    source = _plane_wave(polar_angle=0.2, azimuthal_angle=0.1)
+    prepared = prepare_matvec(
+        lmax=1,
+        k=2.0 * np.pi / 550.0,
+        particles=[_sphere(radius=10.0), _sphere(radius=9.0, x=70.0)],
+        n_medium=1.0 + 0j,
+        radial_lut_dr=1.0,
+        cache_translation_blocks=False,
+        periodic=spec,
+        k_parallel=pcl.core.plane_wave_k_parallel(source),
+        show_progress=False,
+    )
+    assert isinstance(prepared.coupling, PeriodicCouplingOperator)
+    assert prepared.coupling._ewald_block_cache == {}
+    x = (np.arange(12, dtype=np.float64) + 0.3j).astype(np.complex128)
+    _ = prepared.apply_W(x)
+    assert prepared.coupling._ewald_block_cache == {}
+
+
+def test_periodic_dense_assembly_uses_temporary_block_cache_only() -> None:
+    spec = pcl.PeriodicSpec(
+        lattice=pcl.RectangularLattice2D(360.0, 390.0),
+        options=pcl.PeriodicOptions(method="ewald", eta=0.02, real_shells=2, reciprocal_shells=2),
+    )
+    source = _plane_wave(polar_angle=0.2, azimuthal_angle=0.1)
+    prepared = prepare_matvec(
+        lmax=1,
+        k=2.0 * np.pi / 550.0,
+        particles=[_sphere(radius=10.0), _sphere(radius=9.0, x=70.0)],
+        n_medium=1.0 + 0j,
+        radial_lut_dr=1.0,
+        cache_translation_blocks=False,
+        periodic=spec,
+        k_parallel=pcl.core.plane_wave_k_parallel(source),
+        show_progress=False,
+    )
+    assert isinstance(prepared.coupling, PeriodicCouplingOperator)
+    sentinel_cache = {(99, 99): np.eye(n_modes(1), dtype=np.complex128)}
+    prepared.coupling._ewald_block_cache = dict(sentinel_cache)
+
+    dense = _assemble_dense_operator_for_prepared(
+        prepared=prepared,
+        A_mv=prepared.apply_A,
+        n=2 * n_modes(1),
+        dtype=np.dtype(np.complex128),
+        show_progress=False,
+    )
+
+    assert dense.shape == (2 * n_modes(1), 2 * n_modes(1))
+    assert prepared.coupling.cache_blocks is False
+    assert set(prepared.coupling._ewald_block_cache) == set(sentinel_cache)
+    np.testing.assert_array_equal(
+        prepared.coupling._ewald_block_cache[(99, 99)], sentinel_cache[(99, 99)]
+    )
 
 
 def test_prepare_matvec_periodic_does_not_build_radial_lut(

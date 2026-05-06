@@ -20,8 +20,23 @@ def validate_shell_count(value: int, *, name: str) -> int:
     return shells
 
 
-def square_shell_indices(shell: int) -> tuple[tuple[int, int], ...]:
-    """Return rectangular-lattice index pairs on one square shell."""
+def validate_optional_shell_count(value: int | None, *, name: str) -> int | None:
+    """Validate one optional nonnegative shell count."""
+    if value is None:
+        return None
+    return validate_shell_count(value, name=name)
+
+
+def validate_shell_tolerance(value: float) -> float:
+    """Validate the adaptive shell-accumulation tolerance."""
+    tol = float(value)
+    if not np.isfinite(tol) or tol <= 0.0:
+        raise ValueError(f"`shell_tolerance` must be finite and positive. Got {value!r}.")
+    return tol
+
+
+def chebyshev_shell_indices(shell: int) -> tuple[tuple[int, int], ...]:
+    """Return index pairs on one rectangular-lattice Chebyshev shell."""
     s = int(shell)
     if s < 0:
         raise ValueError(f"`shell` must be >= 0. Got {shell!r}.")
@@ -43,7 +58,7 @@ def factorial_int(value: int | np.integer) -> int:
 
 
 def structural_sum_m_normalization(order: int) -> float:
-    """Return the SMUTHI-to-pyceles scalar normalization for order `M`."""
+    """Return the SMUTHI-to-pyceles scalar structural-sum normalization for order `M`."""
     m = int(order)
     if m >= 0:
         return math.sqrt(2.0 * math.pi) * ((-1.0) ** (-m))
@@ -69,7 +84,7 @@ def upper_gamma_sequence(max_index: int, z: Array) -> Array:
 
 
 def real_integral_sequence(degree: int, eta: float, k: float, radii: Array) -> Array:
-    """Evaluate the real-space integral sequence used by the Kambe summand."""
+    """Evaluate the real-space integral sequence used by Ewald summands."""
     l = int(degree)
     r = np.asarray(radii, dtype=float).reshape(-1)
     if np.any(r <= 0.0):

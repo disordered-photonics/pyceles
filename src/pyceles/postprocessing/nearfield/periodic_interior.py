@@ -13,17 +13,11 @@ from pyceles.core.particles import (
     particle_contains_points,
 )
 from pyceles.core.periodic import PeriodicSpec, plane_wave_k_parallel
-from pyceles.core.periodic.ewald import default_ewald_eta
-from pyceles.core.periodic.scalar import (
-    factorial_int,
-    real_integral_sequence,
-    reciprocal_gamma,
-    square_shell_indices,
-    structural_sum_m_normalization,
-    upper_gamma_sequence,
+from pyceles.core.periodic.ewald import (
+    EwaldShellWorkspace,
+    default_ewald_eta,
+    ewald_structural_sums_2d_batch,
 )
-from pyceles.core.periodic.special import shifted_delta_sequence, shifted_reciprocal_regime
-from pyceles.core.spherical import legendre_normalized_trigon
 from pyceles.core.translation import translation_ab5_table
 
 from .classification import InternalPointClassification
@@ -189,188 +183,6 @@ def _reduce_structural_sums_to_l1(
     )
 
 
-def _ewald_structural_sums_batch(
-    *,
-    lmax_struct: int,
-    k: float,
-    destinations: np.ndarray,
-    source: np.ndarray,
-    lattice,
-    k_parallel: np.ndarray,
-    eta: float,
-    real_shells: int,
-    reciprocal_shells: int,
-) -> np.ndarray:
-    """Vectorized batch of pyceles-normalized scalar structural sums."""
-    dest = np.asarray(destinations, dtype=float).reshape(-1, 3)
-    source_arr = np.asarray(source, dtype=float).reshape(3)
-    n_points = int(dest.shape[0])
-    order = 2 * int(lmax_struct)
-    offset = order
-    sums = np.zeros((n_points, order + 1, 2 * order + 1), dtype=np.complex128)
-    if n_points == 0:
-        return sums
-
-    c = source_arr[None, :] - dest
-    cxy = np.asarray(c[:, :2], dtype=float)
-    cz = np.asarray(c[:, 2], dtype=float)
-    kp0 = np.asarray(k_parallel, dtype=float).reshape(2)
-
-    # Reciprocal-space part: reuse shell geometry, phases, delta-sequences and
-    # incomplete-gamma tables across all `(L, M)` channels.
-    max_same_n = max(0, order // 2)
-    unique_cz, inverse_cz = np.unique(cz, return_inverse=True)
-    for shell in range(int(reciprocal_shells) + 1):
-        indices = square_shell_indices(shell)
-        reciprocal = np.asarray([p * lattice.b1 + q * lattice.b2 for p, q in indices], dtype=float)
-        kgt = kp0[None, :] + reciprocal
-        rho = np.linalg.norm(kgt, axis=1)
-        phi = np.arctan2(kgt[:, 1], kgt[:, 0])
-        gamma = reciprocal_gamma(float(k), rho)
-        phase_all = np.exp(-1j * (cxy @ kgt.T))
-        exp_m_phi = {m: np.exp(1j * m * phi) for m in range(-order, order + 1)}
-
-        xarg = -(gamma * gamma) / (4.0 * float(eta) * float(eta))
-        gamma_fun = upper_gamma_sequence(max_same_n, xarg)
-
-        for group_id, cz_val in enumerate(unique_cz):
-            point_mask = inverse_cz == group_id
-            if not np.any(point_mask):
-                continue
-            phase = phase_all[point_mask]
-            cz_f = float(cz_val)
-            same_plane = np.isclose(cz_f, 0.0, atol=0.0, rtol=0.0)
-            if same_plane:
-                for degree in range(order + 1):
-                    for m in range(-degree, degree + 1):
-                        if (degree - abs(m)) % 2:
-                            continue
-                        root = (
-                            np.sqrt(2 * degree + 1.0)
-                            * np.sqrt(factorial_int(degree - m))
-                            * np.sqrt(factorial_int(degree + m))
-                        )
-                        prefactor = (
-                            (1j) ** m
-                            * root
-                            / (lattice.area * float(k) * (2.0 * float(k)) ** degree)
-                        )
-                        n_vals = np.arange((degree - abs(m)) // 2 + 1, dtype=np.int64)
-                        inner = np.zeros_like(gamma, dtype=np.complex128)
-                        for n in n_vals:
-                            denom = (
-                                factorial_int(n)
-                                * factorial_int((degree + m) // 2 - n)
-                                * factorial_int((degree - m) // 2 - n)
-                            )
-                            inner += (
-                                gamma_fun[:, int(n)]
-                                * gamma ** (2 * int(n) - 1)
-                                * rho ** (degree - 2 * int(n))
-                                / denom
-                            )
-                        vec = exp_m_phi[m] * inner
-                        sums[point_mask, degree, m + offset] += (
-                            structural_sum_m_normalization(m) * prefactor * (phase @ vec)
-                        )
-                continue
-
-            regime = shifted_reciprocal_regime(gamma, cz_f)
-            if regime == "rayleigh_limit":
-                raise ValueError(
-                    "Periodic interior evaluator reached a Rayleigh-threshold shifted "
-                    "reciprocal limit. Use the same-plane path when applicable, or move "
-                    "the evaluation point away from gamma*z_offset == 0 until a limiting "
-                    "formula is implemented."
-                )
-            delta_full = shifted_delta_sequence(order, gamma, cz_f, float(eta))
-            gamma_over_k = gamma / float(k)
-            for degree in range(order + 1):
-                for m in range(-degree, degree + 1):
-                    root = (
-                        np.sqrt(2 * degree + 1.0)
-                        * np.sqrt(factorial_int(degree - m))
-                        * np.sqrt(factorial_int(degree + m))
-                    )
-                    prefactor = (
-                        (-1j) ** m
-                        * root
-                        / (((-2.0) ** degree) * lattice.area * float(k) * float(k))
-                    )
-                    n_vals = np.arange(0, degree - abs(m) + 1, dtype=np.int64)
-                    if n_vals.size == 0:
-                        continue
-                    inner = np.zeros((rho.size, n_vals.size), dtype=np.complex128)
-                    for n in n_vals:
-                        s_vals = np.arange(
-                            int(n), min(degree - abs(m), 2 * int(n)) + 1, dtype=np.int64
-                        )
-                        s_vals = (
-                            s_vals[s_vals % 2 == 1]
-                            if (degree - abs(m)) % 2
-                            else s_vals[s_vals % 2 == 0]
-                        )
-                        if s_vals.size == 0:
-                            continue
-                        terms = np.zeros_like(rho, dtype=np.complex128)
-                        for s in s_vals:
-                            denom = (
-                                factorial_int(2 * int(n) - int(s))
-                                * factorial_int(int(s) - int(n))
-                                * factorial_int((degree + abs(m) - int(s)) // 2)
-                                * factorial_int((degree - abs(m) - int(s)) // 2)
-                            )
-                            terms += (
-                                (-float(k) * cz_f) ** (2 * int(n) - int(s))
-                                * (rho / float(k)) ** (degree - int(s))
-                                / denom
-                            )
-                        inner[:, int(n)] = terms
-                    vec = exp_m_phi[m] * np.sum(
-                        gamma_over_k[:, None] ** (2 * n_vals - 1) * delta_full[:, n_vals] * inner,
-                        axis=1,
-                    )
-                    sums[point_mask, degree, m + offset] += (
-                        structural_sum_m_normalization(m) * prefactor * (phase @ vec)
-                    )
-
-    # Real-space part: reuse shell phases and vectorized normalized Legendre values.
-    for shell in range(int(real_shells) + 1):
-        indices = square_shell_indices(shell)
-        shifts = np.asarray([p * lattice.a1 + q * lattice.a2 for p, q in indices], dtype=float)
-        shifted = -(shifts[None, :, :] + c[:, None, :])
-        radii = np.linalg.norm(shifted, axis=2)
-        mask = radii > 0.0
-        if not np.any(mask):
-            continue
-        point_idx, shell_idx = np.nonzero(mask)
-        shifted_valid = shifted[point_idx, shell_idx, :]
-        radii_valid = radii[point_idx, shell_idx]
-        ct = shifted_valid[:, 2] / radii_valid
-        st = np.sqrt(np.maximum(0.0, 1.0 - ct * ct))
-        phi = np.arctan2(shifted_valid[:, 1], shifted_valid[:, 0])
-        plm = np.asarray(legendre_normalized_trigon(ct, st, max(1, order)), dtype=np.float64)
-        phase_shell = np.exp(1j * (np.asarray(shifts[shell_idx, :2], dtype=float) @ kp0))
-        exp_m_phi = {m: np.exp(1j * m * phi) for m in range(-order, order + 1)}
-        kz_r = float(k) * radii_valid
-        for degree in range(order + 1):
-            integral = (0.5) ** (degree + 1.5) * real_integral_sequence(
-                degree, float(eta), float(k), radii_valid
-            )
-            radial = phase_shell * kz_r**degree * integral
-            for m in range(-degree, degree + 1):
-                if np.all(np.isclose(cz, 0.0, atol=0.0, rtol=0.0)) and (degree - abs(m)) % 2:
-                    continue
-                angular = plm[degree, abs(m), :] * exp_m_phi[m] / structural_sum_m_normalization(m)
-                contrib = -1j * np.sqrt(2.0 / np.pi) * radial * angular
-                np.add.at(
-                    sums[:, degree, m + offset],
-                    point_idx,
-                    structural_sum_m_normalization(m) * contrib,
-                )
-    return sums
-
-
 def _periodic_local_regular_l1_coeffs(
     *,
     points: np.ndarray,
@@ -410,12 +222,18 @@ def _periodic_local_regular_l1_coeffs(
         if periodic.options.eta is None
         else float(periodic.options.eta)
     )
+    workspace = EwaldShellWorkspace(
+        lattice=periodic.lattice,
+        k=float(k),
+        k_parallel=np.asarray(k_parallel, dtype=float).reshape(2),
+        eta=float(eta),
+    )
     for s in range(0, pts.shape[0], batch):
         e = min(pts.shape[0], s + batch)
         pts_batch = np.asarray(pts[s:e], dtype=float)
         acc = np.zeros((pts_batch.shape[0], 6), dtype=np.complex128)
         for j in range(pos.shape[0]):
-            sums = _ewald_structural_sums_batch(
+            sums = ewald_structural_sums_2d_batch(
                 lmax_struct=lmax_struct,
                 k=float(k),
                 destinations=pts_batch,
@@ -423,8 +241,11 @@ def _periodic_local_regular_l1_coeffs(
                 lattice=periodic.lattice,
                 k_parallel=k_parallel,
                 eta=float(eta),
-                real_shells=int(periodic.options.real_shells),
-                reciprocal_shells=int(periodic.options.reciprocal_shells),
+                real_shells=periodic.options.real_shells,
+                reciprocal_shells=periodic.options.reciprocal_shells,
+                shell_tolerance=float(periodic.options.shell_tolerance),
+                max_shells=int(periodic.options.max_shells),
+                workspace=workspace,
             )
             acc += _reduce_structural_sums_to_l1(sums, coeff_arr[j], kernel=kernel)
         out[s:e, :] = acc

@@ -17,8 +17,10 @@ class PeriodicOptions:
 
     ``eta`` is an inverse-length Ewald splitting parameter. Leaving it as
     ``None`` selects pyceles's canonical 2D rectangular-lattice default
-    ``sqrt(pi / area)``. ``real_shells`` and ``reciprocal_shells`` are
-    explicit square-shell truncation counts.
+    ``sqrt(pi / area)``. ``real_shells`` and ``reciprocal_shells`` are optional
+    explicit Chebyshev-index shell truncation counts. Leaving either as ``None``
+    enables adaptive shell accumulation with ``shell_tolerance`` and ``max_shells``
+    (used as a safety cap, not as an accuracy target).
 
     ``output_bmax`` controls optional evanescent diffraction orders in periodic
     output bases. ``None`` means propagating orders only for far-field power
@@ -28,9 +30,11 @@ class PeriodicOptions:
 
     method: Literal["ewald", "directsum"] = "ewald"
     eta: float | None = None
-    real_shells: int = 12
-    reciprocal_shells: int = 12
+    real_shells: int | None = None
+    reciprocal_shells: int | None = None
     directsum_window: int = 3
+    shell_tolerance: float = 1.0e-10
+    max_shells: int = 32
     output_bmax: float | None = None
 
     def __post_init__(self) -> None:
@@ -47,14 +51,33 @@ class PeriodicOptions:
                     f"`output_bmax` must be finite and positive when set. Got {self.output_bmax!r}."
                 )
             object.__setattr__(self, "output_bmax", bmax)
-        for name in ("real_shells", "reciprocal_shells", "directsum_window"):
+        for name in ("real_shells", "reciprocal_shells"):
+            raw = getattr(self, name)
+            if raw is None:
+                continue
+            value = int(raw)
+            if value != raw:
+                raise ValueError(f"`{name}` must be an integer or None. Got {raw!r}.")
+            if value < 0:
+                raise ValueError(f"`{name}` must be >= 0 when set. Got {raw!r}.")
+            object.__setattr__(self, name, value)
+        for name in ("directsum_window", "max_shells"):
             raw = getattr(self, name)
             value = int(raw)
             if value != raw:
                 raise ValueError(f"`{name}` must be an integer. Got {raw!r}.")
-            if value < 0:
+            if name == "max_shells":
+                if value <= 0:
+                    raise ValueError(f"`{name}` must be > 0. Got {raw!r}.")
+            elif value < 0:
                 raise ValueError(f"`{name}` must be >= 0. Got {raw!r}.")
             object.__setattr__(self, name, value)
+        shell_tolerance = float(self.shell_tolerance)
+        if not np.isfinite(shell_tolerance) or shell_tolerance <= 0.0:
+            raise ValueError(
+                f"`shell_tolerance` must be finite and positive. Got {self.shell_tolerance!r}."
+            )
+        object.__setattr__(self, "shell_tolerance", shell_tolerance)
 
 
 @dataclass(frozen=True)

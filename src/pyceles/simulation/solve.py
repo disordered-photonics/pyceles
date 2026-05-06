@@ -12,6 +12,7 @@ from pyceles._dtypes import resolve_compute_accum_dtypes
 from pyceles.core.indexing import n_modes
 from pyceles.core.operators import (
     PairwiseCouplingOperator,
+    PeriodicCouplingOperator,
     PreparedOperator,
     assemble_dense_A_numpy,
     prepare_matvec,
@@ -57,6 +58,48 @@ def _assemble_dense_operator_via_matvec(
     for j in col_iter:
         A[:, j] = np.asarray(A_mv(eye[:, j]), dtype=dtype)
     return A
+
+
+def _assemble_dense_operator_for_prepared(
+    *,
+    prepared: PreparedOperator,
+    A_mv,
+    n: int,
+    dtype: np.dtype,
+    show_progress: bool,
+) -> np.ndarray:
+    """Assemble dense `A` while avoiding accidental periodic Ewald recomputation."""
+    coupling = prepared.coupling
+    if (
+        isinstance(coupling, PeriodicCouplingOperator)
+        and coupling.periodic.options.method == "ewald"
+        and not coupling.cache_blocks
+    ):
+        # Dense assembly applies `A_mv` once per basis vector. Temporarily enabling
+        # private Ewald block reuse avoids recomputing all pair blocks for every
+        # column while keeping iterative default behavior (`cache_blocks=False`).
+        previous_cache_blocks = coupling.cache_blocks
+        previous_block_cache = coupling._ewald_block_cache
+        assembly_block_cache: dict[tuple[int, int], np.ndarray] = {}
+        coupling.cache_blocks = True
+        coupling._ewald_block_cache = assembly_block_cache
+        try:
+            return _assemble_dense_operator_via_matvec(
+                A_mv,
+                n=n,
+                dtype=dtype,
+                show_progress=show_progress,
+            )
+        finally:
+            assembly_block_cache.clear()
+            coupling.cache_blocks = previous_cache_blocks
+            coupling._ewald_block_cache = previous_block_cache
+    return _assemble_dense_operator_via_matvec(
+        A_mv,
+        n=n,
+        dtype=dtype,
+        show_progress=show_progress,
+    )
 
 
 if TYPE_CHECKING:
@@ -288,8 +331,9 @@ def solve_sources_core(
                             raise RuntimeError(
                                 "Internal error: direct dense assembly requires prepared A_mv."
                             )
-                        A_dense = _assemble_dense_operator_via_matvec(
-                            A_mv,
+                        A_dense = _assemble_dense_operator_for_prepared(
+                            prepared=prepared,
+                            A_mv=A_mv,
                             n=unknowns,
                             dtype=np.dtype(compute_dtype),
                             show_progress=bool(cfg.verbose),

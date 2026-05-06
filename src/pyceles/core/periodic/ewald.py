@@ -3,27 +3,174 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass, field
 
 import numpy as np
 import numpy.typing as npt
 
 from pyceles.core.indexing import n_modes
 from pyceles.core.lattice import RectangularLattice2D
-from pyceles.core.spherical import legendre_normalized_trigon_scalar
+from pyceles.core.spherical import (
+    legendre_normalized_trigon,
+    legendre_normalized_trigon_scalar,
+)
 
 from .scalar import (
+    chebyshev_shell_indices,
     factorial_int,
     real_integral_sequence,
     reciprocal_gamma,
-    square_shell_indices,
     structural_sum_m_normalization,
     upper_gamma_sequence,
-    validate_shell_count,
 )
-from .special import shifted_delta_sequence, upper_incomplete_gamma_int_or_halfint
+from .shells import (
+    PeriodicEwaldConvergenceError,
+    accumulate_lattice_shell_series,
+    make_lattice_shell_control,
+)
+from .special import (
+    shifted_delta_sequence,
+    shifted_reciprocal_regime,
+    upper_incomplete_gamma_int_or_halfint,
+)
 from .structural import block_from_structural_sums
 
 Array = np.ndarray
+
+
+@dataclass(frozen=True)
+class _ReciprocalShellData:
+    kgt: Array
+    rho: Array
+    phi: Array
+    gamma: Array
+    xarg: Array
+
+
+@dataclass(frozen=True)
+class _RealShellData:
+    shifts: Array
+    shifts_xy: Array
+    phase_xy: Array
+    radii_xy: Array
+    phi_xy: Array
+
+
+@dataclass
+class EwaldShellWorkspace:
+    """Cache reusable shell geometry for periodic Ewald structural sums."""
+
+    lattice: RectangularLattice2D
+    k: float
+    k_parallel: Array
+    eta: float
+    _reciprocal_shell_cache: dict[int, _ReciprocalShellData] = field(default_factory=dict)
+    _real_shell_cache: dict[int, _RealShellData] = field(default_factory=dict)
+    _upper_gamma_cache: dict[tuple[int, int], Array] = field(default_factory=dict)
+    _propagating_min_shell_cache: dict[float, int] = field(default_factory=dict)
+
+    def reciprocal_shell(self, shell: int) -> _ReciprocalShellData:
+        cached = self._reciprocal_shell_cache.get(int(shell))
+        if cached is not None:
+            return cached
+        reciprocal = np.asarray(
+            [
+                p * self.lattice.b1 + q * self.lattice.b2
+                for p, q in chebyshev_shell_indices(int(shell))
+            ],
+            dtype=float,
+        )
+        kgt = np.asarray(self.k_parallel, dtype=float).reshape(2)[None, :] + reciprocal
+        rho = np.linalg.norm(kgt, axis=1)
+        phi = np.arctan2(kgt[:, 1], kgt[:, 0])
+        gamma = reciprocal_gamma(float(self.k), rho)
+        xarg = -(gamma * gamma) / (4.0 * float(self.eta) * float(self.eta))
+        data = _ReciprocalShellData(
+            kgt=np.asarray(kgt, dtype=float),
+            rho=np.asarray(rho, dtype=float),
+            phi=np.asarray(phi, dtype=float),
+            gamma=np.asarray(gamma, dtype=np.complex128),
+            xarg=np.asarray(xarg, dtype=np.complex128),
+        )
+        self._reciprocal_shell_cache[int(shell)] = data
+        return data
+
+    def real_shell(self, shell: int) -> _RealShellData:
+        cached = self._real_shell_cache.get(int(shell))
+        if cached is not None:
+            return cached
+        shifts = np.asarray(
+            [
+                p * self.lattice.a1 + q * self.lattice.a2
+                for p, q in chebyshev_shell_indices(int(shell))
+            ],
+            dtype=float,
+        )
+        shifts_xy = np.asarray(shifts[:, :2], dtype=float)
+        phase_xy = np.exp(1j * (shifts_xy @ np.asarray(self.k_parallel, dtype=float).reshape(2)))
+        radii_xy = np.linalg.norm(shifts_xy, axis=1)
+        phi_xy = np.arctan2(shifts_xy[:, 1], shifts_xy[:, 0])
+        data = _RealShellData(
+            shifts=np.asarray(shifts, dtype=float),
+            shifts_xy=np.asarray(shifts_xy, dtype=float),
+            phase_xy=np.asarray(phase_xy, dtype=np.complex128),
+            radii_xy=np.asarray(radii_xy, dtype=float),
+            phi_xy=np.asarray(phi_xy, dtype=float),
+        )
+        self._real_shell_cache[int(shell)] = data
+        return data
+
+    def upper_gamma(self, shell: int, max_index: int) -> Array:
+        key = (int(shell), int(max_index))
+        cached = self._upper_gamma_cache.get(key)
+        if cached is not None:
+            return cached
+        data = self.reciprocal_shell(int(shell))
+        gamma_fun = upper_gamma_sequence(int(max_index), data.xarg)
+        out = np.asarray(gamma_fun, dtype=np.complex128)
+        self._upper_gamma_cache[key] = out
+        return out
+
+    def minimum_reciprocal_shell_for_propagating_orders(self, *, rayleigh_margin: float) -> int:
+        margin = float(rayleigh_margin)
+        cached = self._propagating_min_shell_cache.get(margin)
+        if cached is not None:
+            return int(cached)
+        k_lim = float(self.k) * (1.0 + margin)
+        kp = np.asarray(self.k_parallel, dtype=float).reshape(2)
+        b1 = np.asarray(self.lattice.b1, dtype=float).reshape(2)
+        b2 = np.asarray(self.lattice.b2, dtype=float).reshape(2)
+        min_b = min(float(np.linalg.norm(b1)), float(np.linalg.norm(b2)))
+        if min_b <= 0.0:
+            raise ValueError("Reciprocal basis vectors must be nonzero.")
+        g_bound = float(np.linalg.norm(kp)) + k_lim
+        pq_max = int(np.ceil(g_bound / min_b)) + 1
+        min_shell = 0
+        for p in range(-pq_max, pq_max + 1):
+            for q in range(-pq_max, pq_max + 1):
+                g = float(p) * b1 + float(q) * b2
+                if float(np.linalg.norm(kp + g)) <= (k_lim + 1.0e-15):
+                    min_shell = max(min_shell, abs(int(p)), abs(int(q)))
+        self._propagating_min_shell_cache[margin] = int(min_shell)
+        return int(min_shell)
+
+
+def _ensure_workspace(
+    *,
+    workspace: EwaldShellWorkspace | None,
+    k: float,
+    k_parallel: Array,
+    lattice: RectangularLattice2D,
+    eta: float,
+) -> EwaldShellWorkspace:
+    if workspace is None:
+        return EwaldShellWorkspace(
+            lattice=lattice,
+            k=float(k),
+            k_parallel=np.asarray(k_parallel, dtype=float).reshape(2),
+            eta=float(eta),
+        )
+    return workspace
 
 
 def default_ewald_eta(lattice: RectangularLattice2D) -> float:
@@ -43,8 +190,11 @@ def _same_plane_reciprocal_sum(
     k_parallel: Array,
     lattice: RectangularLattice2D,
     eta: float,
-    shells: int,
+    shells: int | None,
     c_xy: Array,
+    shell_tolerance: float = 1.0e-10,
+    max_shells: int = 32,
+    workspace: EwaldShellWorkspace | None = None,
 ) -> complex:
     l = int(degree)
     m = int(order)
@@ -53,22 +203,31 @@ def _same_plane_reciprocal_sum(
     root = math.sqrt(2 * l + 1) * math.sqrt(factorial_int(l - m)) * math.sqrt(factorial_int(l + m))
     prefactor = (1j) ** m * root / (lattice.area * float(k) * (2.0 * float(k)) ** l)
 
-    kp0 = np.asarray(k_parallel, dtype=float).reshape(2)
+    ws = _ensure_workspace(
+        workspace=workspace,
+        k=float(k),
+        k_parallel=k_parallel,
+        lattice=lattice,
+        eta=float(eta),
+    )
     cxy = np.asarray(c_xy, dtype=float).reshape(2)
-    acc = 0.0 + 0.0j
-    for shell in range(validate_shell_count(shells, name="reciprocal_shells") + 1):
-        indices = square_shell_indices(shell)
-        reciprocal = np.asarray(
-            [p * lattice.b1 + q * lattice.b2 for p, q in indices],
-            dtype=float,
-        )
-        kgt = kp0 + reciprocal
-        rho = np.linalg.norm(kgt, axis=1)
-        phi = np.arctan2(kgt[:, 1], kgt[:, 0])
-        gamma = reciprocal_gamma(float(k), rho)
-        gamma_arg = -(gamma * gamma) / (4.0 * float(eta) * float(eta))
+    min_recip_shell = ws.minimum_reciprocal_shell_for_propagating_orders(rayleigh_margin=1.0e-12)
+    control = make_lattice_shell_control(
+        shells=shells,
+        max_shells=int(max_shells),
+        shell_tolerance=float(shell_tolerance),
+        name="reciprocal_shells",
+        min_converged_shell=min_recip_shell,
+    )
+
+    def shell_increment(shell: int) -> complex:
+        shell_data = ws.reciprocal_shell(shell)
+        kgt = shell_data.kgt
+        rho = shell_data.rho
+        phi = shell_data.phi
+        gamma = shell_data.gamma
         n_values = np.arange((l - abs(m)) // 2 + 1, dtype=np.int64)
-        gamma_fun = upper_gamma_sequence(int(n_values[-1]), gamma_arg)
+        gamma_fun = ws.upper_gamma(shell, int(n_values[-1]))
         inner = np.zeros_like(gamma, dtype=np.complex128)
         for n in n_values:
             denom = (
@@ -77,7 +236,14 @@ def _same_plane_reciprocal_sum(
             inner += (
                 gamma_fun[:, int(n)] * gamma ** (2 * int(n) - 1) * rho ** (l - 2 * int(n)) / denom
             )
-        acc += np.sum(np.exp(-1j * (kgt @ cxy)) * np.exp(1j * m * phi) * inner)
+        return complex(np.sum(np.exp(-1j * (kgt @ cxy)) * np.exp(1j * m * phi) * inner))
+
+    acc = accumulate_lattice_shell_series(
+        control=control,
+        name="reciprocal_shells",
+        zero=0.0 + 0.0j,
+        evaluate_shell=shell_increment,
+    )
     return complex(prefactor * acc)
 
 
@@ -89,14 +255,22 @@ def _same_plane_real_sum(
     k_parallel: Array,
     lattice: RectangularLattice2D,
     eta: float,
-    shells: int,
+    shells: int | None,
+    shell_tolerance: float = 1.0e-10,
+    max_shells: int = 32,
+    workspace: EwaldShellWorkspace | None = None,
 ) -> complex:
     l = int(degree)
     m = int(order)
     if (l - abs(m)) % 2:
         return 0.0 + 0.0j
-    if shells <= 0:
-        return 0.0 + 0.0j
+    ws = _ensure_workspace(
+        workspace=workspace,
+        k=float(k),
+        k_parallel=k_parallel,
+        lattice=lattice,
+        eta=float(eta),
+    )
 
     frac = (
         -1j
@@ -106,28 +280,42 @@ def _same_plane_real_sum(
     root = math.sqrt(2 * l + 1) * math.sqrt(factorial_int(l - m)) * math.sqrt(factorial_int(l + m))
     prefactor = frac * root
 
-    kp = np.asarray(k_parallel, dtype=float).reshape(2)
-    acc = 0.0 + 0.0j
-    for shell in range(1, validate_shell_count(shells, name="real_shells") + 1):
-        indices = square_shell_indices(shell)
-        shifts_xy = np.asarray(
-            [(p * lattice.a1 + q * lattice.a2)[:2] for p, q in indices],
-            dtype=float,
-        )
-        radii = np.linalg.norm(shifts_xy, axis=1)
-        phi = np.arctan2(shifts_xy[:, 1], shifts_xy[:, 0])
+    control = make_lattice_shell_control(
+        shells=shells,
+        max_shells=int(max_shells),
+        shell_tolerance=float(shell_tolerance),
+        name="real_shells",
+        start_shell=1,
+    )
+
+    def shell_increment(shell: int) -> complex:
+        shell_data = ws.real_shell(shell)
+        radii = shell_data.radii_xy
+        if radii.size == 0:
+            return 0.0 + 0.0j
+        phi = shell_data.phi_xy
         integral = (float(k) * float(k) / 4.0) ** (l + 0.5) * real_integral_sequence(
             l,
             float(eta),
             float(k),
             radii,
         )
-        acc += np.sum(
-            np.exp(1j * (shifts_xy @ kp + m * (phi + math.pi)))
-            / float(k)
-            * (2.0 * radii / float(k)) ** l
-            * integral
+        return complex(
+            np.sum(
+                shell_data.phase_xy
+                * np.exp(1j * m * (phi + math.pi))
+                / float(k)
+                * (2.0 * radii / float(k)) ** l
+                * integral
+            )
         )
+
+    acc = accumulate_lattice_shell_series(
+        control=control,
+        name="real_shells",
+        zero=0.0 + 0.0j,
+        evaluate_shell=shell_increment,
+    )
     return complex(prefactor * acc)
 
 
@@ -147,7 +335,10 @@ def _shifted_reciprocal_sum(
     k_parallel: Array,
     lattice: RectangularLattice2D,
     eta: float,
-    shells: int,
+    shells: int | None,
+    shell_tolerance: float = 1.0e-10,
+    max_shells: int = 32,
+    workspace: EwaldShellWorkspace | None = None,
 ) -> complex:
     l = int(degree)
     m = int(order)
@@ -160,25 +351,37 @@ def _shifted_reciprocal_sum(
             k_parallel=k_parallel,
             lattice=lattice,
             eta=float(eta),
-            shells=int(shells),
+            shells=shells,
             c_xy=c[:2],
+            shell_tolerance=float(shell_tolerance),
+            max_shells=int(max_shells),
+            workspace=workspace,
         )
 
+    ws = _ensure_workspace(
+        workspace=workspace,
+        k=float(k),
+        k_parallel=k_parallel,
+        lattice=lattice,
+        eta=float(eta),
+    )
     root = math.sqrt(2 * l + 1) * math.sqrt(factorial_int(l - m)) * math.sqrt(factorial_int(l + m))
     prefactor = (-1j) ** m * root / (((-2.0) ** l) * lattice.area * float(k) * float(k))
+    min_recip_shell = ws.minimum_reciprocal_shell_for_propagating_orders(rayleigh_margin=1.0e-12)
+    control = make_lattice_shell_control(
+        shells=shells,
+        max_shells=int(max_shells),
+        shell_tolerance=float(shell_tolerance),
+        name="reciprocal_shells",
+        min_converged_shell=min_recip_shell,
+    )
 
-    kp0 = np.asarray(k_parallel, dtype=float).reshape(2)
-    acc = 0.0 + 0.0j
-    for shell in range(validate_shell_count(shells, name="reciprocal_shells") + 1):
-        indices = square_shell_indices(shell)
-        reciprocal = np.asarray(
-            [p * lattice.b1 + q * lattice.b2 for p, q in indices],
-            dtype=float,
-        )
-        kgt = kp0 + reciprocal
-        rho = np.linalg.norm(kgt, axis=1)
-        phi = np.arctan2(kgt[:, 1], kgt[:, 0])
-        gamma = reciprocal_gamma(float(k), rho)
+    def shell_increment(shell: int) -> complex:
+        shell_data = ws.reciprocal_shell(shell)
+        kgt = shell_data.kgt
+        rho = shell_data.rho
+        phi = shell_data.phi
+        gamma = shell_data.gamma
         n_values = np.arange(0, l - abs(m) + 1, dtype=np.int64)
         inner = np.zeros((rho.size, n_values.size), dtype=np.complex128)
         for n in n_values:
@@ -204,11 +407,20 @@ def _shifted_reciprocal_sum(
                 )
             inner[:, int(n)] = terms
         delta = shifted_delta_sequence(int(n_values[-1]), gamma, float(c[2]), float(eta))
-        acc += np.sum(
-            np.exp(-1j * (kgt @ c[:2]))
-            * np.exp(1j * m * phi)
-            * np.sum((gamma / float(k))[:, None] ** (2 * n_values - 1) * delta * inner, axis=1)
+        return complex(
+            np.sum(
+                np.exp(-1j * (kgt @ c[:2]))
+                * np.exp(1j * m * phi)
+                * np.sum((gamma / float(k))[:, None] ** (2 * n_values - 1) * delta * inner, axis=1)
+            )
         )
+
+    acc = accumulate_lattice_shell_series(
+        control=control,
+        name="reciprocal_shells",
+        zero=0.0 + 0.0j,
+        evaluate_shell=shell_increment,
+    )
     return complex(prefactor * acc)
 
 
@@ -221,7 +433,10 @@ def _shifted_real_sum(
     k_parallel: Array,
     lattice: RectangularLattice2D,
     eta: float,
-    shells: int,
+    shells: int | None,
+    shell_tolerance: float = 1.0e-10,
+    max_shells: int = 32,
+    workspace: EwaldShellWorkspace | None = None,
 ) -> complex:
     l = int(degree)
     m = int(order)
@@ -229,17 +444,29 @@ def _shifted_real_sum(
     if c[2] == 0.0 and (l - abs(m)) % 2:
         return 0.0 + 0.0j
 
-    kp = np.asarray(k_parallel, dtype=float).reshape(2)
-    acc = 0.0 + 0.0j
-    for shell in range(validate_shell_count(shells, name="real_shells") + 1):
-        indices = square_shell_indices(shell)
-        shifts = np.asarray([p * lattice.a1 + q * lattice.a2 for p, q in indices], dtype=float)
-        shifted = -(shifts + c)
+    ws = _ensure_workspace(
+        workspace=workspace,
+        k=float(k),
+        k_parallel=k_parallel,
+        lattice=lattice,
+        eta=float(eta),
+    )
+    kp = np.asarray(ws.k_parallel, dtype=float).reshape(2)
+    control = make_lattice_shell_control(
+        shells=shells,
+        max_shells=int(max_shells),
+        shell_tolerance=float(shell_tolerance),
+        name="real_shells",
+    )
+
+    def shell_increment(shell: int) -> complex:
+        shell_data = ws.real_shell(shell)
+        shifted = -(shell_data.shifts + c)
         radii = np.linalg.norm(shifted, axis=1)
         mask = radii > 0.0
         if not np.any(mask):
-            continue
-        shifts_xy = shifts[mask, :2]
+            return 0.0 + 0.0j
+        shifts_xy = shell_data.shifts_xy[mask]
         shifted = shifted[mask]
         radii = radii[mask]
         ct = shifted[:, 2] / radii
@@ -259,7 +486,16 @@ def _shifted_real_sum(
             float(k),
             radii,
         )
-        acc += np.sum(np.exp(1j * (shifts_xy @ kp)) * (float(k) * radii) ** l * angular * integral)
+        return complex(
+            np.sum(np.exp(1j * (shifts_xy @ kp)) * (float(k) * radii) ** l * angular * integral)
+        )
+
+    acc = accumulate_lattice_shell_series(
+        control=control,
+        name="real_shells",
+        zero=0.0 + 0.0j,
+        evaluate_shell=shell_increment,
+    )
     return complex(-1j * math.sqrt(2.0 / math.pi) * acc)
 
 
@@ -273,9 +509,12 @@ def ewald_structural_constant_2d(
     lattice: RectangularLattice2D,
     k_parallel: Array,
     eta: float,
-    real_shells: int,
-    reciprocal_shells: int,
+    real_shells: int | None,
+    reciprocal_shells: int | None,
+    shell_tolerance: float = 1.0e-10,
+    max_shells: int = 32,
     exclude_zero_shift: bool = False,
+    workspace: EwaldShellWorkspace | None = None,
 ) -> complex:
     """Evaluate one pyceles-normalized scalar Ewald structural constant.
 
@@ -293,6 +532,13 @@ def ewald_structural_constant_2d(
     eta_f = float(eta)
     if not np.isfinite(eta_f) or eta_f <= 0.0:
         raise ValueError(f"`eta` must be finite and positive. Got {eta!r}.")
+    ws = _ensure_workspace(
+        workspace=workspace,
+        k=float(k),
+        k_parallel=k_parallel,
+        lattice=lattice,
+        eta=eta_f,
+    )
     rvec = np.asarray(destination, dtype=float).reshape(3) - np.asarray(
         source, dtype=float
     ).reshape(3)
@@ -305,8 +551,11 @@ def ewald_structural_constant_2d(
             k_parallel=k_parallel,
             lattice=lattice,
             eta=eta_f,
-            shells=int(reciprocal_shells),
+            shells=reciprocal_shells,
             c_xy=np.zeros(2, dtype=float),
+            shell_tolerance=float(shell_tolerance),
+            max_shells=int(max_shells),
+            workspace=ws,
         ) + _same_plane_real_sum(
             l,
             m,
@@ -314,7 +563,10 @@ def ewald_structural_constant_2d(
             k_parallel=k_parallel,
             lattice=lattice,
             eta=eta_f,
-            shells=int(real_shells),
+            shells=real_shells,
+            shell_tolerance=float(shell_tolerance),
+            max_shells=int(max_shells),
+            workspace=ws,
         )
         if l == 0:
             value += _self_correction(float(k), eta_f)
@@ -327,7 +579,10 @@ def ewald_structural_constant_2d(
             k_parallel=k_parallel,
             lattice=lattice,
             eta=eta_f,
-            shells=int(reciprocal_shells),
+            shells=reciprocal_shells,
+            shell_tolerance=float(shell_tolerance),
+            max_shells=int(max_shells),
+            workspace=ws,
         ) + _shifted_real_sum(
             l,
             m,
@@ -336,7 +591,10 @@ def ewald_structural_constant_2d(
             k_parallel=k_parallel,
             lattice=lattice,
             eta=eta_f,
-            shells=int(real_shells),
+            shells=real_shells,
+            shell_tolerance=float(shell_tolerance),
+            max_shells=int(max_shells),
+            workspace=ws,
         )
     return complex(structural_sum_m_normalization(m) * value)
 
@@ -350,10 +608,13 @@ def ewald_structural_sums_2d(
     lattice: RectangularLattice2D,
     k_parallel: Array,
     eta: float,
-    real_shells: int,
-    reciprocal_shells: int,
+    real_shells: int | None,
+    reciprocal_shells: int | None,
+    shell_tolerance: float = 1.0e-10,
+    max_shells: int = 32,
     exclude_zero_shift: bool = False,
     dtype: npt.DTypeLike = np.complex128,
+    workspace: EwaldShellWorkspace | None = None,
 ) -> Array:
     """Evaluate a scalar structural table using rectangular-lattice Ewald sums."""
     out_dtype = np.dtype(dtype)
@@ -362,6 +623,13 @@ def ewald_structural_sums_2d(
         raise ValueError(f"`lmax` must be >= 0. Got {lmax!r}.")
     sums = np.zeros((order + 1, 2 * order + 1), dtype=np.complex128)
     offset = order
+    ws = _ensure_workspace(
+        workspace=workspace,
+        k=float(k),
+        k_parallel=k_parallel,
+        lattice=lattice,
+        eta=float(eta),
+    )
     for degree in range(order + 1):
         for m in range(-degree, degree + 1):
             sums[degree, m + offset] = ewald_structural_constant_2d(
@@ -373,10 +641,250 @@ def ewald_structural_sums_2d(
                 lattice=lattice,
                 k_parallel=k_parallel,
                 eta=float(eta),
-                real_shells=int(real_shells),
-                reciprocal_shells=int(reciprocal_shells),
+                real_shells=real_shells,
+                reciprocal_shells=reciprocal_shells,
+                shell_tolerance=float(shell_tolerance),
+                max_shells=int(max_shells),
                 exclude_zero_shift=bool(exclude_zero_shift),
+                workspace=ws,
             )
+    return np.asarray(sums, dtype=out_dtype)
+
+
+def ewald_structural_sums_2d_batch(
+    *,
+    lmax_struct: int,
+    k: float,
+    destinations: Array,
+    source: Array,
+    lattice: RectangularLattice2D,
+    k_parallel: Array,
+    eta: float,
+    real_shells: int | None,
+    reciprocal_shells: int | None,
+    shell_tolerance: float = 1.0e-10,
+    max_shells: int = 32,
+    dtype: npt.DTypeLike = np.complex128,
+    workspace: EwaldShellWorkspace | None = None,
+) -> Array:
+    """Evaluate batched pyceles-normalized scalar structural sums.
+
+    This helper owns the vectorized CPU reference implementation used by
+    periodic in-slab near-field evaluation. Keeping it in ``core.periodic``
+    makes the same structural-sum contract available to future accelerated
+    backends without tying it to one postprocessing module.
+    """
+    out_dtype = np.dtype(dtype)
+    dest = np.asarray(destinations, dtype=float).reshape(-1, 3)
+    source_arr = np.asarray(source, dtype=float).reshape(3)
+    n_points = int(dest.shape[0])
+    order = 2 * int(lmax_struct)
+    if order < 0:
+        raise ValueError(f"`lmax_struct` must be >= 0. Got {lmax_struct!r}.")
+    offset = order
+    sums = np.zeros((n_points, order + 1, 2 * order + 1), dtype=np.complex128)
+    if n_points == 0:
+        return np.asarray(sums, dtype=out_dtype)
+    ws = _ensure_workspace(
+        workspace=workspace,
+        k=float(k),
+        k_parallel=k_parallel,
+        lattice=lattice,
+        eta=float(eta),
+    )
+    c = source_arr[None, :] - dest
+    cxy = np.asarray(c[:, :2], dtype=float)
+    cz = np.asarray(c[:, 2], dtype=float)
+
+    reciprocal_sums = np.zeros_like(sums)
+    max_same_n = max(0, order // 2)
+    unique_cz, inverse_cz = np.unique(cz, return_inverse=True)
+    min_recip_shell = ws.minimum_reciprocal_shell_for_propagating_orders(rayleigh_margin=1.0e-12)
+    reciprocal_control = make_lattice_shell_control(
+        shells=reciprocal_shells,
+        max_shells=int(max_shells),
+        shell_tolerance=float(shell_tolerance),
+        name="reciprocal_shells",
+        min_converged_shell=min_recip_shell,
+    )
+
+    def reciprocal_increment(shell: int) -> Array:
+        shell_data = ws.reciprocal_shell(shell)
+        kgt = shell_data.kgt
+        rho = shell_data.rho
+        phi = shell_data.phi
+        gamma = shell_data.gamma
+        phase_all = np.exp(-1j * (cxy @ kgt.T))
+        exp_m_phi = {m: np.exp(1j * m * phi) for m in range(-order, order + 1)}
+        gamma_fun = ws.upper_gamma(shell, max_same_n)
+        inc = np.zeros_like(sums)
+        for group_id, cz_val in enumerate(unique_cz):
+            point_mask = inverse_cz == group_id
+            if not np.any(point_mask):
+                continue
+            phase = phase_all[point_mask]
+            cz_f = float(cz_val)
+            same_plane = np.isclose(cz_f, 0.0, atol=0.0, rtol=0.0)
+            if same_plane:
+                for degree in range(order + 1):
+                    for m in range(-degree, degree + 1):
+                        if (degree - abs(m)) % 2:
+                            continue
+                        root = (
+                            np.sqrt(2 * degree + 1.0)
+                            * np.sqrt(factorial_int(degree - m))
+                            * np.sqrt(factorial_int(degree + m))
+                        )
+                        prefactor = (
+                            (1j) ** m
+                            * root
+                            / (lattice.area * float(k) * (2.0 * float(k)) ** degree)
+                        )
+                        n_vals = np.arange((degree - abs(m)) // 2 + 1, dtype=np.int64)
+                        inner = np.zeros_like(gamma, dtype=np.complex128)
+                        for n in n_vals:
+                            denom = (
+                                factorial_int(n)
+                                * factorial_int((degree + m) // 2 - n)
+                                * factorial_int((degree - m) // 2 - n)
+                            )
+                            inner += (
+                                gamma_fun[:, int(n)]
+                                * gamma ** (2 * int(n) - 1)
+                                * rho ** (degree - 2 * int(n))
+                                / denom
+                            )
+                        vec = exp_m_phi[m] * inner
+                        inc[point_mask, degree, m + offset] += (
+                            structural_sum_m_normalization(m) * prefactor * (phase @ vec)
+                        )
+                continue
+
+            regime = shifted_reciprocal_regime(gamma, cz_f)
+            if regime == "rayleigh_limit":
+                raise ValueError(
+                    "Shifted periodic reciprocal sums are singular at gamma*z_offset == 0. "
+                    "Use the same-plane path when applicable, or move the evaluation point "
+                    "away from the Rayleigh threshold until a limiting formula is implemented."
+                )
+            delta_full = shifted_delta_sequence(order, gamma, cz_f, float(eta))
+            gamma_over_k = gamma / float(k)
+            for degree in range(order + 1):
+                for m in range(-degree, degree + 1):
+                    root = (
+                        np.sqrt(2 * degree + 1.0)
+                        * np.sqrt(factorial_int(degree - m))
+                        * np.sqrt(factorial_int(degree + m))
+                    )
+                    prefactor = (
+                        (-1j) ** m
+                        * root
+                        / (((-2.0) ** degree) * lattice.area * float(k) * float(k))
+                    )
+                    n_vals = np.arange(0, degree - abs(m) + 1, dtype=np.int64)
+                    if n_vals.size == 0:
+                        continue
+                    inner = np.zeros((rho.size, n_vals.size), dtype=np.complex128)
+                    for n in n_vals:
+                        s_vals = np.arange(
+                            int(n), min(degree - abs(m), 2 * int(n)) + 1, dtype=np.int64
+                        )
+                        s_vals = (
+                            s_vals[s_vals % 2 == 1]
+                            if (degree - abs(m)) % 2
+                            else s_vals[s_vals % 2 == 0]
+                        )
+                        if s_vals.size == 0:
+                            continue
+                        terms = np.zeros_like(rho, dtype=np.complex128)
+                        for s in s_vals:
+                            denom = (
+                                factorial_int(2 * int(n) - int(s))
+                                * factorial_int(int(s) - int(n))
+                                * factorial_int((degree + abs(m) - int(s)) // 2)
+                                * factorial_int((degree - abs(m) - int(s)) // 2)
+                            )
+                            terms += (
+                                (-float(k) * cz_f) ** (2 * int(n) - int(s))
+                                * (rho / float(k)) ** (degree - int(s))
+                                / denom
+                            )
+                        inner[:, int(n)] = terms
+                    vec = exp_m_phi[m] * np.sum(
+                        gamma_over_k[:, None] ** (2 * n_vals - 1) * delta_full[:, n_vals] * inner,
+                        axis=1,
+                    )
+                    inc[point_mask, degree, m + offset] += (
+                        structural_sum_m_normalization(m) * prefactor * (phase @ vec)
+                    )
+        return inc
+
+    reciprocal_sums = np.asarray(
+        accumulate_lattice_shell_series(
+            control=reciprocal_control,
+            name="reciprocal_shells",
+            zero=np.zeros_like(sums),
+            evaluate_shell=reciprocal_increment,
+        ),
+        dtype=np.complex128,
+    )
+
+    real_sums = np.zeros_like(sums)
+    same_plane_batch = np.all(np.isclose(cz, 0.0, atol=0.0, rtol=0.0))
+    real_control = make_lattice_shell_control(
+        shells=real_shells,
+        max_shells=int(max_shells),
+        shell_tolerance=float(shell_tolerance),
+        name="real_shells",
+    )
+
+    def real_increment(shell: int) -> Array:
+        shell_data = ws.real_shell(shell)
+        shifted = -(shell_data.shifts[None, :, :] + c[:, None, :])
+        radii = np.linalg.norm(shifted, axis=2)
+        inc = np.zeros_like(sums)
+        mask = radii > 0.0
+        if np.any(mask):
+            point_idx, shell_idx = np.nonzero(mask)
+            shifted_valid = shifted[point_idx, shell_idx, :]
+            radii_valid = radii[point_idx, shell_idx]
+            ct = shifted_valid[:, 2] / radii_valid
+            st = np.sqrt(np.maximum(0.0, 1.0 - ct * ct))
+            phi = np.arctan2(shifted_valid[:, 1], shifted_valid[:, 0])
+            plm = np.asarray(legendre_normalized_trigon(ct, st, max(1, order)), dtype=np.float64)
+            phase_shell = np.asarray(shell_data.phase_xy[shell_idx], dtype=np.complex128)
+            exp_m_phi = {m: np.exp(1j * m * phi) for m in range(-order, order + 1)}
+            kz_r = float(k) * radii_valid
+            for degree in range(order + 1):
+                integral = (0.5) ** (degree + 1.5) * real_integral_sequence(
+                    degree, float(eta), float(k), radii_valid
+                )
+                radial = phase_shell * kz_r**degree * integral
+                for m in range(-degree, degree + 1):
+                    if same_plane_batch and (degree - abs(m)) % 2:
+                        continue
+                    angular = (
+                        plm[degree, abs(m), :] * exp_m_phi[m] / structural_sum_m_normalization(m)
+                    )
+                    contrib = -1j * np.sqrt(2.0 / np.pi) * radial * angular
+                    np.add.at(
+                        inc[:, degree, m + offset],
+                        point_idx,
+                        structural_sum_m_normalization(m) * contrib,
+                    )
+        return inc
+
+    real_sums = np.asarray(
+        accumulate_lattice_shell_series(
+            control=real_control,
+            name="real_shells",
+            zero=np.zeros_like(sums),
+            evaluate_shell=real_increment,
+        ),
+        dtype=np.complex128,
+    )
+
+    sums = reciprocal_sums + real_sums
     return np.asarray(sums, dtype=out_dtype)
 
 
@@ -389,11 +897,14 @@ def periodic_ewald_block(
     lattice: RectangularLattice2D,
     k_parallel: Array,
     eta: float,
-    real_shells: int,
-    reciprocal_shells: int,
+    real_shells: int | None,
+    reciprocal_shells: int | None,
     ab5: Array,
     dtype: npt.DTypeLike = np.complex128,
+    shell_tolerance: float = 1.0e-10,
+    max_shells: int = 32,
     exclude_zero_shift: bool = False,
+    workspace: EwaldShellWorkspace | None = None,
 ) -> Array:
     """Assemble one periodic SVWF coupling block from Ewald structural constants."""
     sums = ewald_structural_sums_2d(
@@ -404,10 +915,13 @@ def periodic_ewald_block(
         lattice=lattice,
         k_parallel=k_parallel,
         eta=float(eta),
-        real_shells=int(real_shells),
-        reciprocal_shells=int(reciprocal_shells),
+        real_shells=real_shells,
+        reciprocal_shells=reciprocal_shells,
+        shell_tolerance=float(shell_tolerance),
+        max_shells=int(max_shells),
         exclude_zero_shift=bool(exclude_zero_shift),
         dtype=np.complex128,
+        workspace=workspace,
     )
     return block_from_structural_sums(
         lmax=int(lmax),
@@ -426,11 +940,14 @@ def apply_periodic_ewald_sum(
     lattice: RectangularLattice2D,
     k_parallel: Array,
     eta: float,
-    real_shells: int,
-    reciprocal_shells: int,
+    real_shells: int | None,
+    reciprocal_shells: int | None,
     ab5: Array,
     dtype: npt.DTypeLike = np.complex128,
+    shell_tolerance: float = 1.0e-10,
+    max_shells: int = 32,
     block_cache: dict[tuple[int, int], Array] | None = None,
+    workspace: EwaldShellWorkspace | None = None,
 ) -> Array:
     """Apply the Ewald Bloch image sum to stacked SVWF coefficients."""
     out_dtype = np.dtype(dtype)
@@ -439,6 +956,13 @@ def apply_periodic_ewald_sum(
     nm = n_modes(int(lmax))
     arr = np.asarray(x, dtype=out_dtype).reshape(ns, nm)
     y = np.zeros_like(arr, dtype=out_dtype)
+    ws = _ensure_workspace(
+        workspace=workspace,
+        k=float(k),
+        k_parallel=k_parallel,
+        lattice=lattice,
+        eta=float(eta),
+    )
 
     for i in range(ns):
         for j in range(ns):
@@ -453,11 +977,14 @@ def apply_periodic_ewald_sum(
                     lattice=lattice,
                     k_parallel=k_parallel,
                     eta=float(eta),
-                    real_shells=int(real_shells),
-                    reciprocal_shells=int(reciprocal_shells),
+                    real_shells=real_shells,
+                    reciprocal_shells=reciprocal_shells,
                     ab5=ab5,
                     dtype=out_dtype,
+                    shell_tolerance=float(shell_tolerance),
+                    max_shells=int(max_shells),
                     exclude_zero_shift=(i == j),
+                    workspace=ws,
                 )
                 if block_cache is not None:
                     block_cache[key] = wij
@@ -466,9 +993,12 @@ def apply_periodic_ewald_sum(
 
 
 __all__ = [
+    "EwaldShellWorkspace",
+    "PeriodicEwaldConvergenceError",
     "apply_periodic_ewald_sum",
     "default_ewald_eta",
     "ewald_structural_constant_2d",
     "ewald_structural_sums_2d",
+    "ewald_structural_sums_2d_batch",
     "periodic_ewald_block",
 ]

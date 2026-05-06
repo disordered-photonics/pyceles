@@ -258,10 +258,6 @@ def prepare_matvec(
             raise NotImplementedError("Periodic operator preparation is currently CPU/NumPy-only.")
         if coupling_name != "pairwise":
             raise NotImplementedError("Periodic MLFMM coupling is not implemented yet.")
-        if cache_translation_blocks:
-            raise NotImplementedError(
-                "Periodic coupling does not support translation-block caching yet."
-            )
         if k_parallel is None:
             raise ValueError("`k_parallel` is required when preparing a periodic operator.")
         k_parallel_arr = np.asarray(k_parallel, dtype=float).reshape(2)
@@ -307,6 +303,7 @@ def prepare_matvec(
                 periodic=periodic_spec,
                 k_parallel=k_parallel_arr,
                 dtype=op_dtype,
+                cache_blocks=bool(cache_translation_blocks),
             )
         elif coupling_name == "pairwise":
             lut = make_radial_lut()
