@@ -1,0 +1,60 @@
+# Normalize text files in the repository.
+# Git stores them and checks them out with LF unless marked binary below.
+* text=auto
+
+# Extensionless project files.
+.editorconfig          text eol=lf export-ignore
+.gitattributes         text eol=lf export-ignore
+.gitignore             text eol=lf export-ignore
+.pre-commit-config.yaml text eol=lf export-ignore
+LICENSE                text eol=lf
+
+# Source code and project metadata: always LF.
+*.py      text eol=lf diff=python
+*.pyi     text eol=lf diff=python
+*.toml    text eol=lf
+*.yaml    text eol=lf
+*.yml     text eol=lf
+*.json    text eol=lf
+*.md      text eol=lf diff=markdown
+*.rst     text eol=lf
+*.txt     text eol=lf
+*.cfg     text eol=lf
+*.ini     text eol=lf
+*.sh      text eol=lf
+
+# Jupyter notebooks are JSON; keep stable LF line endings.
+*.ipynb   text eol=lf
+
+# Scientific/data artifacts.
+*.mat     binary
+*.h5      binary
+*.hdf5    binary
+*.npy     binary
+*.npz     binary
+*.pkl     binary
+*.pickle  binary
+*.parquet binary
+
+# Images and documents.
+*.png     binary
+*.jpg     binary
+*.jpeg    binary
+*.gif     binary
+*.tif     binary
+*.tiff    binary
+*.ico     binary
+*.pdf     binary
+
+# Archives.
+*.zip     binary
+*.tar     binary
+*.gz      binary
+*.tgz     binary
+*.bz2     binary
+*.xz      binary
+*.7z      binary
+
+# Patch files should preserve their exact contents.
+*.patch   -text
+*.diff    -text
