@@ -183,6 +183,259 @@ def default_ewald_eta(lattice: RectangularLattice2D) -> float:
     return float(np.sqrt(np.pi / lattice.area))
 
 
+_ETA_PROBE_GROWTH = math.sqrt(2.0)
+_ETA_PROBE_MAX_K_FACTOR = 0.35
+_ETA_PROBE_POSITION_LIMIT = 1024
+_ETA_PROBE_STABILITY_RTOL = 1.0e-3
+
+
+def _candidate_ewald_etas(
+    *, canonical_eta: float, k: float, max_steps: int = 16
+) -> tuple[float, ...]:
+    """Return a geometric eta ladder for a cheap structural-sum preflight."""
+    canonical = float(canonical_eta)
+    if not np.isfinite(canonical) or canonical <= 0.0:
+        raise ValueError(f"`canonical_eta` must be finite and positive. Got {canonical_eta!r}.")
+    eta_ceiling = max(canonical, _ETA_PROBE_MAX_K_FACTOR * abs(float(k)))
+    candidates = [canonical]
+    eta = canonical
+    for _ in range(max(1, int(max_steps))):
+        eta_next = eta * _ETA_PROBE_GROWTH
+        if eta_next >= eta_ceiling:
+            if eta_ceiling > candidates[-1] * (1.0 + 1.0e-12):
+                candidates.append(eta_ceiling)
+            break
+        candidates.append(float(eta_next))
+        eta = float(eta_next)
+    return tuple(candidates)
+
+
+def _nearest_periodic_delta_xy(delta_xy: Array, lattice: RectangularLattice2D) -> Array:
+    out = np.asarray(delta_xy, dtype=float).reshape(2).copy()
+    ax = float(np.linalg.norm(lattice.a1))
+    ay = float(np.linalg.norm(lattice.a2))
+    if ax > 0.0:
+        out[0] -= ax * np.round(out[0] / ax)
+    if ay > 0.0:
+        out[1] -= ay * np.round(out[1] / ay)
+    return out
+
+
+def _append_eta_probe_offset(offsets: list[Array], offset: Array, *, atol: float = 1.0e-9) -> None:
+    arr = np.asarray(offset, dtype=float).reshape(3)
+    if float(np.linalg.norm(arr)) <= 0.0:
+        return
+    if not any(np.allclose(arr, old, rtol=0.0, atol=float(atol)) for old in offsets):
+        offsets.append(arr)
+
+
+def _sample_eta_probe_positions(positions: Array) -> Array:
+    pos = np.asarray(positions, dtype=float).reshape(-1, 3)
+    if pos.shape[0] <= _ETA_PROBE_POSITION_LIMIT:
+        return pos
+    indices = np.unique(np.linspace(0, pos.shape[0] - 1, _ETA_PROBE_POSITION_LIMIT, dtype=np.intp))
+    return np.asarray(pos[indices], dtype=float)
+
+
+def _representative_ewald_eta_offsets(
+    *,
+    positions: Array,
+    lattice: RectangularLattice2D,
+    k: float,
+    max_offsets: int = 8,
+) -> Array:
+    """Return a compact set of geometry offsets that stress eta stability."""
+    pos = np.asarray(positions, dtype=float).reshape(-1, 3)
+    ax = float(np.linalg.norm(lattice.a1))
+    ay = float(np.linalg.norm(lattice.a2))
+    cell = max(ax, ay, 1.0)
+    offsets: list[Array] = []
+    ns = int(pos.shape[0])
+    if ns >= 2:
+        sample = _sample_eta_probe_positions(pos)
+        best: dict[str, tuple[float, Array] | None] = {
+            "r3_min": None,
+            "xy_min": None,
+        }
+        for i in range(sample.shape[0]):
+            for j in range(i + 1, sample.shape[0]):
+                raw = sample[i] - sample[j]
+                dxy = _nearest_periodic_delta_xy(raw[:2], lattice)
+                off = np.array([dxy[0], dxy[1], raw[2]], dtype=float)
+                rxy = float(np.linalg.norm(dxy))
+                r3 = float(np.linalg.norm(off))
+                if r3 <= 0.0:
+                    continue
+                metrics = {
+                    "r3_min": r3,
+                    "xy_min": rxy if rxy > 0.0 else math.inf,
+                }
+                for key, value in metrics.items():
+                    old = best[key]
+                    if old is None or value < old[0]:
+                        best[key] = (value, off.copy())
+        for item in best.values():
+            if item is not None:
+                _append_eta_probe_offset(offsets, item[1])
+
+        order = np.argsort(pos[:, 2])
+        z_sorted = pos[order, 2]
+        dz = np.diff(z_sorted)
+        nonzero = np.flatnonzero(dz > max(1.0e-9, 1.0e-12 * cell))
+        if nonzero.size:
+            iz = int(nonzero[np.argmin(dz[nonzero])])
+            raw = pos[order[iz + 1]] - pos[order[iz]]
+            dxy = _nearest_periodic_delta_xy(raw[:2], lattice)
+            _append_eta_probe_offset(offsets, np.array([dxy[0], dxy[1], raw[2]], dtype=float))
+        z_low = int(np.argmin(pos[:, 2]))
+        z_high = int(np.argmax(pos[:, 2]))
+        if z_low != z_high:
+            raw = pos[z_high] - pos[z_low]
+            dxy = _nearest_periodic_delta_xy(raw[:2], lattice)
+            _append_eta_probe_offset(offsets, np.array([dxy[0], dxy[1], raw[2]], dtype=float))
+
+    # Single-particle and near-coincident periodic configurations do not expose
+    # these offsets through actual pairs, but they are exactly where a too-small
+    # eta can make same-plane and small-shift terms numerically fragile.
+    wavelength = 2.0 * math.pi / max(float(abs(k)), 1.0e-300)
+    near = max(0.02 * wavelength, 1.0e-6 * cell)
+    _append_eta_probe_offset(offsets, np.array([near, 0.0, 0.0], dtype=float))
+    _append_eta_probe_offset(offsets, np.array([0.0, 0.0, near], dtype=float))
+    return np.asarray(offsets[: int(max_offsets)], dtype=float).reshape(-1, 3)
+
+
+def _eta_probe_vector(
+    *,
+    eta: float,
+    offsets: Array,
+    lmax_struct: int,
+    k: float,
+    lattice: RectangularLattice2D,
+    k_parallel: Array,
+    real_shells: int,
+    reciprocal_shells: int,
+    shell_tolerance: float,
+    max_shells: int,
+) -> Array | None:
+    workspace = EwaldShellWorkspace(
+        lattice=lattice,
+        k=float(k),
+        k_parallel=np.asarray(k_parallel, dtype=float).reshape(2),
+        eta=float(eta),
+    )
+    with np.errstate(all="ignore"):
+        try:
+            sums = ewald_structural_sums_2d_batch(
+                lmax_struct=int(lmax_struct),
+                k=float(k),
+                destinations=np.asarray(offsets, dtype=float).reshape(-1, 3),
+                source=np.zeros(3, dtype=float),
+                lattice=lattice,
+                k_parallel=k_parallel,
+                eta=float(eta),
+                real_shells=int(real_shells),
+                reciprocal_shells=int(reciprocal_shells),
+                shell_tolerance=float(shell_tolerance),
+                max_shells=int(max_shells),
+                dtype=np.complex128,
+                workspace=workspace,
+            )
+        except (ArithmeticError, ValueError, PeriodicEwaldConvergenceError):
+            return None
+    n_offsets = int(np.asarray(offsets).reshape(-1, 3).shape[0])
+    flat = np.asarray(sums, dtype=np.complex128).reshape(n_offsets, -1)
+    if not np.all(np.isfinite(flat)):
+        return None
+    return flat
+
+
+def _eta_probe_relative_difference(a: Array, b: Array) -> float:
+    lhs = np.asarray(a, dtype=np.complex128).reshape(a.shape[0], -1)
+    rhs = np.asarray(b, dtype=np.complex128).reshape(b.shape[0], -1)
+    diff = np.linalg.norm(lhs - rhs, axis=1)
+    lhs_norm = np.linalg.norm(lhs, axis=1)
+    rhs_norm = np.linalg.norm(rhs, axis=1)
+    scale = np.maximum.reduce((lhs_norm, rhs_norm, np.ones_like(diff)))
+    return float(np.max(diff / scale))
+
+
+def select_ewald_eta(
+    *,
+    lattice: RectangularLattice2D,
+    k: float,
+    k_parallel: Array,
+    positions: Array,
+    lmax: int,
+    shell_tolerance: float = 1.0e-10,
+    max_shells: int = 32,
+    real_shells: int | None = None,
+    reciprocal_shells: int | None = None,
+    stability_rtol: float = _ETA_PROBE_STABILITY_RTOL,
+) -> float:
+    """Choose an automatic Ewald split for this lattice and particle packing.
+
+    The selector starts from the CELES/SMUTHI-style ``sqrt(pi / area)`` value
+    and raises eta only when a cheap structural-sum preflight shows that the
+    current value is unstable against the next geometric candidate.
+    """
+    canonical = default_ewald_eta(lattice)
+    candidates = _candidate_ewald_etas(canonical_eta=canonical, k=float(k))
+    if len(candidates) == 1:
+        return float(canonical)
+    offsets = _representative_ewald_eta_offsets(
+        positions=positions,
+        lattice=lattice,
+        k=float(k),
+    )
+    if offsets.size == 0:
+        return float(canonical)
+    # Keep the preflight intentionally cheap: low-order structural sums are
+    # sufficient to catch the catastrophic eta regimes seen in large cells.
+    lmax_probe = max(1, min(int(lmax), 2))
+    probe_real = int(real_shells) if real_shells is not None else min(12, max(1, int(max_shells)))
+    probe_recip = (
+        int(reciprocal_shells)
+        if reciprocal_shells is not None
+        else min(
+            12,
+            max(1, int(max_shells)),
+        )
+    )
+    previous_eta: float | None = None
+    previous_vec: Array | None = None
+    best_eta: float | None = None
+    best_rel = math.inf
+    for eta in candidates:
+        vec = _eta_probe_vector(
+            eta=float(eta),
+            offsets=offsets,
+            lmax_struct=lmax_probe,
+            k=float(k),
+            lattice=lattice,
+            k_parallel=k_parallel,
+            real_shells=probe_real,
+            reciprocal_shells=probe_recip,
+            shell_tolerance=float(shell_tolerance),
+            max_shells=int(max_shells),
+        )
+        if vec is None:
+            continue
+        if previous_vec is not None and previous_eta is not None:
+            rel = _eta_probe_relative_difference(previous_vec, vec)
+            if rel < best_rel:
+                best_rel = rel
+                best_eta = float(previous_eta)
+            if rel <= float(stability_rtol):
+                return float(previous_eta)
+        previous_eta = float(eta)
+        previous_vec = vec
+    if best_eta is not None:
+        return float(best_eta)
+    if previous_eta is not None:
+        return float(previous_eta)
+    return float(canonical)
+
+
 def _same_plane_reciprocal_sum(
     degree: int,
     order: int,
@@ -1154,4 +1407,5 @@ __all__ = [
     "ewald_structural_sums_2d_batch",
     "fill_periodic_ewald_block_cache",
     "periodic_ewald_block",
+    "select_ewald_eta",
 ]

@@ -16,9 +16,12 @@ class PeriodicOptions:
     """Numerical policy for periodic coupling and output evaluation.
 
     ``eta`` is an inverse-length Ewald splitting parameter. Leaving it as
-    ``None`` selects pyceles's canonical 2D rectangular-lattice default
-    ``sqrt(pi / area)``. ``real_shells`` and ``reciprocal_shells`` are optional
-    explicit Chebyshev-index shell truncation counts. Leaving either as ``None``
+    ``None`` selects pyceles's automatic Ewald split: the canonical 2D
+    rectangular-lattice value ``sqrt(pi / area)`` is used when stable, and is
+    increased only when a cheap geometry-aware structural-sum preflight finds
+    it unsafe. Set a numeric ``eta`` to force an expert/manual split.
+    ``real_shells`` and ``reciprocal_shells`` are optional explicit
+    Chebyshev-index shell truncation counts. Leaving either as ``None``
     enables adaptive shell accumulation with ``shell_tolerance`` and ``max_shells``
     (used as a safety cap, not as an accuracy target).
 

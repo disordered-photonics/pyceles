@@ -7,8 +7,10 @@ import pyceles as pcl
 from pyceles.core.periodic.ewald import (
     PeriodicEwaldConvergenceError,
     _self_correction,
+    default_ewald_eta,
     ewald_structural_constant_2d,
     ewald_structural_sums_2d,
+    select_ewald_eta,
 )
 from pyceles.core.periodic.shells import (
     accumulate_lattice_shell_series,
@@ -198,6 +200,31 @@ def test_fixed_shell_counts_ignore_adaptive_limits() -> None:
         shell_tolerance=1e-12,
     )
     assert a == pytest.approx(b, rel=1e-14, abs=1e-14)
+
+
+def test_automatic_eta_raises_unstable_large_cell_split() -> None:
+    k = 2.0 * np.pi / 550.0
+    lattice = pcl.RectangularLattice2D(ax=3600.0, ay=3600.0)
+    positions = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [100.0, 0.0, 10.0],
+        ],
+        dtype=float,
+    )
+
+    eta = select_ewald_eta(
+        lattice=lattice,
+        k=k,
+        k_parallel=np.zeros(2, dtype=float),
+        positions=positions,
+        lmax=3,
+        real_shells=12,
+        reciprocal_shells=12,
+    )
+
+    assert eta > 2.0 * default_ewald_eta(lattice)
+    assert eta <= 0.35 * k * (1.0 + 1.0e-12)
 
 
 def test_adaptive_shells_match_large_fixed_reference_on_benign_case() -> None:

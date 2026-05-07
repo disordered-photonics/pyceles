@@ -13,8 +13,8 @@ from pyceles.core.periodic.directsum import apply_periodic_direct_sum
 from pyceles.core.periodic.ewald import (
     EwaldShellWorkspace,
     apply_periodic_ewald_sum,
-    default_ewald_eta,
     fill_periodic_ewald_block_cache,
+    select_ewald_eta,
 )
 
 Array = np.ndarray
@@ -34,10 +34,26 @@ class PeriodicCouplingOperator:
     cache_blocks: bool = False
     _ewald_block_cache: dict[tuple[int, int], Array] = field(default_factory=dict)
     _ewald_shell_workspace: EwaldShellWorkspace | None = field(default=None, init=False, repr=False)
+    _resolved_ewald_eta: float | None = field(default=None, init=False, repr=False)
 
     def _ewald_eta(self) -> float:
+        """Return the effective Ewald split for this operator."""
         eta = self.periodic.options.eta
-        return default_ewald_eta(self.periodic.lattice) if eta is None else float(eta)
+        if eta is not None:
+            return float(eta)
+        if self._resolved_ewald_eta is None:
+            self._resolved_ewald_eta = select_ewald_eta(
+                lattice=self.periodic.lattice,
+                k=float(self.k),
+                k_parallel=self.k_parallel,
+                positions=self.positions,
+                lmax=int(self.lmax),
+                shell_tolerance=float(self.periodic.options.shell_tolerance),
+                max_shells=int(self.periodic.options.max_shells),
+                real_shells=self.periodic.options.real_shells,
+                reciprocal_shells=self.periodic.options.reciprocal_shells,
+            )
+        return float(self._resolved_ewald_eta)
 
     def _workspace(self) -> EwaldShellWorkspace:
         """Return the reusable non-pair Ewald shell workspace for this operator."""
