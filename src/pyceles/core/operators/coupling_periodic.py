@@ -14,7 +14,7 @@ from pyceles.core.periodic.ewald import (
     EwaldShellWorkspace,
     apply_periodic_ewald_sum,
     default_ewald_eta,
-    periodic_ewald_block,
+    fill_periodic_ewald_block_cache,
 )
 
 Array = np.ndarray
@@ -94,30 +94,26 @@ class PeriodicCouplingOperator:
         ns = pos.shape[0]
         options = self.periodic.options
         workspace = self._workspace()
-        pair_iter: Iterable[tuple[int, int]] = ((i, j) for i in range(ns) for j in range(ns))
+        sources: Iterable[int] = range(ns)
         if show_progress:
-            pair_iter = tqdm(pair_iter, total=ns * ns, desc="Populate periodic W cache")
-        for i, j in pair_iter:
-            key = (i, j)
-            if key in self._ewald_block_cache:
-                continue
-            self._ewald_block_cache[key] = periodic_ewald_block(
-                lmax=int(self.lmax),
-                k=float(self.k),
-                destination=pos[i],
-                source=pos[j],
-                lattice=self.periodic.lattice,
-                k_parallel=self.k_parallel,
-                eta=self._ewald_eta(),
-                real_shells=options.real_shells,
-                reciprocal_shells=options.reciprocal_shells,
-                ab5=self.ab5,
-                shell_tolerance=float(options.shell_tolerance),
-                max_shells=int(options.max_shells),
-                dtype=self.dtype,
-                exclude_zero_shift=(i == j),
-                workspace=workspace,
-            )
+            sources = tqdm(sources, total=ns, desc="Populate periodic W cache")
+        fill_periodic_ewald_block_cache(
+            cache=self._ewald_block_cache,
+            lmax=int(self.lmax),
+            k=float(self.k),
+            positions=pos,
+            lattice=self.periodic.lattice,
+            k_parallel=self.k_parallel,
+            eta=self._ewald_eta(),
+            real_shells=options.real_shells,
+            reciprocal_shells=options.reciprocal_shells,
+            ab5=self.ab5,
+            dtype=self.dtype,
+            shell_tolerance=float(options.shell_tolerance),
+            max_shells=int(options.max_shells),
+            source_indices=sources,
+            workspace=workspace,
+        )
 
 
 __all__ = ["PeriodicCouplingOperator"]

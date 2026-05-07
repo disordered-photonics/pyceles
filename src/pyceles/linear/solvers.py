@@ -1292,9 +1292,18 @@ def bicgstab_scipy(
     iterations = 0
 
     def _cb(xk):
-        """BiCGSTAB callback estimating true relative residual from iterate."""
+        """BiCGSTAB callback.
+
+        SciPy provides the current iterate, not the residual. Computing a true
+        residual here costs one extra matvec per iteration, which is too
+        expensive for periodic matrix-free operators. Only pay that diagnostic
+        cost when progress output is actually requested.
+        """
         nonlocal iterations
         iterations += 1
+        if not show_progress:
+            progress_update(None)
+            return
         xk_1d = np.asarray(xk).reshape(-1)
         rk = b - np.asarray(A_mv(xk_1d)).reshape(-1)
         rrel = float(np.linalg.norm(rk) / b_norm) if b_norm > 0 else float(np.linalg.norm(rk))

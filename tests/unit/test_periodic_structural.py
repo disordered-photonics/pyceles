@@ -4,8 +4,10 @@ import numpy as np
 import pytest
 
 import pyceles as pcl
+from pyceles.core.indexing import n_modes
 from pyceles.core.periodic.directsum import periodic_direct_sum_block
 from pyceles.core.periodic.structural import (
+    apply_structural_sums_to_vector,
     block_from_structural_sums,
     periodic_direct_structural_block,
 )
@@ -106,3 +108,39 @@ def test_structural_block_rejects_incompatible_table_shape() -> None:
             structural_sums=np.zeros((2, 5), dtype=np.complex128),
             ab5=ab5,
         )
+
+
+def test_apply_structural_sums_to_vector_matches_dense_blocks() -> None:
+    lmax = 2
+    nm = n_modes(lmax)
+    order = 2 * lmax
+    rng = np.random.default_rng(1234)
+    sums = (
+        rng.normal(size=(3, order + 1, 2 * order + 1))
+        + 1j * rng.normal(size=(3, order + 1, 2 * order + 1))
+    ).astype(np.complex128)
+    ab5 = translation_ab5_table(lmax, dtype=np.complex128)
+    vector = (rng.normal(size=nm) + 1j * rng.normal(size=nm)).astype(np.complex128)
+
+    expected = np.vstack(
+        [
+            block_from_structural_sums(
+                lmax=lmax,
+                structural_sums=sums[i],
+                ab5=ab5,
+                dtype=np.complex128,
+            )
+            @ vector
+            for i in range(sums.shape[0])
+        ]
+    )
+
+    actual = apply_structural_sums_to_vector(
+        lmax=lmax,
+        structural_sums=sums,
+        ab5=ab5,
+        vector=vector,
+        dtype=np.complex128,
+    )
+
+    np.testing.assert_allclose(actual, expected, rtol=3e-15, atol=3e-15)

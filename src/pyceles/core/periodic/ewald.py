@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -33,7 +34,7 @@ from .special import (
     shifted_reciprocal_regime,
     upper_incomplete_gamma_int_or_halfint,
 )
-from .structural import block_from_structural_sums
+from .structural import apply_structural_sums_to_vector, block_from_structural_sums
 
 Array = np.ndarray
 
@@ -931,6 +932,126 @@ def periodic_ewald_block(
     )
 
 
+def _add_self_correction_to_batched_sums(
+    sums: Array,
+    *,
+    local_destination_index: int,
+    k: float,
+    eta: float,
+) -> None:
+    """Patch the same-particle central-point correction into one batched table."""
+    idx = int(local_destination_index)
+    if idx < 0 or idx >= sums.shape[0]:
+        return
+    order = int(sums.shape[1] - 1)
+    sums[idx, 0, order] += structural_sum_m_normalization(0) * _self_correction(
+        float(k), float(eta)
+    )
+
+
+def _fill_block_cache_for_source(
+    *,
+    source_index: int,
+    cache: dict[tuple[int, int], Array],
+    lmax: int,
+    k: float,
+    positions: Array,
+    lattice: RectangularLattice2D,
+    k_parallel: Array,
+    eta: float,
+    real_shells: int | None,
+    reciprocal_shells: int | None,
+    ab5: Array,
+    dtype: npt.DTypeLike,
+    shell_tolerance: float,
+    max_shells: int,
+    workspace: EwaldShellWorkspace,
+) -> None:
+    """Populate missing dense blocks for one source using one structural batch."""
+    src_idx = int(source_index)
+    pos = np.asarray(positions, dtype=float).reshape(-1, 3)
+    missing = [i for i in range(pos.shape[0]) if (i, src_idx) not in cache]
+    if not missing:
+        return
+    sums = ewald_structural_sums_2d_batch(
+        lmax_struct=int(lmax),
+        k=float(k),
+        destinations=pos[missing],
+        source=pos[src_idx],
+        lattice=lattice,
+        k_parallel=k_parallel,
+        eta=float(eta),
+        real_shells=real_shells,
+        reciprocal_shells=reciprocal_shells,
+        shell_tolerance=float(shell_tolerance),
+        max_shells=int(max_shells),
+        dtype=np.complex128,
+        workspace=workspace,
+    )
+    if src_idx in missing:
+        _add_self_correction_to_batched_sums(
+            sums,
+            local_destination_index=missing.index(src_idx),
+            k=float(k),
+            eta=float(eta),
+        )
+    for local_idx, dst_idx in enumerate(missing):
+        cache[(int(dst_idx), src_idx)] = block_from_structural_sums(
+            lmax=int(lmax),
+            structural_sums=sums[local_idx],
+            ab5=ab5,
+            dtype=dtype,
+        )
+
+
+def fill_periodic_ewald_block_cache(
+    *,
+    cache: dict[tuple[int, int], Array],
+    lmax: int,
+    k: float,
+    positions: Array,
+    lattice: RectangularLattice2D,
+    k_parallel: Array,
+    eta: float,
+    real_shells: int | None,
+    reciprocal_shells: int | None,
+    ab5: Array,
+    dtype: npt.DTypeLike = np.complex128,
+    shell_tolerance: float = 1.0e-10,
+    max_shells: int = 32,
+    source_indices: Iterable[int] | None = None,
+    workspace: EwaldShellWorkspace | None = None,
+) -> None:
+    """Populate a dense periodic block cache source-by-source."""
+    pos = np.asarray(positions, dtype=float).reshape(-1, 3)
+    ws = _ensure_workspace(
+        workspace=workspace,
+        k=float(k),
+        k_parallel=k_parallel,
+        lattice=lattice,
+        eta=float(eta),
+    )
+    sources = range(pos.shape[0]) if source_indices is None else source_indices
+    for j in sources:
+        _fill_block_cache_for_source(
+            source_index=int(j),
+            cache=cache,
+            lmax=int(lmax),
+            k=float(k),
+            positions=pos,
+            lattice=lattice,
+            k_parallel=k_parallel,
+            eta=float(eta),
+            real_shells=real_shells,
+            reciprocal_shells=reciprocal_shells,
+            ab5=ab5,
+            dtype=dtype,
+            shell_tolerance=float(shell_tolerance),
+            max_shells=int(max_shells),
+            workspace=ws,
+        )
+
+
 def apply_periodic_ewald_sum(
     *,
     lmax: int,
@@ -949,7 +1070,12 @@ def apply_periodic_ewald_sum(
     block_cache: dict[tuple[int, int], Array] | None = None,
     workspace: EwaldShellWorkspace | None = None,
 ) -> Array:
-    """Apply the Ewald Bloch image sum to stacked SVWF coefficients."""
+    """Apply the Ewald Bloch image sum to stacked SVWF coefficients.
+
+    The no-cache path batches all destinations for one source particle at a
+    time. This keeps iterative CPU runs matrix-free without recomputing one
+    complete scalar Ewald table independently for every pair block.
+    """
     out_dtype = np.dtype(dtype)
     pos = np.asarray(positions, dtype=float).reshape(-1, 3)
     ns = pos.shape[0]
@@ -964,31 +1090,57 @@ def apply_periodic_ewald_sum(
         eta=float(eta),
     )
 
-    for i in range(ns):
-        for j in range(ns):
-            key = (i, j)
-            wij = block_cache.get(key) if block_cache is not None else None
-            if wij is None:
-                wij = periodic_ewald_block(
-                    lmax=int(lmax),
-                    k=float(k),
-                    destination=pos[i],
-                    source=pos[j],
-                    lattice=lattice,
-                    k_parallel=k_parallel,
-                    eta=float(eta),
-                    real_shells=real_shells,
-                    reciprocal_shells=reciprocal_shells,
-                    ab5=ab5,
-                    dtype=out_dtype,
-                    shell_tolerance=float(shell_tolerance),
-                    max_shells=int(max_shells),
-                    exclude_zero_shift=(i == j),
-                    workspace=ws,
-                )
-                if block_cache is not None:
-                    block_cache[key] = wij
-            y[i] += wij @ arr[j]
+    for j in range(ns):
+        if block_cache is None:
+            sums = ewald_structural_sums_2d_batch(
+                lmax_struct=int(lmax),
+                k=float(k),
+                destinations=pos,
+                source=pos[j],
+                lattice=lattice,
+                k_parallel=k_parallel,
+                eta=float(eta),
+                real_shells=real_shells,
+                reciprocal_shells=reciprocal_shells,
+                shell_tolerance=float(shell_tolerance),
+                max_shells=int(max_shells),
+                dtype=np.complex128,
+                workspace=ws,
+            )
+            _add_self_correction_to_batched_sums(
+                sums,
+                local_destination_index=j,
+                k=float(k),
+                eta=float(eta),
+            )
+            y += apply_structural_sums_to_vector(
+                lmax=int(lmax),
+                structural_sums=sums,
+                ab5=ab5,
+                vector=arr[j],
+                dtype=out_dtype,
+            )
+            continue
+
+        _fill_block_cache_for_source(
+            source_index=j,
+            cache=block_cache,
+            lmax=int(lmax),
+            k=float(k),
+            positions=pos,
+            lattice=lattice,
+            k_parallel=k_parallel,
+            eta=float(eta),
+            real_shells=real_shells,
+            reciprocal_shells=reciprocal_shells,
+            ab5=ab5,
+            dtype=out_dtype,
+            shell_tolerance=float(shell_tolerance),
+            max_shells=int(max_shells),
+            workspace=ws,
+        )
+        for i in range(ns):
+            y[i] += block_cache[(i, j)] @ arr[j]
     return y.reshape(ns * nm)
 
 
@@ -1000,5 +1152,6 @@ __all__ = [
     "ewald_structural_constant_2d",
     "ewald_structural_sums_2d",
     "ewald_structural_sums_2d_batch",
+    "fill_periodic_ewald_block_cache",
     "periodic_ewald_block",
 ]

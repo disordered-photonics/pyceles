@@ -120,6 +120,55 @@ def block_from_structural_sums(
     return np.asarray(block, dtype=out_dtype)
 
 
+def apply_structural_sums_to_vector(
+    *,
+    lmax: int,
+    structural_sums: Array,
+    ab5: Array,
+    vector: Array,
+    dtype: npt.DTypeLike = np.complex128,
+) -> Array:
+    """Apply batched scalar structural tables to one source coefficient vector.
+
+    ``structural_sums[p]`` is the scalar table for one destination and one fixed
+    source. This helper contracts those tables with the CELES/SMUTHI angular
+    translation coefficients and applies the resulting translation blocks
+    without materializing a dense block for each destination.
+    """
+    out_dtype = np.dtype(dtype)
+    lmax_i = int(lmax)
+    nm = n_modes(lmax_i)
+    order = 2 * lmax_i
+    sums = np.asarray(structural_sums)
+    expected_sums_shape = (order + 1, 2 * order + 1)
+    if sums.ndim != 3 or sums.shape[1:] != expected_sums_shape:
+        raise ValueError(
+            "`structural_sums` must have shape "
+            f"(n_destinations, {expected_sums_shape[0]}, {expected_sums_shape[1]}). "
+            f"Got {sums.shape}."
+        )
+    ab5_arr = np.asarray(ab5)
+    expected_ab5_shape = (nm, nm, order + 1)
+    if ab5_arr.shape != expected_ab5_shape:
+        raise ValueError(f"`ab5` must have shape {expected_ab5_shape}. Got {ab5_arr.shape}.")
+    vec = np.asarray(vector, dtype=np.result_type(out_dtype, np.complex64)).reshape(nm)
+
+    result_dtype = np.result_type(sums.dtype, ab5_arr.dtype, vec.dtype, np.complex64)
+    result = np.zeros((sums.shape[0], nm), dtype=result_dtype)
+    m_offset = order
+    for _tau_dst, _l_dst, m_dst, dst_idx in iter_modes(lmax_i):
+        acc = np.zeros(sums.shape[0], dtype=result_dtype)
+        for _tau_src, _l_src, m_src, src_idx in iter_modes(lmax_i):
+            coeff = ab5_arr[dst_idx, src_idx, :]
+            if not np.any(coeff):
+                continue
+            m_delta = m_src - m_dst
+            translated = np.sum(coeff[None, :] * sums[:, :, m_delta + m_offset], axis=1)
+            acc += translated * vec[src_idx]
+        result[:, dst_idx] = acc
+    return np.asarray(result, dtype=out_dtype)
+
+
 def periodic_direct_structural_block(
     *,
     lmax: int,
@@ -154,6 +203,7 @@ def periodic_direct_structural_block(
 
 
 __all__ = [
+    "apply_structural_sums_to_vector",
     "block_from_structural_sums",
     "direct_structural_sums_2d",
     "periodic_direct_structural_block",
