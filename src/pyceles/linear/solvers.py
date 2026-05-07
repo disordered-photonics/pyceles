@@ -350,6 +350,8 @@ def _make_progress_tracker(
         pbar.update(max(0, n_updates - int(pbar.n)))
         if r is not None and np.isfinite(r):
             pbar.set_postfix_str(f"{residual_label}={r:.3e}", refresh=True)
+        elif target_rel > 0.0:
+            pbar.set_postfix_str(f"target_rel={target_rel:.3e}", refresh=False)
 
     def close() -> None:
         """Finalize progress display."""
@@ -1281,7 +1283,6 @@ def bicgstab_scipy(
     op_dtype = np.result_type(b.dtype, np.complex64)
     Aop = _make_linear_operator(A_mv, n, op_dtype)
     Mop = _make_preconditioner_operator(preconditioner, n, op_dtype)
-    b_norm = float(np.linalg.norm(b))
 
     progress_update, progress_close, history = _make_progress_tracker(
         "bicgstab",
@@ -1291,23 +1292,16 @@ def bicgstab_scipy(
     )
     iterations = 0
 
-    def _cb(xk):
+    def _cb(_xk):
         """BiCGSTAB callback.
 
-        SciPy provides the current iterate, not the residual. Computing a true
-        residual here costs one extra matvec per iteration, which is too
-        expensive for periodic matrix-free operators. Only pay that diagnostic
-        cost when progress output is actually requested.
+        SciPy provides the current iterate, not a residual scalar. Keep progress
+        iteration-only here so expensive matrix-free operators do not pay one
+        extra matvec per callback just for display diagnostics.
         """
         nonlocal iterations
         iterations += 1
-        if not show_progress:
-            progress_update(None)
-            return
-        xk_1d = np.asarray(xk).reshape(-1)
-        rk = b - np.asarray(A_mv(xk_1d)).reshape(-1)
-        rrel = float(np.linalg.norm(rk) / b_norm) if b_norm > 0 else float(np.linalg.norm(rk))
-        progress_update(rrel)
+        progress_update(None)
 
     x, info = bicgstab(Aop, b, x0=x0, M=Mop, rtol=rtol, atol=atol, maxiter=maxiter, callback=_cb)
     progress_close()
@@ -1352,7 +1346,7 @@ def lgmres_scipy(
     )
     iterations = 0
 
-    def _cb(xk):
+    def _cb(_xk):
         """LGMRES callback (residual unavailable; progress is iteration-based)."""
         nonlocal iterations
         iterations += 1
@@ -1413,7 +1407,7 @@ def gcrotmk_scipy(
     )
     iterations = 0
 
-    def _cb(xk):
+    def _cb(_xk):
         """GCROTMK callback (residual unavailable; progress is iteration-based)."""
         nonlocal iterations
         iterations += 1

@@ -201,6 +201,52 @@ def test_lgmres_and_gcrotmk_identity():
     assert out_gcrotmk.iterations >= 1
 
 
+def test_bicgstab_progress_callback_does_not_add_residual_matvec(monkeypatch):
+    A = np.array(
+        [
+            [4.0 + 0.0j, 1.0 + 0.0j, 0.0 + 0.0j],
+            [1.0 + 0.0j, 3.0 + 0.0j, 1.0 + 0.0j],
+            [0.0 + 0.0j, 1.0 + 0.0j, 2.0 + 0.0j],
+        ],
+        dtype=np.complex128,
+    )
+    b = np.asarray([1.0 + 0.0j, -1.5 + 0.0j, 0.5 + 0.0j], dtype=np.complex128)
+    progress_updates: list[float | None] = []
+
+    def fake_progress_tracker(*args, **kwargs):
+        return progress_updates.append, lambda: None, []
+
+    monkeypatch.setattr(solvers, "_make_progress_tracker", fake_progress_tracker)
+
+    def run(*, show_progress: bool) -> tuple[solvers.LinearSolveResult, int]:
+        calls = 0
+
+        def A_mv(x: np.ndarray) -> np.ndarray:
+            nonlocal calls
+            calls += 1
+            return cast(np.ndarray, A @ np.asarray(x))
+
+        out = solvers.bicgstab_scipy(
+            A_mv,
+            b,
+            rtol=1e-15,
+            atol=0.0,
+            maxiter=1,
+            show_progress=show_progress,
+            compute_final_residual=False,
+        )
+        return out, calls
+
+    out_no_progress, calls_no_progress = run(show_progress=False)
+    progress_updates.clear()
+    out, calls_progress = run(show_progress=True)
+
+    assert int(out_no_progress.iterations) == 1
+    assert int(out.iterations) == 1
+    assert progress_updates == [None]
+    assert calls_progress == calls_no_progress
+
+
 def test_solve_linear_system_supports_multi_rhs_direct():
     A = np.array([[3.0 + 0j, 1.0 + 0j], [0.0 + 0j, 2.0 + 0j]], dtype=np.complex128)
     B = np.array([[1.0 + 0j, 2.0 + 0j], [3.0 + 0j, -1.0 + 0j]], dtype=np.complex128)

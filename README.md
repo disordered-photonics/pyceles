@@ -833,6 +833,12 @@ Notes:
   verification.
 - `Simulation.solve_sources(..., solver_compute_final_residual=...)` can override
   the above per call.
+- SciPy GMRES progress reports SciPy's cheap preconditioned residual
+  (`pr_rel_res`). SciPy BiCGSTAB, LGMRES, and GCROTMK callbacks do not expose a
+  cheap residual scalar, so pyceles reports iteration-only progress for those
+  methods instead of spending an extra matrix-vector product per callback just
+  for display. Final true-residual diagnostics are still controlled by
+  `solver_compute_final_residual`.
 - `solver_preconditioner` is a custom callable hook. pyceles no longer ships a
   built-in grid-block preconditioner in the high-level simulation API.
 
