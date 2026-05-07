@@ -73,8 +73,18 @@ def _assemble_dense_operator_for_prepared(
     if (
         isinstance(coupling, PeriodicCouplingOperator)
         and coupling.periodic.options.method == "ewald"
-        and not coupling.cache_blocks
     ):
+        if coupling.cache_blocks:
+            # Make the expensive cache-fill phase visible before the dense-column
+            # loop starts; otherwise the first column appears to stall.
+            coupling.populate(show_progress=show_progress)
+            return _assemble_dense_operator_via_matvec(
+                A_mv,
+                n=n,
+                dtype=dtype,
+                show_progress=show_progress,
+            )
+
         # Dense assembly applies `A_mv` once per basis vector. Temporarily enabling
         # private Ewald block reuse avoids recomputing all pair blocks for every
         # column while keeping iterative default behavior (`cache_blocks=False`).
@@ -84,6 +94,7 @@ def _assemble_dense_operator_for_prepared(
         coupling.cache_blocks = True
         coupling._ewald_block_cache = assembly_block_cache
         try:
+            coupling.populate(show_progress=show_progress)
             return _assemble_dense_operator_via_matvec(
                 A_mv,
                 n=n,
@@ -304,6 +315,8 @@ def solve_sources_core(
         A_mv = prepared.apply_A
         for label in labels:
             rhs_flat[label] = prepared.rhs_Tb(initial_coeffs[label].reshape(Ns * Nm))
+        if bool(cfg.cache_translation_blocks) and not will_use_direct:
+            prepared.populate_coupling(show_progress=bool(cfg.verbose))
         if will_use_direct:
             need_dense_lu = (
                 sim._dense_lu_cache is None
