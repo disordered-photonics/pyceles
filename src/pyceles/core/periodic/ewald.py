@@ -189,14 +189,17 @@ def default_ewald_eta(lattice: RectangularLattice2D) -> float:
 
 _ETA_PROBE_GROWTH = math.sqrt(2.0)
 _ETA_PROBE_MAX_K_FACTOR = 0.35
-_ETA_PROBE_POSITION_LIMIT = 1024
 _ETA_PROBE_STABILITY_RTOL = 1.0e-3
 
 
 def _candidate_ewald_etas(
     *, canonical_eta: float, k: float, max_steps: int = 16
 ) -> tuple[float, ...]:
-    """Return a geometric eta ladder for a cheap structural-sum preflight."""
+    """Return the intentionally bounded eta ladder used by the automatic selector.
+
+    The selector is a stability preflight, not an optimizer.  Keep the ladder
+    finite and k-scaled so that ``eta=None`` remains a cheap default.
+    """
     canonical = float(canonical_eta)
     if not np.isfinite(canonical) or canonical <= 0.0:
         raise ValueError(f"`canonical_eta` must be finite and positive. Got {canonical_eta!r}.")
@@ -233,22 +236,20 @@ def _append_eta_probe_offset(offsets: list[Array], offset: Array, *, atol: float
         offsets.append(arr)
 
 
-def _sample_eta_probe_positions(positions: Array) -> Array:
-    pos = np.asarray(positions, dtype=float).reshape(-1, 3)
-    if pos.shape[0] <= _ETA_PROBE_POSITION_LIMIT:
-        return pos
-    indices = np.unique(np.linspace(0, pos.shape[0] - 1, _ETA_PROBE_POSITION_LIMIT, dtype=np.intp))
-    return np.asarray(pos[indices], dtype=float)
-
-
 def _representative_ewald_eta_offsets(
     *,
     positions: Array,
     lattice: RectangularLattice2D,
     k: float,
-    max_offsets: int = 8,
+    max_offsets: int = 6,
 ) -> Array:
-    """Return a compact set of geometry offsets that stress eta stability."""
+    """Return a compact, cheap set of offsets that stress eta stability.
+
+    This production preflight deliberately avoids all-pairs searches and KD-tree
+    dependencies. It combines z-extreme packing probes with two near-self
+    synthetic offsets; this is enough to catch the large-area small-eta failures
+    seen so far without turning eta selection into an optimization pass.
+    """
     pos = np.asarray(positions, dtype=float).reshape(-1, 3)
     ax = float(np.linalg.norm(lattice.a1))
     ay = float(np.linalg.norm(lattice.a2))
@@ -256,32 +257,6 @@ def _representative_ewald_eta_offsets(
     offsets: list[Array] = []
     ns = int(pos.shape[0])
     if ns >= 2:
-        sample = _sample_eta_probe_positions(pos)
-        best: dict[str, tuple[float, Array] | None] = {
-            "r3_min": None,
-            "xy_min": None,
-        }
-        for i in range(sample.shape[0]):
-            for j in range(i + 1, sample.shape[0]):
-                raw = sample[i] - sample[j]
-                dxy = _nearest_periodic_delta_xy(raw[:2], lattice)
-                off = np.array([dxy[0], dxy[1], raw[2]], dtype=float)
-                rxy = float(np.linalg.norm(dxy))
-                r3 = float(np.linalg.norm(off))
-                if r3 <= 0.0:
-                    continue
-                metrics = {
-                    "r3_min": r3,
-                    "xy_min": rxy if rxy > 0.0 else math.inf,
-                }
-                for key, value in metrics.items():
-                    old = best[key]
-                    if old is None or value < old[0]:
-                        best[key] = (value, off.copy())
-        for item in best.values():
-            if item is not None:
-                _append_eta_probe_offset(offsets, item[1])
-
         order = np.argsort(pos[:, 2])
         z_sorted = pos[order, 2]
         dz = np.diff(z_sorted)
@@ -291,6 +266,7 @@ def _representative_ewald_eta_offsets(
             raw = pos[order[iz + 1]] - pos[order[iz]]
             dxy = _nearest_periodic_delta_xy(raw[:2], lattice)
             _append_eta_probe_offset(offsets, np.array([dxy[0], dxy[1], raw[2]], dtype=float))
+
         z_low = int(np.argmin(pos[:, 2]))
         z_high = int(np.argmax(pos[:, 2]))
         if z_low != z_high:
