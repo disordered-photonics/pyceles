@@ -4,12 +4,14 @@ import numpy as np
 import pytest
 
 import pyceles as pcl
-from pyceles.core.indexing import n_modes
+from pyceles.core.indexing import iter_modes, n_modes
 from pyceles.core.periodic.directsum import periodic_direct_sum_block
 from pyceles.core.periodic.structural import (
     apply_structural_sums_to_vector,
     block_from_structural_sums,
+    blocks_from_structural_sums,
     periodic_direct_structural_block,
+    translation_contraction_tensor,
 )
 from pyceles.core.translation import translation_ab5_table
 
@@ -141,6 +143,35 @@ def test_apply_structural_sums_to_vector_matches_dense_blocks() -> None:
         ab5=ab5,
         vector=vector,
         dtype=np.complex128,
+    )
+
+    np.testing.assert_allclose(actual, expected, rtol=3e-15, atol=3e-15)
+
+
+def test_batched_structural_blocks_match_single_block_assembly() -> None:
+    lmax = 2
+    order = 2 * lmax
+    rng = np.random.default_rng(4321)
+    sums = (
+        rng.normal(size=(4, order + 1, 2 * order + 1))
+        + 1j * rng.normal(size=(4, order + 1, 2 * order + 1))
+    ).astype(np.complex128)
+    ab5 = translation_ab5_table(lmax, dtype=np.complex128)
+    tensor = translation_contraction_tensor(lmax=lmax, ab5=ab5)
+
+    expected = np.zeros((sums.shape[0], n_modes(lmax), n_modes(lmax)), dtype=np.complex128)
+    for d in range(sums.shape[0]):
+        for _tau_dst, _l_dst, m_dst, dst_idx in iter_modes(lmax):
+            for _tau_src, _l_src, m_src, src_idx in iter_modes(lmax):
+                expected[d, dst_idx, src_idx] = np.sum(
+                    ab5[dst_idx, src_idx, :] * sums[d, :, m_src - m_dst + order]
+                )
+    actual = blocks_from_structural_sums(
+        lmax=lmax,
+        structural_sums=sums,
+        ab5=ab5,
+        dtype=np.complex128,
+        contraction_tensor=tensor,
     )
 
     np.testing.assert_allclose(actual, expected, rtol=3e-15, atol=3e-15)

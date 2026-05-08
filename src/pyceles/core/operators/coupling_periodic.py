@@ -16,6 +16,7 @@ from pyceles.core.periodic.ewald import (
     fill_periodic_ewald_block_cache,
     select_ewald_eta,
 )
+from pyceles.core.periodic.structural import translation_contraction_tensor
 
 Array = np.ndarray
 
@@ -35,6 +36,7 @@ class PeriodicCouplingOperator:
     _ewald_block_cache: dict[tuple[int, int], Array] = field(default_factory=dict)
     _ewald_shell_workspace: EwaldShellWorkspace | None = field(default=None, init=False, repr=False)
     _resolved_ewald_eta: float | None = field(default=None, init=False, repr=False)
+    _structural_contraction_tensor: Array | None = field(default=None, init=False, repr=False)
 
     def _ewald_eta(self) -> float:
         """Return the effective Ewald split for this operator."""
@@ -54,6 +56,18 @@ class PeriodicCouplingOperator:
                 reciprocal_shells=self.periodic.options.reciprocal_shells,
             )
         return float(self._resolved_ewald_eta)
+
+    def _contraction_tensor(self) -> Array:
+        """Return the reusable tensor mapping scalar structural sums to W blocks."""
+        tensor = self._structural_contraction_tensor
+        if tensor is None:
+            tensor = translation_contraction_tensor(
+                lmax=int(self.lmax),
+                ab5=self.ab5,
+                dtype=np.result_type(self.ab5.dtype, self.dtype, np.complex64),
+            )
+            self._structural_contraction_tensor = tensor
+        return tensor
 
     def _workspace(self) -> EwaldShellWorkspace:
         """Return the reusable non-pair Ewald shell workspace for this operator."""
@@ -100,6 +114,7 @@ class PeriodicCouplingOperator:
             dtype=self.dtype,
             block_cache=self._ewald_block_cache if self.cache_blocks else None,
             workspace=workspace,
+            contraction_tensor=self._contraction_tensor(),
         )
 
     def populate(self, *, show_progress: bool = False) -> None:
@@ -129,6 +144,7 @@ class PeriodicCouplingOperator:
             max_shells=int(options.max_shells),
             source_indices=sources,
             workspace=workspace,
+            contraction_tensor=self._contraction_tensor(),
         )
 
 

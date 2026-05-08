@@ -80,18 +80,56 @@ def direct_structural_sums_2d(
     return np.asarray(sums, dtype=out_dtype)
 
 
-def block_from_structural_sums(
+def translation_contraction_tensor(
+    *,
+    lmax: int,
+    ab5: Array,
+    dtype: npt.DTypeLike | None = None,
+) -> Array:
+    """Return the dense tensor that contracts scalar structural sums into W blocks.
+
+    For a fixed ``lmax`` and CELES/SMUTHI ``ab5`` table, periodic Ewald block
+    assembly repeatedly performs the same sparse selection/contraction:
+
+    ``block[dst, src] = sum_p ab5[dst, src, p] * S[p, m_src - m_dst]``.
+
+    Building this tensor once removes Python-level mode-pair loops from dense
+    block-cache population and from the matrix-free batched ``W @ x`` path.
+    The tensor is small for the low orders used by typycal pycels examples.
+    """
+    lmax_i = int(lmax)
+    nm = n_modes(lmax_i)
+    order = 2 * lmax_i
+    ab5_arr = np.asarray(ab5)
+    expected_ab5_shape = (nm, nm, order + 1)
+    if ab5_arr.shape != expected_ab5_shape:
+        raise ValueError(f"`ab5` must have shape {expected_ab5_shape}. Got {ab5_arr.shape}.")
+    out_dtype = (
+        np.dtype(dtype) if dtype is not None else np.result_type(ab5_arr.dtype, np.complex64)
+    )
+    tensor = np.zeros((nm, nm, order + 1, 2 * order + 1), dtype=out_dtype)
+    m_offset = order
+    modes = tuple(iter_modes(lmax_i))
+    for _tau_dst, _l_dst, m_dst, dst_idx in modes:
+        for _tau_src, _l_src, m_src, src_idx in modes:
+            tensor[dst_idx, src_idx, :, m_src - m_dst + m_offset] = ab5_arr[dst_idx, src_idx, :]
+    return tensor
+
+
+def blocks_from_structural_sums(
     *,
     lmax: int,
     structural_sums: Array,
     ab5: Array,
     dtype: npt.DTypeLike = np.complex128,
+    contraction_tensor: Array | None = None,
 ) -> Array:
-    """Assemble one SVWF translation block from scalar structural sums.
+    """Assemble one or more SVWF translation blocks from scalar structural sums.
 
-    This isolates the CELES/SMUTHI `ab5` contraction from how the scalar
-    periodic sums are evaluated, so the same block assembly can be checked
-    against finite direct sums before an Ewald evaluator supplies the table.
+    ``structural_sums`` can be either one table with shape ``(P, M)`` or a batch
+    with shape ``(n_destinations, P, M)``. The returned array has shape
+    ``(n_destinations, n_modes, n_modes)`` for batched input and
+    ``(n_modes, n_modes)`` for single-table input.
     """
     out_dtype = np.dtype(dtype)
     lmax_i = int(lmax)
@@ -99,25 +137,56 @@ def block_from_structural_sums(
     order = 2 * lmax_i
     expected_sums_shape = (order + 1, 2 * order + 1)
     sums = np.asarray(structural_sums)
-    if sums.shape != expected_sums_shape:
+    single = False
+    if sums.shape == expected_sums_shape:
+        sums = sums[None, :, :]
+        single = True
+    if sums.ndim != 3 or sums.shape[1:] != expected_sums_shape:
         raise ValueError(
-            f"`structural_sums` must have shape {expected_sums_shape}. Got {sums.shape}."
+            "`structural_sums` must have shape "
+            f"{expected_sums_shape} or (n_destinations, {expected_sums_shape[0]}, {expected_sums_shape[1]}). "
+            f"Got {np.asarray(structural_sums).shape}."
         )
-    ab5_arr = np.asarray(ab5)
-    expected_ab5_shape = (nm, nm, order + 1)
-    if ab5_arr.shape != expected_ab5_shape:
-        raise ValueError(f"`ab5` must have shape {expected_ab5_shape}. Got {ab5_arr.shape}.")
+    tensor = (
+        translation_contraction_tensor(lmax=lmax_i, ab5=ab5)
+        if contraction_tensor is None
+        else np.asarray(contraction_tensor)
+    )
+    expected_tensor_shape = (nm, nm, order + 1, 2 * order + 1)
+    if tensor.shape != expected_tensor_shape:
+        raise ValueError(
+            f"`contraction_tensor` must have shape {expected_tensor_shape}. Got {tensor.shape}."
+        )
+    block_dtype = np.result_type(sums.dtype, tensor.dtype, np.complex64)
+    blocks = np.einsum(
+        "dpm,ijpm->dij",
+        np.asarray(sums, dtype=block_dtype),
+        np.asarray(tensor, dtype=block_dtype),
+        optimize=True,
+    )
+    blocks = np.asarray(blocks, dtype=out_dtype)
+    return blocks[0] if single else blocks
 
-    block_dtype = np.result_type(ab5_arr.dtype, sums.dtype, np.complex64)
-    block = np.zeros((nm, nm), dtype=block_dtype)
-    m_offset = order
-    for _tau_dst, _l_dst, m_dst, dst_idx in iter_modes(lmax_i):
-        for _tau_src, _l_src, m_src, src_idx in iter_modes(lmax_i):
-            m_delta = m_src - m_dst
-            block[dst_idx, src_idx] = np.sum(
-                ab5_arr[dst_idx, src_idx, :] * sums[:, m_delta + m_offset]
-            )
-    return np.asarray(block, dtype=out_dtype)
+
+def block_from_structural_sums(
+    *,
+    lmax: int,
+    structural_sums: Array,
+    ab5: Array,
+    dtype: npt.DTypeLike = np.complex128,
+    contraction_tensor: Array | None = None,
+) -> Array:
+    """Assemble one SVWF translation block from scalar structural sums."""
+    return np.asarray(
+        blocks_from_structural_sums(
+            lmax=int(lmax),
+            structural_sums=structural_sums,
+            ab5=ab5,
+            dtype=dtype,
+            contraction_tensor=contraction_tensor,
+        ),
+        dtype=np.dtype(dtype),
+    )
 
 
 def apply_structural_sums_to_vector(
@@ -127,13 +196,14 @@ def apply_structural_sums_to_vector(
     ab5: Array,
     vector: Array,
     dtype: npt.DTypeLike = np.complex128,
+    contraction_tensor: Array | None = None,
 ) -> Array:
     """Apply batched scalar structural tables to one source coefficient vector.
 
-    ``structural_sums[p]`` is the scalar table for one destination and one fixed
-    source. This helper contracts those tables with the CELES/SMUTHI angular
-    translation coefficients and applies the resulting translation blocks
-    without materializing a dense block for each destination.
+    This is the matrix-free counterpart of ``blocks_from_structural_sums``. It
+    uses the same precomputed contraction tensor when available, but contracts
+    directly with the source vector to avoid materializing one block per
+    destination.
     """
     out_dtype = np.dtype(dtype)
     lmax_i = int(lmax)
@@ -147,25 +217,25 @@ def apply_structural_sums_to_vector(
             f"(n_destinations, {expected_sums_shape[0]}, {expected_sums_shape[1]}). "
             f"Got {sums.shape}."
         )
-    ab5_arr = np.asarray(ab5)
-    expected_ab5_shape = (nm, nm, order + 1)
-    if ab5_arr.shape != expected_ab5_shape:
-        raise ValueError(f"`ab5` must have shape {expected_ab5_shape}. Got {ab5_arr.shape}.")
+    tensor = (
+        translation_contraction_tensor(lmax=lmax_i, ab5=ab5)
+        if contraction_tensor is None
+        else np.asarray(contraction_tensor)
+    )
+    expected_tensor_shape = (nm, nm, order + 1, 2 * order + 1)
+    if tensor.shape != expected_tensor_shape:
+        raise ValueError(
+            f"`contraction_tensor` must have shape {expected_tensor_shape}. Got {tensor.shape}."
+        )
     vec = np.asarray(vector, dtype=np.result_type(out_dtype, np.complex64)).reshape(nm)
-
-    result_dtype = np.result_type(sums.dtype, ab5_arr.dtype, vec.dtype, np.complex64)
-    result = np.zeros((sums.shape[0], nm), dtype=result_dtype)
-    m_offset = order
-    for _tau_dst, _l_dst, m_dst, dst_idx in iter_modes(lmax_i):
-        acc = np.zeros(sums.shape[0], dtype=result_dtype)
-        for _tau_src, _l_src, m_src, src_idx in iter_modes(lmax_i):
-            coeff = ab5_arr[dst_idx, src_idx, :]
-            if not np.any(coeff):
-                continue
-            m_delta = m_src - m_dst
-            translated = np.sum(coeff[None, :] * sums[:, :, m_delta + m_offset], axis=1)
-            acc += translated * vec[src_idx]
-        result[:, dst_idx] = acc
+    result_dtype = np.result_type(sums.dtype, tensor.dtype, vec.dtype, np.complex64)
+    result = np.einsum(
+        "dpm,ijpm,j->di",
+        np.asarray(sums, dtype=result_dtype),
+        np.asarray(tensor, dtype=result_dtype),
+        vec,
+        optimize=True,
+    )
     return np.asarray(result, dtype=out_dtype)
 
 
@@ -205,6 +275,8 @@ def periodic_direct_structural_block(
 __all__ = [
     "apply_structural_sums_to_vector",
     "block_from_structural_sums",
+    "blocks_from_structural_sums",
     "direct_structural_sums_2d",
     "periodic_direct_structural_block",
+    "translation_contraction_tensor",
 ]

@@ -34,7 +34,11 @@ from .special import (
     shifted_reciprocal_regime,
     upper_incomplete_gamma_int_or_halfint,
 )
-from .structural import apply_structural_sums_to_vector, block_from_structural_sums
+from .structural import (
+    apply_structural_sums_to_vector,
+    block_from_structural_sums,
+    blocks_from_structural_sums,
+)
 
 Array = np.ndarray
 
@@ -374,9 +378,9 @@ def select_ewald_eta(
 ) -> float:
     """Choose an automatic Ewald split for this lattice and particle packing.
 
-    The selector starts from the CELES/SMUTHI-style ``sqrt(pi / area)`` value
-    and raises eta only when a cheap structural-sum preflight shows that the
-    current value is unstable against the next geometric candidate.
+    The selector starts from the canonical ``sqrt(pi / area)`` value and raises
+    eta only when a cheap structural-sum preflight shows that the current value
+    is unstable against the next geometric candidate.
     """
     canonical = default_ewald_eta(lattice)
     candidates = _candidate_ewald_etas(canonical_eta=canonical, k=float(k))
@@ -1219,6 +1223,7 @@ def _fill_block_cache_for_source(
     shell_tolerance: float,
     max_shells: int,
     workspace: EwaldShellWorkspace,
+    contraction_tensor: Array | None = None,
 ) -> None:
     """Populate missing dense blocks for one source using one structural batch."""
     src_idx = int(source_index)
@@ -1248,13 +1253,15 @@ def _fill_block_cache_for_source(
             k=float(k),
             eta=float(eta),
         )
+    blocks = blocks_from_structural_sums(
+        lmax=int(lmax),
+        structural_sums=sums,
+        ab5=ab5,
+        dtype=dtype,
+        contraction_tensor=contraction_tensor,
+    )
     for local_idx, dst_idx in enumerate(missing):
-        cache[(int(dst_idx), src_idx)] = block_from_structural_sums(
-            lmax=int(lmax),
-            structural_sums=sums[local_idx],
-            ab5=ab5,
-            dtype=dtype,
-        )
+        cache[(int(dst_idx), src_idx)] = blocks[local_idx]
 
 
 def fill_periodic_ewald_block_cache(
@@ -1274,6 +1281,7 @@ def fill_periodic_ewald_block_cache(
     max_shells: int = 32,
     source_indices: Iterable[int] | None = None,
     workspace: EwaldShellWorkspace | None = None,
+    contraction_tensor: Array | None = None,
 ) -> None:
     """Populate a dense periodic block cache source-by-source."""
     pos = np.asarray(positions, dtype=float).reshape(-1, 3)
@@ -1302,6 +1310,7 @@ def fill_periodic_ewald_block_cache(
             shell_tolerance=float(shell_tolerance),
             max_shells=int(max_shells),
             workspace=ws,
+            contraction_tensor=contraction_tensor,
         )
 
 
@@ -1322,6 +1331,7 @@ def apply_periodic_ewald_sum(
     max_shells: int = 32,
     block_cache: dict[tuple[int, int], Array] | None = None,
     workspace: EwaldShellWorkspace | None = None,
+    contraction_tensor: Array | None = None,
 ) -> Array:
     """Apply the Ewald Bloch image sum to stacked SVWF coefficients.
 
@@ -1372,6 +1382,7 @@ def apply_periodic_ewald_sum(
                 ab5=ab5,
                 vector=arr[j],
                 dtype=out_dtype,
+                contraction_tensor=contraction_tensor,
             )
             continue
 
@@ -1391,6 +1402,7 @@ def apply_periodic_ewald_sum(
             shell_tolerance=float(shell_tolerance),
             max_shells=int(max_shells),
             workspace=ws,
+            contraction_tensor=contraction_tensor,
         )
         for i in range(ns):
             y[i] += block_cache[(i, j)] @ arr[j]
