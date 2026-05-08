@@ -4,6 +4,7 @@ from functools import cache
 from typing import TYPE_CHECKING, Literal
 
 import numpy as np
+from tqdm.auto import tqdm
 
 from pyceles.core.indexing import iter_modes, n_modes
 from pyceles.core.particles import (
@@ -193,6 +194,7 @@ def _periodic_local_regular_l1_coeffs(
     periodic: PeriodicSpec,
     k_parallel: np.ndarray,
     point_batch_size: int = 128,
+    show_progress: bool = False,
 ) -> np.ndarray:
     """Return point-local regular `l=1` coefficients for periodic in-slab points.
 
@@ -238,27 +240,41 @@ def _periodic_local_regular_l1_coeffs(
         k_parallel=np.asarray(k_parallel, dtype=float).reshape(2),
         eta=float(eta),
     )
-    for s in range(0, pts.shape[0], batch):
-        e = min(pts.shape[0], s + batch)
-        pts_batch = np.asarray(pts[s:e], dtype=float)
-        acc = np.zeros((pts_batch.shape[0], 6), dtype=np.complex128)
-        for j in range(pos.shape[0]):
-            sums = ewald_structural_sums_2d_batch(
-                lmax_struct=lmax_struct,
-                k=float(k),
-                destinations=pts_batch,
-                source=pos[j],
-                lattice=periodic.lattice,
-                k_parallel=k_parallel,
-                eta=float(eta),
-                real_shells=periodic.options.real_shells,
-                reciprocal_shells=periodic.options.reciprocal_shells,
-                shell_tolerance=float(periodic.options.shell_tolerance),
-                max_shells=int(periodic.options.max_shells),
-                workspace=workspace,
-            )
-            acc += _reduce_structural_sums_to_l1(sums, coeff_arr[j], kernel=kernel)
-        out[s:e, :] = acc
+    batch_starts = range(0, pts.shape[0], batch)
+    n_batches = (pts.shape[0] + batch - 1) // batch
+    total_work = int(n_batches * pos.shape[0])
+    progress = (
+        tqdm(total=total_work, desc="Periodic slab field", unit="source-batch", leave=True)
+        if show_progress and total_work > 0
+        else None
+    )
+    try:
+        for s in batch_starts:
+            e = min(pts.shape[0], s + batch)
+            pts_batch = np.asarray(pts[s:e], dtype=float)
+            acc = np.zeros((pts_batch.shape[0], 6), dtype=np.complex128)
+            for j in range(pos.shape[0]):
+                sums = ewald_structural_sums_2d_batch(
+                    lmax_struct=lmax_struct,
+                    k=float(k),
+                    destinations=pts_batch,
+                    source=pos[j],
+                    lattice=periodic.lattice,
+                    k_parallel=k_parallel,
+                    eta=float(eta),
+                    real_shells=periodic.options.real_shells,
+                    reciprocal_shells=periodic.options.reciprocal_shells,
+                    shell_tolerance=float(periodic.options.shell_tolerance),
+                    max_shells=int(periodic.options.max_shells),
+                    workspace=workspace,
+                )
+                acc += _reduce_structural_sums_to_l1(sums, coeff_arr[j], kernel=kernel)
+                if progress is not None:
+                    progress.update(1)
+            out[s:e, :] = acc
+    finally:
+        if progress is not None:
+            progress.close()
     return out
 
 
@@ -307,6 +323,7 @@ def compute_periodic_near_field_interior(
     *,
     points: np.ndarray,
     channel: Literal["mixed", "te", "tm"] = "mixed",
+    show_progress: bool = False,
 ) -> NearFieldComponents:
     """Evaluate periodic near fields for points inside the particle slab.
 
@@ -395,6 +412,7 @@ def compute_periodic_near_field_interior(
                 k=float(run.k),
                 periodic=periodic,
                 k_parallel=k_parallel,
+                show_progress=show_progress,
             )
             e_valid, h_valid = _local_regular_l1_fields_at_center(
                 local_l1_coeffs=local_l1,

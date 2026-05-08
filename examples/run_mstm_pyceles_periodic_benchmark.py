@@ -85,6 +85,7 @@ class RunConfig:
     max_iterations: int = 10000
     run_pyceles: bool = True
     pyceles_nearfield_bmax: float | None = None
+    pyceles_field_evanescent_decay: float = 8.0
 
 
 _NUMERIC_TOKEN_RE = re.compile(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eEdD][+-]?\d+)?")
@@ -587,7 +588,9 @@ def _grid_payload(
     def _axis_samples(vmin: float, vmax: float) -> np.ndarray:
         if np.isclose(vmin, vmax, rtol=0.0, atol=1e-12):
             return np.asarray([vmin], dtype=float)
-        values = np.arange(vmin, vmax, step, dtype=float)
+        # MSTM includes an endpoint when it falls exactly on the regular grid,
+        # but it does not add a final point beyond a non-grid-aligned maximum.
+        values = np.arange(vmin, vmax + 0.5 * step, step, dtype=float)
         if values.size == 0:
             return np.asarray([vmin], dtype=float)
         return values
@@ -736,7 +739,7 @@ def _plot_bipanel_intensity(
             np.asarray(data, dtype=float).T,
             origin="lower",
             extent=extent,
-            aspect="auto",
+            aspect="equal",
             cmap="viridis",
         )
         ax.set_title(label)
@@ -876,11 +879,50 @@ def _save_pyceles_periodic_npz(path: Path, periodic: Any) -> None:
     )
 
 
+def _pyceles_nearfield_reference_distance(case: PeriodicBenchmarkCase) -> float:
+    """Return a conservative exterior distance for near-field order selection."""
+    radii = [float(sphere.radius) for sphere in case.spheres]
+    if not radii:
+        return 1.0
+    return max(2.0 * max(radii), 1.0e-12)
+
+
+def _field_bmax_for_evanescent_decay(*, k: float, distance: float, decay: float) -> float:
+    """Return a reciprocal cutoff from a target evanescent decay length."""
+    kf = float(k)
+    d = max(float(distance), 1.0e-12)
+    q = max(float(decay), 0.0) / d
+    return float(math.sqrt(kf * kf + q * q))
+
+
+def _resolve_pyceles_nearfield_bmax(
+    case: PeriodicBenchmarkCase,
+    cfg: RunConfig,
+) -> tuple[float | None, dict[str, Any] | None]:
+    """Resolve the pyceles periodic near-field reciprocal output radius."""
+    if cfg.pyceles_nearfield_bmax is not None:
+        value = float(cfg.pyceles_nearfield_bmax)
+        return value, {"source": "explicit", "value": value}
+    distance = _pyceles_nearfield_reference_distance(case)
+    k = 2.0 * math.pi * float(np.real(case.medium_refractive_index)) / float(case.vacuum_wavelength)
+    decay = float(cfg.pyceles_field_evanescent_decay)
+    value = _field_bmax_for_evanescent_decay(k=k, distance=distance, decay=decay)
+    return value, {
+        "source": "auto_evanescent_decay",
+        "value": float(value),
+        "k": float(k),
+        "value_over_k": float(value / k) if k > 0.0 else None,
+        "characteristic_distance": float(distance),
+        "evanescent_decay": float(decay),
+    }
+
+
 def _run_pyceles_case(
     case: PeriodicBenchmarkCase,
     outdir_case: Path,
     *,
     nearfield_bmax: float | None,
+    nearfield_bmax_policy: dict[str, Any] | None = None,
     nearfield_reference: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     import pyceles as pcl
@@ -968,12 +1010,14 @@ def _run_pyceles_case(
                 points=coords,
                 channel="mixed",
                 field_bmax=nearfield_bmax,
+                show_progress=True,
             )
             nf_tm = pcl.compute_periodic_near_field(
                 run_tm,
                 points=coords,
                 channel="mixed",
                 field_bmax=nearfield_bmax,
+                show_progress=True,
             )
         except NotImplementedError as exc:
             nearfield_artifacts[slice_cfg.name] = {
@@ -1028,6 +1072,7 @@ def _run_pyceles_case(
             "A": float(0.5 * (channels["te"]["A"] + channels["tm"]["A"])),
         },
         "nearfield": nearfield_artifacts,
+        "nearfield_bmax_policy": nearfield_bmax_policy,
         "mapping_convention": {"parallel": "tm", "perpendicular": "te"},
     }
 
@@ -1117,16 +1162,18 @@ def run_case(case: PeriodicBenchmarkCase, cfg: RunConfig) -> dict[str, Any]:
             },
         }
 
-    pyceles_output = (
-        _run_pyceles_case(
+    pyceles_output = None
+    if cfg.run_pyceles:
+        pyceles_nearfield_bmax, pyceles_nearfield_bmax_policy = _resolve_pyceles_nearfield_bmax(
+            case, cfg
+        )
+        pyceles_output = _run_pyceles_case(
             case,
             outdir_case,
-            nearfield_bmax=cfg.pyceles_nearfield_bmax,
+            nearfield_bmax=pyceles_nearfield_bmax,
+            nearfield_bmax_policy=pyceles_nearfield_bmax_policy,
             nearfield_reference=nearfield_reference,
         )
-        if cfg.run_pyceles
-        else None
-    )
 
     summary = _build_summary(
         case,
@@ -1312,7 +1359,19 @@ def _build_parser() -> argparse.ArgumentParser:
         "--pyceles-nearfield-bmax",
         type=float,
         default=None,
-        help="Optional pyceles periodic near-field reciprocal-radius cutoff.",
+        help=(
+            "Optional pyceles periodic near-field reciprocal-radius cutoff. "
+            "When omitted, the benchmark derives one from --pyceles-field-evanescent-decay."
+        ),
+    )
+    parser.add_argument(
+        "--pyceles-field-evanescent-decay",
+        type=float,
+        default=8.0,
+        help=(
+            "Target evanescent decay used to derive pyceles near-field bmax "
+            "when --pyceles-nearfield-bmax is omitted."
+        ),
     )
     parser.add_argument(
         "--plot-map-panels",
@@ -1329,10 +1388,8 @@ def main() -> None:
         parser.error("--mstm-exe is required unless --parse-only-mstm is used.")
     if args.pyceles_nearfield_bmax is not None and float(args.pyceles_nearfield_bmax) <= 0.0:
         parser.error("--pyceles-nearfield-bmax must be > 0 when provided.")
-    if not bool(args.skip_pyceles) and args.pyceles_nearfield_bmax is None:
-        parser.error(
-            "--pyceles-nearfield-bmax is required for benchmark runs that include pyceles near-field payloads."
-        )
+    if float(args.pyceles_field_evanescent_decay) < 0.0:
+        parser.error("--pyceles-field-evanescent-decay must be >= 0.")
 
     case = CASES[args.case]
     if args.medium_n_real is not None:
@@ -1354,6 +1411,7 @@ def main() -> None:
         pyceles_nearfield_bmax=(
             None if args.pyceles_nearfield_bmax is None else float(args.pyceles_nearfield_bmax)
         ),
+        pyceles_field_evanescent_decay=float(args.pyceles_field_evanescent_decay),
     )
     summary = run_case(case, cfg)
     map_report_path: Path | None = None

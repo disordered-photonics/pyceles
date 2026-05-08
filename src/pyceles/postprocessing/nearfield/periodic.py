@@ -29,6 +29,7 @@ def compute_periodic_near_field(
     channel: Literal["mixed", "te", "tm"] = "mixed",
     field_bmax: float | None = None,
     slab_tolerance: float = 1e-12,
+    show_progress: bool = False,
 ) -> NearFieldComponents:
     """Evaluate periodic near fields with slab-aware production dispatch.
 
@@ -92,6 +93,7 @@ def compute_periodic_near_field(
             run,
             points=pts_flat[slab_mask],
             channel=channel,
+            show_progress=show_progress,
         )
         e_initial[slab_mask] = np.asarray(nf_int.E_initial, dtype=out_dtype).reshape(-1, 3)
         h_initial[slab_mask] = np.asarray(nf_int.H_initial, dtype=out_dtype).reshape(-1, 3)
@@ -136,6 +138,7 @@ def compute_periodic_near_field_slice(
     field_bmax: float | None = None,
     slab_tolerance: float = 1e-12,
     center_pixel_policy: Literal["none", "interpolate"] = "interpolate",
+    show_progress: bool = False,
 ) -> NearFieldSlice:
     """Evaluate periodic near fields on an axis-aligned planar slice."""
     if float(dx) <= 0.0:
@@ -180,6 +183,7 @@ def compute_periodic_near_field_slice(
         channel=channel,
         field_bmax=field_bmax,
         slab_tolerance=slab_tolerance,
+        show_progress=show_progress,
     )
     field_dtype = np.dtype(getattr(run.config, "compute_dtype", "complex128"))
     field_maps = {
