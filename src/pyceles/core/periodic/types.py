@@ -23,7 +23,9 @@ class PeriodicOptions:
     ``real_shells`` and ``reciprocal_shells`` are optional explicit
     Chebyshev-index shell truncation counts. Leaving either as ``None``
     enables adaptive shell accumulation with ``shell_tolerance`` and ``max_shells``
-    (used as a safety cap, not as an accuracy target).
+    (used as a safety cap, not as an accuracy target). Accelerated evaluators
+    that cannot adapt without host/device synchronization may resolve these
+    options once to fixed shell counts using the same tolerance.
 
     ``output_bmax`` controls optional evanescent diffraction orders in periodic
     output bases. ``None`` means propagating orders only for far-field power

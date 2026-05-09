@@ -22,7 +22,7 @@ import numpy as np
 from pyceles._optional import import_cupy
 from pyceles.core.indexing import n_modes
 from pyceles.core.lattice import RectangularLattice2D
-from pyceles.core.periodic.ewald import resolve_ewald_eta
+from pyceles.core.periodic.ewald import resolve_ewald_eta, resolve_ewald_shell_counts
 from pyceles.core.periodic.scalar import (
     chebyshev_shell_indices,
     factorial_int,
@@ -128,17 +128,6 @@ class _CupyFixedShellWorkspace:
         out = _CupyRealShell(shifts=shifts, phase_xy=phase_xy.astype(cp.complex128))
         self.real_cache[idx] = out
         return out
-
-
-def _fixed_shell_count(value: int | None, *, max_shells: int) -> int:
-    """Return an inclusive shell cap for the fixed-range GPU evaluator."""
-    if value is not None:
-        return max(0, int(value))
-    # The GPU slab evaluator currently uses a bounded fixed range when the
-    # operator itself is configured for adaptive shell accumulation.  This keeps
-    # the field path device-resident and matches the cheap eta-preflight range;
-    # callers that need a stricter field basis can set explicit shell counts.
-    return min(12, max(1, int(max_shells)))
 
 
 def _ewald_structural_sums_shifted_fixed_cupy(
@@ -389,9 +378,10 @@ def periodic_local_regular_l1_coeffs_cupy(
     """Return point-local regular ``l=1`` coefficients using the CuPy path.
 
     The function is intentionally specialized to periodic in-slab near fields.
-    It uses fixed shell ranges (``real_shells``/``reciprocal_shells`` when set,
-    otherwise a bounded eta-preflight range) to avoid adaptive host/device
-    synchronizations.
+    It uses explicit shell ranges when supplied, otherwise a centralized
+    one-shot shell resolver chooses fixed ranges compatible with the NumPy
+    adaptive options. This avoids adaptive host/device synchronizations in the
+    hot CuPy loop.
     """
     cp, _ = import_cupy()
     pts = np.asarray(points, dtype=np.float64).reshape(-1, 3)
@@ -413,13 +403,16 @@ def periodic_local_regular_l1_coeffs_cupy(
         coeffs=coeff_arr,
         cupy=cp,
     )
-    real_count = _fixed_shell_count(
-        periodic.options.real_shells, max_shells=int(periodic.options.max_shells)
+    shell_counts = resolve_ewald_shell_counts(
+        periodic=periodic,
+        k=float(k),
+        k_parallel=np.asarray(k_parallel, dtype=float).reshape(2),
+        positions=pos,
+        lmax=int(lmax),
+        eta=float(eta),
     )
-    recip_count = _fixed_shell_count(
-        periodic.options.reciprocal_shells,
-        max_shells=int(periodic.options.max_shells),
-    )
+    real_count = int(shell_counts.real_shells)
+    recip_count = int(shell_counts.reciprocal_shells)
     if source_batch_size is None:
         # Keep the flattened pair count modest.  This is not a public tuning
         # parameter; it only bounds temporary GPU arrays.

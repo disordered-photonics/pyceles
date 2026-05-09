@@ -406,3 +406,50 @@ def test_adaptive_shells_raise_on_non_convergence() -> None:
             shell_tolerance=1e-14,
             max_shells=1,
         )
+
+
+def test_resolve_ewald_shell_counts_honors_explicit_options():
+    from pyceles.core.lattice import RectangularLattice2D
+    from pyceles.core.periodic import PeriodicOptions, PeriodicSpec
+    from pyceles.core.periodic.ewald import resolve_ewald_shell_counts
+
+    lattice = RectangularLattice2D(ax=3600.0, ay=3600.0)
+    spec = PeriodicSpec(
+        lattice=lattice,
+        options=PeriodicOptions(real_shells=3, reciprocal_shells=5, max_shells=16),
+    )
+    counts = resolve_ewald_shell_counts(
+        periodic=spec,
+        k=2 * np.pi / 550.0,
+        k_parallel=np.zeros(2),
+        positions=np.asarray([[0.0, 0.0, 0.0], [100.0, 0.0, 200.0]]),
+        lmax=3,
+    )
+    assert counts.real_shells == 3
+    assert counts.reciprocal_shells == 5
+    assert counts.selected_by == "explicit"
+
+
+def test_resolve_ewald_shell_counts_returns_bounded_probe_counts():
+    from pyceles.core.lattice import RectangularLattice2D
+    from pyceles.core.periodic import PeriodicOptions, PeriodicSpec
+    from pyceles.core.periodic.ewald import resolve_ewald_eta, resolve_ewald_shell_counts
+
+    lattice = RectangularLattice2D(ax=3600.0, ay=3600.0)
+    spec = PeriodicSpec(
+        lattice=lattice, options=PeriodicOptions(max_shells=8, shell_tolerance=1e-8)
+    )
+    positions = np.asarray([[0.0, 0.0, 0.0], [120.0, 0.0, 200.0], [300.0, 50.0, 900.0]])
+    k = 2 * np.pi / 550.0
+    eta = resolve_ewald_eta(periodic=spec, k=k, k_parallel=np.zeros(2), positions=positions, lmax=3)
+    counts = resolve_ewald_shell_counts(
+        periodic=spec,
+        k=k,
+        k_parallel=np.zeros(2),
+        positions=positions,
+        lmax=3,
+        eta=eta,
+    )
+    assert 0 <= counts.real_shells <= 8
+    assert 0 <= counts.reciprocal_shells <= 8
+    assert counts.selected_by in {"probe", "fallback", "max_shells_reference_failed"}
