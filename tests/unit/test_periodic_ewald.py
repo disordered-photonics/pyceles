@@ -10,6 +10,7 @@ from pyceles.core.periodic.ewald import (
     default_ewald_eta,
     ewald_structural_constant_2d,
     ewald_structural_sums_2d,
+    ewald_structural_sums_2d_batch,
     select_ewald_eta,
 )
 from pyceles.core.periodic.shells import (
@@ -124,6 +125,97 @@ def test_ewald_structural_sums_are_eta_invariant_for_same_plane_case() -> None:
     )
 
     assert a == pytest.approx(b, rel=2e-9, abs=2e-9)
+
+
+def test_batch_same_plane_rows_match_individual_evaluations() -> None:
+    """Mixed same-plane/shifted batches must apply same-plane parity per point.
+
+    Regular xz/yz diagnostic slices can contain one exact same-z row embedded in
+    otherwise off-plane rows.  The batch implementation should match separate
+    scalar-table evaluations for each point in that mixed batch.
+    """
+    k = 2.0 * np.pi / 550.0
+    kp = np.array([0.0012, -0.0007], dtype=float)
+    lattice = _lattice()
+    source = np.zeros(3, dtype=float)
+    destinations = np.array(
+        [
+            [73.0, 28.0, 0.0],
+            [65.0, 32.0, 59.0],
+            [-41.0, 109.0, 0.0],
+        ],
+        dtype=float,
+    )
+    batch = ewald_structural_sums_2d_batch(
+        lmax_struct=2,
+        k=k,
+        destinations=destinations,
+        source=source,
+        lattice=lattice,
+        k_parallel=kp,
+        eta=0.02,
+        real_shells=8,
+        reciprocal_shells=8,
+    )
+    expected = np.stack(
+        [
+            ewald_structural_sums_2d(
+                lmax=2,
+                k=k,
+                destination=dest,
+                source=source,
+                lattice=lattice,
+                k_parallel=kp,
+                eta=0.02,
+                real_shells=8,
+                reciprocal_shells=8,
+            )
+            for dest in destinations
+        ],
+        axis=0,
+    )
+    np.testing.assert_allclose(batch, expected, rtol=5e-12, atol=5e-12)
+
+
+def test_batch_roundoff_same_plane_rows_use_same_plane_limit() -> None:
+    k = 2.0 * np.pi / 550.0
+    kp = np.array([0.0012, -0.0007], dtype=float)
+    lattice = _lattice()
+    source = np.array([12.0, -8.0, 53.71408859848636], dtype=float)
+    destinations = np.array(
+        [
+            [73.0, 28.0, 53.71408859848634],
+            [65.0, 32.0, 59.0],
+            [-41.0, 109.0, 53.71408859848634],
+        ],
+        dtype=float,
+    )
+    exact_destinations = np.asarray(destinations, dtype=float)
+    exact_destinations[[0, 2], 2] = source[2]
+
+    near = ewald_structural_sums_2d_batch(
+        lmax_struct=2,
+        k=k,
+        destinations=destinations,
+        source=source,
+        lattice=lattice,
+        k_parallel=kp,
+        eta=0.02,
+        real_shells=8,
+        reciprocal_shells=8,
+    )
+    exact = ewald_structural_sums_2d_batch(
+        lmax_struct=2,
+        k=k,
+        destinations=exact_destinations,
+        source=source,
+        lattice=lattice,
+        k_parallel=kp,
+        eta=0.02,
+        real_shells=8,
+        reciprocal_shells=8,
+    )
+    np.testing.assert_allclose(near, exact, rtol=5e-12, atol=5e-12)
 
 
 def test_ewald_structural_constant_rejects_invalid_mode() -> None:

@@ -12,6 +12,21 @@ from .special import upper_incomplete_gamma_int_or_halfint
 Array = np.ndarray
 
 
+def same_plane_z_tolerance(k: float, *, coordinate_scale: float = 0.0) -> float:
+    """Return the roundoff-scale height tolerance for same-plane Ewald routing.
+
+    The shifted reciprocal recurrence is singular in the same-plane limit.  Grid
+    construction and particle coordinates can differ by a few ulps even when a
+    diagnostic slice is intended to pass exactly through a particle height, so
+    those roundoff-sized offsets should use the same-plane formula instead of the
+    shifted recurrence.
+    """
+    k_abs = abs(float(k))
+    wavelength_scale = 1.0 / k_abs if np.isfinite(k_abs) and k_abs > 0.0 else 1.0
+    scale = max(1.0, wavelength_scale, abs(float(coordinate_scale)))
+    return float(1024.0 * np.finfo(float).eps * scale)
+
+
 def validate_shell_count(value: int, *, name: str) -> int:
     """Validate one nonnegative shell/window count."""
     shells = int(value)

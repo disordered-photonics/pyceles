@@ -21,6 +21,7 @@ from .scalar import (
     factorial_int,
     real_integral_sequence,
     reciprocal_gamma,
+    same_plane_z_tolerance,
     structural_sum_m_normalization,
     upper_gamma_sequence,
 )
@@ -776,6 +777,15 @@ def ewald_structural_constant_2d(
     rvec = np.asarray(destination, dtype=float).reshape(3) - np.asarray(
         source, dtype=float
     ).reshape(3)
+    coordinate_scale = float(
+        max(
+            np.max(np.abs(np.asarray(destination, dtype=float).reshape(3))),
+            np.max(np.abs(np.asarray(source, dtype=float).reshape(3))),
+        )
+    )
+    if abs(float(rvec[2])) <= same_plane_z_tolerance(float(k), coordinate_scale=coordinate_scale):
+        rvec = np.asarray(rvec, dtype=float).copy()
+        rvec[2] = 0.0
     is_self = bool(exclude_zero_shift) and float(np.linalg.norm(rvec)) == 0.0
     if is_self:
         value = _same_plane_reciprocal_sum(
@@ -929,6 +939,13 @@ def ewald_structural_sums_2d_batch(
     c = source_arr[None, :] - dest
     cxy = np.asarray(c[:, :2], dtype=float)
     cz = np.asarray(c[:, 2], dtype=float)
+    coordinate_scale = float(max(np.max(np.abs(source_arr)), np.max(np.abs(dest))))
+    same_plane_atol = same_plane_z_tolerance(float(k), coordinate_scale=coordinate_scale)
+    same_plane_points = np.abs(cz) <= same_plane_atol
+    if np.any(same_plane_points):
+        c = np.asarray(c, dtype=float).copy()
+        c[same_plane_points, 2] = 0.0
+        cz = np.asarray(c[:, 2], dtype=float)
 
     reciprocal_sums = np.zeros_like(sums)
     max_same_n = max(0, order // 2)
@@ -958,7 +975,7 @@ def ewald_structural_sums_2d_batch(
                 continue
             phase = phase_all[point_mask]
             cz_f = float(cz_val)
-            same_plane = np.isclose(cz_f, 0.0, atol=0.0, rtol=0.0)
+            same_plane = abs(cz_f) <= same_plane_atol
             if same_plane:
                 for degree in range(order + 1):
                     for m in range(-degree, degree + 1):
@@ -1064,7 +1081,6 @@ def ewald_structural_sums_2d_batch(
     )
 
     real_sums = np.zeros_like(sums)
-    same_plane_batch = np.all(np.isclose(cz, 0.0, atol=0.0, rtol=0.0))
     real_control = make_lattice_shell_control(
         shells=real_shells,
         max_shells=int(max_shells),
@@ -1095,12 +1111,16 @@ def ewald_structural_sums_2d_batch(
                 )
                 radial = phase_shell * kz_r**degree * integral
                 for m in range(-degree, degree + 1):
-                    if same_plane_batch and (degree - abs(m)) % 2:
-                        continue
                     angular = (
                         plm[degree, abs(m), :] * exp_m_phi[m] / structural_sum_m_normalization(m)
                     )
                     contrib = -1j * np.sqrt(2.0 / np.pi) * radial * angular
+                    if (degree - abs(m)) % 2:
+                        # Exact same-plane real-space terms vanish for odd
+                        # degree-|m|.  Apply this per point, not per batch:
+                        # regular xz/yz diagnostic slices often contain a
+                        # same-z row embedded in otherwise shifted rows.
+                        contrib = np.where(same_plane_points[point_idx], 0.0 + 0.0j, contrib)
                     np.add.at(
                         inc[:, degree, m + offset],
                         point_idx,
