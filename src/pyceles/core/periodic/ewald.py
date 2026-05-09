@@ -794,6 +794,11 @@ def _self_correction(k: float, eta: float) -> complex:
     return complex(upper_incomplete_gamma_int_or_halfint(-0.5, x) / (4.0 * math.pi))
 
 
+def ewald_self_correction(k: float, eta: float) -> complex:
+    """Return the public-internal same-particle Ewald central-point correction."""
+    return _self_correction(float(k), float(eta))
+
+
 def _shifted_reciprocal_sum(
     degree: int,
     order: int,
@@ -1644,6 +1649,7 @@ __all__ = [
     "PeriodicEwaldConvergenceError",
     "apply_periodic_ewald_sum",
     "default_ewald_eta",
+    "ewald_self_correction",
     "ewald_structural_constant_2d",
     "ewald_structural_sums_2d",
     "ewald_structural_sums_2d_batch",

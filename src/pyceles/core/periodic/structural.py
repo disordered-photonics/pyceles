@@ -88,7 +88,7 @@ def translation_contraction_tensor(
 ) -> Array:
     """Return the dense tensor that contracts scalar structural sums into W blocks.
 
-    For a fixed ``lmax`` and CELES/SMUTHI ``ab5`` table, periodic Ewald block
+    For a fixed ``lmax`` and translation ``ab5`` table, periodic Ewald block
     assembly repeatedly performs the same sparse selection/contraction:
 
     ``block[dst, src] = sum_p ab5[dst, src, p] * S[p, m_src - m_dst]``.

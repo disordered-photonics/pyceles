@@ -104,12 +104,33 @@ def test_periodic_options_reject_invalid_numerical_policy() -> None:
         pcl.PeriodicOptions(output_bmax=0.0)
 
 
-def test_periodic_config_rejects_unimplemented_backend_combinations() -> None:
+def test_periodic_config_accepts_cupy_operator_backend() -> None:
     spec = pcl.PeriodicSpec(lattice=pcl.RectangularLattice2D(300.0, 400.0))
-    with pytest.raises(NotImplementedError, match="CPU/NumPy-only"):
+
+    cfg = SimulationConfig(
+        source=_plane_wave(),
+        periodic=spec,
+        operator_backend="cupy",
+        verbose=False,
+    )
+
+    assert cfg.periodic == spec
+    assert cfg.operator_backend == "cupy"
+
+
+def test_periodic_config_rejects_cupy_directsum_method() -> None:
+    spec = pcl.PeriodicSpec(
+        lattice=pcl.RectangularLattice2D(300.0, 400.0),
+        options=pcl.PeriodicOptions(method="directsum"),
+    )
+    with pytest.raises(NotImplementedError, match="only Ewald"):
         SimulationConfig(
             source=_plane_wave(), periodic=spec, operator_backend="cupy", verbose=False
         )
+
+
+def test_periodic_config_rejects_unimplemented_mlfmm_combination() -> None:
+    spec = pcl.PeriodicSpec(lattice=pcl.RectangularLattice2D(300.0, 400.0))
     with pytest.raises(NotImplementedError, match="Periodic MLFMM"):
         SimulationConfig(
             source=_plane_wave(), periodic=spec, coupling_backend="mlfmm", verbose=False

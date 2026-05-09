@@ -20,6 +20,7 @@ from .base import CouplingOperator, PreparedOperator
 from .coupling_pairwise import PairwiseCouplingOperator
 from .coupling_pairwise_cupy import CuPyPairwiseCouplingOperator
 from .coupling_periodic import PeriodicCouplingOperator
+from .coupling_periodic_cupy import CuPyPeriodicCouplingOperator
 from .groups import (
     AxisymmetricTGroup,
     DenseTGroup,
@@ -254,8 +255,6 @@ def prepare_matvec(
     periodic_spec = periodic
     k_parallel_arr: np.ndarray | None = None
     if periodic_spec is not None:
-        if backend != "numpy":
-            raise NotImplementedError("Periodic operator preparation is currently CPU/NumPy-only.")
         if coupling_name != "pairwise":
             raise NotImplementedError("Periodic MLFMM coupling is not implemented yet.")
         if k_parallel is None:
@@ -338,9 +337,9 @@ def prepare_matvec(
             )
     elif backend_name == "cupy":
         import_cupy()
-        if cache_translation_blocks:
+        if cache_translation_blocks and periodic_spec is None:
             raise NotImplementedError(
-                "`cache_translation_blocks=True` is not supported with `operator_backend='cupy'` "
+                "`cache_translation_blocks=True` is not supported with finite `operator_backend='cupy'` "
                 "(direct raw-kernel coupling path)."
             )
         # The CuPy backend accepts mixed diagonal/dense groups, including
@@ -369,7 +368,24 @@ def prepare_matvec(
                 dtype=op_dtype,
             ),
         )
-        if coupling_name == "pairwise":
+        if periodic_spec is not None:
+            if k_parallel_arr is None:
+                raise RuntimeError("Internal error: periodic k_parallel was not normalized.")
+            ab5 = translation_ab5_table(int(lmax), dtype=op_dtype)
+            coupling = cast(
+                CouplingOperator,
+                CuPyPeriodicCouplingOperator(
+                    lmax=int(lmax),
+                    k=k_f,
+                    positions=positions,
+                    ab5=ab5,
+                    periodic=periodic_spec,
+                    k_parallel=k_parallel_arr,
+                    dtype=op_dtype,
+                    cache_blocks=bool(cache_translation_blocks),
+                ),
+            )
+        elif coupling_name == "pairwise":
             lut = make_radial_lut()
             ab5 = translation_ab5_table(int(lmax), dtype=op_dtype)
             coupling = cast(

@@ -23,6 +23,7 @@ from .coupling_pairwise import (
 )
 from .coupling_pairwise_cupy import CuPyPairwiseCouplingOperator
 from .coupling_periodic import PeriodicCouplingOperator
+from .coupling_periodic_cupy import CuPyPeriodicCouplingOperator
 from .groups import (
     AxisymmetricTGroup,
     DenseTGroup,
@@ -67,6 +68,7 @@ __all__ = [
     "CuPyMLFMMHostCachePolicy",
     "CuPyMLFMMPreparedData",
     "CuPyPairwiseCouplingOperator",
+    "CuPyPeriodicCouplingOperator",
     "DenseTGroup",
     "DiagonalTGroup",
     "MLFMMCouplingOperator",

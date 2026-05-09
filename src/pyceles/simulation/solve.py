@@ -11,6 +11,7 @@ from tqdm.auto import tqdm
 from pyceles._dtypes import resolve_compute_accum_dtypes
 from pyceles.core.indexing import n_modes
 from pyceles.core.operators import (
+    CuPyPeriodicCouplingOperator,
     PairwiseCouplingOperator,
     PeriodicCouplingOperator,
     PreparedOperator,
@@ -71,7 +72,7 @@ def _assemble_dense_operator_for_prepared(
     """Assemble dense `A` while avoiding accidental periodic Ewald recomputation."""
     coupling = prepared.coupling
     if (
-        isinstance(coupling, PeriodicCouplingOperator)
+        isinstance(coupling, (PeriodicCouplingOperator, CuPyPeriodicCouplingOperator))
         and coupling.periodic.options.method == "ewald"
     ):
         if coupling.cache_blocks:
@@ -89,10 +90,27 @@ def _assemble_dense_operator_for_prepared(
         # private Ewald block reuse avoids recomputing all pair blocks for every
         # column while keeping iterative default behavior (`cache_blocks=False`).
         previous_cache_blocks = coupling.cache_blocks
-        previous_block_cache = coupling._ewald_block_cache
-        assembly_block_cache: dict[tuple[int, int], np.ndarray] = {}
         coupling.cache_blocks = True
-        coupling._ewald_block_cache = assembly_block_cache
+        if isinstance(coupling, PeriodicCouplingOperator):
+            previous_ewald_block_cache = coupling._ewald_block_cache
+            assembly_ewald_block_cache: dict[tuple[int, int], np.ndarray] = {}
+            coupling._ewald_block_cache = assembly_ewald_block_cache
+            try:
+                coupling.populate(show_progress=show_progress)
+                return _assemble_dense_operator_via_matvec(
+                    A_mv,
+                    n=n,
+                    dtype=dtype,
+                    show_progress=show_progress,
+                )
+            finally:
+                assembly_ewald_block_cache.clear()
+                coupling.cache_blocks = previous_cache_blocks
+                coupling._ewald_block_cache = previous_ewald_block_cache
+
+        previous_source_block_cache = coupling._source_block_cache
+        assembly_source_block_cache: dict[int, Any] = {}
+        coupling._source_block_cache = assembly_source_block_cache
         try:
             coupling.populate(show_progress=show_progress)
             return _assemble_dense_operator_via_matvec(
@@ -102,9 +120,9 @@ def _assemble_dense_operator_for_prepared(
                 show_progress=show_progress,
             )
         finally:
-            assembly_block_cache.clear()
+            assembly_source_block_cache.clear()
             coupling.cache_blocks = previous_cache_blocks
-            coupling._ewald_block_cache = previous_block_cache
+            coupling._source_block_cache = previous_source_block_cache
     return _assemble_dense_operator_via_matvec(
         A_mv,
         n=n,

@@ -73,7 +73,7 @@ def factorial_int(value: int | np.integer) -> int:
 
 
 def structural_sum_m_normalization(order: int) -> float:
-    """Return the SMUTHI-to-pyceles scalar structural-sum normalization for order `M`."""
+    """Return pyceles's scalar structural-sum normalization for azimuthal order `M`."""
     m = int(order)
     if m >= 0:
         return math.sqrt(2.0 * math.pi) * ((-1.0) ** (-m))

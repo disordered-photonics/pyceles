@@ -215,20 +215,22 @@ class SimulationConfig:
                     "`periodic` must be a PeriodicSpec instance or None. "
                     f"Got {type(self.periodic).__name__}."
                 )
-            if backend != "numpy":
-                raise NotImplementedError("Periodic workflows are currently CPU/NumPy-only.")
             if coupling_backend != "pairwise":
                 raise NotImplementedError("Periodic MLFMM coupling is not implemented yet.")
+            if backend == "cupy" and self.periodic.options.method != "ewald":
+                raise NotImplementedError(
+                    "CuPy periodic workflows currently support only Ewald coupling."
+                )
         post_backend = str(self.postprocessing_backend).lower()
         if post_backend not in {"inherit", "numpy", "cupy"}:
             raise ValueError(
                 "`postprocessing_backend` must be one of {'inherit', 'numpy', 'cupy'}. "
                 f"Got {self.postprocessing_backend!r}."
             )
-        if backend == "cupy" and bool(self.cache_translation_blocks):
+        if backend == "cupy" and bool(self.cache_translation_blocks) and self.periodic is None:
             raise ValueError(
-                "`cache_translation_blocks=True` is not supported with `operator_backend='cupy'`. "
-                "The CuPy backend does not expose translation-block caching."
+                "`cache_translation_blocks=True` is not supported with finite `operator_backend='cupy'`. "
+                "The finite CuPy direct-coupling path does not expose translation-block caching."
             )
         _, az_shared = validate_angular_grid_pair(
             polar_name="polar_angles",

@@ -5,7 +5,9 @@ from typing import Any, cast
 import numpy as np
 import pytest
 
+from pyceles.core.lattice import RectangularLattice2D
 from pyceles.core.operators import MLFMMOptions
+from pyceles.core.periodic import PeriodicSpec
 from pyceles.core.sources import PlaneWave
 from pyceles.simulation import SimulationConfig
 
@@ -36,9 +38,21 @@ def test_simulation_config_rejects_unknown_postprocessing_backend() -> None:
         SimulationConfig(postprocessing_backend="cuda", verbose=False)  # type: ignore[arg-type]
 
 
-def test_simulation_config_rejects_cupy_translation_block_cache() -> None:
+def test_simulation_config_rejects_finite_cupy_translation_block_cache() -> None:
     with pytest.raises(ValueError, match="cache_translation_blocks=True"):
         SimulationConfig(operator_backend="cupy", cache_translation_blocks=True, verbose=False)
+
+
+def test_simulation_config_allows_periodic_cupy_translation_block_cache() -> None:
+    cfg = SimulationConfig(
+        source=PlaneWave(wavelength=550.0, medium_n=1.0 + 0j),
+        periodic=PeriodicSpec(lattice=RectangularLattice2D(300.0, 300.0)),
+        operator_backend="cupy",
+        cache_translation_blocks=True,
+        verbose=False,
+    )
+
+    assert cfg.cache_translation_blocks is True
 
 
 def test_simulation_config_accepts_mlfmm_coupling_backend_and_options() -> None:

@@ -1,10 +1,10 @@
 """CuPy special-function helpers for two-dimensional periodic Ewald sums.
 
 This module mirrors the small subset of :mod:`pyceles.core.periodic.special`
-needed by the experimental CuPy periodic-Ewald path. CuPy/cupyx currently does
-not expose ``scipy.special.wofz`` (the Faddeeva function), so we provide a
-self-contained GPU implementation based on the modified trapezoidal rules from
-M. Al Azah & S. N. Chandler-Wilde, SIAM J. Numer. Anal. 59, 2346-2367 (2021)
+needed by accelerated periodic-Ewald paths. CuPy/cupyx currently does not expose
+``scipy.special.wofz`` (the Faddeeva function), so we provide a self-contained
+GPU implementation based on the modified trapezoidal rules from M. Al Azah and
+S. N. Chandler-Wilde, SIAM J. Numer. Anal. 59, 2346-2367 (2021).
 """
 
 from __future__ import annotations
@@ -244,8 +244,8 @@ def real_integral_sequence_cupy(
 ) -> Any:
     """CuPy version of the real-space Ewald radial integral sequence.
 
-    This mirrors the helper used by the experimental CuPy Ewald evaluator. It is
-    intentionally kept here because it depends on the same Faddeeva primitive.
+    This mirrors the NumPy helper used by periodic Ewald evaluators and is kept
+    here because it depends on the same Faddeeva primitive.
     """
     cp = cupy
     if cp is None:
