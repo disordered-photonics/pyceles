@@ -404,16 +404,31 @@ def compute_periodic_near_field_interior(
 
         valid_idx = np.flatnonzero(~inside_mask)
         if valid_idx.size > 0:
-            local_l1 = _periodic_local_regular_l1_coeffs(
-                points=np.asarray(pts_flat[valid_idx], dtype=float),
-                positions=run.positions,
-                coeffs=coeffs,
-                lmax=int(run.config.lmax),
-                k=float(run.k),
-                periodic=periodic,
-                k_parallel=k_parallel,
-                show_progress=show_progress,
-            )
+            points_valid = np.asarray(pts_flat[valid_idx], dtype=float)
+            if run.config.resolved_postprocessing_backend() == "cupy":
+                from .periodic_interior_cupy import periodic_local_regular_l1_coeffs_cupy
+
+                local_l1 = periodic_local_regular_l1_coeffs_cupy(
+                    points=points_valid,
+                    positions=run.positions,
+                    coeffs=coeffs,
+                    lmax=int(run.config.lmax),
+                    k=float(run.k),
+                    periodic=periodic,
+                    k_parallel=k_parallel,
+                    show_progress=show_progress,
+                )
+            else:
+                local_l1 = _periodic_local_regular_l1_coeffs(
+                    points=points_valid,
+                    positions=run.positions,
+                    coeffs=coeffs,
+                    lmax=int(run.config.lmax),
+                    k=float(run.k),
+                    periodic=periodic,
+                    k_parallel=k_parallel,
+                    show_progress=show_progress,
+                )
             e_valid, h_valid = _local_regular_l1_fields_at_center(
                 local_l1_coeffs=local_l1,
                 n_medium=run.config.n_medium,
