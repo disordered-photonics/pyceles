@@ -95,7 +95,7 @@ def translation_contraction_tensor(
 
     Building this tensor once removes Python-level mode-pair loops from dense
     block-cache population and from the matrix-free batched ``W @ x`` path.
-    The tensor is small for the low orders used by typycal pycels examples.
+    The tensor is small for the low orders used by typical pyceles examples.
     """
     lmax_i = int(lmax)
     nm = n_modes(lmax_i)

@@ -17,7 +17,7 @@ from pyceles.core.periodic import PeriodicSpec, plane_wave_k_parallel
 from pyceles.core.periodic.ewald import (
     EwaldShellWorkspace,
     ewald_structural_sums_2d_batch,
-    select_ewald_eta,
+    resolve_ewald_eta,
 )
 from pyceles.core.translation import translation_ab5_table
 
@@ -219,20 +219,12 @@ def _periodic_local_regular_l1_coeffs(
         )
 
     batch = max(1, int(point_batch_size))
-    eta = (
-        select_ewald_eta(
-            lattice=periodic.lattice,
-            k=float(k),
-            k_parallel=k_parallel,
-            positions=pos,
-            lmax=lmax_i,
-            shell_tolerance=float(periodic.options.shell_tolerance),
-            max_shells=int(periodic.options.max_shells),
-            real_shells=periodic.options.real_shells,
-            reciprocal_shells=periodic.options.reciprocal_shells,
-        )
-        if periodic.options.eta is None
-        else float(periodic.options.eta)
+    eta = resolve_ewald_eta(
+        periodic=periodic,
+        k=float(k),
+        k_parallel=k_parallel,
+        positions=pos,
+        lmax=lmax_i,
     )
     workspace = EwaldShellWorkspace(
         lattice=periodic.lattice,

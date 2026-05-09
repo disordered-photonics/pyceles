@@ -22,7 +22,7 @@ import numpy as np
 from pyceles._optional import import_cupy
 from pyceles.core.indexing import n_modes
 from pyceles.core.lattice import RectangularLattice2D
-from pyceles.core.periodic.ewald import select_ewald_eta
+from pyceles.core.periodic.ewald import resolve_ewald_eta
 from pyceles.core.periodic.scalar import (
     chebyshev_shell_indices,
     factorial_int,
@@ -364,20 +364,12 @@ def _resolve_eta(
     positions: np.ndarray,
     lmax: int,
 ) -> float:
-    if periodic.options.eta is not None:
-        return float(periodic.options.eta)
-    return float(
-        select_ewald_eta(
-            lattice=periodic.lattice,
-            k=float(k),
-            k_parallel=np.asarray(k_parallel, dtype=float).reshape(2),
-            positions=np.asarray(positions, dtype=float).reshape(-1, 3),
-            lmax=int(lmax),
-            shell_tolerance=float(periodic.options.shell_tolerance),
-            max_shells=int(periodic.options.max_shells),
-            real_shells=periodic.options.real_shells,
-            reciprocal_shells=periodic.options.reciprocal_shells,
-        )
+    return resolve_ewald_eta(
+        periodic=periodic,
+        k=float(k),
+        k_parallel=np.asarray(k_parallel, dtype=float).reshape(2),
+        positions=np.asarray(positions, dtype=float).reshape(-1, 3),
+        lmax=int(lmax),
     )
 
 

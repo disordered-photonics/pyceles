@@ -417,6 +417,39 @@ def select_ewald_eta(
     return float(canonical)
 
 
+def resolve_ewald_eta(
+    *,
+    periodic,
+    k: float,
+    k_parallel: Array,
+    positions: Array,
+    lmax: int,
+) -> float:
+    """Return the effective Ewald split for one periodic configuration.
+
+    This is the single internal policy helper used by the periodic operator and
+    by postprocessing evaluators.  Explicit ``periodic.options.eta`` values are
+    honored exactly; ``None`` delegates to :func:`select_ewald_eta` so every
+    periodic code path uses the same automatic preflight.
+    """
+    eta = periodic.options.eta
+    if eta is not None:
+        return float(eta)
+    return float(
+        select_ewald_eta(
+            lattice=periodic.lattice,
+            k=float(k),
+            k_parallel=np.asarray(k_parallel, dtype=float).reshape(2),
+            positions=np.asarray(positions, dtype=float).reshape(-1, 3),
+            lmax=int(lmax),
+            shell_tolerance=float(periodic.options.shell_tolerance),
+            max_shells=int(periodic.options.max_shells),
+            real_shells=periodic.options.real_shells,
+            reciprocal_shells=periodic.options.reciprocal_shells,
+        )
+    )
+
+
 def _same_plane_reciprocal_sum(
     degree: int,
     order: int,
