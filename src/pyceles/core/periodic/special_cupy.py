@@ -1,9 +1,10 @@
 """CuPy special-function helpers for two-dimensional periodic Ewald sums.
 
 This module mirrors the small subset of :mod:`pyceles.core.periodic.special`
-needed by the experimental CuPy periodic-Ewald path.  CuPy/cupyx currently does
+needed by the experimental CuPy periodic-Ewald path. CuPy/cupyx currently does
 not expose ``scipy.special.wofz`` (the Faddeeva function), so we provide a
-self-contained GPU implementation based on Weideman's rational approximation.
+self-contained GPU implementation based on the modified trapezoidal rules from
+M. Al Azah & S. N. Chandler-Wilde, SIAM J. Numer. Anal. 59, 2346-2367 (2021)
 """
 
 from __future__ import annotations
@@ -17,136 +18,106 @@ import numpy as np
 from pyceles._optional import import_cupy
 
 _SMALL_COMPLEX = 1.0e-14
-_DEFAULT_WOFZ_TERMS = 64
+_DEFAULT_WOFZ_TERMS = 11
 
 
-@cache
-def _weideman_coefficients_host(terms: int) -> tuple[float, np.ndarray]:
-    """Return Weideman coefficients for the Faddeeva approximation.
+_WTRAP_CUDA_SOURCE = r"""
+#include <cupy/complex.cuh>
 
-    This is the compact rational approximation described by J. A. C. Weideman,
-    SIAM J. Numer. Anal. 31, 1497--1518 (1994).  The coefficients are generated
-    once on the host using NumPy FFTs and then transferred to the active CUDA
-    device on demand.
-    """
-    n = int(terms)
-    if n < 8:
-        raise ValueError(f"`terms` must be >= 8. Got {terms!r}.")
-    m = 2 * n
-    m2 = 2 * m
-    k = np.arange(-m + 1, m, dtype=np.float64)
-    length = math.sqrt(n / math.sqrt(2.0))
-    theta = k * math.pi / float(m)
-    t = length * np.tan(theta / 2.0)
-    f = np.exp(-(t * t)) * (length * length + t * t)
-    f = np.concatenate(([0.0], f))
-    coeff = np.real(np.fft.fft(np.fft.fftshift(f))) / float(m2)
-    coeff = coeff[1 : n + 1][::-1].copy().astype(np.float64)
-    return float(length), coeff
-
-
-_DEVICE_COEFF_CACHE: dict[tuple[int, int], tuple[float, Any]] = {}
-
-
-def _weideman_coefficients_device(terms: int, cupy: Any) -> tuple[float, Any]:
-    """Return ``(L, coeffs_on_current_device)`` for the active CUDA device."""
-    device_id = int(cupy.cuda.Device().id)
-    key = (int(terms), device_id)
-    cached = _DEVICE_COEFF_CACHE.get(key)
-    if cached is not None:
-        return cached
-    length, coeff_host = _weideman_coefficients_host(int(terms))
-    coeff_dev = cupy.asarray(coeff_host, dtype=cupy.float64)
-    _DEVICE_COEFF_CACHE[key] = (length, coeff_dev)
-    return length, coeff_dev
-
-
-_WOFZ_KERNEL = r"""
-extern "C" __global__ void pyceles_wofz_weideman64(
-    const double2* __restrict__ z,
-    const double* __restrict__ coeff,
-    const long n,
+extern "C" __device__ complex<double> _wtrap_upper_one(
+    const complex<double> z,
     const int terms,
-    const double L,
-    double2* __restrict__ out
+    const double h,
+    const double H
 ) {
-    const long i = blockDim.x * blockIdx.x + threadIdx.x;
-    if (i >= n) return;
+    const double rz = z.real();
+    const double iz = z.imag();
+    const double rzh = rz / h;
+    const double buff = fabs(rzh - floor(rzh) - 0.5);
+    const bool use_midpoint_only = iz >= fmax(rz, H);
+    const bool use_modified_trapezium = (iz < rz) && (buff <= 0.25);
 
-    const double inv_sqrt_pi = 0.564189583547756286948079451560772585844050629329;
+    const complex<double> z2 = z * z;
+    const complex<double> az = complex<double>(0.0, 2.0 / H) * z;
 
-    double x = z[i].x;
-    double y = z[i].y;
-    const bool lower = (y < 0.0);
-
-    // Evaluate in the upper half-plane, then use w(z)=2*exp(-z*z)-w(-z)
-    // for lower-half-plane arguments.  This avoids the pole-like quadrature
-    // difficulty near the real axis and follows the standard Faddeeva symmetry.
-    double xu = lower ? -x : x;
-    double yu = lower ? -y : y;
-
-    // Z = (L + i*z) / (L - i*z)
-    // For z=x+iy: L+i*z = (L-y) + i*x, L-i*z = (L+y) - i*x.
-    const double ar = L - yu;
-    const double ai = xu;
-    const double br = L + yu;
-    const double bi = -xu;
-    const double bden = br * br + bi * bi;
-    const double Zr = (ar * br + ai * bi) / bden;
-    const double Zi = (ai * br - ar * bi) / bden;
-
-    // Horner evaluation of the real-coefficient polynomial.
-    double pr = 0.0;
-    double pi = 0.0;
-    for (int j = 0; j < terms; ++j) {
-        const double nr = pr * Zr - pi * Zi + coeff[j];
-        const double ni = pr * Zi + pi * Zr;
-        pr = nr;
-        pi = ni;
+    if (use_modified_trapezium) {
+        complex<double> sum = complex<double>(0.0, 0.0);
+        for (int j = 1; j <= terms; ++j) {
+            const double t = h * (double)j;
+            const double t2 = t * t;
+            const double et2 = exp(-t2);
+            sum += complex<double>(et2, 0.0) / (z2 - complex<double>(t2, 0.0));
+        }
+        const complex<double> exp_z2 = exp(z2);
+        const complex<double> exp_shift = exp(complex<double>(0.0, -2.0 * H) * z);
+        const complex<double> correction = complex<double>(2.0, 0.0)
+            / (exp_z2 * (complex<double>(1.0, 0.0) - exp_shift));
+        return complex<double>(0.0, 1.0 / H) / z + az * sum + correction;
     }
 
-    // den = L - i*z = (L+y) - i*x; den2 = den*den.
-    const double dr = br;
-    const double di = bi;
-    const double d2r = dr * dr - di * di;
-    const double d2i = 2.0 * dr * di;
-    const double d2den = d2r * d2r + d2i * d2i;
-
-    // term1 = 2*p/den^2
-    const double t1r = 2.0 * (pr * d2r + pi * d2i) / d2den;
-    const double t1i = 2.0 * (pi * d2r - pr * d2i) / d2den;
-
-    // term2 = invsqrtpi / den
-    const double dden = dr * dr + di * di;
-    const double t2r = inv_sqrt_pi * dr / dden;
-    const double t2i = -inv_sqrt_pi * di / dden;
-
-    double wr = t1r + t2r;
-    double wi = t1i + t2i;
-
-    if (lower) {
-        // 2*exp(-z*z) - w(-z)
-        const double er = exp(-x * x + y * y);
-        const double phase = -2.0 * x * y;
-        const double exr = er * cos(phase);
-        const double exi = er * sin(phase);
-        wr = 2.0 * exr - wr;
-        wi = 2.0 * exi - wi;
+    const double h0 = 0.5 * h;
+    complex<double> sum = complex<double>(exp(-(h0 * h0)), 0.0)
+        / (z2 - complex<double>(h0 * h0, 0.0));
+    for (int j = 1; j <= terms; ++j) {
+        const double t = h * ((double)j + 0.5);
+        const double t2 = t * t;
+        const double et2 = exp(-t2);
+        sum += complex<double>(et2, 0.0) / (z2 - complex<double>(t2, 0.0));
+    }
+    const complex<double> midpoint = az * sum;
+    if (use_midpoint_only) {
+        return midpoint;
     }
 
-    out[i].x = wr;
-    out[i].y = wi;
+    const complex<double> exp_z2 = exp(z2);
+    const complex<double> exp_shift = exp(complex<double>(0.0, -2.0 * H) * z);
+    const complex<double> correction = complex<double>(2.0, 0.0)
+        / (exp_z2 * (complex<double>(1.0, 0.0) + exp_shift));
+    return midpoint + correction;
+}
+
+extern "C" __global__ void pyceles_wofz_wtrap_c128(
+    const long long n,
+    const complex<double>* z_in,
+    complex<double>* out,
+    const int terms,
+    const double h,
+    const double H
+) {
+    const long long idx = (long long)blockIdx.x * (long long)blockDim.x + (long long)threadIdx.x;
+    if (idx >= n) {
+        return;
+    }
+
+    const complex<double> z0 = z_in[idx];
+    const bool xneg = z0.real() < 0.0;
+    const bool yneg = z0.imag() < 0.0;
+    const bool not_both = xneg != yneg;
+
+    complex<double> z = z0;
+    if (xneg) {
+        z = -z;
+    }
+    if (not_both) {
+        z = conj(z);
+    }
+
+    complex<double> w = _wtrap_upper_one(z, terms, h, H);
+    if (not_both) {
+        w = conj(w);
+    }
+    if (yneg) {
+        w = complex<double>(2.0, 0.0) * exp(-(z0 * z0)) - w;
+    }
+    out[idx] = w;
 }
 """
 
-_WOFZ_RAW_KERNEL: Any | None = None
 
-
-def _wofz_raw_kernel(cupy: Any) -> Any:
-    global _WOFZ_RAW_KERNEL
-    if _WOFZ_RAW_KERNEL is None:
-        _WOFZ_RAW_KERNEL = cupy.RawKernel(_WOFZ_KERNEL, "pyceles_wofz_weideman64")
-    return _WOFZ_RAW_KERNEL
+@cache
+def _wtrap_raw_kernel() -> Any:
+    cp, _ = import_cupy()
+    return cp.RawKernel(_WTRAP_CUDA_SOURCE, "pyceles_wofz_wtrap_c128")
 
 
 def wofz_cupy(z: Any, *, terms: int = _DEFAULT_WOFZ_TERMS, cupy: Any | None = None) -> Any:
@@ -155,36 +126,45 @@ def wofz_cupy(z: Any, *, terms: int = _DEFAULT_WOFZ_TERMS, cupy: Any | None = No
     Parameters
     ----------
     z:
-        Scalar or array-like complex argument.  The result is returned as a
-        CuPy ``complex128`` array.
+        Scalar or array-like complex argument. The result is returned as a CuPy
+        ``complex128`` array with the same shape.
     terms:
-        Number of Weideman rational-approximation terms.  ``64`` is the default
-        and is typically close to double precision over the Ewald argument range.
+        Quadrature order ``N`` for the modified trapezoidal rules. The reference
+        MATLAB implementation recommends ``N=11`` for near-double-precision
+        accuracy; this is the default used here.
     cupy:
         Optional CuPy module handle, useful for callers that already imported it.
-
-    Notes
-    -----
-    The Faddeeva function is ``w(z) = exp(-z**2) * erfc(-1j*z)``.
     """
     cp = cupy
     if cp is None:
         cp, _ = import_cupy()
+    n_terms = int(terms)
+    if n_terms < 1:
+        raise ValueError(f"`terms` must be >= 1. Got {terms!r}.")
+
     z_arr = cp.asarray(z, dtype=cp.complex128)
-    out = cp.empty_like(z_arr, dtype=cp.complex128)
-    if z_arr.size == 0:
-        return out
-    length, coeff = _weideman_coefficients_device(int(terms), cp)
-    flat_z = cp.ascontiguousarray(z_arr.reshape(-1))
-    flat_out = cp.empty_like(flat_z, dtype=cp.complex128)
-    block = 256
-    grid = (int((flat_z.size + block - 1) // block),)
-    _wofz_raw_kernel(cp)(
-        grid,
-        (block,),
-        (flat_z, coeff, np.int64(flat_z.size), np.int32(int(terms)), np.float64(length), flat_out),
+    if int(z_arr.size) == 0:
+        return cp.empty_like(z_arr, dtype=cp.complex128)
+
+    z_flat = cp.ascontiguousarray(z_arr.reshape(-1))
+    out_flat = cp.empty_like(z_flat, dtype=cp.complex128)
+    h = math.sqrt(math.pi / float(n_terms + 1))
+    H = math.pi / h
+    threads = 256
+    blocks = (int(z_flat.size) + threads - 1) // threads
+    _wtrap_raw_kernel()(
+        (blocks,),
+        (threads,),
+        (
+            np.int64(int(z_flat.size)),
+            z_flat,
+            out_flat,
+            np.int32(n_terms),
+            np.float64(h),
+            np.float64(H),
+        ),
     )
-    return flat_out.reshape(z_arr.shape)
+    return out_flat.reshape(z_arr.shape)
 
 
 def shifted_delta_sequence_cupy(
@@ -264,7 +244,7 @@ def real_integral_sequence_cupy(
 ) -> Any:
     """CuPy version of the real-space Ewald radial integral sequence.
 
-    This mirrors the helper used by the experimental CuPy Ewald evaluator.  It is
+    This mirrors the helper used by the experimental CuPy Ewald evaluator. It is
     intentionally kept here because it depends on the same Faddeeva primitive.
     """
     cp = cupy

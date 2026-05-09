@@ -34,7 +34,7 @@ def test_wofz_cupy_matches_scipy_reference():
     )
     got = cp.asnumpy(wofz_cupy(cp.asarray(z), cupy=cp))
     want = scipy_special.wofz(z)
-    np.testing.assert_allclose(got, want, rtol=5e-11, atol=5e-12)
+    np.testing.assert_allclose(got, want, rtol=1e-14, atol=1e-14)
 
 
 def test_shifted_delta_sequence_cupy_matches_numpy_reference():
@@ -45,7 +45,7 @@ def test_shifted_delta_sequence_cupy_matches_numpy_reference():
     gamma = np.asarray([0.008 + 0.001j, 0.011 + 0.003j, 0.004 + 0.009j], dtype=np.complex128)
     got = cp.asnumpy(shifted_delta_sequence_cupy(4, cp.asarray(gamma), 275.0, 0.0015, cupy=cp))
     want = shifted_delta_sequence(4, gamma, 275.0, 0.0015)
-    np.testing.assert_allclose(got, want, rtol=2e-10, atol=2e-10)
+    np.testing.assert_allclose(got, want, rtol=1e-14, atol=1e-14)
 
 
 def test_real_integral_sequence_cupy_matches_numpy_reference():
@@ -61,7 +61,7 @@ def test_real_integral_sequence_cupy_matches_numpy_reference():
     # This recurrence is mildly ill-conditioned for the smallest radius in this
     # sample: near-machine-epsilon differences in the Faddeeva seed are
     # amplified into a few 1e-10 relative error in the final real-space term.
-    np.testing.assert_allclose(got, want, rtol=5e-10, atol=2e-10)
+    np.testing.assert_allclose(got, want, rtol=5e-10, atol=1e-14)
 
 
 def test_shifted_delta_sequence_cupy_batched_matches_reference_rows():
@@ -84,4 +84,4 @@ def test_shifted_delta_sequence_cupy_batched_matches_reference_rows():
         [shifted_delta_sequence(4, gamma, float(z_offset), 0.0015) for z_offset in z_offsets],
         axis=0,
     )
-    np.testing.assert_allclose(got, want, rtol=2e-10, atol=2e-10)
+    np.testing.assert_allclose(got, want, rtol=2e-14, atol=1e-14)
