@@ -1051,7 +1051,7 @@ def test_cupy_simulation_run_matches_numpy_for_coeffs_farfield_and_nearfield(
         atol=ff_back_atol,
     )
     if run_numpy.cross_sections is None or run_cupy.cross_sections is None:
-        raise AssertionError("Plane-wave CuPy/NuPy parity run must expose cross sections.")
+        raise AssertionError("Plane-wave CuPy/NumPy parity run must expose cross sections.")
     for key in (
         "C_ext",
         "C_sca",

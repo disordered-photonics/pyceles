@@ -1631,7 +1631,7 @@ def direct_dense_cupy(
     if show_progress:
         residual_mode = "on" if compute_final_residual else "off"
         print(
-            "[solver] Direct dense solve [cupy]:"
+            "[solver] Direct dense solve (CuPy):"
             f" n={n} nrhs={nrhs} setup={setup_mode} final_residual_check={residual_mode}"
         )
     b_gpu = cupy.asarray(b_mat)
@@ -1640,7 +1640,7 @@ def direct_dense_cupy(
     cupy.cuda.Stream.null.synchronize()
     if show_progress:
         dt = time.perf_counter() - t0
-        print(f"[solver] Direct dense solve [cupy] completed in {dt:.3f} s")
+        print(f"[solver] Direct dense solve (CuPy) completed in {dt:.3f} s")
 
     _record_backend_solution(x_gpu[:, 0] if squeezed else x_gpu)
     x_mat = asnumpy(x_gpu)

@@ -50,7 +50,9 @@ class CuPyPeriodicCouplingOperator:
     _workspace: CupyEwaldShellWorkspace | None = field(default=None, init=False, repr=False)
     _resolved_ewald_eta: float | None = field(default=None, init=False, repr=False)
     _resolved_shell_counts: tuple[int, int] | None = field(default=None, init=False, repr=False)
+    _coordinate_scale: float | None = field(default=None, init=False, repr=False)
     _contraction_tensor_gpu: Any | None = field(default=None, init=False, repr=False)
+    _self_correction_gpu: Any | None = field(default=None, init=False, repr=False)
     _source_block_cache: dict[int, Any] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -133,61 +135,116 @@ class CuPyPeriodicCouplingOperator:
             self._contraction_tensor_gpu = cp.asarray(tensor_np, dtype=self.dtype)
         return self._contraction_tensor_gpu
 
-    def _add_self_correction(self, sums: Any, *, local_destination_index: int) -> None:
-        idx = int(local_destination_index)
-        if idx < 0 or idx >= int(sums.shape[0]):
-            return
-        order = int(sums.shape[1] - 1)
-        cp = self._cupy()
-        correction = ewald_self_correction(float(self.k), self._ewald_eta())
-        value = structural_sum_m_normalization(0) * correction
-        sums[idx, 0, order] = sums[idx, 0, order] + cp.asarray(value, dtype=cp.complex128)
+    def _coordinate_scale_value(self) -> float:
+        if self._coordinate_scale is None:
+            self._coordinate_scale = float(np.max(np.abs(np.asarray(self.positions, dtype=float))))
+        return float(self._coordinate_scale)
 
-    def _structural_sums_for_source(self, source_index: int) -> Any:
+    def _self_correction_device(self) -> Any:
+        cp = self._cupy()
+        if self._self_correction_gpu is None:
+            correction = ewald_self_correction(float(self.k), self._ewald_eta())
+            value = structural_sum_m_normalization(0) * correction
+            self._self_correction_gpu = cp.asarray(value, dtype=cp.complex128)
+        return self._self_correction_gpu
+
+    def _source_batch_size(self) -> int:
+        """Return an internal source chunk size bounded by temporary block memory."""
+        bytes_per_source = self.n_particles * self.n_modes * self.n_modes * self.dtype.itemsize
+        target_bytes = 256 * 1024**2
+        return max(1, min(self.n_particles, 16, target_bytes // max(bytes_per_source, 1)))
+
+    def _source_batches(self) -> Iterable[tuple[int, ...]]:
+        batch_size = int(self._source_batch_size())
+        for start in range(0, self.n_particles, batch_size):
+            stop = min(self.n_particles, start + batch_size)
+            yield tuple(range(start, stop))
+
+    def _add_self_corrections(self, sums: Any, *, source_indices: tuple[int, ...]) -> None:
+        if len(source_indices) == 0:
+            return
+        order = int(sums.shape[2] - 1)
+        cp = self._cupy()
+        rows = cp.arange(len(source_indices), dtype=cp.int64)
+        cols = cp.asarray(source_indices, dtype=cp.int64)
+        sums[rows, cols, 0, order] = sums[rows, cols, 0, order] + self._self_correction_device()
+
+    def _structural_sums_for_sources(self, source_indices: tuple[int, ...]) -> Any:
+        if len(source_indices) == 0:
+            cp = self._cupy()
+            order = 2 * int(self.lmax)
+            return cp.zeros((0, self.n_particles, order + 1, 2 * order + 1), dtype=cp.complex128)
         cp = self._cupy()
         pos = self._positions_device()
-        src = pos[int(source_index)]
-        rel = src[None, :] - pos
+        src = pos[cp.asarray(source_indices, dtype=cp.int64)]
+        rel = src[:, None, :] - pos[None, :, :]
         real_count, reciprocal_count = self._shell_counts()
         sums = ewald_structural_sums_2d_fixed_cupy(
-            relative_source_minus_destination=rel,
+            relative_source_minus_destination=rel.reshape(-1, 3),
             lmax_struct=int(self.lmax),
             k=float(self.k),
             eta=self._ewald_eta(),
             workspace=self._workspace_device(),
             real_shell_count=int(real_count),
             reciprocal_shell_count=int(reciprocal_count),
-            coordinate_scale=float(np.max(np.abs(np.asarray(self.positions, dtype=float)))),
+            coordinate_scale=self._coordinate_scale_value(),
         )
-        self._add_self_correction(sums, local_destination_index=int(source_index))
-        return cp.asarray(sums, dtype=cp.complex128)
+        sums = cp.asarray(sums, dtype=cp.complex128).reshape(
+            len(source_indices),
+            self.n_particles,
+            2 * int(self.lmax) + 1,
+            4 * int(self.lmax) + 1,
+        )
+        self._add_self_corrections(sums, source_indices=source_indices)
+        return sums
 
-    def _blocks_for_source(self, source_index: int) -> Any:
-        cached = self._source_block_cache.get(int(source_index))
-        if cached is not None:
-            return cached
+    def _structural_sums_for_source(self, source_index: int) -> Any:
+        return self._structural_sums_for_sources((int(source_index),))[0]
+
+    def _blocks_for_sources(self, source_indices: tuple[int, ...]) -> Any:
         cp = self._cupy()
-        sums = self._structural_sums_for_source(int(source_index))
+        sums = self._structural_sums_for_sources(source_indices)
         tensor = self._contraction_tensor_device()
         blocks = cp.einsum(
-            "dpm,ijpm->dij",
+            "sdpm,ijpm->sdij",
             sums.astype(self.dtype, copy=False),
             tensor,
             optimize=True,
         ).astype(self.dtype, copy=False)
         if self.cache_blocks:
-            self._source_block_cache[int(source_index)] = blocks
+            for local, source_index in enumerate(source_indices):
+                self._source_block_cache[int(source_index)] = blocks[local]
         return blocks
+
+    def _blocks_for_source(self, source_index: int) -> Any:
+        cached = self._source_block_cache.get(int(source_index))
+        if cached is not None:
+            return cached
+        return self._blocks_for_sources((int(source_index),))[0]
 
     def populate(self, *, show_progress: bool = False) -> None:
         """Eagerly populate the optional device-side dense block cache."""
         if not self.cache_blocks:
             return
-        sources: Iterable[int] = range(self.n_particles)
-        if show_progress:
-            sources = tqdm(sources, total=self.n_particles, desc="Populate periodic W cache [cupy]")
-        for source_index in sources:
-            self._blocks_for_source(int(source_index))
+        progress = (
+            tqdm(total=self.n_particles, desc="Populate periodic W cache (CuPy)")
+            if show_progress
+            else None
+        )
+        try:
+            for source_indices in self._source_batches():
+                missing = tuple(
+                    int(source_index)
+                    for source_index in source_indices
+                    if int(source_index) not in self._source_block_cache
+                )
+                if missing:
+                    self._blocks_for_sources(missing)
+                if progress is not None:
+                    progress.update(len(source_indices))
+        finally:
+            if progress is not None:
+                progress.close()
 
     def _apply_gpu(self, x: Array | object) -> Any:
         cp = self._cupy()
@@ -217,20 +274,22 @@ class CuPyPeriodicCouplingOperator:
 
         y = cp.zeros_like(arr, dtype=self.dtype)
         tensor = self._contraction_tensor_device()
-        for source_index in range(self.n_particles):
-            src = arr[source_index]
-            if self.cache_blocks:
+        if self.cache_blocks:
+            for source_index in range(self.n_particles):
+                src = arr[source_index]
                 blocks = self._blocks_for_source(source_index)
                 y += cp.einsum("dij,jr->dir", blocks, src, optimize=True)
-                continue
-            sums = self._structural_sums_for_source(source_index)
-            y += cp.einsum(
-                "dpm,ijpm,jr->dir",
-                sums.astype(self.dtype, copy=False),
-                tensor,
-                src,
-                optimize=True,
-            )
+        else:
+            for source_indices in self._source_batches():
+                source_indexer = cp.asarray(source_indices, dtype=cp.int64)
+                sums = self._structural_sums_for_sources(source_indices)
+                y += cp.einsum(
+                    "sdpm,ijpm,sjr->dir",
+                    sums.astype(self.dtype, copy=False),
+                    tensor,
+                    arr[source_indexer],
+                    optimize=True,
+                )
         if squeezed:
             return y.reshape(self.n_particles * self.n_modes)
         return y.reshape(self.n_particles * self.n_modes, int(arr.shape[2]))
