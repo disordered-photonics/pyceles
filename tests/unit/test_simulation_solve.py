@@ -103,8 +103,10 @@ def test_assemble_dense_operator_via_matvec_builds_dense_columns():
         arr = np.asarray(x, dtype=np.complex128)
         return np.array([2.0 * arr[0] + arr[1], arr[0] - 3.0 * arr[1]], dtype=np.complex128)
 
-    A = fn(_op, n=2, dtype=np.dtype(np.complex128), show_progress=False)
+    timings: dict[str, float] = {}
+    A = fn(_op, n=2, dtype=np.dtype(np.complex128), show_progress=False, timings=timings)
     np.testing.assert_allclose(A, np.array([[2.0, 1.0], [1.0, -3.0]], dtype=np.complex128))
+    assert timings["dense_operator_assembly_s"] >= 0.0
 
 
 def test_solve_sources_core_reuses_prepared_cache_and_broadcasts_warm_start(monkeypatch):
@@ -168,6 +170,14 @@ def test_solve_sources_core_reuses_prepared_cache_and_broadcasts_warm_start(monk
     assert out0.coeffs["first"].shape == (1, 6)
     assert out0.coeffs["second"].shape == (1, 6)
     assert out1.rhs["first"].shape == (1, 6)
+    metadata = out0.solver_result.block_metadata
+    assert metadata is not None
+    timings = cast(dict[str, float], metadata["simulation_phase_timings_s"])
+    assert timings["source_projection_s"] >= 0.0
+    assert timings["prepare_operator_s"] >= 0.0
+    assert timings["rhs_Tb_s"] >= 0.0
+    assert timings["linear_solve_s"] >= 0.0
+    assert timings["solve_sources_core_s"] >= 0.0
 
 
 @pytest.mark.parametrize(

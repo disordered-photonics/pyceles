@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Iterable, Mapping
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -38,12 +40,18 @@ from .helpers import (
 from .results import SolvedSourcesResult
 
 
+def _record_elapsed(timings: dict[str, float] | None, key: str, start: float) -> None:
+    if timings is not None:
+        timings[key] = timings.get(key, 0.0) + time.perf_counter() - float(start)
+
+
 def _assemble_dense_operator_via_matvec(
     A_mv,
     *,
     n: int,
     dtype: np.dtype,
     show_progress: bool,
+    timings: dict[str, float] | None = None,
 ) -> np.ndarray:
     """Assemble a dense operator by applying the prepared matvec to basis vectors.
 
@@ -56,8 +64,10 @@ def _assemble_dense_operator_via_matvec(
     col_iter: Iterable[int] = range(n)
     if show_progress:
         col_iter = tqdm(col_iter, desc="Assemble A (dense via matvec)")
+    t0 = time.perf_counter()
     for j in col_iter:
         A[:, j] = np.asarray(A_mv(eye[:, j]), dtype=dtype)
+    _record_elapsed(timings, "dense_operator_assembly_s", t0)
     return A
 
 
@@ -68,6 +78,7 @@ def _assemble_dense_operator_for_prepared(
     n: int,
     dtype: np.dtype,
     show_progress: bool,
+    timings: dict[str, float] | None = None,
 ) -> np.ndarray:
     """Assemble dense `A` while avoiding accidental periodic Ewald recomputation."""
     coupling = prepared.coupling
@@ -78,12 +89,15 @@ def _assemble_dense_operator_for_prepared(
         if coupling.cache_blocks:
             # Make the expensive cache-fill phase visible before the dense-column
             # loop starts; otherwise the first column appears to stall.
+            t0 = time.perf_counter()
             coupling.populate(show_progress=show_progress)
+            _record_elapsed(timings, "periodic_w_cache_populate_s", t0)
             return _assemble_dense_operator_via_matvec(
                 A_mv,
                 n=n,
                 dtype=dtype,
                 show_progress=show_progress,
+                timings=timings,
             )
 
         # Dense assembly applies `A_mv` once per basis vector. Temporarily enabling
@@ -96,12 +110,15 @@ def _assemble_dense_operator_for_prepared(
             assembly_ewald_block_cache: dict[tuple[int, int], np.ndarray] = {}
             coupling._ewald_block_cache = assembly_ewald_block_cache
             try:
+                t0 = time.perf_counter()
                 coupling.populate(show_progress=show_progress)
+                _record_elapsed(timings, "periodic_w_cache_populate_s", t0)
                 return _assemble_dense_operator_via_matvec(
                     A_mv,
                     n=n,
                     dtype=dtype,
                     show_progress=show_progress,
+                    timings=timings,
                 )
             finally:
                 assembly_ewald_block_cache.clear()
@@ -112,12 +129,15 @@ def _assemble_dense_operator_for_prepared(
         assembly_source_block_cache: dict[int, Any] = {}
         coupling._source_block_cache = assembly_source_block_cache
         try:
+            t0 = time.perf_counter()
             coupling.populate(show_progress=show_progress)
+            _record_elapsed(timings, "periodic_w_cache_populate_s", t0)
             return _assemble_dense_operator_via_matvec(
                 A_mv,
                 n=n,
                 dtype=dtype,
                 show_progress=show_progress,
+                timings=timings,
             )
         finally:
             assembly_source_block_cache.clear()
@@ -128,6 +148,7 @@ def _assemble_dense_operator_for_prepared(
         n=n,
         dtype=dtype,
         show_progress=show_progress,
+        timings=timings,
     )
 
 
@@ -235,6 +256,8 @@ def solve_sources_core(
         compute_dtype=cfg.compute_dtype,
         accum_dtype=cfg.accum_dtype,
     )
+    phase_timings: dict[str, float] = {}
+    solve_sources_t0 = time.perf_counter()
 
     Ns = positions.shape[0]
     Nm = n_modes(cfg.lmax)
@@ -278,6 +301,7 @@ def solve_sources_core(
         )
 
     initial_coeffs: dict[str, np.ndarray] = {}
+    source_projection_t0 = time.perf_counter()
     for label in labels:
         src = labeled_sources[label]
         coeff = project_source_to_svwf(
@@ -289,6 +313,7 @@ def solve_sources_core(
             dtype=compute_dtype,
         )
         initial_coeffs[label] = np.asarray(coeff, dtype=accum_dtype)
+    phase_timings["source_projection_s"] = time.perf_counter() - source_projection_t0
 
     rhs_flat: dict[str, np.ndarray] = {
         label: np.zeros((unknowns,), dtype=accum_dtype) for label in labels
@@ -304,6 +329,7 @@ def solve_sources_core(
             or sim._prepared_operator_periodic_key != periodic_key
         )
         if need_prepared:
+            prepare_t0 = time.perf_counter()
             prepared = prepare_matvec(
                 lmax=cfg.lmax,
                 k=k,
@@ -319,6 +345,7 @@ def solve_sources_core(
                 backend=operator_backend,
                 show_progress=bool(cfg.verbose),
             )
+            phase_timings["prepare_operator_s"] = time.perf_counter() - prepare_t0
             sim._prepared_operator_cache = prepared
             sim._prepared_operator_dtype = np.dtype(compute_dtype)
             sim._prepared_operator_periodic_key = periodic_key
@@ -331,10 +358,14 @@ def solve_sources_core(
         if prepared is None:
             raise RuntimeError("Internal error: prepared operator cache not initialized.")
         A_mv = prepared.apply_A
+        rhs_t0 = time.perf_counter()
         for label in labels:
             rhs_flat[label] = prepared.rhs_Tb(initial_coeffs[label].reshape(Ns * Nm))
+        phase_timings["rhs_Tb_s"] = time.perf_counter() - rhs_t0
         if bool(cfg.cache_translation_blocks) and not will_use_direct:
+            populate_t0 = time.perf_counter()
             prepared.populate_coupling(show_progress=bool(cfg.verbose))
+            phase_timings["periodic_w_cache_populate_s"] = time.perf_counter() - populate_t0
         if will_use_direct:
             need_dense_lu = (
                 sim._dense_lu_cache is None
@@ -351,12 +382,14 @@ def solve_sources_core(
                     if operator_backend == "numpy" and isinstance(
                         prepared.coupling, PairwiseCouplingOperator
                     ):
+                        dense_t0 = time.perf_counter()
                         A_dense = assemble_dense_A_numpy(
                             prepared,
                             show_progress=bool(cfg.verbose),
                             use_cache=bool(cfg.cache_translation_blocks),
                             store_blocks=False,
                         )
+                        _record_elapsed(phase_timings, "dense_operator_assembly_s", dense_t0)
                     else:
                         if A_mv is None:
                             raise RuntimeError(
@@ -368,6 +401,7 @@ def solve_sources_core(
                             n=unknowns,
                             dtype=np.dtype(compute_dtype),
                             show_progress=bool(cfg.verbose),
+                            timings=phase_timings,
                         )
                     sim._dense_operator_cache = A_dense
                     sim._dense_operator_dtype = np.dtype(compute_dtype)
@@ -375,12 +409,14 @@ def solve_sources_core(
                     A_dense = sim._dense_operator_cache
                 if A_dense is None:
                     raise RuntimeError("Internal error: direct solve requires dense operator.")
+                factor_t0 = time.perf_counter()
                 sim._dense_lu_cache = factorize_dense_matrix(
                     A_dense,
                     dtype=compute_dtype,
                     backend=operator_backend,
                     overwrite_input=(operator_backend == "cupy"),
                 )
+                phase_timings["dense_factorization_s"] = time.perf_counter() - factor_t0
                 sim._dense_lu_dtype = np.dtype(compute_dtype)
                 # On the CuPy direct path, the cached LU payload is the useful
                 # repeated-RHS asset. Releasing the unfactorized dense operator
@@ -448,6 +484,7 @@ def solve_sources_core(
     else:
         if A_mv is None:
             raise RuntimeError("Internal error: A_mv not prepared for non-empty system.")
+        linear_solve_t0 = time.perf_counter()
         if operator_backend == "cupy" and bool(retain_backend_handoff):
             token, backend_capture = _start_backend_solution_capture()
             try:
@@ -490,10 +527,16 @@ def solve_sources_core(
                 show_progress=bool(cfg.verbose),
                 compute_final_residual=compute_final_residual,
             )
+        phase_timings["linear_solve_s"] = time.perf_counter() - linear_solve_t0
         x_arr = np.asarray(solver_result.x)
         x_matrix = (
             x_arr.reshape(unknowns, 1) if n_channels == 1 else x_arr.reshape(unknowns, n_channels)
         )
+
+    phase_timings["solve_sources_core_s"] = time.perf_counter() - solve_sources_t0
+    metadata = dict(solver_result.block_metadata or {})
+    metadata["simulation_phase_timings_s"] = dict(phase_timings)
+    solver_result = replace(solver_result, block_metadata=metadata)
 
     coeffs: dict[str, np.ndarray] = {}
     rhs_out: dict[str, np.ndarray] = {}
