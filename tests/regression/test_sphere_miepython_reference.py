@@ -18,12 +18,15 @@ from dataclasses import dataclass
 from typing import cast
 
 import numpy as np
+import pytest
 
 import pyceles as pcl
 from pyceles.core.fields import PlaneWave
 from pyceles.core.particles import Sphere
 from pyceles.postprocessing.farfield import scattering_cross_section
 from pyceles.simulation import Simulation, SimulationConfig, SimulationResult
+
+pytestmark = pytest.mark.reference
 
 
 @dataclass(frozen=True)

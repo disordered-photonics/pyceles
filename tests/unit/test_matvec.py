@@ -502,6 +502,7 @@ def test_prepare_matvec_accepts_axisymmetric_block_group_factory():
     assert rhs.shape == (2 * nm,)
 
 
+@pytest.mark.reference
 def test_sphere_and_layered_match_when_forced_through_dense_factory():
     lmax, k, positions, radii, n_particle, _, n_medium, x, b = _sample_problem()
     base_particles: list[Particle] = [
@@ -560,6 +561,7 @@ def test_sphere_and_layered_match_when_forced_through_dense_factory():
     )
 
 
+@pytest.mark.reference
 def test_sphere_and_layered_match_when_forced_through_axisymmetric_factory():
     lmax, k, positions, radii, n_particle, _, n_medium, x, b = _sample_problem()
     base_particles: list[Particle] = [
@@ -661,6 +663,7 @@ def test_prepare_matvec_rejects_dense_representation_without_canonical_block_dis
         )
 
 
+@pytest.mark.reference
 def test_precompute_t_diagonal_matches_per_sphere_reference():
     lmax, k, _, radii, n_particle, particles, n_medium, _, _ = _sample_problem()
     T_M, T_N = precompute_T_diagonal(lmax=lmax, k=k, particles=particles, n_medium=n_medium)

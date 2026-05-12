@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from pyceles.core.fields import PlaneWave, incident_coeffs_planewave, transformation_coefficients
 from pyceles.core.indexing import n_modes, n_scalar, scalar_index
@@ -41,6 +42,7 @@ def _incident_coeffs_planewave_reference(
     return aI
 
 
+@pytest.mark.reference
 def test_incident_coeffs_planewave_matches_celes_formula():
     source = PlaneWave(
         wavelength=550.0,

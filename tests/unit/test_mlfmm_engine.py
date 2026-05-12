@@ -428,6 +428,7 @@ def test_multilevel_auto_hf_start_uses_wavelength_threshold() -> None:
     assert operators.hf_end_level == 3
 
 
+@pytest.mark.slow
 def test_multilevel_auto_hf_start_falls_back_to_two_finest_levels() -> None:
     positions, radii, lmax, _k = _multilevel_fixture()
     k_small_wavelength = 2.0 * np.pi / 150.0
@@ -883,6 +884,8 @@ def test_directional_g_operators_are_derived_from_f_basis() -> None:
     np.testing.assert_allclose(transforms.Gph_adj, 1j * transforms.Fth_adj, rtol=0.0, atol=0.0)
 
 
+@pytest.mark.reference
+@pytest.mark.slow
 def test_multilevel_upward_transfer_matches_exact_recenter_oracle(transfer_scaffold) -> None:
     scaffold, k = transfer_scaffold
     transfer = scaffold.transfer
@@ -930,6 +933,8 @@ def test_multilevel_upward_transfer_matches_exact_recenter_oracle(transfer_scaff
     assert rel < 0.80
 
 
+@pytest.mark.reference
+@pytest.mark.slow
 def test_multilevel_downward_transfer_matches_exact_recenter_oracle(transfer_scaffold) -> None:
     scaffold, k = transfer_scaffold
     transfer = scaffold.transfer

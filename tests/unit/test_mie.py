@@ -1,8 +1,10 @@
 import numpy as np
+import pytest
 
 from pyceles.core.tmatrix import mie_ab, mie_cross_sections, mie_efficiencies, sphere_T_diagonal
 
 
+@pytest.mark.reference
 def test_mie_coeffs_against_reference_values():
     """Reference values from the SMUTHI prototype test case."""
     l = 4

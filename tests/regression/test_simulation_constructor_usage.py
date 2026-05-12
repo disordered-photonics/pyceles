@@ -3,6 +3,10 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+import pytest
+
+pytestmark = pytest.mark.api_contract
+
 
 def test_codebase_uses_particle_only_simulation_constructor() -> None:
     """Guard against reintroducing legacy array kwargs in Simulation calls.

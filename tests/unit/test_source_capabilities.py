@@ -25,6 +25,8 @@ from pyceles.core.sources import (
 )
 from pyceles.postprocessing.farfield import finite_beam_power_fractions
 
+pytestmark = pytest.mark.api_contract
+
 
 def _make_dummy_pwp(alpha: np.ndarray, beta: np.ndarray) -> dict:
     coeff = np.zeros((alpha.size, beta.size), dtype=np.complex128)

@@ -5,23 +5,12 @@ from typing import Any
 import numpy as np
 import pytest
 
-from pyceles._optional import import_cupy
 from pyceles.core.lattice import RectangularLattice2D
 from pyceles.core.operators import CuPyPeriodicCouplingOperator, PeriodicCouplingOperator
 from pyceles.core.periodic import PeriodicOptions, PeriodicSpec
 from pyceles.core.translation import translation_ab5_table
 
-
-def _cupy_or_skip() -> Any:
-    try:
-        cupy, _ = import_cupy()
-    except RuntimeError as exc:  # pragma: no cover - optional dependency
-        pytest.skip(f"CuPy is unavailable: {exc}")
-    try:
-        _ = cupy.asarray([0.0], dtype=cupy.float64).sum().get()
-    except Exception as exc:  # pragma: no cover - optional CUDA runtime
-        pytest.skip(f"CuPy/CUDA runtime is unavailable: {exc}")
-    return cupy
+pytestmark = pytest.mark.gpu
 
 
 def _small_periodic_case(
@@ -72,8 +61,10 @@ def _small_periodic_case(
     return cpu, gpu
 
 
-def test_periodic_cupy_coupling_apply_matches_numpy_same_plane_two_particle_cell() -> None:
-    cp = _cupy_or_skip()
+def test_periodic_cupy_coupling_apply_matches_numpy_same_plane_two_particle_cell(
+    cupy_runtime: tuple[Any, Any],
+) -> None:
+    cp, _ = cupy_runtime
     cpu, gpu = _small_periodic_case(cache_blocks=False)
     rng = np.random.default_rng(12)
     x = rng.normal(size=12) + 1j * rng.normal(size=12)
@@ -88,8 +79,8 @@ def test_periodic_cupy_coupling_apply_matches_numpy_same_plane_two_particle_cell
     np.testing.assert_allclose(cp.asnumpy(got_device), want, rtol=1e-8, atol=1e-9)
 
 
-def test_periodic_cupy_coupling_cache_apply_parity() -> None:
-    cp = _cupy_or_skip()
+def test_periodic_cupy_coupling_cache_apply_parity(cupy_runtime: tuple[Any, Any]) -> None:
+    cp, _ = cupy_runtime
     uncached_cpu, uncached_gpu = _small_periodic_case(cache_blocks=False)
     _cpu_cached, cached_gpu = _small_periodic_case(cache_blocks=True)
     rng = np.random.default_rng(25)

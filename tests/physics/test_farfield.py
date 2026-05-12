@@ -329,6 +329,7 @@ def test_finite_beam_power_fractions_expose_local_and_closure_terms():
     )
 
 
+@pytest.mark.reference
 def test_finite_beam_power_fractions_uses_initial_pwp_for_tilted_sources():
     alpha = np.linspace(0.0, 2 * np.pi, 25, endpoint=False)
     beta = np.linspace(0.0, np.pi, 37)
@@ -738,6 +739,8 @@ def test_plane_wave_cross_section_components_expose_raw_local_and_closure():
     )
 
 
+@pytest.mark.reference
+@pytest.mark.slow
 def test_plane_wave_cross_sections_from_coefficients_match_single_sphere_mie():
     wavelength = 550.0
     n_medium = 1.0 + 0j
@@ -1009,6 +1012,7 @@ def test_plane_wave_lossless_cluster_skips_expensive_local_absorption_route(monk
     np.testing.assert_allclose(run.cross_sections["C_abs_local"], 0.0, rtol=0.0, atol=0.0)
 
 
+@pytest.mark.slow
 def test_plane_wave_local_absorption_varies_smoothly_with_weak_absorber():
     wavelength = 550.0
     n_medium = 1.0 + 0j
@@ -1265,6 +1269,7 @@ def test_simulation_dual_basis_jones_mixing_consistency():
     assert "cross_sections" in run.unpolarized
 
 
+@pytest.mark.slow
 def test_simulation_dual_basis_supports_slm_wrapped_gaussian_source():
     base = GaussianBeam(
         wavelength=550.0,

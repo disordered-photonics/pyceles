@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from pyceles.core.fields import (
     FocusedLaguerreGaussianBeam,
     LaguerreGaussianBeam,
     project_source_to_svwf,
 )
+
+pytestmark = pytest.mark.reference
 
 
 def test_laguerre_gaussian_projection_snapshot():

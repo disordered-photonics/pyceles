@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import cast
 
 import numpy as np
+import pytest
 
 from pyceles.core.conversions import pwp_to_svwf_regular
 from pyceles.core.fields import (
@@ -725,6 +726,7 @@ def test_laguerre_gaussian_m0_is_cylindrically_symmetric_in_alpha():
     assert float(np.std(profile)) <= 1e-10 * float(np.max(np.abs(profile)))
 
 
+@pytest.mark.reference
 def test_laguerre_gaussian_projection_matches_high_resolution_reference():
     positions = np.array(
         [
@@ -770,6 +772,7 @@ def test_laguerre_gaussian_projection_matches_high_resolution_reference():
     np.testing.assert_allclose(got, ref, rtol=1e-3, atol=1e-3)
 
 
+@pytest.mark.reference
 def test_focused_laguerre_projection_matches_high_resolution_reference():
     positions = np.array([[0.0, 0.0, 0.0], [45.0, -30.0, 15.0]], dtype=float)
     source = FocusedLaguerreGaussianBeam(

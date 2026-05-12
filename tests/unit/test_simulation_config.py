@@ -11,6 +11,8 @@ from pyceles.core.periodic import PeriodicSpec
 from pyceles.core.sources import PlaneWave
 from pyceles.simulation import SimulationConfig
 
+pytestmark = pytest.mark.api_contract
+
 
 def test_simulation_config_accepts_cupy_operator_backend() -> None:
     cfg = SimulationConfig(operator_backend="cupy", verbose=False)

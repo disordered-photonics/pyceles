@@ -36,6 +36,7 @@ def test_self_correction_uses_half_integer_origin_term() -> None:
     assert _self_correction(k, eta) == pytest.approx(expected, rel=1e-15, abs=1e-15)
 
 
+@pytest.mark.reference
 def test_off_plane_ewald_structural_constants_match_stabilized_references() -> None:
     k = 2.0 * np.pi / 550.0
     k_parallel = np.array([0.0012, -0.0007], dtype=float)
@@ -64,6 +65,7 @@ def test_off_plane_ewald_structural_constants_match_stabilized_references() -> N
         assert actual == pytest.approx(reference, rel=1e-12, abs=1e-12)
 
 
+@pytest.mark.reference
 def test_off_plane_ewald_high_order_matches_reliable_direct_window() -> None:
     k = 2.0 * np.pi / 550.0
     k_parallel = np.array([0.0012, -0.0007], dtype=float)
@@ -319,6 +321,7 @@ def test_automatic_eta_raises_unstable_large_cell_split() -> None:
     assert eta <= 0.35 * k * (1.0 + 1.0e-12)
 
 
+@pytest.mark.reference
 def test_adaptive_shells_match_large_fixed_reference_on_benign_case() -> None:
     k = 2.0 * np.pi / 550.0
     kp = np.array([0.0012, -0.0007], dtype=float)

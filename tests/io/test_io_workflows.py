@@ -1,6 +1,7 @@
 from typing import Any, cast
 
 import numpy as np
+import pytest
 
 from pyceles.core.fields import PlaneWave
 from pyceles.core.particles import Sphere, spheres_from_arrays
@@ -9,6 +10,8 @@ from pyceles.linear.solvers import LinearSolveResult
 from pyceles.postprocessing.farfield import FarFieldPatterns
 from pyceles.postprocessing.nearfield import NearFieldSlice
 from pyceles.simulation import Simulation, SimulationConfig, SimulationResult
+
+pytestmark = [pytest.mark.filesystem, pytest.mark.hdf5]
 
 
 def _dummy_pwp(alpha: np.ndarray, beta: np.ndarray) -> dict:

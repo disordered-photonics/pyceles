@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import inspect
 
+import pytest
+
 from pyceles.simulation import Simulation
+
+pytestmark = pytest.mark.api_contract
 
 
 def test_simulation_constructor_is_particle_only() -> None:

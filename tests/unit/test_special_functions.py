@@ -1,9 +1,12 @@
 from typing import cast
 
 import numpy as np
+import pytest
 from scipy.special import spherical_jn, spherical_yn
 
 from pyceles.core.translation import spherical_bessel_jy
+
+pytestmark = pytest.mark.reference
 
 
 def _dx_xj(n: int, z: np.ndarray) -> np.ndarray:

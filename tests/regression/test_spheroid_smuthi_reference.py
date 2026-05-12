@@ -37,10 +37,13 @@ from dataclasses import dataclass
 from typing import Literal
 
 import numpy as np
+import pytest
 
 from pyceles.core.particles import Spheroid
 from pyceles.core.sources import PlaneWave
 from pyceles.simulation import Simulation, SimulationConfig, SimulationResult
+
+pytestmark = [pytest.mark.reference, pytest.mark.slow]
 
 
 @dataclass(frozen=True)

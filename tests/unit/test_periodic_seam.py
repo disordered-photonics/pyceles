@@ -163,6 +163,7 @@ def test_periodic_overlap_validator_checks_self_images() -> None:
         Simulation(cfg, particles=[_sphere(radius=60.0)])
 
 
+@pytest.mark.reference
 def test_periodic_overlap_validator_accepts_separated_reference_cell() -> None:
     spec = pcl.PeriodicSpec(lattice=pcl.RectangularLattice2D(300.0, 300.0))
     cfg = SimulationConfig(source=_plane_wave(), periodic=spec, verbose=False)
@@ -426,6 +427,7 @@ def test_prepare_matvec_periodic_does_not_build_radial_lut(
     assert isinstance(prepared.coupling, PeriodicCouplingOperator)
 
 
+@pytest.mark.reference
 def test_periodic_direct_sum_window_zero_matches_pairwise_reference() -> None:
     spec = pcl.PeriodicSpec(
         lattice=pcl.RectangularLattice2D(500.0, 500.0),
@@ -609,6 +611,7 @@ def test_periodic_run_rejects_polarization_basis_mode() -> None:
         sim.run(include_farfield=False)
 
 
+@pytest.mark.hdf5
 def test_periodic_hdf5_roundtrip(tmp_path) -> None:
     source = _plane_wave(polar_angle=0.2, azimuthal_angle=0.3, polarization="TE")
     spec = pcl.PeriodicSpec(lattice=pcl.RectangularLattice2D(300.0, 320.0))

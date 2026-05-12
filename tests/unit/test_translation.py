@@ -42,6 +42,7 @@ def test_translation_block_shape():
     assert W.shape == (n_modes(lmax), n_modes(lmax))
 
 
+@pytest.mark.reference
 def test_translation_ab5_against_smuthi_prototype_values():
     """Ported from SMUTHI's `test_ab5_versus_prototype`."""
     lmax = 6
@@ -330,6 +331,7 @@ def _vector_B_from_scalar_coeffs(
     return complex(term_a + term_b + term_c)
 
 
+@pytest.mark.reference
 @pytest.mark.parametrize("lmax", [1, 2, 3])
 def test_scalar_to_vector_oracle_matches_axial_translation_block(lmax: int) -> None:
     """Low-order oracle from scalar translation to vector A/B couplings.
@@ -361,6 +363,7 @@ def test_scalar_to_vector_oracle_matches_axial_translation_block(lmax: int) -> N
     np.testing.assert_allclose(W, W_oracle, rtol=2e-11, atol=2e-11)
 
 
+@pytest.mark.reference
 @pytest.mark.parametrize("lmax", [1, 2, 3])
 def test_rotation_through_z_reproduces_general_translation_block(lmax: int) -> None:
     """Rotate-to-z translation oracle against direct off-axis translation.

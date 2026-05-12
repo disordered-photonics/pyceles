@@ -1,10 +1,12 @@
 import numpy as np
+import pytest
 
 from pyceles.core.angular import periodic_azimuthal_weights, trapezoidal_weights
 from pyceles.core.fields import FocusedLaguerreGaussianBeam, GaussianBeam
 from pyceles.postprocessing.nearfield import compute_initial_field
 
 
+@pytest.mark.reference
 def test_gaussian_initial_field_focus_amplitude_against_smuthi_style_case():
     """SMUTHI-style Gaussian focus sanity check (homogeneous medium)."""
     wavelength = 532.0

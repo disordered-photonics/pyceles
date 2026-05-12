@@ -84,6 +84,7 @@ def prepared_multilevel_mlfmm():
     )
 
 
+@pytest.mark.slow
 def test_simulation_direct_solve_uses_matvec_fallback_for_true_mlfmm_coupling(
     prepared_multilevel_mlfmm,
 ) -> None:

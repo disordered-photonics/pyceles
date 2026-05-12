@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 
 import numpy as np
+import pytest
 
 from pyceles.core.sources import (
     AngularSpectrumSource,
@@ -20,6 +21,8 @@ from pyceles.core.sources import (
     SLMSource,
     Source,
 )
+
+pytestmark = pytest.mark.api_contract
 
 
 def _gaussian_base() -> GaussianBeam:

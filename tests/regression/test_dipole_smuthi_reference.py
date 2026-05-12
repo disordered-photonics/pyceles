@@ -10,9 +10,12 @@ from __future__ import annotations
 from typing import cast
 
 import numpy as np
+import pytest
 
 import pyceles as pcl
 from pyceles.core.particles import spheres_from_arrays
+
+pytestmark = pytest.mark.reference
 
 
 def _build_geometry(shift_z: float) -> list[pcl.core.Particle]:

@@ -1,3 +1,5 @@
+import pytest
+
 from pyceles.core.indexing import index_vswf, n_modes, n_scalar, unindex_vswf
 
 
@@ -25,6 +27,7 @@ def test_tau_blocks_contiguous():
     assert index_vswf(1, -1, 2, lmax) == Ns
 
 
+@pytest.mark.reference
 def test_smuthi_style_contiguous_indexing_order():
     """Port of the core contiguous-order check from SMUTHI's index test."""
     lmax = 5

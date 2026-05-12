@@ -1,10 +1,6 @@
 from __future__ import annotations
 
-import os
 import pickle
-import tempfile
-from collections.abc import Generator
-from pathlib import Path
 from typing import Any, Literal
 
 import numpy as np
@@ -34,59 +30,7 @@ from pyceles.postprocessing.farfield import (
     local_absorption_cross_section_from_exciting,
 )
 
-
-def _cupy_available() -> bool:
-    try:
-        cupy, _ = import_cupy()
-    except RuntimeError:
-        return False
-    try:
-        x = cupy.arange(1, dtype=cupy.float32)
-        cupy.cuda.Stream.null.synchronize()
-        return int(cupy.asnumpy(x)[0]) == 0
-    except Exception:
-        return False
-
-
-pytestmark = pytest.mark.skipif(not _cupy_available(), reason="CuPy runtime unavailable")
-
-
-def _configure_cupy_tempdir() -> None:
-    tmp_root = Path.cwd() / "outputs" / "test_cupy_tmp"
-    tmp_root.mkdir(parents=True, exist_ok=True)
-    os.environ["TMP"] = str(tmp_root)
-    os.environ["TEMP"] = str(tmp_root)
-    tempfile.tempdir = str(tmp_root)
-
-
-@pytest.fixture(scope="module", autouse=True)
-def _cupy_tempdir_env() -> Generator[None, None, None]:
-    prev_tmp = os.environ.get("TMP")
-    prev_temp = os.environ.get("TEMP")
-    prev_tempdir = tempfile.tempdir
-    try:
-        _configure_cupy_tempdir()
-    except PermissionError as exc:
-        pytest.skip(f"Local CuPy temp-directory permission issue: {exc}")
-    yield
-    if prev_tmp is None:
-        os.environ.pop("TMP", None)
-    else:
-        os.environ["TMP"] = prev_tmp
-    if prev_temp is None:
-        os.environ.pop("TEMP", None)
-    else:
-        os.environ["TEMP"] = prev_temp
-    tempfile.tempdir = prev_tempdir
-
-
-def _skip_on_cupy_temp_permission(exc: Exception) -> None:
-    if (
-        isinstance(exc, PermissionError)
-        or "Permission denied" in str(exc)
-        or "Accesso negato" in str(exc)
-    ):
-        pytest.skip(f"Local CuPy temp-directory permission issue: {exc}")
+pytestmark = pytest.mark.gpu
 
 
 def _small_cluster_particles() -> tuple[Particle, ...]:
@@ -567,12 +511,8 @@ def test_cupy_local_absorption_postprocess_uses_backend_coefficients(monkeypatch
         ),
     )
 
-    try:
-        sim = pcl.Simulation(cfg, particles=particles)
-        run = sim.run(include_farfield=True)
-    except Exception as exc:
-        _skip_on_cupy_temp_permission(exc)
-        raise
+    sim = pcl.Simulation(cfg, particles=particles)
+    run = sim.run(include_farfield=True)
 
     assert run.cross_sections is not None
     assert seen_backend_payloads
@@ -605,11 +545,7 @@ def test_cupy_public_solve_sources_does_not_retain_backend_handoff() -> None:
     )
     sim = pcl.Simulation(cfg, particles=particles)
 
-    try:
-        solved = sim.solve_sources({"mixed": source})
-    except Exception as exc:
-        _skip_on_cupy_temp_permission(exc)
-        raise
+    solved = sim.solve_sources({"mixed": source})
 
     assert not hasattr(solved.solver_result, "backend_x")
     assert sim._solve_backend_handoffs == {}
@@ -1011,11 +947,7 @@ def test_cupy_simulation_run_matches_numpy_for_coeffs_farfield_and_nearfield(
     )
 
     run_numpy = pcl.Simulation(cfg_numpy, particles=particles).run(include_farfield=True)
-    try:
-        run_cupy = pcl.Simulation(cfg_cupy, particles=particles).run(include_farfield=True)
-    except Exception as exc:
-        _skip_on_cupy_temp_permission(exc)
-        raise
+    run_cupy = pcl.Simulation(cfg_cupy, particles=particles).run(include_farfield=True)
 
     np.testing.assert_allclose(
         run_cupy.coeffs,
@@ -1095,13 +1027,9 @@ def test_cupy_simulation_run_matches_numpy_for_coeffs_farfield_and_nearfield(
     nf_numpy = pcl.compute_near_field(
         run_numpy, points=nearfield_points, channel="mixed", show_progress=False
     )
-    try:
-        nf_cupy = pcl.compute_near_field(
-            run_cupy, points=nearfield_points, channel="mixed", show_progress=False
-        )
-    except Exception as exc:
-        _skip_on_cupy_temp_permission(exc)
-        raise
+    nf_cupy = pcl.compute_near_field(
+        run_cupy, points=nearfield_points, channel="mixed", show_progress=False
+    )
 
     np.testing.assert_array_equal(np.asarray(nf_cupy.inside_mask), np.asarray(nf_numpy.inside_mask))
     np.testing.assert_allclose(
@@ -1164,11 +1092,7 @@ def test_cupy_mixed_particle_groups_match_numpy_for_solve_and_backscatter() -> N
     )
 
     run_numpy = pcl.Simulation(cfg_numpy, particles=particles).run(include_farfield=True)
-    try:
-        run_cupy = pcl.Simulation(cfg_cupy, particles=particles).run(include_farfield=True)
-    except Exception as exc:
-        _skip_on_cupy_temp_permission(exc)
-        raise
+    run_cupy = pcl.Simulation(cfg_cupy, particles=particles).run(include_farfield=True)
 
     np.testing.assert_allclose(run_cupy.coeffs, run_numpy.coeffs, rtol=5e-8, atol=5e-10)
 

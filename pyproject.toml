@@ -56,6 +56,20 @@ include = ["pyceles*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "--strict-markers"
+markers = [
+  "unit: fast isolated checks for core algorithms and public helpers",
+  "physics: physically meaningful end-to-end or invariant-oriented checks",
+  "regression: locked regression coverage for shipped behavior and reference cases",
+  "io: persistence, workflow, and plotting-facing tests",
+  "gpu: requires CuPy and a working CUDA runtime/device",
+  "fake_gpu: exercises CuPy-facing dispatch paths without a real CUDA runtime",
+  "slow: longer-running coverage kept out of the default fast gate",
+  "filesystem: writes files or directories under pytest-managed temporary roots",
+  "hdf5: reads or writes HDF5 payloads",
+  "reference: compares against independent formulas, fixed oracle data, or external references",
+  "api_contract: protects public API shape, validation, or callable/source contracts",
+]
 
 [tool.ruff]
 line-length = 100

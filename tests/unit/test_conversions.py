@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import cast
 
 import numpy as np
+import pytest
 
 from pyceles.core.conversions import (
     pwp_to_svwf_regular,
@@ -11,6 +12,8 @@ from pyceles.core.conversions import (
 )
 from pyceles.core.indexing import n_modes
 from pyceles.core.translation import translation_ab5_table, translation_block_regular
+
+pytestmark = pytest.mark.reference
 
 
 def _angular_grid() -> tuple[np.ndarray, np.ndarray]:

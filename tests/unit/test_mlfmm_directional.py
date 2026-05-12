@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 
 import numpy as np
+import pytest
 from scipy.special import lpmv
 
 from pyceles.core.indexing import n_modes, scalar_index
@@ -52,6 +53,7 @@ def test_high_order_directional_legendre_column_stays_finite() -> None:
         assert np.all(np.isfinite(column))
 
 
+@pytest.mark.reference
 def test_directional_legendre_matches_direct_scipy_reference_at_low_order() -> None:
     xs = (0.0, 0.3, -0.7, 0.999, -0.999)
     for x in xs:
@@ -61,6 +63,7 @@ def test_directional_legendre_matches_direct_scipy_reference_at_low_order() -> N
             np.testing.assert_allclose(got, expected, rtol=5e-15, atol=5e-15)
 
 
+@pytest.mark.reference
 def test_directional_transform_basis_matches_direct_scipy_reference() -> None:
     box_order = 6
     transforms = directional_transforms(box_order, grid_order=6)
@@ -180,6 +183,7 @@ def test_directional_grid_beta_order_matches_validated_multilevel_convention() -
     assert beta[0] > beta[-1]
 
 
+@pytest.mark.reference
 def test_directional_phase_mediation_tracks_exact_axial_recenter_channels() -> None:
     """Directional phase mediation oracle against exact regular translation.
 

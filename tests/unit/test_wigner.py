@@ -1,6 +1,10 @@
 import math
 
+import pytest
+
 from pyceles.core.wigner import wigner_3j
+
+pytestmark = pytest.mark.reference
 
 
 def test_wigner_known_values():

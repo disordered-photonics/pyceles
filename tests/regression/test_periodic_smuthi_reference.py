@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 import pyceles as pcl
+
+pytestmark = pytest.mark.reference
 
 _SMUTHI_ONE_SPHERE_COEFFS = np.array(
     [

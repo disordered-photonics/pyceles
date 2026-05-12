@@ -3,6 +3,10 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+import pytest
+
+pytestmark = pytest.mark.api_contract
+
 
 def _module_name_from_path(src_root: Path, path: Path) -> str:
     """Return fully qualified module name for one source file under `src/pyceles`.

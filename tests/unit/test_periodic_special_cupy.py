@@ -1,24 +1,16 @@
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import pytest
 from scipy import special as scipy_special
 
-
-def _cupy_or_skip():
-    try:
-        from pyceles._optional import import_cupy
-
-        cupy, _ = import_cupy()
-        # Trigger context creation so CI machines without a working CUDA runtime skip cleanly.
-        _ = cupy.asarray([0.0]).sum().get()
-        return cupy
-    except Exception as exc:  # pragma: no cover - depends on optional GPU availability
-        pytest.skip(f"CuPy/CUDA is not available: {exc}")
+pytestmark = [pytest.mark.gpu, pytest.mark.reference]
 
 
-def test_wofz_cupy_matches_scipy_reference():
-    cp = _cupy_or_skip()
+def test_wofz_cupy_matches_scipy_reference(cupy_runtime: tuple[Any, Any]) -> None:
+    cp, _ = cupy_runtime
     from pyceles.core.periodic.special_cupy import wofz_cupy
 
     z = np.asarray(
@@ -37,8 +29,10 @@ def test_wofz_cupy_matches_scipy_reference():
     np.testing.assert_allclose(got, want, rtol=1e-14, atol=1e-14)
 
 
-def test_shifted_delta_sequence_cupy_matches_numpy_reference():
-    cp = _cupy_or_skip()
+def test_shifted_delta_sequence_cupy_matches_numpy_reference(
+    cupy_runtime: tuple[Any, Any],
+) -> None:
+    cp, _ = cupy_runtime
     from pyceles.core.periodic.special import shifted_delta_sequence
     from pyceles.core.periodic.special_cupy import shifted_delta_sequence_cupy
 
@@ -48,8 +42,10 @@ def test_shifted_delta_sequence_cupy_matches_numpy_reference():
     np.testing.assert_allclose(got, want, rtol=1e-14, atol=1e-14)
 
 
-def test_real_integral_sequence_cupy_matches_numpy_reference():
-    cp = _cupy_or_skip()
+def test_real_integral_sequence_cupy_matches_numpy_reference(
+    cupy_runtime: tuple[Any, Any],
+) -> None:
+    cp, _ = cupy_runtime
     from pyceles.core.periodic.scalar import real_integral_sequence
     from pyceles.core.periodic.special_cupy import real_integral_sequence_cupy
 
@@ -64,8 +60,10 @@ def test_real_integral_sequence_cupy_matches_numpy_reference():
     np.testing.assert_allclose(got, want, rtol=5e-10, atol=1e-14)
 
 
-def test_shifted_delta_sequence_cupy_batched_matches_reference_rows():
-    cp = _cupy_or_skip()
+def test_shifted_delta_sequence_cupy_batched_matches_reference_rows(
+    cupy_runtime: tuple[Any, Any],
+) -> None:
+    cp, _ = cupy_runtime
     from pyceles.core.periodic.special import shifted_delta_sequence
     from pyceles.core.periodic.special_cupy import shifted_delta_sequence_cupy_batched
 

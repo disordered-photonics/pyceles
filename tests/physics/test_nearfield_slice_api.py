@@ -14,6 +14,8 @@ from pyceles.postprocessing.nearfield.slice import (
 )
 from pyceles.simulation import Simulation, SimulationConfig
 
+pytestmark = pytest.mark.api_contract
+
 
 def _make_run():
     cfg = SimulationConfig(

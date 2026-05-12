@@ -1,9 +1,12 @@
 import math
 
 import numpy as np
+import pytest
 from scipy.special import lpmv
 
 from pyceles.core.spherical import legendre_normalized_trigon, spherical_functions_trigon
+
+pytestmark = pytest.mark.reference
 
 
 def _celes_legendre_norm(l: int, m: int) -> float:

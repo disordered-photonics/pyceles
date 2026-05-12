@@ -18,6 +18,8 @@ from pyceles.core.particles import (
     spheroids_from_arrays,
 )
 
+pytestmark = pytest.mark.api_contract
+
 
 def test_particle_contains_points_handles_supported_particle_families():
     pts = np.array(

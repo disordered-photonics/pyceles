@@ -17,12 +17,15 @@ from dataclasses import dataclass
 from typing import Any, Literal, cast
 
 import numpy as np
+import pytest
 
 from pyceles.core.particles import LayeredSphere
 from pyceles.core.sources import PlaneWave
 from pyceles.io import far_field_intensity
 from pyceles.postprocessing.nearfield import compute_near_field
 from pyceles.simulation import Simulation, SimulationConfig
+
+pytestmark = [pytest.mark.reference, pytest.mark.slow]
 
 
 @dataclass(frozen=True)

@@ -1,16 +1,12 @@
-import os
 import sys
-import tempfile
 import types
-from pathlib import Path
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 import numpy as np
 import pytest
 from scipy.sparse.linalg import LinearOperator
 from scipy.sparse.linalg import gmres as scipy_gmres
 
-from pyceles._optional import import_cupy
 from pyceles.io.hdf5 import load_solution_h5, save_solution_h5
 from pyceles.linear import solvers
 from pyceles.linear.solvers import (
@@ -86,27 +82,6 @@ def _fake_cupy_numpy_backend():
             eigh = staticmethod(np.linalg.eigh)
 
     return _FakeCuPy()
-
-
-def _cupy_available() -> bool:
-    try:
-        cupy, _ = import_cupy()
-    except RuntimeError:
-        return False
-    try:
-        x = cupy.arange(1, dtype=cupy.float32)
-        cupy.cuda.Stream.null.synchronize()
-        return int(cupy.asnumpy(x)[0]) == 0
-    except Exception:
-        return False
-
-
-def _configure_cupy_tempdir() -> None:
-    tmp_root = Path.cwd() / "outputs" / "test_cupy_tmp"
-    tmp_root.mkdir(parents=True, exist_ok=True)
-    os.environ["TMP"] = str(tmp_root)
-    os.environ["TEMP"] = str(tmp_root)
-    tempfile.tempdir = str(tmp_root)
 
 
 def test_gmres_result_reports_true_residual():
@@ -1248,7 +1223,7 @@ def test_solve_linear_system_bicgstab_cupy_skip_final_residual_avoids_extra_appl
     assert np.isnan(float(out.relative_residual))
 
 
-@pytest.mark.skipif(not _cupy_available(), reason="CuPy runtime unavailable")
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     ("dtype",),
     [
@@ -1258,92 +1233,76 @@ def test_solve_linear_system_bicgstab_cupy_skip_final_residual_avoids_extra_appl
 )
 def test_gmres_cupy_native_matches_builtin_cupy_on_real_device(
     dtype: np.dtype,
+    cupy_runtime: tuple[Any, Any],
 ) -> None:
-    prev_tmp = os.environ.get("TMP")
-    prev_temp = os.environ.get("TEMP")
-    prev_tempdir = tempfile.tempdir
-    _configure_cupy_tempdir()
-    try:
-        cupy, cupyx_sparse_linalg = import_cupy()
-        rng = np.random.default_rng(41)
-        n = 80
-        M = (rng.standard_normal((n, n)) + 1j * rng.standard_normal((n, n))).astype(dtype)
-        A = M.conj().T @ M + (0.5 + 0.0j) * np.eye(n, dtype=dtype)
-        b = (rng.standard_normal(n) + 1j * rng.standard_normal(n)).astype(dtype)
-        A_gpu = cupy.asarray(A)
-        b_gpu = cupy.asarray(b)
-        Aop_cpu = LinearOperator(
-            (n, n), matvec=lambda v: A @ np.asarray(v, dtype=dtype), dtype=dtype
-        )
-        scipy_hist: list[float] = []
+    cupy, cupyx_sparse_linalg = cupy_runtime
+    rng = np.random.default_rng(41)
+    n = 80
+    M = (rng.standard_normal((n, n)) + 1j * rng.standard_normal((n, n))).astype(dtype)
+    A = M.conj().T @ M + (0.5 + 0.0j) * np.eye(n, dtype=dtype)
+    b = (rng.standard_normal(n) + 1j * rng.standard_normal(n)).astype(dtype)
+    A_gpu = cupy.asarray(A)
+    b_gpu = cupy.asarray(b)
+    Aop_cpu = LinearOperator((n, n), matvec=lambda v: A @ np.asarray(v, dtype=dtype), dtype=dtype)
+    scipy_hist: list[float] = []
 
-        def _scipy_cb(v: float) -> None:
-            scipy_hist.append(float(v))
+    def _scipy_cb(v: float) -> None:
+        scipy_hist.append(float(v))
 
-        x_scipy, info_scipy = scipy_gmres(
-            Aop_cpu,
-            b,
-            rtol=0.0,
-            atol=0.0,
-            restart=20,
-            maxiter=40,
-            callback=_scipy_cb,
-            callback_type="legacy",
-        )
-        native_hist: list[float] = []
+    x_scipy, info_scipy = scipy_gmres(
+        Aop_cpu,
+        b,
+        rtol=0.0,
+        atol=0.0,
+        restart=20,
+        maxiter=40,
+        callback=_scipy_cb,
+        callback_type="legacy",
+    )
+    native_hist: list[float] = []
 
-        out_native = solvers.gmres_cupy(
-            lambda x: A_gpu @ cupy.asarray(x),
-            b,
-            rtol=0.0,
-            atol=0.0,
-            restart=20,
-            maxiter=40,
-            callback=native_hist.append,
-            show_progress=False,
-        )
+    out_native = solvers.gmres_cupy(
+        lambda x: A_gpu @ cupy.asarray(x),
+        b,
+        rtol=0.0,
+        atol=0.0,
+        restart=20,
+        maxiter=40,
+        callback=native_hist.append,
+        show_progress=False,
+    )
 
-        Aop_gpu = cupyx_sparse_linalg.LinearOperator(
-            (n, n),
-            matvec=lambda v: A_gpu @ v,
-            dtype=dtype,
-        )
-        x_builtin, info_builtin = cupyx_sparse_linalg.gmres(
-            Aop_gpu,
-            b_gpu,
-            x0=cupy.zeros_like(b_gpu),
-            M=None,
-            rtol=0.0,
-            atol=0.0,
-            restart=20,
-            maxiter=40,
-            callback=None,
-            callback_type=None,
-        )
-        cupy.cuda.Stream.null.synchronize()
-        rel_scipy = float(np.linalg.norm(A @ np.asarray(x_scipy) - b) / np.linalg.norm(b))
-        rel_builtin = float(cupy.linalg.norm(A_gpu @ x_builtin - b_gpu) / cupy.linalg.norm(b_gpu))
-        rel_native = float(out_native.relative_residual)
-        rel_diff_native_builtin = abs(rel_native - rel_builtin) / max(abs(rel_builtin), 1e-30)
-        rel_diff_scipy_builtin = abs(rel_scipy - rel_builtin) / max(abs(rel_builtin), 1e-30)
+    Aop_gpu = cupyx_sparse_linalg.LinearOperator(
+        (n, n),
+        matvec=lambda v: A_gpu @ v,
+        dtype=dtype,
+    )
+    x_builtin, info_builtin = cupyx_sparse_linalg.gmres(
+        Aop_gpu,
+        b_gpu,
+        x0=cupy.zeros_like(b_gpu),
+        M=None,
+        rtol=0.0,
+        atol=0.0,
+        restart=20,
+        maxiter=40,
+        callback=None,
+        callback_type=None,
+    )
+    cupy.cuda.Stream.null.synchronize()
+    rel_scipy = float(np.linalg.norm(A @ np.asarray(x_scipy) - b) / np.linalg.norm(b))
+    rel_builtin = float(cupy.linalg.norm(A_gpu @ x_builtin - b_gpu) / cupy.linalg.norm(b_gpu))
+    rel_native = float(out_native.relative_residual)
+    rel_diff_native_builtin = abs(rel_native - rel_builtin) / max(abs(rel_builtin), 1e-30)
+    rel_diff_scipy_builtin = abs(rel_scipy - rel_builtin) / max(abs(rel_builtin), 1e-30)
 
-        assert int(out_native.info) == int(info_builtin)
-        assert int(info_scipy) == int(info_builtin)
-        assert int(out_native.iterations) == len(native_hist)
-        assert len(scipy_hist) == 40
-        # Native GMRES should match built-in CuPy at least at the same residual
-        # agreement level observed between SciPy legacy-inner and built-in CuPy.
-        assert rel_diff_native_builtin <= 1.1 * rel_diff_scipy_builtin + 1e-12
-    finally:
-        if prev_tmp is None:
-            os.environ.pop("TMP", None)
-        else:
-            os.environ["TMP"] = prev_tmp
-        if prev_temp is None:
-            os.environ.pop("TEMP", None)
-        else:
-            os.environ["TEMP"] = prev_temp
-        tempfile.tempdir = prev_tempdir
+    assert int(out_native.info) == int(info_builtin)
+    assert int(info_scipy) == int(info_builtin)
+    assert int(out_native.iterations) == len(native_hist)
+    assert len(scipy_hist) == 40
+    # Native GMRES should match built-in CuPy at least at the same residual
+    # agreement level observed between SciPy legacy-inner and built-in CuPy.
+    assert rel_diff_native_builtin <= 1.1 * rel_diff_scipy_builtin + 1e-12
 
 
 def test_solve_linear_system_preconditioner_hook_identity():
@@ -1362,6 +1321,7 @@ def test_solve_linear_system_preconditioner_hook_identity():
     np.testing.assert_allclose(out.x, b, atol=1e-12, rtol=1e-12)
 
 
+@pytest.mark.hdf5
 def test_gmres_warm_restart_roundtrip_from_h5(tmp_path):
     rng = np.random.default_rng(77)
     n = 80
@@ -1437,6 +1397,7 @@ def test_apply_operator_falls_back_to_columnwise_vector_calls():
     assert len(calls) == 2
 
 
+@pytest.mark.api_contract
 @pytest.mark.parametrize(
     ("kwargs", "match"),
     [

@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from pyceles.core.particles import LayeredSphere, Sphere, Spheroid
 from pyceles.io.hdf5 import (
@@ -14,6 +15,8 @@ from pyceles.io.hdf5 import (
     save_near_field_h5,
     save_solution_h5,
 )
+
+pytestmark = [pytest.mark.filesystem, pytest.mark.hdf5]
 
 
 def _dummy_pwp(alpha: np.ndarray, beta: np.ndarray) -> dict:
