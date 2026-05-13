@@ -21,7 +21,9 @@ _SMALL_COMPLEX = 1.0e-14
 _DEFAULT_WOFZ_TERMS = 11
 
 
-_WTRAP_CUDA_SOURCE = r"""
+# Source fragment reused by periodic Ewald RawKernels.  CuPy exposes complex
+# arithmetic through ``complex.cuh`` but not a Faddeeva implementation.
+_WTRAP_DEVICE_CUDA_SOURCE = r"""
 #include <cupy/complex.cuh>
 
 extern "C" __device__ complex<double> _wtrap_upper_one(
@@ -76,20 +78,12 @@ extern "C" __device__ complex<double> _wtrap_upper_one(
     return midpoint + correction;
 }
 
-extern "C" __global__ void pyceles_wofz_wtrap_c128(
-    const long long n,
-    const complex<double>* z_in,
-    complex<double>* out,
+extern "C" __device__ complex<double> _wtrap_wofz_one(
+    const complex<double> z0,
     const int terms,
     const double h,
     const double H
 ) {
-    const long long idx = (long long)blockIdx.x * (long long)blockDim.x + (long long)threadIdx.x;
-    if (idx >= n) {
-        return;
-    }
-
-    const complex<double> z0 = z_in[idx];
     const bool xneg = z0.real() < 0.0;
     const bool yneg = z0.imag() < 0.0;
     const bool not_both = xneg != yneg;
@@ -109,9 +103,31 @@ extern "C" __global__ void pyceles_wofz_wtrap_c128(
     if (yneg) {
         w = complex<double>(2.0, 0.0) * exp(-(z0 * z0)) - w;
     }
-    out[idx] = w;
+    return w;
 }
 """
+
+
+_WTRAP_CUDA_SOURCE = (
+    _WTRAP_DEVICE_CUDA_SOURCE
+    + r"""
+extern "C" __global__ void pyceles_wofz_wtrap_c128(
+    const long long n,
+    const complex<double>* z_in,
+    complex<double>* out,
+    const int terms,
+    const double h,
+    const double H
+) {
+    const long long idx = (long long)blockIdx.x * (long long)blockDim.x + (long long)threadIdx.x;
+    if (idx >= n) {
+        return;
+    }
+
+    out[idx] = _wtrap_wofz_one(z_in[idx], terms, h, H);
+}
+"""
+)
 
 
 @cache

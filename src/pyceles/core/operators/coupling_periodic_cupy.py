@@ -155,10 +155,19 @@ class CuPyPeriodicCouplingOperator:
         return self._self_correction_gpu
 
     def _source_batch_size(self) -> int:
-        """Return an internal source chunk size bounded by temporary block memory."""
-        bytes_per_source = self.n_particles * self.n_modes * self.n_modes * self.dtype.itemsize
-        target_bytes = 256 * 1024**2
-        return max(1, min(self.n_particles, 16, target_bytes // max(bytes_per_source, 1)))
+        """Return an internal source chunk size bounded by temporary device memory."""
+        if self.cache_blocks:
+            bytes_per_source = self.n_particles * self.n_modes * self.n_modes * self.dtype.itemsize
+            target_bytes = 256 * 1024**2
+            max_sources = 16
+        else:
+            order = 2 * int(self.lmax)
+            bytes_per_source = (
+                self.n_particles * (order + 1) * (2 * order + 1) * np.dtype(np.complex128).itemsize
+            )
+            target_bytes = 256 * 1024**2
+            max_sources = 64
+        return max(1, min(self.n_particles, max_sources, target_bytes // max(bytes_per_source, 1)))
 
     def _source_batches(self) -> Iterable[tuple[int, ...]]:
         batch_size = int(self._source_batch_size())

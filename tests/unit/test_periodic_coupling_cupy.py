@@ -14,14 +14,14 @@ pytestmark = pytest.mark.gpu
 
 
 def _small_periodic_case(
-    *, cache_blocks: bool = False, dtype: Any = np.complex128
+    *, cache_blocks: bool = False, dtype: Any = np.complex128, off_plane: bool = False
 ) -> tuple[PeriodicCouplingOperator, CuPyPeriodicCouplingOperator]:
     lmax = 1
     k = 2.0 * np.pi / 550.0
     positions = np.asarray(
         [
             [0.0, 0.0, 40.0],
-            [210.0, -120.0, 40.0],
+            [210.0, -120.0, 185.0 if off_plane else 40.0],
         ],
         dtype=float,
     )
@@ -77,6 +77,20 @@ def test_periodic_cupy_coupling_apply_matches_numpy_same_plane_two_particle_cell
     got_device = gpu.apply(cp.asarray(x.astype(np.complex128)))
     assert hasattr(got_device, "get")
     np.testing.assert_allclose(cp.asnumpy(got_device), want, rtol=1e-8, atol=1e-9)
+
+
+def test_periodic_cupy_coupling_apply_matches_numpy_off_plane_two_particle_cell(
+    cupy_runtime: tuple[Any, Any],
+) -> None:
+    cp, _ = cupy_runtime
+    cpu, gpu = _small_periodic_case(cache_blocks=False, off_plane=True)
+    rng = np.random.default_rng(18)
+    x = rng.normal(size=12) + 1j * rng.normal(size=12)
+
+    got = gpu.apply(cp.asarray(x.astype(np.complex128)))
+    want = cpu.apply(x.astype(np.complex128))
+
+    np.testing.assert_allclose(cp.asnumpy(got), want, rtol=1e-8, atol=1e-9)
 
 
 def test_periodic_cupy_coupling_cache_apply_parity(cupy_runtime: tuple[Any, Any]) -> None:
