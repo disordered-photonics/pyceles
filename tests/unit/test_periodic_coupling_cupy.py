@@ -90,6 +90,7 @@ def test_periodic_cupy_coupling_cache_apply_parity(cupy_runtime: tuple[Any, Any]
     uncached = uncached_gpu.apply(x_device)
     cached_first = cached_gpu.apply(x_device)
     assert len(cached_gpu._source_block_cache) == 2
+    assert (0, 1) in cached_gpu._source_block_chunk_cache
     cached_second = cached_gpu.apply(x_device)
 
     want = uncached_cpu.apply(x.astype(np.complex128))
@@ -100,4 +101,5 @@ def test_periodic_cupy_coupling_cache_apply_parity(cupy_runtime: tuple[Any, Any]
     # Explicit cache population should be idempotent and keep the same device-owned blocks.
     cached_gpu.populate(show_progress=False)
     assert len(cached_gpu._source_block_cache) == 2
+    assert (0, 1) in cached_gpu._source_block_chunk_cache
     np.testing.assert_allclose(cp.asnumpy(cached_gpu.apply(x_device)), want, rtol=1e-8, atol=1e-9)

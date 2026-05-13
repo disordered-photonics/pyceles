@@ -54,6 +54,12 @@ class CuPyPeriodicCouplingOperator:
     _contraction_tensor_gpu: Any | None = field(default=None, init=False, repr=False)
     _self_correction_gpu: Any | None = field(default=None, init=False, repr=False)
     _source_block_cache: dict[int, Any] = field(default_factory=dict, init=False, repr=False)
+    _source_block_chunk_cache: dict[tuple[int, ...], Any] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _source_index_gpu_cache: dict[tuple[int, ...], Any] = field(
+        default_factory=dict, init=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         self.dtype = np.dtype(self.dtype)
@@ -160,6 +166,16 @@ class CuPyPeriodicCouplingOperator:
             stop = min(self.n_particles, start + batch_size)
             yield tuple(range(start, stop))
 
+    def _source_index_device(self, source_indices: tuple[int, ...]) -> Any:
+        key = tuple(int(i) for i in source_indices)
+        cached = self._source_index_gpu_cache.get(key)
+        if cached is not None:
+            return cached
+        cp = self._cupy()
+        out = cp.asarray(key, dtype=cp.int64)
+        self._source_index_gpu_cache[key] = out
+        return out
+
     def _add_self_corrections(self, sums: Any, *, source_indices: tuple[int, ...]) -> None:
         if len(source_indices) == 0:
             return
@@ -202,8 +218,13 @@ class CuPyPeriodicCouplingOperator:
         return self._structural_sums_for_sources((int(source_index),))[0]
 
     def _blocks_for_sources(self, source_indices: tuple[int, ...]) -> Any:
+        key = tuple(int(i) for i in source_indices)
+        if self.cache_blocks:
+            cached = self._source_block_chunk_cache.get(key)
+            if cached is not None:
+                return cached
         cp = self._cupy()
-        sums = self._structural_sums_for_sources(source_indices)
+        sums = self._structural_sums_for_sources(key)
         tensor = self._contraction_tensor_device()
         blocks = cp.einsum(
             "sdpm,ijpm->sdij",
@@ -212,8 +233,24 @@ class CuPyPeriodicCouplingOperator:
             optimize=True,
         ).astype(self.dtype, copy=False)
         if self.cache_blocks:
-            for local, source_index in enumerate(source_indices):
+            self._source_block_chunk_cache[key] = blocks
+            for local, source_index in enumerate(key):
                 self._source_block_cache[int(source_index)] = blocks[local]
+        return blocks
+
+    def _cached_blocks_for_sources(self, source_indices: tuple[int, ...]) -> Any:
+        key = tuple(int(i) for i in source_indices)
+        cached = self._source_block_chunk_cache.get(key)
+        if cached is not None:
+            return cached
+        missing = tuple(i for i in key if i not in self._source_block_cache)
+        if missing:
+            if missing == key:
+                return self._blocks_for_sources(key)
+            self._blocks_for_sources(missing)
+        cp = self._cupy()
+        blocks = cp.stack([self._source_block_cache[i] for i in key], axis=0)
+        self._source_block_chunk_cache[key] = blocks
         return blocks
 
     def _blocks_for_source(self, source_index: int) -> Any:
@@ -275,13 +312,18 @@ class CuPyPeriodicCouplingOperator:
         y = cp.zeros_like(arr, dtype=self.dtype)
         tensor = self._contraction_tensor_device()
         if self.cache_blocks:
-            for source_index in range(self.n_particles):
-                src = arr[source_index]
-                blocks = self._blocks_for_source(source_index)
-                y += cp.einsum("dij,jr->dir", blocks, src, optimize=True)
+            for source_indices in self._source_batches():
+                source_indexer = self._source_index_device(source_indices)
+                blocks = self._cached_blocks_for_sources(source_indices)
+                y += cp.einsum(
+                    "sdij,sjr->dir",
+                    blocks,
+                    arr[source_indexer],
+                    optimize=True,
+                )
         else:
             for source_indices in self._source_batches():
-                source_indexer = cp.asarray(source_indices, dtype=cp.int64)
+                source_indexer = self._source_index_device(source_indices)
                 sums = self._structural_sums_for_sources(source_indices)
                 y += cp.einsum(
                     "sdpm,ijpm,sjr->dir",
