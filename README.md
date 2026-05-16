@@ -554,34 +554,41 @@ Common benchmark parameters:
 
 Reproduce:
 ```bash
-python examples/profile_pyceles_periodic_phases.py --operator-backend cupy --postprocessing-backend inherit --cache-mode on --out-dir outputs/profile_periodic_cupy_cache_on --quiet
-python examples/profile_pyceles_periodic_phases.py --operator-backend cupy --postprocessing-backend inherit --cache-mode off --out-dir outputs/profile_periodic_cupy_cache_off --quiet
-python examples/profile_pyceles_periodic_phases.py --operator-backend numpy --postprocessing-backend inherit --cache-mode on --out-dir outputs/profile_periodic_numpy_cache_on --quiet
+python examples/profile_pyceles_periodic_phases.py --operator-backend cupy --postprocessing-backend inherit --cache-mode on --skip-nearfield --out-dir outputs/profile_periodic_cupy_cache_on --quiet
+python examples/profile_pyceles_periodic_phases.py --operator-backend cupy --postprocessing-backend inherit --cache-mode off --skip-nearfield --out-dir outputs/profile_periodic_cupy_cache_off --quiet
+python examples/profile_pyceles_periodic_phases.py --operator-backend numpy --postprocessing-backend inherit --cache-mode on --skip-nearfield --out-dir outputs/profile_periodic_numpy_cache_on --quiet
 python examples/profile_pyceles_periodic_phases.py --operator-backend cupy --postprocessing-backend inherit --solver direct --skip-nearfield --skip-final-residual-check --out-dir outputs/profile_periodic_cupy_direct --quiet
+python examples/profile_pyceles_periodic_phases.py --operator-backend numpy --postprocessing-backend inherit --solver direct --skip-nearfield --out-dir outputs/profile_periodic_numpy_direct --quiet
 ```
 
 Measured phase wall times on the same laptop/GPU used for the non-periodic
 snapshot above:
 - CuPy, explicit periodic W cache:
-  - W-cache population: `19.9 s`
-  - GMRES solve: `12.2 s` for 160 iterations
-  - Full solve phase: `43.6 s`
+  - W-cache population: `18.5 s`
+  - GMRES solve: `12.3 s` for 160 iterations
+  - Full solve phase: `42.4 s`
   - Near field: xy `1.4 s`, xz `130 s`
 - CuPy, no periodic W cache:
-  - GMRES solve: `2020 s` for 160 iterations (`~12.6 s/iteration`)
-  - Full solve phase: `2031 s`
+  - GMRES solve: `2000 s` for 160 iterations (`~12.5 s/iteration`)
+  - Full solve phase: `2012 s`
   - Near field: xy `1.4 s`, xz `132 s`
 - NumPy, explicit periodic W cache:
-  - W-cache population: `121 s`
-  - GMRES solve: `600 s` for 160 iterations
-  - Full solve phase: `733 s`
+  - W-cache population: `116 s`
+  - GMRES solve: `584 s` for 160 iterations
+  - Full solve phase: `712 s`
   - Near field: xy `1.5 s`, xz `1443 s`
 - CuPy direct dense validation, with near field and final residual check skipped:
   - W-cache population: `19.1 s`
-  - Dense `A` assembly from cached periodic blocks: `0.45 s`
-  - Dense LU factorization: `155 s`
-  - Full solve phase: `186 s`
+  - Dense `A` assembly from cached periodic blocks: `0.31 s`
+  - Dense LU factorization: `43.5 s`
+  - Full solve phase: `74.6 s`
+- NumPy direct dense validation, with near field skipped:
+  - W-cache population: `116 s`
+  - Dense `A` assembly from cached periodic blocks: `3.23 s`
+  - Dense LU factorization: `19.8 s`
+  - Full solve phase: `152 s`
 
+The direct dense rows are validation paths, not the intended scaling route.
 The cache-off periodic path is intentionally memory-light, but it recomputes
 periodic Ewald work on every Krylov matvec. For large periodic runs, explicit
 W-block caching is currently the practical path when memory permits. The

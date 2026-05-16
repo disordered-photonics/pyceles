@@ -133,7 +133,10 @@ def _assemble_dense_periodic_cupy_from_cache(
     ns = int(coupling.n_particles)
     nm = int(coupling.n_modes)
     n = ns * nm
-    A = cp.eye(n, dtype=dtype)
+    # cuSOLVER LU consumes Fortran-order matrices.  Building dense A in that
+    # layout lets `overwrite_input=True` factorize the matrix in place instead
+    # of first creating a full device copy.
+    A = cp.eye(n, dtype=dtype, order="F")
     t_diag_gpu = cp.asarray(t_diag, dtype=dtype).reshape(ns, nm)
     batches: Iterable[tuple[int, ...]] = coupling._source_batches()
     if show_progress:
