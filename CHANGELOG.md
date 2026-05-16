@@ -57,6 +57,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dense/direct NumPy solves now use fast pairwise dense assembly when available
   and otherwise fall back to generic dense assembly through repeated
   matrix-free applies.
+- Periodic dense direct validation now assembles `A = I - T W` directly from
+  cached periodic Ewald blocks for diagonal particle-local `T` operators,
+  avoiding column-by-column matrix-free assembly on sphere-like systems.
 - `solve_linear_system(..., backend="cupy", method="gmres")` now routes through
   pyceles' native CuPy GMRES path (instead of delegating to CuPy built-in
   GMRES), improving convergence observability within restart cycles.

@@ -721,6 +721,7 @@ def ewald_structural_sums_2d_fixed_cupy(
     real_shell_count: int,
     reciprocal_shell_count: int,
     coordinate_scale: float = 0.0,
+    same_plane_pair_indices: Any | None = None,
 ) -> Any:
     """Evaluate scalar periodic Ewald tables for source/destination pairs.
 
@@ -754,12 +755,15 @@ def ewald_structural_sums_2d_fixed_cupy(
     same_plane_atol = same_plane_z_tolerance(float(k), coordinate_scale=float(coordinate_scale))
     cz_raw = c[:, 2]
     same_plane = cp.abs(cz_raw) <= float(same_plane_atol)
-    cz = cp.where(same_plane, 0.0, cz_raw)
-    has_same = bool(cp.any(same_plane).get())
-    if has_same:
-        c = c.copy()
-        c[:, 2] = cz
-    same_idx = cp.nonzero(same_plane)[0] if has_same else None
+    # Avoid a host-side `any(...).get()` in the hot structural-sum path.  Coupling
+    # callers can also provide the compact same-plane pair index list from their
+    # host-side particle metadata, avoiding a device-side nonzero scan.
+    if same_plane_pair_indices is None:
+        same_idx = cp.nonzero(same_plane)[0]
+    else:
+        same_idx = cp.asarray(same_plane_pair_indices, dtype=cp.int64).reshape(-1)
+    c = c.copy()
+    c[:, 2] = cp.where(same_plane, 0.0, cz_raw)
 
     max_same_n = max(0, order // 2)
     for shell in range(int(reciprocal_shell_count) + 1):
@@ -769,41 +773,40 @@ def ewald_structural_sums_2d_fixed_cupy(
         phi = shell_data.phi
         gamma = shell_data.gamma
 
-        if has_same:
-            phase_same = cp.exp(-1j * (cxy[same_idx] @ kgt.T))
-            exp_m_phi = {m: cp.exp(1j * m * phi) for m in range(-order, order + 1)}
-            gamma_fun = workspace.upper_gamma(shell, max_same_n)
-            for degree in range(order + 1):
-                for m in range(-degree, degree + 1):
-                    if (degree - abs(m)) % 2:
-                        continue
-                    root = (
-                        math.sqrt(2 * degree + 1.0)
-                        * math.sqrt(factorial_int(degree - m))
-                        * math.sqrt(factorial_int(degree + m))
+        phase_same = cp.exp(-1j * (cxy[same_idx] @ kgt.T))
+        exp_m_phi = {m: cp.exp(1j * m * phi) for m in range(-order, order + 1)}
+        gamma_fun = workspace.upper_gamma(shell, max_same_n)
+        for degree in range(order + 1):
+            for m in range(-degree, degree + 1):
+                if (degree - abs(m)) % 2:
+                    continue
+                root = (
+                    math.sqrt(2 * degree + 1.0)
+                    * math.sqrt(factorial_int(degree - m))
+                    * math.sqrt(factorial_int(degree + m))
+                )
+                prefactor = (
+                    (1j) ** m
+                    * root
+                    / (workspace.lattice.area * float(k) * (2.0 * float(k)) ** degree)
+                )
+                n_vals = np.arange((degree - abs(m)) // 2 + 1, dtype=np.int64)
+                inner = cp.zeros_like(gamma, dtype=cp.complex128)
+                for n in n_vals:
+                    denom = (
+                        factorial_int(n)
+                        * factorial_int((degree + m) // 2 - n)
+                        * factorial_int((degree - m) // 2 - n)
                     )
-                    prefactor = (
-                        (1j) ** m
-                        * root
-                        / (workspace.lattice.area * float(k) * (2.0 * float(k)) ** degree)
+                    inner += (
+                        gamma_fun[:, int(n)]
+                        * gamma ** (2 * int(n) - 1)
+                        * rho ** (degree - 2 * int(n))
+                        / denom
                     )
-                    n_vals = np.arange((degree - abs(m)) // 2 + 1, dtype=np.int64)
-                    inner = cp.zeros_like(gamma, dtype=cp.complex128)
-                    for n in n_vals:
-                        denom = (
-                            factorial_int(n)
-                            * factorial_int((degree + m) // 2 - n)
-                            * factorial_int((degree - m) // 2 - n)
-                        )
-                        inner += (
-                            gamma_fun[:, int(n)]
-                            * gamma ** (2 * int(n) - 1)
-                            * rho ** (degree - 2 * int(n))
-                            / denom
-                        )
-                    vec = exp_m_phi[m] * inner
-                    vals = structural_sum_m_normalization(m) * prefactor * (phase_same @ vec)
-                    sums[same_idx, degree, m + offset] = sums[same_idx, degree, m + offset] + vals
+                vec = exp_m_phi[m] * inner
+                vals = structural_sum_m_normalization(m) * prefactor * (phase_same @ vec)
+                sums[same_idx, degree, m + offset] = sums[same_idx, degree, m + offset] + vals
 
     _add_shifted_reciprocal_structural_sums_cupy(
         c=c,

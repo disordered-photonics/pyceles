@@ -5,10 +5,16 @@ from typing import Any
 import numpy as np
 import pytest
 
+import pyceles as pcl
 from pyceles.core.lattice import RectangularLattice2D
-from pyceles.core.operators import CuPyPeriodicCouplingOperator, PeriodicCouplingOperator
+from pyceles.core.operators import (
+    CuPyPeriodicCouplingOperator,
+    PeriodicCouplingOperator,
+    prepare_matvec,
+)
 from pyceles.core.periodic import PeriodicOptions, PeriodicSpec
 from pyceles.core.translation import translation_ab5_table
+from pyceles.simulation.solve import _assemble_dense_operator_for_prepared
 
 pytestmark = pytest.mark.gpu
 
@@ -117,3 +123,59 @@ def test_periodic_cupy_coupling_cache_apply_parity(cupy_runtime: tuple[Any, Any]
     assert len(cached_gpu._source_block_cache) == 2
     assert (0, 1) in cached_gpu._source_block_chunk_cache
     np.testing.assert_allclose(cp.asnumpy(cached_gpu.apply(x_device)), want, rtol=1e-8, atol=1e-9)
+
+
+def test_periodic_cupy_dense_assembly_from_cached_blocks_matches_matvec(
+    cupy_runtime: tuple[Any, Any],
+) -> None:
+    cp, _ = cupy_runtime
+    spec = PeriodicSpec(
+        lattice=RectangularLattice2D(ax=900.0, ay=850.0),
+        options=PeriodicOptions(
+            method="ewald",
+            eta=0.002,
+            real_shells=1,
+            reciprocal_shells=1,
+            max_shells=4,
+            shell_tolerance=1e-9,
+        ),
+    )
+    source = pcl.PlaneWave(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        polarization="TE",
+        polar_angle=0.0,
+        azimuthal_angle=0.0,
+    )
+    prepared = prepare_matvec(
+        lmax=1,
+        k=2.0 * np.pi / 550.0,
+        particles=[
+            pcl.Sphere(position=(0.0, 0.0, 40.0), radius=55.0, refractive_index=1.5 + 0j),
+            pcl.Sphere(position=(210.0, -120.0, 185.0), radius=45.0, refractive_index=1.4 + 0j),
+        ],
+        n_medium=1.0 + 0j,
+        radial_lut_dr=1.0,
+        cache_translation_blocks=False,
+        periodic=spec,
+        k_parallel=pcl.core.plane_wave_k_parallel(source),
+        backend="cupy",
+        show_progress=False,
+    )
+    assert isinstance(prepared.coupling, CuPyPeriodicCouplingOperator)
+
+    n = 2 * 6
+    dense = _assemble_dense_operator_for_prepared(
+        prepared=prepared,
+        A_mv=prepared.apply_A,
+        n=n,
+        dtype=np.dtype(np.complex128),
+        show_progress=False,
+    )
+    eye = cp.eye(n, dtype=cp.complex128)
+    expected = cp.stack([prepared.apply_A(eye[:, j]) for j in range(n)], axis=1)
+
+    np.testing.assert_allclose(cp.asnumpy(dense), cp.asnumpy(expected), rtol=1e-8, atol=1e-9)
+    assert prepared.coupling.cache_blocks is False
+    assert prepared.coupling._source_block_cache == {}
+    assert prepared.coupling._source_block_chunk_cache == {}

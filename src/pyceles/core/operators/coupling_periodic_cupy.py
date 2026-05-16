@@ -21,7 +21,7 @@ from pyceles.core.periodic.ewald_cupy import (
     CupyEwaldShellWorkspace,
     ewald_structural_sums_2d_fixed_cupy,
 )
-from pyceles.core.periodic.scalar import structural_sum_m_normalization
+from pyceles.core.periodic.scalar import same_plane_z_tolerance, structural_sum_m_normalization
 from pyceles.core.periodic.structural import translation_contraction_tensor
 
 Array = np.ndarray
@@ -58,6 +58,9 @@ class CuPyPeriodicCouplingOperator:
         default_factory=dict, init=False, repr=False
     )
     _source_index_gpu_cache: dict[tuple[int, ...], Any] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _same_plane_index_gpu_cache: dict[tuple[int, ...], Any] = field(
         default_factory=dict, init=False, repr=False
     )
 
@@ -146,6 +149,27 @@ class CuPyPeriodicCouplingOperator:
             self._coordinate_scale = float(np.max(np.abs(np.asarray(self.positions, dtype=float))))
         return float(self._coordinate_scale)
 
+    def _same_plane_pair_indices_device(self, source_indices: tuple[int, ...]) -> Any:
+        """Return flat pair indices needing the exact same-plane reciprocal formula."""
+        key = tuple(int(i) for i in source_indices)
+        cached = self._same_plane_index_gpu_cache.get(key)
+        if cached is not None:
+            return cached
+        cp = self._cupy()
+        if len(key) == 0:
+            out = cp.zeros((0,), dtype=cp.int64)
+            self._same_plane_index_gpu_cache[key] = out
+            return out
+        pos = np.asarray(self.positions, dtype=float).reshape(-1, 3)
+        src_z = pos[np.asarray(key, dtype=np.int64), 2]
+        atol = same_plane_z_tolerance(
+            float(self.k), coordinate_scale=self._coordinate_scale_value()
+        )
+        mask = np.abs(src_z[:, None] - pos[None, :, 2]) <= float(atol)
+        out = cp.asarray(np.flatnonzero(mask).astype(np.int64, copy=False), dtype=cp.int64)
+        self._same_plane_index_gpu_cache[key] = out
+        return out
+
     def _self_correction_device(self) -> Any:
         cp = self._cupy()
         if self._self_correction_gpu is None:
@@ -213,6 +237,7 @@ class CuPyPeriodicCouplingOperator:
             real_shell_count=int(real_count),
             reciprocal_shell_count=int(reciprocal_count),
             coordinate_scale=self._coordinate_scale_value(),
+            same_plane_pair_indices=self._same_plane_pair_indices_device(source_indices),
         )
         sums = cp.asarray(sums, dtype=cp.complex128).reshape(
             len(source_indices),

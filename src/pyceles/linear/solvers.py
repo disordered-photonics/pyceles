@@ -92,22 +92,25 @@ def estimate_dense_matrix_bytes(n: int, *, dtype: npt.DTypeLike = np.complex128)
 
 
 def factorize_dense_matrix(
-    A_dense: np.ndarray,
+    A_dense: Any,
     *,
     dtype: npt.DTypeLike = np.complex128,
     backend: Literal["numpy", "cupy"] = "numpy",
     overwrite_input: bool = False,
 ) -> DenseLUFactorization:
-    """Return LU factorization payload for repeated direct solves."""
+    """Return LU factorization payload for repeated direct solves.
+
+    CuPy callers may pass a dense matrix that already lives on device.  Keep it
+    there instead of forcing a NumPy conversion before uploading it again.
+    """
     solve_dtype = np.dtype(dtype)
-    A = np.asarray(A_dense, dtype=solve_dtype)
-    if A.ndim != 2 or A.shape[0] != A.shape[1]:
-        raise ValueError(f"`A_dense` must be a square 2D matrix. Got shape {A.shape}.")
     if backend == "cupy":
         cupy, _ = import_cupy()
         import cupyx.scipy.linalg
 
-        A_gpu = cupy.asarray(A)
+        A_gpu = cupy.asarray(A_dense, dtype=solve_dtype)
+        if int(A_gpu.ndim) != 2 or int(A_gpu.shape[0]) != int(A_gpu.shape[1]):
+            raise ValueError(f"`A_dense` must be a square 2D matrix. Got shape {A_gpu.shape}.")
         # For the GPU direct path, the LU payload is the persistent object we
         # actually want to keep. Allowing cuSOLVER to overwrite the dense matrix
         # avoids carrying both A and LU in device memory when callers are done
@@ -120,6 +123,10 @@ def factorize_dense_matrix(
                 check_finite=True,
             ),
         )
+
+    A = np.asarray(A_dense, dtype=solve_dtype)
+    if A.ndim != 2 or A.shape[0] != A.shape[1]:
+        raise ValueError(f"`A_dense` must be a square 2D matrix. Got shape {A.shape}.")
     import scipy.linalg
 
     lu, piv = scipy.linalg.lu_factor(
@@ -1604,17 +1611,20 @@ def direct_dense_cupy(
         )
 
     A_for_residual: np.ndarray | None = None
+    A_gpu_dense: Any | None = None
     if A_dense is not None:
-        A_for_residual = np.asarray(A_dense, dtype=solve_dtype)
-        if A_for_residual.shape != (n, n):
-            raise ValueError(f"A_dense must have shape ({n},{n}), got {A_for_residual.shape}.")
+        A_gpu_dense = cupy.asarray(A_dense, dtype=solve_dtype)
+        if int(A_gpu_dense.ndim) != 2 or tuple(int(v) for v in A_gpu_dense.shape) != (n, n):
+            raise ValueError(f"A_dense must have shape ({n},{n}), got {A_gpu_dense.shape}.")
+        if compute_final_residual:
+            A_for_residual = asnumpy(A_gpu_dense).astype(solve_dtype, copy=False)
 
     setup_mode = "assemble+factorize"
     if A_factorized is not None:
         setup_mode = "reuse_lu"
         lu_payload = A_factorized
     else:
-        if A_for_residual is None:
+        if A_gpu_dense is None:
             A = np.empty((n, n), dtype=solve_dtype)
             eye = np.eye(n, dtype=solve_dtype)
             col_iter: Iterable[int] = range(n)
@@ -1623,9 +1633,10 @@ def direct_dense_cupy(
             for j in col_iter:
                 A[:, j] = np.asarray(A_mv(eye[:, j]), dtype=solve_dtype)
             A_for_residual = A
+            A_gpu = cupy.asarray(A_for_residual)
         else:
             setup_mode = "factorize_dense"
-        A_gpu = cupy.asarray(A_for_residual)
+            A_gpu = A_gpu_dense
         lu_payload = cupyx.scipy.linalg.lu_factor(A_gpu, overwrite_a=False, check_finite=True)
 
     if show_progress:

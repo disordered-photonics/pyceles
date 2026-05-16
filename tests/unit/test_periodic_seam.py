@@ -392,8 +392,11 @@ def test_periodic_dense_assembly_uses_temporary_block_cache_only() -> None:
         dtype=np.dtype(np.complex128),
         show_progress=False,
     )
+    eye = np.eye(2 * n_modes(1), dtype=np.complex128)
+    expected = np.column_stack([prepared.apply_A(eye[:, j]) for j in range(eye.shape[1])])
 
     assert dense.shape == (2 * n_modes(1), 2 * n_modes(1))
+    np.testing.assert_allclose(dense, expected, rtol=1e-12, atol=1e-12)
     assert prepared.coupling.cache_blocks is False
     assert set(prepared.coupling._ewald_block_cache) == set(sentinel_cache)
     np.testing.assert_array_equal(

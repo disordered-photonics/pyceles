@@ -71,6 +71,125 @@ def _assemble_dense_operator_via_matvec(
     return A
 
 
+def _particle_t_diagonal_or_none(prepared: PreparedOperator) -> np.ndarray | None:
+    """Return per-mode diagonal T data when dense periodic block assembly can use it."""
+    try:
+        diag = prepared.particle_t.mode_diagonal()
+    except NotImplementedError:
+        return None
+    if diag is None:
+        return None
+    ns = int(np.asarray(prepared.positions).reshape(-1, 3).shape[0])
+    nm = n_modes(int(prepared.lmax))
+    arr = np.asarray(diag, dtype=prepared.dtype).reshape(ns, nm)
+    return arr
+
+
+def _assemble_dense_periodic_numpy_from_cache(
+    *,
+    prepared: PreparedOperator,
+    coupling: PeriodicCouplingOperator,
+    dtype: np.dtype,
+    show_progress: bool,
+    timings: dict[str, float] | None = None,
+) -> np.ndarray | None:
+    """Assemble dense ``A`` from cached NumPy periodic W blocks when T is diagonal."""
+    t_diag = _particle_t_diagonal_or_none(prepared)
+    if t_diag is None:
+        return None
+    ns = int(np.asarray(prepared.positions).reshape(-1, 3).shape[0])
+    nm = n_modes(int(prepared.lmax))
+    n = ns * nm
+    A = np.eye(n, dtype=dtype)
+    pairs: Iterable[tuple[int, int]] = ((i, j) for j in range(ns) for i in range(ns))
+    if show_progress:
+        pairs = tqdm(pairs, total=ns * ns, desc="Assemble A (periodic blocks)")
+    t0 = time.perf_counter()
+    cache = coupling._ewald_block_cache
+    for i, j in pairs:
+        wij = cache.get((i, j))
+        if wij is None:
+            return None
+        rows = slice(i * nm, (i + 1) * nm)
+        cols = slice(j * nm, (j + 1) * nm)
+        A[rows, cols] -= t_diag[i, :, None] * np.asarray(wij, dtype=dtype)
+    _record_elapsed(timings, "dense_operator_assembly_s", t0)
+    return A
+
+
+def _assemble_dense_periodic_cupy_from_cache(
+    *,
+    prepared: PreparedOperator,
+    coupling: CuPyPeriodicCouplingOperator,
+    dtype: np.dtype,
+    show_progress: bool,
+    timings: dict[str, float] | None = None,
+) -> Any | None:
+    """Assemble dense ``A`` on device from cached CuPy periodic W source blocks."""
+    t_diag = _particle_t_diagonal_or_none(prepared)
+    if t_diag is None:
+        return None
+    cp = coupling._cupy()
+    ns = int(coupling.n_particles)
+    nm = int(coupling.n_modes)
+    n = ns * nm
+    A = cp.eye(n, dtype=dtype)
+    t_diag_gpu = cp.asarray(t_diag, dtype=dtype).reshape(ns, nm)
+    batches: Iterable[tuple[int, ...]] = coupling._source_batches()
+    if show_progress:
+        batches = tqdm(
+            batches,
+            total=(ns + coupling._source_batch_size() - 1) // coupling._source_batch_size(),
+            desc="Assemble A (periodic blocks, CuPy)",
+        )
+    t0 = time.perf_counter()
+    for source_indices in batches:
+        if len(source_indices) == 0:
+            continue
+        blocks = coupling._cached_blocks_for_sources(tuple(int(i) for i in source_indices))
+        weighted = -(blocks.astype(dtype, copy=False) * t_diag_gpu[None, :, :, None])
+        columns = weighted.transpose(1, 2, 0, 3).reshape(n, len(source_indices) * nm)
+        start = int(source_indices[0])
+        stop = int(source_indices[-1]) + 1
+        if stop - start == len(source_indices):
+            A[:, start * nm : stop * nm] += columns
+        else:
+            for local, source_index in enumerate(source_indices):
+                cs = slice(int(source_index) * nm, (int(source_index) + 1) * nm)
+                A[:, cs] += columns[:, local * nm : (local + 1) * nm]
+    cp.cuda.Stream.null.synchronize()
+    _record_elapsed(timings, "dense_operator_assembly_s", t0)
+    return A
+
+
+def _assemble_dense_periodic_from_cache(
+    *,
+    prepared: PreparedOperator,
+    dtype: np.dtype,
+    show_progress: bool,
+    timings: dict[str, float] | None = None,
+) -> Any | None:
+    """Assemble dense ``A`` from periodic W cache without scalar basis matvecs."""
+    coupling = prepared.coupling
+    if isinstance(coupling, PeriodicCouplingOperator):
+        return _assemble_dense_periodic_numpy_from_cache(
+            prepared=prepared,
+            coupling=coupling,
+            dtype=dtype,
+            show_progress=show_progress,
+            timings=timings,
+        )
+    if isinstance(coupling, CuPyPeriodicCouplingOperator):
+        return _assemble_dense_periodic_cupy_from_cache(
+            prepared=prepared,
+            coupling=coupling,
+            dtype=dtype,
+            show_progress=show_progress,
+            timings=timings,
+        )
+    return None
+
+
 def _assemble_dense_operator_for_prepared(
     *,
     prepared: PreparedOperator,
@@ -79,7 +198,7 @@ def _assemble_dense_operator_for_prepared(
     dtype: np.dtype,
     show_progress: bool,
     timings: dict[str, float] | None = None,
-) -> np.ndarray:
+) -> Any:
     """Assemble dense `A` while avoiding accidental periodic Ewald recomputation."""
     coupling = prepared.coupling
     if (
@@ -87,11 +206,18 @@ def _assemble_dense_operator_for_prepared(
         and coupling.periodic.options.method == "ewald"
     ):
         if coupling.cache_blocks:
-            # Make the expensive cache-fill phase visible before the dense-column
-            # loop starts; otherwise the first column appears to stall.
+            # Make the expensive cache-fill phase visible before dense assembly.
             t0 = time.perf_counter()
             coupling.populate(show_progress=show_progress)
             _record_elapsed(timings, "periodic_w_cache_populate_s", t0)
+            A_from_blocks = _assemble_dense_periodic_from_cache(
+                prepared=prepared,
+                dtype=dtype,
+                show_progress=show_progress,
+                timings=timings,
+            )
+            if A_from_blocks is not None:
+                return A_from_blocks
             return _assemble_dense_operator_via_matvec(
                 A_mv,
                 n=n,
@@ -100,9 +226,12 @@ def _assemble_dense_operator_for_prepared(
                 timings=timings,
             )
 
-        # Dense assembly applies `A_mv` once per basis vector. Temporarily enabling
-        # private Ewald block reuse avoids recomputing all pair blocks for every
-        # column while keeping iterative default behavior (`cache_blocks=False`).
+        # Dense assembly applies `A_mv` once per basis vector when no blockwise
+        # assembler exists.  For periodic Ewald coupling that is prohibitively
+        # expensive, especially on CuPy where each scalar column would otherwise
+        # trigger a device-to-host transfer.  Temporarily enable private block
+        # reuse, assemble dense A directly from those W blocks when T is diagonal,
+        # then restore the iterative no-cache state.
         previous_cache_blocks = coupling.cache_blocks
         coupling.cache_blocks = True
         if isinstance(coupling, PeriodicCouplingOperator):
@@ -113,6 +242,14 @@ def _assemble_dense_operator_for_prepared(
                 t0 = time.perf_counter()
                 coupling.populate(show_progress=show_progress)
                 _record_elapsed(timings, "periodic_w_cache_populate_s", t0)
+                A_from_blocks = _assemble_dense_periodic_from_cache(
+                    prepared=prepared,
+                    dtype=dtype,
+                    show_progress=show_progress,
+                    timings=timings,
+                )
+                if A_from_blocks is not None:
+                    return A_from_blocks
                 return _assemble_dense_operator_via_matvec(
                     A_mv,
                     n=n,
@@ -126,12 +263,23 @@ def _assemble_dense_operator_for_prepared(
                 coupling._ewald_block_cache = previous_ewald_block_cache
 
         previous_source_block_cache = coupling._source_block_cache
+        previous_source_block_chunk_cache = coupling._source_block_chunk_cache
         assembly_source_block_cache: dict[int, Any] = {}
+        assembly_source_block_chunk_cache: dict[tuple[int, ...], Any] = {}
         coupling._source_block_cache = assembly_source_block_cache
+        coupling._source_block_chunk_cache = assembly_source_block_chunk_cache
         try:
             t0 = time.perf_counter()
             coupling.populate(show_progress=show_progress)
             _record_elapsed(timings, "periodic_w_cache_populate_s", t0)
+            A_from_blocks = _assemble_dense_periodic_from_cache(
+                prepared=prepared,
+                dtype=dtype,
+                show_progress=show_progress,
+                timings=timings,
+            )
+            if A_from_blocks is not None:
+                return A_from_blocks
             return _assemble_dense_operator_via_matvec(
                 A_mv,
                 n=n,
@@ -141,8 +289,10 @@ def _assemble_dense_operator_for_prepared(
             )
         finally:
             assembly_source_block_cache.clear()
+            assembly_source_block_chunk_cache.clear()
             coupling.cache_blocks = previous_cache_blocks
             coupling._source_block_cache = previous_source_block_cache
+            coupling._source_block_chunk_cache = previous_source_block_chunk_cache
     return _assemble_dense_operator_via_matvec(
         A_mv,
         n=n,
@@ -425,6 +575,11 @@ def solve_sources_core(
                 if operator_backend == "cupy":
                     sim._dense_operator_cache = None
                     sim._dense_operator_dtype = None
+                    # The LU payload is now the owner of the device matrix.  Do
+                    # not pass the unfactorized dense matrix into the direct
+                    # solver again; that would only trigger an avoidable copy
+                    # for residual bookkeeping.
+                    A_dense = None
             else:
                 # Repeated direct solves only need the cached LU payload.
                 # Reassembling dense A here would defeat the intended repeated-RHS fast path.
