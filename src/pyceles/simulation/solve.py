@@ -40,6 +40,11 @@ from .helpers import (
 from .results import SolvedSourcesResult
 
 
+def _source_projection_uses_angular_grid(source: Source) -> bool:
+    """Return whether RHS projection uses the configured angular quadrature grid."""
+    return not isinstance(source, (LocalExpansionSource, PlaneWave))
+
+
 def _record_elapsed(timings: dict[str, float] | None, key: str, start: float) -> None:
     if timings is not None:
         timings[key] = timings.get(key, 0.0) + time.perf_counter() - float(start)
@@ -448,10 +453,16 @@ def solve_sources_core(
 
     source_polar_angles, source_azimuthal_angles = cfg.source_angular_grids()
     if cfg.verbose:
-        print(
-            "Source angular grid:"
-            f" beta={source_polar_angles.size}, alpha={source_azimuthal_angles.size}"
+        uses_source_grid = any(
+            _source_projection_uses_angular_grid(labeled_sources[label]) for label in labels
         )
+        if uses_source_grid:
+            print(
+                "Source angular grid:"
+                f" beta={source_polar_angles.size}, alpha={source_azimuthal_angles.size}"
+            )
+        else:
+            print("Source projection: analytic/local coefficients (no angular quadrature)")
 
     initial_coeffs: dict[str, np.ndarray] = {}
     source_projection_t0 = time.perf_counter()

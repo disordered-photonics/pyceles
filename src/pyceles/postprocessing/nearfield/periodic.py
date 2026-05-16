@@ -77,6 +77,7 @@ def compute_periodic_near_field(
             channel=channel,
             field_bmax=field_bmax,
             slab_tolerance=slab_tolerance,
+            show_progress=show_progress,
         )
         e_initial[outer_mask] = np.asarray(nf_ext.E_initial, dtype=out_dtype).reshape(-1, 3)
         h_initial[outer_mask] = np.asarray(nf_ext.H_initial, dtype=out_dtype).reshape(-1, 3)

@@ -683,6 +683,20 @@ def postprocess_sources_impl(
                 coeffs=np.asarray(x_col),
                 k=float(solved.k),
             )
+            if cfg.verbose:
+                order_count = int(np.asarray(periodic_payload.order_mn).shape[0])
+                propagating_count = int(
+                    np.count_nonzero(np.asarray(periodic_payload.order_propagating, dtype=bool))
+                )
+                prefix = "Periodic orders"
+                if n_channels > 1:
+                    prefix = f"{prefix} [{label}]"
+                print(
+                    f"{prefix}: total={order_count} propagating={propagating_count} "
+                    f"R={float(periodic_payload.reflectance):.6g} "
+                    f"T={float(periodic_payload.transmittance):.6g} "
+                    f"A={float(periodic_payload.absorptance):.6g}"
+                )
             periodic_runs[label] = _assemble_simulation_result(
                 sim,
                 source=solved.sources[label],

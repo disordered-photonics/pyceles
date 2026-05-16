@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 
@@ -164,6 +164,7 @@ def _accumulate_order_field(
     order_k_parallel: np.ndarray,
     order_kz: np.ndarray,
     amplitudes: np.ndarray,
+    progress: Any | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Accumulate one-hemisphere periodic order field on query points."""
     pts = np.asarray(points, dtype=float).reshape(-1, 3)
@@ -177,25 +178,29 @@ def _accumulate_order_field(
     kz_arr = np.asarray(order_kz, dtype=np.complex128).reshape(-1)
     amp = np.asarray(amplitudes, dtype=np.complex128).reshape(-1, 2)
     for i in range(kpar.shape[0]):
-        kx = float(kpar[i, 0])
-        ky = float(kpar[i, 1])
-        kz = complex(kz_arr[i])
-        if abs(kz) <= 1e-15:
-            continue
-        a_te = complex(amp[i, 0])
-        a_tm = complex(amp[i, 1])
-        if abs(a_te) <= 0.0 and abs(a_tm) <= 0.0:
-            continue
-        e_te, e_tm, h_te, h_tm = _plane_wave_vectors(
-            k=float(k),
-            k_parallel=kpar[i],
-            kz=kz,
-        )
-        e_vec = a_te * e_te + a_tm * e_tm
-        h_vec = complex(n_medium) * (a_te * h_te + a_tm * h_tm)
-        phase = np.exp(1j * (kx * pts[:, 0] + ky * pts[:, 1] + kz * pts[:, 2]))
-        e += phase[:, None] * e_vec[None, :]
-        h += phase[:, None] * h_vec[None, :]
+        try:
+            kx = float(kpar[i, 0])
+            ky = float(kpar[i, 1])
+            kz = complex(kz_arr[i])
+            if abs(kz) <= 1e-15:
+                continue
+            a_te = complex(amp[i, 0])
+            a_tm = complex(amp[i, 1])
+            if abs(a_te) <= 0.0 and abs(a_tm) <= 0.0:
+                continue
+            e_te, e_tm, h_te, h_tm = _plane_wave_vectors(
+                k=float(k),
+                k_parallel=kpar[i],
+                kz=kz,
+            )
+            e_vec = a_te * e_te + a_tm * e_tm
+            h_vec = complex(n_medium) * (a_te * h_te + a_tm * h_tm)
+            phase = np.exp(1j * (kx * pts[:, 0] + ky * pts[:, 1] + kz * pts[:, 2]))
+            e += phase[:, None] * e_vec[None, :]
+            h += phase[:, None] * h_vec[None, :]
+        finally:
+            if progress is not None:
+                progress.update(1)
     return e, h
 
 
@@ -206,6 +211,7 @@ def compute_periodic_near_field_exterior(
     channel: Literal["mixed", "te", "tm"] = "mixed",
     field_bmax: float | None = None,
     slab_tolerance: float = 1e-12,
+    show_progress: bool = False,
 ) -> NearFieldComponents:
     """Evaluate periodic near fields for points strictly outside the particle slab."""
     periodic = run.config.periodic
@@ -281,28 +287,42 @@ def compute_periodic_near_field_exterior(
     e_scattered = np.zeros_like(e_initial)
     h_scattered = np.zeros_like(h_initial)
 
-    if np.any(above_mask):
-        e_up, h_up = _accumulate_order_field(
-            pts_flat[above_mask],
-            k=k,
-            n_medium=run.config.n_medium,
-            order_k_parallel=order_payload.order_k_parallel,
-            order_kz=order_payload.order_kz,
-            amplitudes=order_payload.scattered_up_amplitudes,
-        )
-        e_scattered[above_mask] = e_up
-        h_scattered[above_mask] = h_up
-    if np.any(below_mask):
-        e_down, h_down = _accumulate_order_field(
-            pts_flat[below_mask],
-            k=k,
-            n_medium=run.config.n_medium,
-            order_k_parallel=order_payload.order_k_parallel,
-            order_kz=-np.asarray(order_payload.order_kz, dtype=np.complex128),
-            amplitudes=order_payload.scattered_down_amplitudes,
-        )
-        e_scattered[below_mask] = e_down
-        h_scattered[below_mask] = h_down
+    progress = None
+    if show_progress:
+        hemisphere_count = int(np.any(above_mask)) + int(np.any(below_mask))
+        total = hemisphere_count * int(order_payload.order_mn.shape[0])
+        if total > 0:
+            from tqdm.auto import tqdm
+
+            progress = tqdm(total=total, desc="Periodic exterior field", unit="order")
+    try:
+        if np.any(above_mask):
+            e_up, h_up = _accumulate_order_field(
+                pts_flat[above_mask],
+                k=k,
+                n_medium=run.config.n_medium,
+                order_k_parallel=order_payload.order_k_parallel,
+                order_kz=order_payload.order_kz,
+                amplitudes=order_payload.scattered_up_amplitudes,
+                progress=progress,
+            )
+            e_scattered[above_mask] = e_up
+            h_scattered[above_mask] = h_up
+        if np.any(below_mask):
+            e_down, h_down = _accumulate_order_field(
+                pts_flat[below_mask],
+                k=k,
+                n_medium=run.config.n_medium,
+                order_k_parallel=order_payload.order_k_parallel,
+                order_kz=-np.asarray(order_payload.order_kz, dtype=np.complex128),
+                amplitudes=order_payload.scattered_down_amplitudes,
+                progress=progress,
+            )
+            e_scattered[below_mask] = e_down
+            h_scattered[below_mask] = h_down
+    finally:
+        if progress is not None:
+            progress.close()
 
     e_internal = np.zeros_like(e_initial)
     h_internal = np.zeros_like(h_initial)
