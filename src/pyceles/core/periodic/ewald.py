@@ -32,7 +32,7 @@ from .shells import (
 )
 from .special import (
     shifted_delta_sequence,
-    shifted_reciprocal_regime,
+    shifted_delta_sequence_batched,
     upper_incomplete_gamma_int_or_halfint,
 )
 from .structural import (
@@ -1187,7 +1187,6 @@ def ewald_structural_sums_2d_batch(
 
     reciprocal_sums = np.zeros_like(sums)
     max_same_n = max(0, order // 2)
-    unique_cz, inverse_cz = np.unique(cz, return_inverse=True)
     min_recip_shell = ws.minimum_reciprocal_shell_for_propagating_orders(rayleigh_margin=1.0e-12)
     reciprocal_control = make_lattice_shell_control(
         shells=reciprocal_shells,
@@ -1207,56 +1206,46 @@ def ewald_structural_sums_2d_batch(
         exp_m_phi = {m: np.exp(1j * m * phi) for m in range(-order, order + 1)}
         gamma_fun = ws.upper_gamma(shell, max_same_n)
         inc = np.zeros_like(sums)
-        for group_id, cz_val in enumerate(unique_cz):
-            point_mask = inverse_cz == group_id
-            if not np.any(point_mask):
-                continue
-            phase = phase_all[point_mask]
-            cz_f = float(cz_val)
-            same_plane = abs(cz_f) <= same_plane_atol
-            if same_plane:
-                for degree in range(order + 1):
-                    for m in range(-degree, degree + 1):
-                        if (degree - abs(m)) % 2:
-                            continue
-                        root = (
-                            np.sqrt(2 * degree + 1.0)
-                            * np.sqrt(factorial_int(degree - m))
-                            * np.sqrt(factorial_int(degree + m))
-                        )
-                        prefactor = (
-                            (1j) ** m
-                            * root
-                            / (lattice.area * float(k) * (2.0 * float(k)) ** degree)
-                        )
-                        n_vals = np.arange((degree - abs(m)) // 2 + 1, dtype=np.int64)
-                        inner = np.zeros_like(gamma, dtype=np.complex128)
-                        for n in n_vals:
-                            denom = (
-                                factorial_int(n)
-                                * factorial_int((degree + m) // 2 - n)
-                                * factorial_int((degree - m) // 2 - n)
-                            )
-                            inner += (
-                                gamma_fun[:, int(n)]
-                                * gamma ** (2 * int(n) - 1)
-                                * rho ** (degree - 2 * int(n))
-                                / denom
-                            )
-                        vec = exp_m_phi[m] * inner
-                        inc[point_mask, degree, m + offset] += (
-                            structural_sum_m_normalization(m) * prefactor * (phase @ vec)
-                        )
-                continue
 
-            regime = shifted_reciprocal_regime(gamma, cz_f)
-            if regime == "rayleigh_limit":
-                raise ValueError(
-                    "Shifted periodic reciprocal sums are singular at gamma*z_offset == 0. "
-                    "Use the same-plane path when applicable, or move the evaluation point "
-                    "away from the Rayleigh threshold until a limiting formula is implemented."
-                )
-            delta_full = shifted_delta_sequence(order, gamma, cz_f, float(eta))
+        same_mask = same_plane_points
+        if np.any(same_mask):
+            phase = phase_all[same_mask]
+            for degree in range(order + 1):
+                for m in range(-degree, degree + 1):
+                    if (degree - abs(m)) % 2:
+                        continue
+                    root = (
+                        np.sqrt(2 * degree + 1.0)
+                        * np.sqrt(factorial_int(degree - m))
+                        * np.sqrt(factorial_int(degree + m))
+                    )
+                    prefactor = (
+                        (1j) ** m * root / (lattice.area * float(k) * (2.0 * float(k)) ** degree)
+                    )
+                    n_vals = np.arange((degree - abs(m)) // 2 + 1, dtype=np.int64)
+                    inner = np.zeros_like(gamma, dtype=np.complex128)
+                    for n in n_vals:
+                        denom = (
+                            factorial_int(n)
+                            * factorial_int((degree + m) // 2 - n)
+                            * factorial_int((degree - m) // 2 - n)
+                        )
+                        inner += (
+                            gamma_fun[:, int(n)]
+                            * gamma ** (2 * int(n) - 1)
+                            * rho ** (degree - 2 * int(n))
+                            / denom
+                        )
+                    vec = exp_m_phi[m] * inner
+                    inc[same_mask, degree, m + offset] += (
+                        structural_sum_m_normalization(m) * prefactor * (phase @ vec)
+                    )
+
+        shifted_mask = ~same_mask
+        if np.any(shifted_mask):
+            phase = phase_all[shifted_mask]
+            cz_shifted = np.asarray(cz[shifted_mask], dtype=float)
+            delta_full = shifted_delta_sequence_batched(order, gamma, cz_shifted, float(eta))
             gamma_over_k = gamma / float(k)
             for degree in range(order + 1):
                 for m in range(-degree, degree + 1):
@@ -1273,7 +1262,7 @@ def ewald_structural_sums_2d_batch(
                     n_vals = np.arange(0, degree - abs(m) + 1, dtype=np.int64)
                     if n_vals.size == 0:
                         continue
-                    inner = np.zeros((rho.size, n_vals.size), dtype=np.complex128)
+                    acc = np.zeros((cz_shifted.size, rho.size), dtype=np.complex128)
                     for n in n_vals:
                         s_vals = np.arange(
                             int(n), min(degree - abs(m), 2 * int(n)) + 1, dtype=np.int64
@@ -1285,7 +1274,7 @@ def ewald_structural_sums_2d_batch(
                         )
                         if s_vals.size == 0:
                             continue
-                        terms = np.zeros_like(rho, dtype=np.complex128)
+                        terms = np.zeros((cz_shifted.size, rho.size), dtype=np.complex128)
                         for s in s_vals:
                             denom = (
                                 factorial_int(2 * int(n) - int(s))
@@ -1294,18 +1283,25 @@ def ewald_structural_sums_2d_batch(
                                 * factorial_int((degree - abs(m) - int(s)) // 2)
                             )
                             terms += (
-                                (-float(k) * cz_f) ** (2 * int(n) - int(s))
-                                * (rho / float(k)) ** (degree - int(s))
+                                (-float(k) * cz_shifted[:, None]) ** (2 * int(n) - int(s))
+                                * (rho[None, :] / float(k)) ** (degree - int(s))
                                 / denom
                             )
-                        inner[:, int(n)] = terms
-                    vec = exp_m_phi[m] * np.sum(
-                        gamma_over_k[:, None] ** (2 * n_vals - 1) * delta_full[:, n_vals] * inner,
-                        axis=1,
+                        acc += (
+                            gamma_over_k[None, :] ** (2 * int(n) - 1)
+                            * delta_full[:, :, int(n)]
+                            * terms
+                        )
+                    vec = exp_m_phi[m][None, :] * acc
+                    vals = (
+                        structural_sum_m_normalization(m)
+                        * prefactor
+                        * np.sum(
+                            phase * vec,
+                            axis=1,
+                        )
                     )
-                    inc[point_mask, degree, m + offset] += (
-                        structural_sum_m_normalization(m) * prefactor * (phase @ vec)
-                    )
+                    inc[shifted_mask, degree, m + offset] += vals
         return inc
 
     reciprocal_sums = np.asarray(

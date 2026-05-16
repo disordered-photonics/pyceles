@@ -17,7 +17,11 @@ from pyceles.core.periodic.shells import (
     accumulate_lattice_shell_series,
     make_lattice_shell_control,
 )
-from pyceles.core.periodic.special import upper_incomplete_gamma_int_or_halfint
+from pyceles.core.periodic.special import (
+    shifted_delta_sequence,
+    shifted_delta_sequence_batched,
+    upper_incomplete_gamma_int_or_halfint,
+)
 from pyceles.core.periodic.structural import direct_structural_sums_2d
 
 
@@ -218,6 +222,19 @@ def test_batch_roundoff_same_plane_rows_use_same_plane_limit() -> None:
         reciprocal_shells=8,
     )
     np.testing.assert_allclose(near, exact, rtol=5e-12, atol=5e-12)
+
+
+def test_shifted_delta_sequence_batched_matches_scalar_rows() -> None:
+    gamma = np.asarray([0.011 - 0.0j, 0.006j, 0.003 + 0.004j], dtype=np.complex128)
+    z_offsets = np.asarray([38.0, -117.0, 245.0], dtype=float)
+
+    got = shifted_delta_sequence_batched(4, gamma, z_offsets, 0.02)
+    expected = np.stack(
+        [shifted_delta_sequence(4, gamma, float(z), 0.02) for z in z_offsets],
+        axis=0,
+    )
+
+    np.testing.assert_allclose(got, expected, rtol=2e-14, atol=2e-14)
 
 
 def test_ewald_structural_constant_rejects_invalid_mode() -> None:

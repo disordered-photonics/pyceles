@@ -275,10 +275,76 @@ def shifted_delta_sequence(
     return out
 
 
+def shifted_delta_sequence_batched(
+    max_order: int,
+    gamma: npt.ArrayLike,
+    z_offset: npt.ArrayLike,
+    eta: float,
+    *,
+    singular_atol: float = _SMALL_COMPLEX,
+) -> Array:
+    """Evaluate shifted reciprocal Ewald integrals for many height offsets.
+
+    ``gamma`` is flattened to ``(n_gamma,)`` and ``z_offset`` to
+    ``(n_offsets,)``. The result has shape
+    ``(n_offsets, n_gamma, max_order + 1)``. Callers should route exact
+    same-plane points to the same-plane reciprocal formula before using this
+    helper.
+    """
+    n_max = int(max_order)
+    if n_max < 0:
+        raise ValueError(f"`max_order` must be >= 0. Got {max_order!r}.")
+    eta_f = float(eta)
+    if not np.isfinite(eta_f) or eta_f <= 0.0:
+        raise ValueError(f"`eta` must be finite and positive. Got {eta!r}.")
+    gamma_arr = np.asarray(gamma, dtype=np.complex128).reshape(-1)
+    z_arr = np.asarray(z_offset, dtype=float).reshape(-1)
+    out = np.zeros((z_arr.size, gamma_arr.size, n_max + 1), dtype=np.complex128)
+    if z_arr.size == 0 or gamma_arr.size == 0:
+        return out
+    scaled = z_arr[:, None] * gamma_arr[None, :]
+    if np.any(np.abs(scaled) <= float(singular_atol)):
+        raise ValueError(
+            "shifted reciprocal integrals are singular in the same-plane or "
+            "Rayleigh-threshold limit; route those points to the same-plane "
+            "formula or avoid gamma*z_offset == 0."
+        )
+
+    x = -(gamma_arr * gamma_arr) / (4.0 * eta_f * eta_f)
+    if np.any(np.abs(x) <= float(singular_atol)):
+        raise ValueError("shifted reciprocal integrals are singular at gamma=0.")
+    root_x = np.where(x.real < 0.0, -1j * np.sqrt(np.abs(x)), np.sqrt(x))
+    z_arg = np.where(x.real[None, :] < 0.0, scaled, 1j * np.abs(scaled))
+    z_sq = scaled * scaled
+    x_b = x[None, :]
+    root_b = root_x[None, :]
+    exp_term = np.exp(-x_b + z_sq / (4.0 * x_b))
+
+    w_minus = special.wofz(-z_arg / (2.0 * root_b) + 1j * root_b)
+    w_plus = special.wofz(z_arg / (2.0 * root_b) + 1j * root_b)
+    out[:, :, 0] = 0.5 * math.sqrt(math.pi) * exp_term * (w_minus + w_plus)
+    if n_max == 0:
+        return out
+
+    out[:, :, 1] = 1j * math.sqrt(math.pi) / z_arg * exp_term * (w_minus - w_plus)
+    for idx in range(2, n_max + 1):
+        out[:, :, idx] = (
+            4.0
+            / z_sq
+            * (
+                (1.5 - float(idx)) * out[:, :, idx - 1]
+                - out[:, :, idx - 2]
+                + root_b * x_b ** (1 - idx) * exp_term
+            )
+        )
+    return out
+
+
 __all__ = [
     "kambe_integral",
     "reduced_incomplete_gamma_int_or_halfint",
     "shifted_delta_sequence",
+    "shifted_delta_sequence_batched",
     "shifted_reciprocal_regime",
     "upper_incomplete_gamma_int_or_halfint",
 ]
