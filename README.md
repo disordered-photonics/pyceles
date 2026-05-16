@@ -191,10 +191,11 @@ Users of pyceles are referred to the publications listed in the CELES and SMUTHI
   particle families. In practice this remains especially restrictive for close
   configurations of elongated spheroids, where alternative coupling schemes can
   be implemented.
-- Periodic boundary conditions are still under active hardening. Current scope
-  is homogeneous rectangular 2D lattices with plane-wave excitation; layered
-  media, non-rectangular lattices, reduced-cell local sources, and optional
-  hybrid coupling strategies are not production API yet.
+- Periodic boundary conditions are still experimental. Current tested scope is
+  homogeneous rectangular 2D lattices with plane-wave excitation on the NumPy
+  and CuPy `complex128/complex128` paths; layered media, non-rectangular
+  lattices, reduced-cell local sources, mixed precision, and optional hybrid
+  coupling strategies are not production API yet.
 - At the moment, particles in a simulation need to share the same `lmax`.
 - Exterior near-field evaluation for spheroids remains unreliable at points
   lying inside the circumscribing sphere but outside the physical particle.
@@ -536,66 +537,7 @@ no-preconditioner runs (from `40` to `22` iterations at `rtol=1e-4`,
 `restart=25`), which is where the largest runtime gain appears for
 `complex128`.
 
-## Periodic benchmark snapshot
-
-Use `examples/profile_pyceles_periodic_phases.py` for the rectangular-cell
-periodic profile. The script places the 500 prototype spheres from
-`examples/sphere_parameters.txt` into a non-overlapping 3000 nm square periodic
-cell, solves one normally incident plane-wave RHS, and optionally computes
-periodic xy/xz near-field slices.
-
-Common benchmark parameters:
-- geometry: `N=500`, `lmax=3`, homogeneous medium, 3000 nm periodic square cell
-- source: plane wave (`wavelength=550`, `n_medium=1.0`, TE, normal incidence)
-- angular grids: `n_beta=1801`, `n_alpha=360`
-- solver: `gmres`, `rtol=1e-4`, `restart=80`, `maxiter=800`
-- periodic options: automatic `eta`, adaptive shell counts,
-  `shell_tolerance=1e-10`
-
-Reproduce:
-```bash
-python examples/profile_pyceles_periodic_phases.py --operator-backend cupy --postprocessing-backend inherit --cache-mode on --skip-nearfield --out-dir outputs/profile_periodic_cupy_cache_on --quiet
-python examples/profile_pyceles_periodic_phases.py --operator-backend cupy --postprocessing-backend inherit --cache-mode off --skip-nearfield --out-dir outputs/profile_periodic_cupy_cache_off --quiet
-python examples/profile_pyceles_periodic_phases.py --operator-backend numpy --postprocessing-backend inherit --cache-mode on --skip-nearfield --out-dir outputs/profile_periodic_numpy_cache_on --quiet
-python examples/profile_pyceles_periodic_phases.py --operator-backend cupy --postprocessing-backend inherit --solver direct --skip-nearfield --skip-final-residual-check --out-dir outputs/profile_periodic_cupy_direct --quiet
-python examples/profile_pyceles_periodic_phases.py --operator-backend numpy --postprocessing-backend inherit --solver direct --skip-nearfield --out-dir outputs/profile_periodic_numpy_direct --quiet
-```
-
-Measured phase wall times on the same laptop/GPU used for the non-periodic
-snapshot above:
-- CuPy, explicit periodic W cache:
-  - W-cache population: `18.5 s`
-  - GMRES solve: `12.3 s` for 160 iterations
-  - Full solve phase: `42.4 s`
-  - Near field: xy `1.4 s`, xz `130 s`
-- CuPy, no periodic W cache:
-  - GMRES solve: `2000 s` for 160 iterations (`~12.5 s/iteration`)
-  - Full solve phase: `2012 s`
-  - Near field: xy `1.4 s`, xz `132 s`
-- NumPy, explicit periodic W cache:
-  - W-cache population: `116 s`
-  - GMRES solve: `584 s` for 160 iterations
-  - Full solve phase: `712 s`
-  - Near field: xy `1.5 s`, xz `1443 s`
-- CuPy direct dense validation, with near field and final residual check skipped:
-  - W-cache population: `19.1 s`
-  - Dense `A` assembly from cached periodic blocks: `0.31 s`
-  - Dense LU factorization: `43.5 s`
-  - Full solve phase: `74.6 s`
-- NumPy direct dense validation, with near field skipped:
-  - W-cache population: `116 s`
-  - Dense `A` assembly from cached periodic blocks: `3.23 s`
-  - Dense LU factorization: `19.8 s`
-  - Full solve phase: `152 s`
-
-The direct dense rows are validation paths, not the intended scaling route.
-The cache-off periodic path is intentionally memory-light, but it recomputes
-periodic Ewald work on every Krylov matvec. For large periodic runs, explicit
-W-block caching is currently the practical path when memory permits. The
-remaining major GPU performance target is a fused cache-off periodic Ewald
-apply kernel.
-
-## Cumulative Optimization Notes
+## Cumulative Optimization Notes (Pairwise)
 
 The current performance is the cumulative result of several tweaks.
 Key improvements include:
@@ -637,6 +579,91 @@ pcl.postprocessing.nearfield.clear_caches()
 
 pyceles does not call these automatically between runs because warm caches are
 often beneficial when repeating solves in the same process.
+
+## Periodic benchmark snapshot
+
+Use `examples/profile_pyceles_periodic_phases.py` for the rectangular-cell
+periodic profile. The script places the 500 prototype spheres from
+`examples/sphere_parameters.txt` into a non-overlapping 3000 nm square periodic
+cell, solves one normally incident plane-wave RHS, and optionally computes
+periodic xy/xz near-field slices.
+
+Common benchmark parameters:
+- geometry: `N=500`, `lmax=3`, homogeneous medium, 3000 nm periodic square cell
+- source: plane wave (`wavelength=550`, `n_medium=1.0`, TE, normal incidence)
+- source projection: analytic plane-wave RHS; no source angular quadrature is
+  used in the current periodic scope
+- solver: `gmres`, `rtol=1e-4`, `restart=80`, `maxiter=800`
+- periodic options: automatic `eta`, adaptive shell counts,
+  `shell_tolerance=1e-10`
+- precision: for the moment, only `complex128/complex128` is considered
+
+Reproduce:
+```bash
+python examples/profile_pyceles_periodic_phases.py --operator-backend cupy --postprocessing-backend inherit --cache-mode on --skip-nearfield --out-dir outputs/profile_periodic_cupy_cache_on --quiet
+python examples/profile_pyceles_periodic_phases.py --operator-backend cupy --postprocessing-backend inherit --cache-mode off --skip-nearfield --out-dir outputs/profile_periodic_cupy_cache_off --quiet
+python examples/profile_pyceles_periodic_phases.py --operator-backend numpy --postprocessing-backend inherit --cache-mode on --skip-nearfield --out-dir outputs/profile_periodic_numpy_cache_on --quiet
+python examples/profile_pyceles_periodic_phases.py --operator-backend cupy --postprocessing-backend inherit --solver direct --skip-nearfield --skip-final-residual-check --out-dir outputs/profile_periodic_cupy_direct --quiet
+python examples/profile_pyceles_periodic_phases.py --operator-backend numpy --postprocessing-backend inherit --solver direct --skip-nearfield --out-dir outputs/profile_periodic_numpy_direct --quiet
+```
+
+Measured phase wall times on the same laptop/GPU used for the non-periodic
+snapshot above:
+- CuPy, explicit periodic W cache:
+  - W-cache population: `18.5 s`
+  - GMRES solve: `12.3 s` for 160 iterations
+  - Full solve phase: `42.4 s`
+  - Near field: xy `1.4 s`, xz `130 s`
+- CuPy, no periodic W cache:
+  - GMRES solve: `1941 s` for 160 iterations (`~12.1 s/iteration`)
+  - Full solve phase: `1952 s`
+  - Near field: xy `1.4 s`, xz `132 s`
+- NumPy, explicit periodic W cache:
+  - W-cache population: `116 s`
+  - GMRES solve: `584 s` for 160 iterations
+  - Full solve phase: `712 s`
+  - Near field: xy `1.5 s`, xz `1443 s`
+- CuPy direct dense validation, with near field and final residual check skipped:
+  - W-cache population: `19.1 s`
+  - Dense `A` assembly from cached periodic blocks: `0.31 s`
+  - Dense LU factorization: `43.5 s`
+  - Full solve phase: `74.6 s`
+- NumPy direct dense validation, with near field skipped:
+  - W-cache population: `116 s`
+  - Dense `A` assembly from cached periodic blocks: `3.23 s`
+  - Dense LU factorization: `19.8 s`
+  - Full solve phase: `152 s`
+
+The direct dense rows are validation paths, not the intended scaling route.
+The cache-off periodic path is intentionally memory-light, but it recomputes
+periodic Ewald work on every Krylov matvec. For large periodic runs, explicit
+W-block caching is currently the practical path when memory permits. The
+remaining major GPU performance target is a fused cache-off periodic Ewald
+apply kernel.
+
+## Cumulative Optimization Notes (Periodic)
+
+- The periodic many-body solve remains particle-local and operator/Krylov
+  oriented: pyceles applies `A = I - T W` through the prepared operator and does
+  not build a dense cluster T-matrix as a production workflow.
+- Adaptive Ewald shell selection now has a propagating-order reciprocal guard,
+  clear non-convergence errors, and reusable non-pair shell workspaces. These
+  caches hold lattice-shell metadata, not dense `N^2` pair blocks.
+- The CuPy periodic Ewald path evaluates real-space and shifted reciprocal
+  structural sums with fused device kernels, handles same-plane pairs on device,
+  and batches source particles by temporary-memory budget in cache-off mode.
+- Explicit periodic W-block caching is an opt-in memory/runtime tradeoff. It is
+  the practical path for the current 500-particle benchmark when memory permits,
+  while cache-off remains the memory-light reference for larger exploratory
+  cells.
+- Dense direct periodic solves are validation paths. For diagonal particle-local
+  `T` operators, dense `A` is assembled directly from cached periodic W blocks;
+  the CuPy path builds dense `A` in cuSOLVER's Fortran-order layout so LU can
+  overwrite the matrix instead of first making a full device copy.
+- Periodic near-field evaluation uses two representations: explicit Rayleigh
+  orders above/below the particle slab (`field_bmax` controls the output basis)
+  and local periodic SVWF evaluation inside the slab. This keeps periodic
+  outputs separate from the finite-cluster far-field grids.
 
 ## Beyond CELES (current pyceles extras)
 

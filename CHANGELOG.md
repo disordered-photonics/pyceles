@@ -39,11 +39,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - sampled-far MLFMM interactions stay on `complex128` for both NumPy and CuPy
 - Added absolute local absorbed-power diagnostics for dipole-source runs:
   `run.power["P_abs_local"]` and `run.power["P_abs_local_particles"]`.
-- Added initial rectangular-lattice periodic configuration scaffolding:
-  `RectangularLattice2D`, `PeriodicSpec`, `PeriodicOptions`, source
-  `k_parallel` validation, periodic overlap checks, and a periodic operator
-  placeholder. Periodic coupling evaluation and periodic outputs are not
-  implemented yet.
+- Added homogeneous rectangular-lattice periodic workflows:
+  - `RectangularLattice2D`, `PeriodicSpec`, and `PeriodicOptions`
+  - plane-wave `k_parallel` validation and periodic overlap checks
+  - NumPy/CuPy periodic Ewald coupling, plus a direct-sum oracle for small
+    checks
+  - diffraction-order payloads on `SimulationResult.periodic`, including
+    reflected/transmitted order amplitudes and `R/T/A` totals
+  - periodic near-field slices with exterior Rayleigh-order evaluation and
+    in-slab local-SVWF evaluation for homogeneous spheres
 
 ### Removed
 - The built-in regular-grid block preconditioner from the high-level
@@ -60,6 +64,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Periodic dense direct validation now assembles `A = I - T W` directly from
   cached periodic Ewald blocks for diagonal particle-local `T` operators,
   avoiding column-by-column matrix-free assembly on sphere-like systems.
+- Periodic solve logging now reports analytic/local source projection when no
+  angular source quadrature is used, and periodic postprocessing reports the
+  resolved diffraction-order count and `R/T/A` totals.
+- CuPy periodic cache-off matvecs now batch source particles by the temporary
+  structural-table memory budget instead of a fixed source-count cap.
 - `solve_linear_system(..., backend="cupy", method="gmres")` now routes through
   pyceles' native CuPy GMRES path (instead of delegating to CuPy built-in
   GMRES), improving convergence observability within restart cycles.
