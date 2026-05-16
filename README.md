@@ -168,6 +168,16 @@ Users of pyceles are referred to the publications listed in the CELES and SMUTHI
   - one shared CELES-style default grid (`polar_angles`, `azimuthal_angles`)
   - optional split grids for source projection and far-field outputs
     (`source_*`, `farfield_*`)
+- Homogeneous rectangular 2D periodic-cell workflows:
+  - `RectangularLattice2D`, `PeriodicSpec`, and `PeriodicOptions`
+  - plane-wave Bloch source validation through the incident `k_parallel`
+  - periodic Ewald coupling, with a direct-sum oracle for small checks
+  - periodic diffraction-order payloads on `SimulationResult.periodic`
+  - periodic reflected/transmitted order amplitudes and `R/T/A` totals
+  - periodic near-field slices:
+    - exterior Rayleigh-order evaluation above/below the particle slab
+    - in-slab periodic local-SVWF evaluation outside/inside homogeneous spheres
+  - CuPy periodic Ewald coupling with optional explicit W-block caching
 
 ## Current limits / not yet landed
 
@@ -181,7 +191,10 @@ Users of pyceles are referred to the publications listed in the CELES and SMUTHI
   particle families. In practice this remains especially restrictive for close
   configurations of elongated spheroids, where alternative coupling schemes can
   be implemented.
-- Periodic boundary conditions is still work in progress.
+- Periodic boundary conditions are still under active hardening. Current scope
+  is homogeneous rectangular 2D lattices with plane-wave excitation; layered
+  media, non-rectangular lattices, reduced-cell local sources, and optional
+  hybrid coupling strategies are not production API yet.
 - At the moment, particles in a simulation need to share the same `lmax`.
 - Exterior near-field evaluation for spheroids remains unreliable at points
   lying inside the circumscribing sphere but outside the physical particle.
@@ -522,6 +535,58 @@ On this benchmark, native CuPy GMRES reduced restart overshoot on the
 no-preconditioner runs (from `40` to `22` iterations at `rtol=1e-4`,
 `restart=25`), which is where the largest runtime gain appears for
 `complex128`.
+
+## Periodic benchmark snapshot
+
+Use `examples/profile_pyceles_periodic_phases.py` for the rectangular-cell
+periodic profile. The script places the 500 prototype spheres from
+`examples/sphere_parameters.txt` into a non-overlapping 3000 nm square periodic
+cell, solves one normally incident plane-wave RHS, and optionally computes
+periodic xy/xz near-field slices.
+
+Common benchmark parameters:
+- geometry: `N=500`, `lmax=3`, homogeneous medium, 3000 nm periodic square cell
+- source: plane wave (`wavelength=550`, `n_medium=1.0`, TE, normal incidence)
+- angular grids: `n_beta=1801`, `n_alpha=360`
+- solver: `gmres`, `rtol=1e-4`, `restart=80`, `maxiter=800`
+- periodic options: automatic `eta`, adaptive shell counts,
+  `shell_tolerance=1e-10`
+
+Reproduce:
+```bash
+python examples/profile_pyceles_periodic_phases.py --operator-backend cupy --postprocessing-backend inherit --cache-mode on --out-dir outputs/profile_periodic_cupy_cache_on --quiet
+python examples/profile_pyceles_periodic_phases.py --operator-backend cupy --postprocessing-backend inherit --cache-mode off --out-dir outputs/profile_periodic_cupy_cache_off --quiet
+python examples/profile_pyceles_periodic_phases.py --operator-backend numpy --postprocessing-backend inherit --cache-mode on --out-dir outputs/profile_periodic_numpy_cache_on --quiet
+python examples/profile_pyceles_periodic_phases.py --operator-backend cupy --postprocessing-backend inherit --solver direct --skip-nearfield --skip-final-residual-check --out-dir outputs/profile_periodic_cupy_direct --quiet
+```
+
+Measured phase wall times on the same laptop/GPU used for the non-periodic
+snapshot above:
+- CuPy, explicit periodic W cache:
+  - W-cache population: `19.9 s`
+  - GMRES solve: `12.2 s` for 160 iterations
+  - Full solve phase: `43.6 s`
+  - Near field: xy `1.4 s`, xz `130 s`
+- CuPy, no periodic W cache:
+  - GMRES solve: `2020 s` for 160 iterations (`~12.6 s/iteration`)
+  - Full solve phase: `2031 s`
+  - Near field: xy `1.4 s`, xz `132 s`
+- NumPy, explicit periodic W cache:
+  - W-cache population: `121 s`
+  - GMRES solve: `600 s` for 160 iterations
+  - Full solve phase: `733 s`
+  - Near field: xy `1.5 s`, xz `1443 s`
+- CuPy direct dense validation, with near field and final residual check skipped:
+  - W-cache population: `19.1 s`
+  - Dense `A` assembly from cached periodic blocks: `0.45 s`
+  - Dense LU factorization: `155 s`
+  - Full solve phase: `186 s`
+
+The cache-off periodic path is intentionally memory-light, but it recomputes
+periodic Ewald work on every Krylov matvec. For large periodic runs, explicit
+W-block caching is currently the practical path when memory permits. The
+remaining major GPU performance target is a fused cache-off periodic Ewald
+apply kernel.
 
 ## Cumulative Optimization Notes
 
