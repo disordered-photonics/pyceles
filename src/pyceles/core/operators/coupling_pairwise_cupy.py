@@ -80,7 +80,7 @@ def _translation_matvec_raw_kernel(lmax: int, dtype_str: str):
     // This structure avoids the earlier one-launch-per-source pattern, which
     // left the GPU badly under-occupied for low-lmax many-particle cases.
 
-    extern "C" __device__ {real_type} assoc_legendre_function(
+    __device__ {real_type} assoc_legendre_function(
         const int l,
         const int m,
         const {real_type} ct,
@@ -98,7 +98,7 @@ def _translation_matvec_raw_kernel(lmax: int, dtype_str: str):
         return plm;
     }}
 
-    extern "C" __device__ {real_type} hankel_lookup_linear(
+    __device__ {real_type} hankel_lookup_linear(
         const int p,
         const {real_type} r,
         const {real_type}* table,
@@ -136,8 +136,6 @@ def _translation_matvec_raw_kernel(lmax: int, dtype_str: str):
         const {real_type}* plm_coeffs,
         const {real_type}* re_ab,
         const {real_type}* im_ab,
-        const int* mode_tau,
-        const int* mode_l,
         const int* mode_m,
         const int* pair_offset,
         const int* pair_pmin,
@@ -159,8 +157,6 @@ def _translation_matvec_raw_kernel(lmax: int, dtype_str: str):
         __shared__ {real_type} st_shared;
         __shared__ {real_type} phi_shared;
 
-        const int tau1 = mode_tau[n1];
-        const int l1 = mode_l[n1];
         const int m1 = mode_m[n1];
 
         for (int rhs = blockIdx.z; rhs < nrhs; rhs += gridDim.z) {{
@@ -282,8 +278,6 @@ class CuPyPairwiseCouplingOperator:
     _plm_coeff_gpu: Any | None = field(default=None, init=False, repr=False)
     _lut_re_gpu: Any | None = field(default=None, init=False, repr=False)
     _lut_im_gpu: Any | None = field(default=None, init=False, repr=False)
-    _mode_tau_gpu: Any | None = field(default=None, init=False, repr=False)
-    _mode_l_gpu: Any | None = field(default=None, init=False, repr=False)
     _mode_m_gpu: Any | None = field(default=None, init=False, repr=False)
     _pair_offset_gpu: Any | None = field(default=None, init=False, repr=False)
     _pair_pmin_gpu: Any | None = field(default=None, init=False, repr=False)
@@ -331,10 +325,8 @@ class CuPyPairwiseCouplingOperator:
                 np.ascontiguousarray(lut.imag.reshape(-1)),
                 dtype=real_dtype,
             )
-        if self._mode_tau_gpu is None or self._mode_l_gpu is None or self._mode_m_gpu is None:
-            mode_tau, mode_l, mode_m = mode_metadata_tables(self.lmax)
-            self._mode_tau_gpu = cupy.asarray(mode_tau)
-            self._mode_l_gpu = cupy.asarray(mode_l)
+        if self._mode_m_gpu is None:
+            _, _, mode_m = mode_metadata_tables(self.lmax)
             self._mode_m_gpu = cupy.asarray(mode_m)
         if (
             self._pair_offset_gpu is None
@@ -353,8 +345,6 @@ class CuPyPairwiseCouplingOperator:
             self._plm_coeff_gpu,
             self._compact_re_ab_gpu,
             self._compact_im_ab_gpu,
-            self._mode_tau_gpu,
-            self._mode_l_gpu,
             self._mode_m_gpu,
             self._pair_offset_gpu,
             self._pair_pmin_gpu,
@@ -408,8 +398,6 @@ class CuPyPairwiseCouplingOperator:
             plm_coeff_gpu,
             compact_re_ab_gpu,
             compact_im_ab_gpu,
-            mode_tau_gpu,
-            mode_l_gpu,
             mode_m_gpu,
             pair_offset_gpu,
             pair_pmin_gpu,
@@ -459,8 +447,6 @@ class CuPyPairwiseCouplingOperator:
                 plm_coeff_gpu,
                 compact_re_ab_gpu,
                 compact_im_ab_gpu,
-                mode_tau_gpu,
-                mode_l_gpu,
                 mode_m_gpu,
                 pair_offset_gpu,
                 pair_pmin_gpu,

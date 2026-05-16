@@ -696,7 +696,7 @@ def _leaf_translation_blocks_rect_raw_kernel(full_order: int, dtype_name: str) -
     n_phase = 2 * n_orders - 1
     source = f"""
     #include <cupy/complex.cuh>
-    extern "C" __device__ {real_t} assoc_legendre_function(
+    __device__ {real_t} assoc_legendre_function(
         const int l,
         const int m,
         const {real_t} ct,
@@ -714,7 +714,7 @@ def _leaf_translation_blocks_rect_raw_kernel(full_order: int, dtype_name: str) -
         return plm;
     }}
 
-    extern "C" __device__ {complex_t} bessel_lookup_linear(
+    __device__ {complex_t} bessel_lookup_linear(
         const int p,
         const {real_t} r,
         const {real_t}* re_table,
@@ -2543,7 +2543,7 @@ def _exact_near_pairs_leafpair_raw_kernel(lmax: int, near_dtype_name: str) -> An
     n_phase = 2 * n_orders - 1
     source = f"""
     #include <cupy/complex.cuh>
-    extern "C" __device__ {real_t} assoc_legendre_function(
+    __device__ {real_t} assoc_legendre_function(
         const int l,
         const int m,
         const {real_t} ct,
@@ -2561,7 +2561,7 @@ def _exact_near_pairs_leafpair_raw_kernel(lmax: int, near_dtype_name: str) -> An
         return plm;
     }}
 
-    extern "C" __device__ {real_t} hankel_lookup_linear(
+    __device__ {real_t} hankel_lookup_linear(
         const int p,
         const {real_t} r,
         const {real_t}* table,

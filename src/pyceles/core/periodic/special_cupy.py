@@ -26,7 +26,7 @@ _DEFAULT_WOFZ_TERMS = 11
 _WTRAP_DEVICE_CUDA_SOURCE = r"""
 #include <cupy/complex.cuh>
 
-extern "C" __device__ complex<double> _wtrap_upper_one(
+__device__ complex<double> _wtrap_upper_one(
     const complex<double> z,
     const int terms,
     const double h,
@@ -78,7 +78,7 @@ extern "C" __device__ complex<double> _wtrap_upper_one(
     return midpoint + correction;
 }
 
-extern "C" __device__ complex<double> _wtrap_wofz_one(
+__device__ complex<double> _wtrap_wofz_one(
     const complex<double> z0,
     const int terms,
     const double h,

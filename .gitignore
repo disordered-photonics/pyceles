@@ -15,6 +15,9 @@ dist/
 .pytest_cache/
 .precommit-cache/
 
+# Generated CUDA kernel audit exports
+/.cuda-kernels/
+
 # IDE / OS
 .vscode/
 .idea/

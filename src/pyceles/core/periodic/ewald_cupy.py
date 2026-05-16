@@ -204,7 +204,7 @@ _EWALD_DEVICE_CONSTANTS = r"""
 
 _REAL_SPACE_STRUCTURAL_CUDA_SOURCE = r"""
 
-extern "C" __device__ void _pyceles_legendre_table(
+__device__ void _pyceles_legendre_table(
     const double ct,
     const double st,
     const int order,
@@ -249,7 +249,7 @@ extern "C" __device__ void _pyceles_legendre_table(
     }
 }
 
-extern "C" __device__ void _pyceles_real_integrals(
+__device__ void _pyceles_real_integrals(
     const double r,
     const int order,
     const double eta,
@@ -266,6 +266,9 @@ extern "C" __device__ void _pyceles_real_integrals(
     const complex<double> w = _wtrap_wofz_one(z, terms, h, H);
     const double exp_term = exp(alpha - (kr * kr) / (4.0 * alpha));
     double vals[PYCELES_REAL_MAX_ORDER + 2];
+    for (int idx = 0; idx < PYCELES_REAL_MAX_ORDER + 2; ++idx) {
+        vals[idx] = 0.0;
+    }
     vals[0] = sqrt(PYCELES_PI) * exp_term * w.imag();
     vals[1] = sqrt(PYCELES_PI) * 2.0 / kr * exp_term * w.real();
     const double inv = 2.0 / kr;
@@ -300,7 +303,7 @@ extern "C" __global__ void pyceles_ewald_real_space_structural_c128(
     const double H
 ) {
     const long long pair = (long long)blockIdx.x;
-    if (pair >= n_pairs) {
+    if (pair >= n_pairs || order < 0 || order > PYCELES_REAL_MAX_ORDER) {
         return;
     }
     const int tid = (int)threadIdx.x;
@@ -437,7 +440,7 @@ def _add_real_space_structural_sums_cupy(
 
 _SHIFTED_RECIPROCAL_STRUCTURAL_CUDA_SOURCE = r"""
 
-extern "C" __device__ double _pyceles_factorial_double(const int n) {
+__device__ double _pyceles_factorial_double(const int n) {
     double out = 1.0;
     for (int idx = 2; idx <= n; ++idx) {
         out *= (double)idx;
@@ -445,7 +448,7 @@ extern "C" __device__ double _pyceles_factorial_double(const int n) {
     return out;
 }
 
-extern "C" __device__ double _pyceles_int_power_real(const double base, const int exponent) {
+__device__ double _pyceles_int_power_real(const double base, const int exponent) {
     if (exponent == 0) {
         return 1.0;
     }
@@ -457,7 +460,7 @@ extern "C" __device__ double _pyceles_int_power_real(const double base, const in
     return exponent < 0 ? 1.0 / out : out;
 }
 
-extern "C" __device__ complex<double> _pyceles_int_power_complex(
+__device__ complex<double> _pyceles_int_power_complex(
     const complex<double> base,
     const int exponent
 ) {
@@ -472,7 +475,7 @@ extern "C" __device__ complex<double> _pyceles_int_power_complex(
     return exponent < 0 ? complex<double>(1.0, 0.0) / out : out;
 }
 
-extern "C" __device__ complex<double> _pyceles_minus_i_power(const int exponent) {
+__device__ complex<double> _pyceles_minus_i_power(const int exponent) {
     int mod = exponent % 4;
     if (mod < 0) {
         mod += 4;
@@ -489,12 +492,12 @@ extern "C" __device__ complex<double> _pyceles_minus_i_power(const int exponent)
     return complex<double>(0.0, 1.0);
 }
 
-extern "C" __device__ double _pyceles_structural_m_norm(const int m) {
+__device__ double _pyceles_structural_m_norm(const int m) {
     const double sign = (m >= 0 && ((m & 1) != 0)) ? -1.0 : 1.0;
     return sqrt(2.0 * PYCELES_PI) * sign;
 }
 
-extern "C" __device__ void _pyceles_shifted_delta_sequence(
+__device__ void _pyceles_shifted_delta_sequence(
     const int order,
     const complex<double> gamma,
     const double z_offset,
@@ -557,7 +560,7 @@ extern "C" __global__ void pyceles_ewald_shifted_reciprocal_structural_c128(
     const double H
 ) {
     const long long pair = (long long)blockIdx.x;
-    if (pair >= n_pairs || same_plane[pair] != 0) {
+    if (pair >= n_pairs || same_plane[pair] != 0 || order < 0 || order > PYCELES_SHIFTED_MAX_ORDER) {
         return;
     }
     const int tid = (int)threadIdx.x;
