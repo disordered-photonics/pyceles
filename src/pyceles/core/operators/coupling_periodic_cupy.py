@@ -190,7 +190,10 @@ class CuPyPeriodicCouplingOperator:
                 self.n_particles * (order + 1) * (2 * order + 1) * np.dtype(np.complex128).itemsize
             )
             target_bytes = 256 * 1024**2
-            max_sources = 64
+            # Cache-off matvecs retain no pair data between calls, so let the
+            # temporary-memory budget set the launch size rather than imposing
+            # an additional fixed source-count cap.
+            max_sources = self.n_particles
         return max(1, min(self.n_particles, max_sources, target_bytes // max(bytes_per_source, 1)))
 
     def _source_batches(self) -> Iterable[tuple[int, ...]]:
@@ -219,13 +222,14 @@ class CuPyPeriodicCouplingOperator:
         sums[rows, cols, 0, order] = sums[rows, cols, 0, order] + self._self_correction_device()
 
     def _structural_sums_for_sources(self, source_indices: tuple[int, ...]) -> Any:
-        if len(source_indices) == 0:
+        key = tuple(int(i) for i in source_indices)
+        if len(key) == 0:
             cp = self._cupy()
             order = 2 * int(self.lmax)
             return cp.zeros((0, self.n_particles, order + 1, 2 * order + 1), dtype=cp.complex128)
         cp = self._cupy()
         pos = self._positions_device()
-        src = pos[cp.asarray(source_indices, dtype=cp.int64)]
+        src = pos[self._source_index_device(key)]
         rel = src[:, None, :] - pos[None, :, :]
         real_count, reciprocal_count = self._shell_counts()
         sums = ewald_structural_sums_2d_fixed_cupy(
@@ -237,15 +241,15 @@ class CuPyPeriodicCouplingOperator:
             real_shell_count=int(real_count),
             reciprocal_shell_count=int(reciprocal_count),
             coordinate_scale=self._coordinate_scale_value(),
-            same_plane_pair_indices=self._same_plane_pair_indices_device(source_indices),
+            same_plane_pair_indices=self._same_plane_pair_indices_device(key),
         )
         sums = cp.asarray(sums, dtype=cp.complex128).reshape(
-            len(source_indices),
+            len(key),
             self.n_particles,
             2 * int(self.lmax) + 1,
             4 * int(self.lmax) + 1,
         )
-        self._add_self_corrections(sums, source_indices=source_indices)
+        self._add_self_corrections(sums, source_indices=key)
         return sums
 
     def _structural_sums_for_source(self, source_index: int) -> Any:
