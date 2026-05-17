@@ -6676,7 +6676,7 @@ class CuPyMLFMMCouplingOperator:
             "Persist the compact host cache explicitly if debug serialization is required."
         )
 
-    def __setstate__(self, state: dict[str, Any]) -> None:
+    def __setstate__(self, _state: dict[str, Any]) -> None:
         raise TypeError(
             "CuPyMLFMMCouplingOperator cannot be unpickled. Rebuild it from a CPU MLFMM "
             "coupling plan or from an explicit compact host cache payload."

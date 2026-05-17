@@ -23,7 +23,7 @@ repos:
       - id: nbstripout
         files: \.ipynb$
   - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.20.1
+    rev: v2.1.0
     hooks:
       - id: mypy
         name: mypy (src+examples+tests)
@@ -35,7 +35,7 @@ repos:
             "scipy~=1.17",
             "scipy-stubs",
             "matplotlib~=3.10",
-            "h5py~=3.15",
+            "h5py~=3.16",
             "tqdm~=4.67",
             "types-tqdm",
             "pytest~=9.0",
