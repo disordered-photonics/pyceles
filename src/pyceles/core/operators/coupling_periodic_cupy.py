@@ -252,9 +252,6 @@ class CuPyPeriodicCouplingOperator:
         self._add_self_corrections(sums, source_indices=key)
         return sums
 
-    def _structural_sums_for_source(self, source_index: int) -> Any:
-        return self._structural_sums_for_sources((int(source_index),))[0]
-
     def _blocks_for_sources(self, source_indices: tuple[int, ...]) -> Any:
         key = tuple(int(i) for i in source_indices)
         if self.cache_blocks:
@@ -290,12 +287,6 @@ class CuPyPeriodicCouplingOperator:
         blocks = cp.stack([self._source_block_cache[i] for i in key], axis=0)
         self._source_block_chunk_cache[key] = blocks
         return blocks
-
-    def _blocks_for_source(self, source_index: int) -> Any:
-        cached = self._source_block_cache.get(int(source_index))
-        if cached is not None:
-            return cached
-        return self._blocks_for_sources((int(source_index),))[0]
 
     def populate(self, *, show_progress: bool = False) -> None:
         """Eagerly populate the optional device-side dense block cache."""

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-05-17
+
 ### Added
 - Added a CuPy dense direct-solve path using cuSOLVER-backed LU factorization,
   with repeated-RHS reuse through cached GPU LU payloads on the `Simulation`

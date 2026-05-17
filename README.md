@@ -3,8 +3,9 @@
 pyceles is a Python reimplementation of the MATLAB CELES package for electromagnetic
 simulation of large particle ensembles with the T-matrix method.
 The code keeps a NumPy + SciPy reference implementation and now also ships an
-optional CuPy backend for the direct many-body solve path, plus a CuPy-backed
-MLFMM repeated-apply path for the current high-frequency sphere-cluster regime.
+optional CuPy backend for the direct many-body solve path, a CuPy-backed
+MLFMM repeated-apply path for the current high-frequency sphere-cluster regime,
+and experimental rectangular-cell periodic workflows.
 
 This repository focuses on:
 - Correctness first (CELES conventions, reproducible examples/notebooks)
@@ -195,7 +196,9 @@ Users of pyceles are referred to the publications listed in the CELES and SMUTHI
   homogeneous rectangular 2D lattices with plane-wave excitation on the NumPy
   and CuPy `complex128/complex128` paths; layered media, non-rectangular
   lattices, reduced-cell local sources, mixed precision, and optional hybrid
-  coupling strategies are not production API yet.
+  coupling strategies are not production API yet. Dense/direct periodic solves
+  are validation paths and can remain memory-sensitive on small GPUs even after
+  the current Fortran-order CuPy LU preparation cleanup.
 - At the moment, particles in a simulation need to share the same `lmax`.
 - Exterior near-field evaluation for spheroids remains unreliable at points
   lying inside the circumscribing sphere but outside the physical particle.
@@ -276,9 +279,13 @@ If you have a recent NVIDIA GPU and want the optional CuPy backend:
 python -m pip install -e .[cupy]
 ```
 
-The extra is named `cupy` rather than `gpu` so future accelerator extras can
-remain explicit (`cupy`, `pyopencl`, `numba`, ...), instead of collapsing
-different backends into one generic label.
+For day-to-day GPU work, prefer the CuPy wheel that matches your CUDA runtime
+(for example `cupy-cuda12x` or `cupy-cuda13x`) when building the environment
+explicitly. The editable extra keeps pyceles' dependency metadata simple, while
+CuPy's platform-specific wheels remain the practical installation path for most
+CUDA machines. The extra is named `cupy` rather than `gpu` so future accelerator
+extras can remain explicit (`cupy`, `pyopencl`, `numba`, ...), instead of
+collapsing different backends into one generic label.
 
 ## Run the notebook replicating the original CELES_MAIN.m script
 
