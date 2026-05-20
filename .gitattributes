@@ -3,10 +3,10 @@
 * text=auto
 
 # Extensionless project files.
-.editorconfig          text eol=lf export-ignore
-.gitattributes         text eol=lf export-ignore
-.gitignore             text eol=lf export-ignore
-.pre-commit-config.yaml text eol=lf export-ignore
+.editorconfig          text eol=lf
+.gitattributes         text eol=lf
+.gitignore             text eol=lf
+.pre-commit-config.yaml text eol=lf
 LICENSE                text eol=lf
 
 # Source code and project metadata: always LF.
