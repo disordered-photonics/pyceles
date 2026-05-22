@@ -12,7 +12,7 @@ from tqdm.auto import tqdm
 from pyceles._logo import print_logo
 from pyceles._version import __version__
 from pyceles.core.lattice import RectangularLattice2D
-from pyceles.core.particles import LayeredSphere, Particle, Sphere, Spheroid
+from pyceles.core.particles import LayeredSphere, Particle, PECSphere, Sphere, Spheroid
 from pyceles.linear.solvers import LinearSolveResult
 
 _STARTUP_LOGO_PRINTED = False
@@ -54,6 +54,8 @@ def normalize_particle_geometry(
     for p in part:
         if isinstance(p, Sphere):
             n_eff.append(complex(p.refractive_index))
+        elif isinstance(p, PECSphere):
+            continue
         elif isinstance(p, LayeredSphere):
             n_eff.append(complex(p.layer_refractive_indices[-1]))
         elif isinstance(p, Spheroid):

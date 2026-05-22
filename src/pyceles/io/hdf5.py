@@ -7,7 +7,7 @@ from typing import Any
 import h5py
 import numpy as np
 
-from pyceles.core.particles import LayeredSphere, Particle, Sphere, Spheroid
+from pyceles.core.particles import LayeredSphere, Particle, PECSphere, Sphere, Spheroid
 
 
 def _pathlike(path: str | Path) -> str:
@@ -58,7 +58,10 @@ def _write_particle_descriptors(
         _write_dataset(
             pgroup, "position", np.asarray(particle.position, dtype=float), compression=None
         )
-        if isinstance(particle, Sphere):
+        if isinstance(particle, PECSphere):
+            pgroup.attrs["type"] = "PECSphere"
+            _write_dataset(pgroup, "radius", float(particle.radius), compression=None)
+        elif isinstance(particle, Sphere):
             pgroup.attrs["type"] = "Sphere"
             _write_dataset(pgroup, "radius", float(particle.radius), compression=None)
             _write_dataset(
@@ -126,6 +129,14 @@ def _load_particle_descriptors(group: h5py.Group) -> tuple[Particle, ...]:
         kind = str(pgroup.attrs.get("type", ""))
         pos_arr = np.asarray(pgroup["position"][...], dtype=float).reshape(3)
         pos = (float(pos_arr[0]), float(pos_arr[1]), float(pos_arr[2]))
+        if kind == "PECSphere":
+            particles.append(
+                PECSphere(
+                    position=pos,
+                    radius=float(np.asarray(pgroup["radius"][...]).reshape(())),
+                )
+            )
+            continue
         if kind == "Sphere":
             particles.append(
                 Sphere(

@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from pyceles.core.particles import LayeredSphere, Sphere, Spheroid
+from pyceles.core.particles import LayeredSphere, PECSphere, Sphere, Spheroid
 from pyceles.io.hdf5 import (
     load_far_field_h5,
     load_geometry_h5,
@@ -108,6 +108,7 @@ def test_geometry_particle_descriptor_roundtrip(tmp_path):
             layer_radii=(60.0, 110.0),
             layer_refractive_indices=(2.1 + 0.0j, 1.7 + 0.03j),
         ),
+        PECSphere(position=(260.0, -20.0, 15.0), radius=55.0),
         Spheroid(
             position=(-150.0, 10.0, 25.0),
             equatorial_radius=80.0,
@@ -128,7 +129,7 @@ def test_geometry_particle_descriptor_roundtrip(tmp_path):
     loaded = load_geometry_h5(path)
     loaded_particles = loaded["particles"]
     assert isinstance(loaded_particles, tuple)
-    assert len(loaded_particles) == 3
+    assert len(loaded_particles) == 4
     assert loaded_particles == particles
 
 

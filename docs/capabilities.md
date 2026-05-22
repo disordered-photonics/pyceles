@@ -57,6 +57,7 @@ terms:
 mixed supported particle families:
 
 - `Sphere`,
+- `PECSphere`,
 - `LayeredSphere`,
 - `Spheroid`.
 
@@ -70,8 +71,13 @@ disabled with `check_circumscribing_sphere_overlap=False` for exploratory cases.
 Array-generated geometries should use the canonical helpers:
 
 - `spheres_from_arrays`,
+- `pec_spheres_from_arrays`,
 - `layered_spheres_from_arrays`,
 - `spheroids_from_arrays`.
+
+`PECSphere` uses the analytic perfect-conductor Mie limit instead of an
+artificial large complex refractive index. Near-field points inside PEC spheres
+are treated as particle-internal points with zero physical field.
 
 ## Spheroids
 

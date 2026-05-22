@@ -51,9 +51,11 @@ from .operators import (
 from .particles import (
     LayeredSphere,
     Particle,
+    PECSphere,
     Sphere,
     Spheroid,
     layered_spheres_from_arrays,
+    pec_spheres_from_arrays,
     spheres_from_arrays,
     spheroids_from_arrays,
 )
@@ -69,6 +71,10 @@ from .tmatrix import (
     particle_T_diagonal,
     particle_T_matrix_block,
     particle_T_matrix_blocks,
+    pec_mie_ab,
+    pec_mie_cross_sections,
+    pec_mie_efficiencies,
+    pec_sphere_T_diagonal,
 )
 from .translation import clear_caches as _clear_translation_caches
 from .wigner import clear_caches as _clear_wigner_caches
@@ -108,6 +114,7 @@ __all__ = [
     "LaguerreGaussianBeam",
     "LayeredSphere",
     "LocalExpansionSource",
+    "PECSphere",
     "Particle",
     "ParticleTGroupFactories",
     "ParticleTGroupPlan",
@@ -139,6 +146,11 @@ __all__ = [
     "particle_T_matrix_block",
     "particle_T_matrix_blocks",
     "particle_internal_ratios",
+    "pec_mie_ab",
+    "pec_mie_cross_sections",
+    "pec_mie_efficiencies",
+    "pec_sphere_T_diagonal",
+    "pec_spheres_from_arrays",
     "plan_particle_t_groups",
     "plane_wave_k_parallel",
     "polarization_to_jones",

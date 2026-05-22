@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Added `PECSphere` particle descriptors and PEC-sphere helpers based on the
+  analytic perfect-conductor Mie limit.
+
 ## [0.4.0] - 2026-05-17
 
 ### Added

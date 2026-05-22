@@ -1,7 +1,16 @@
 import numpy as np
 import pytest
 
-from pyceles.core.tmatrix import mie_ab, mie_cross_sections, mie_efficiencies, sphere_T_diagonal
+from pyceles.core.tmatrix import (
+    mie_ab,
+    mie_cross_sections,
+    mie_efficiencies,
+    pec_mie_ab,
+    pec_mie_cross_sections,
+    pec_mie_efficiencies,
+    pec_sphere_T_diagonal,
+    sphere_T_diagonal,
+)
 
 
 @pytest.mark.reference
@@ -54,6 +63,56 @@ def test_sphere_T_diagonal_sign_convention():
 
     np.testing.assert_allclose(tdiag[1][1:], -b[1:], rtol=1e-12, atol=1e-12)
     np.testing.assert_allclose(tdiag[2][1:], -a[1:], rtol=1e-12, atol=1e-12)
+
+
+def test_pec_mie_coefficients_match_large_index_limit():
+    """PEC coefficients are the stable analytic form of the large-index limit."""
+    lmax = 5
+    radius = 100.0
+    k = 2.0 * np.pi / 550.0
+
+    a_pec, b_pec = pec_mie_ab(lmax=lmax, k_medium=k, radius=radius)
+    a_large, b_large = mie_ab(
+        lmax=lmax,
+        k_medium=k,
+        radius=radius,
+        n_particle=1.0e6 + 0j,
+        n_medium=1.0 + 0j,
+    )
+
+    np.testing.assert_allclose(a_pec[1:], a_large[1:], rtol=1e-5, atol=1e-7)
+    np.testing.assert_allclose(b_pec[1:], b_large[1:], rtol=1e-5, atol=1e-7)
+
+
+def test_pec_sphere_T_diagonal_sign_convention():
+    """CELES convention for PEC spheres: tau=1 -> -b_l, tau=2 -> -a_l."""
+    lmax = 6
+    radius = 120.0
+    k = 2.0 * np.pi / 550.0
+
+    a, b = pec_mie_ab(lmax=lmax, k_medium=k, radius=radius)
+    tdiag = pec_sphere_T_diagonal(lmax=lmax, k_medium=k, radius=radius)
+
+    np.testing.assert_allclose(tdiag[1][1:], -b[1:], rtol=1e-13, atol=1e-13)
+    np.testing.assert_allclose(tdiag[2][1:], -a[1:], rtol=1e-13, atol=1e-13)
+
+
+def test_pec_mie_cross_sections_are_lossless():
+    cs = pec_mie_cross_sections(
+        lmax=30,
+        k_medium=2.0 * np.pi / 550.0,
+        radius=100.0,
+    )
+    assert cs["C_ext"] > 0.0
+    assert cs["C_sca"] > 0.0
+    assert abs(cs["C_abs"]) < 1e-10
+
+    qs = pec_mie_efficiencies(
+        lmax=30,
+        k_medium=2.0 * np.pi / 550.0,
+        radius=100.0,
+    )
+    np.testing.assert_allclose(qs["Q_abs"], 0.0, rtol=0.0, atol=1e-14)
 
 
 def test_mie_cross_sections_lossless_sphere_has_near_zero_absorption():

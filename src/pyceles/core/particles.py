@@ -15,9 +15,9 @@ class Particle:
 
     Notes
     -----
-    `Sphere`, `LayeredSphere`, and `Spheroid` are supported by active solver
-    kernels, though not every downstream postprocessing path is equally mature
-    for every particle family.
+    `Sphere`, `PECSphere`, `LayeredSphere`, and `Spheroid` are supported by
+    active solver kernels, though not every downstream postprocessing path is
+    equally mature for every particle family.
     """
 
     position: tuple[float, float, float]
@@ -62,6 +62,31 @@ class Sphere(Particle):
     @property
     def t_operator_representation(self) -> ParticleTRepresentation:
         """Spheres use the diagonal Mie fast path."""
+        return "diagonal"
+
+
+@dataclass(frozen=True)
+class PECSphere(Particle):
+    """Perfect-electric-conductor sphere.
+
+    PEC spheres use the closed-form conducting-sphere Mie limit instead of a
+    finite refractive index. They are lossless scatterers and their physical
+    interior field is zero.
+    """
+
+    radius: float
+
+    def __post_init__(self) -> None:
+        if float(self.radius) <= 0.0:
+            raise ValueError("radius must be positive.")
+
+    def circumscribing_radius(self) -> float:
+        """For PEC spheres the circumscribing radius is the physical radius."""
+        return float(self.radius)
+
+    @property
+    def t_operator_representation(self) -> ParticleTRepresentation:
+        """PEC spheres use the diagonal Mie fast path."""
         return "diagonal"
 
 
@@ -167,7 +192,7 @@ def particle_contains_points(
     center = np.asarray(particle.position, dtype=float).reshape(3)
     rel = pts - center[None, :]
 
-    if isinstance(particle, Sphere):
+    if isinstance(particle, (Sphere, PECSphere)):
         radius = float(particle.radius)
         return np.asarray(np.sum(rel * rel, axis=1) < (radius**2), dtype=bool)
 
@@ -292,6 +317,36 @@ def spheres_from_arrays(
             refractive_index=complex(nr),
         )
         for p, r, nr in zip(pos, rad, n_part, strict=True)
+    )
+    return out
+
+
+def pec_spheres_from_arrays(
+    *,
+    positions: Sequence[Sequence[float]] | np.ndarray,
+    radii: Sequence[float] | np.ndarray,
+    into: list[Particle] | None = None,
+) -> list[Particle]:
+    """Create/extend particle lists with perfect-electric-conductor spheres.
+
+    Unlike :func:`spheres_from_arrays`, this helper intentionally has no
+    refractive-index argument: the particle response is the analytic PEC limit.
+    """
+    pos = _as_positions_array(positions)
+    n = int(pos.shape[0])
+    rad = np.asarray(radii, dtype=float).reshape(-1)
+    if rad.shape[0] != n:
+        raise ValueError(f"`radii` length ({rad.shape[0]}) must match number of particles ({n}).")
+    if np.any(~np.isfinite(rad)) or np.any(rad <= 0.0):
+        raise ValueError("`radii` must be finite and strictly positive.")
+
+    out = [] if into is None else into
+    out.extend(
+        PECSphere(
+            position=(float(p[0]), float(p[1]), float(p[2])),
+            radius=float(r),
+        )
+        for p, r in zip(pos, rad, strict=True)
     )
     return out
 

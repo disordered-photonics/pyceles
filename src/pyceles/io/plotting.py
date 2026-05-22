@@ -10,6 +10,7 @@ from matplotlib.patches import Circle, Ellipse
 from pyceles.core.particles import (
     LayeredSphere,
     Particle,
+    PECSphere,
     Sphere,
     Spheroid,
     _rotation_matrix_zyz_lab_to_body,
@@ -255,8 +256,9 @@ def plot_spheres(
     """Plot particle intersections with a Cartesian slice plane.
 
     Geometry input is particle-native. `LayeredSphere` entries are drawn as
-    concentric shell outlines; `Sphere` entries as single outlines; `Spheroid`
-    entries use the exact planar ellipse plus a dashed circumscribing-sphere cut.
+    concentric shell outlines; `Sphere` and `PECSphere` entries as single
+    outlines; `Spheroid` entries use the exact planar ellipse plus a dashed
+    circumscribing-sphere cut.
     """
     plane = str(plane).lower()
     if plane not in {"x", "y", "z"}:
@@ -266,7 +268,7 @@ def plot_spheres(
 
     for particle in particles:
         p = np.asarray(particle.position, dtype=float).reshape(3)
-        if isinstance(particle, Sphere):
+        if isinstance(particle, (Sphere, PECSphere)):
             shell = np.asarray([float(particle.radius)], dtype=float)
         elif isinstance(particle, LayeredSphere):
             shell = np.asarray(particle.layer_radii, dtype=float).reshape(-1)

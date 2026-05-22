@@ -9,7 +9,7 @@ import numpy as np
 
 from pyceles._optional import import_cupy, is_cupy_array
 from pyceles.core.indexing import n_modes
-from pyceles.core.particles import LayeredSphere, Particle, Sphere, Spheroid
+from pyceles.core.particles import LayeredSphere, Particle, PECSphere, Sphere, Spheroid
 from pyceles.core.sources import (
     DipoleCollection,
     DipoleSource,
@@ -49,6 +49,8 @@ def _is_numerically_lossless_cluster(
     """Return True when all particle materials are numerically lossless."""
     tol = float(imag_tol)
     for particle in particles:
+        if isinstance(particle, PECSphere):
+            continue
         if isinstance(particle, (Sphere, Spheroid)):
             if abs(complex(particle.refractive_index).imag) > tol:
                 return False

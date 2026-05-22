@@ -8,6 +8,7 @@ import numpy as np
 from pyceles.core.particles import (
     LayeredSphere,
     Particle,
+    PECSphere,
     Sphere,
     Spheroid,
     particle_contains_points,
@@ -39,11 +40,11 @@ def classify_internal_points(
     inside_any = np.zeros((n_points,), dtype=bool)
     by_particle: list[np.ndarray] = []
 
-    supported = (Sphere, LayeredSphere, Spheroid)
+    supported = (Sphere, PECSphere, LayeredSphere, Spheroid)
     bad = [type(p).__name__ for p in particles if not isinstance(p, supported)]
     if bad:
         raise TypeError(
-            "Internal point classification currently supports Sphere, LayeredSphere, "
+            "Internal point classification currently supports Sphere, PECSphere, LayeredSphere, "
             f"and Spheroid. Got {bad}."
         )
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 import pytest
@@ -11,6 +12,7 @@ from pyceles.core.operators import (
     CompositeParticleTOperator,
     DenseTGroup,
     DiagonalTGroup,
+    MLFMMOptions,
     PairwiseCouplingOperator,
     ParticleTGroupFactories,
     PreparedOperator,
@@ -30,6 +32,7 @@ from pyceles.core.particles import (
     LayeredSphere,
     Particle,
     ParticleTRepresentation,
+    PECSphere,
     Sphere,
     Spheroid,
     spheres_from_arrays,
@@ -255,6 +258,36 @@ def test_prepare_matvec_exposes_composite_particle_t_operator():
         rtol=1e-12,
         atol=1e-12,
     )
+
+
+@pytest.mark.parametrize("coupling_backend", ["pairwise", "mlfmm"])
+def test_prepare_matvec_accepts_pec_spheres_in_coupling_backends(
+    coupling_backend: Literal["pairwise", "mlfmm"],
+):
+    lmax = 1
+    k = 2 * np.pi / 550.0
+    particles = [
+        PECSphere(position=(-140.0, 0.0, 0.0), radius=55.0),
+        PECSphere(position=(140.0, 0.0, 0.0), radius=60.0),
+    ]
+    prepared = prepare_matvec(
+        lmax=lmax,
+        k=k,
+        particles=particles,
+        n_medium=1.0 + 0j,
+        radial_lut_dr=1.0,
+        cache_translation_blocks=False,
+        coupling_backend=coupling_backend,
+        mlfmm_options=MLFMMOptions(max_leaf_particles=1, max_depth=2),
+    )
+    x = np.arange(len(particles) * n_modes(lmax), dtype=np.float64).astype(np.complex128)
+    y = prepared.apply_A(x)
+    rhs = prepared.rhs_Tb(x)
+
+    assert np.all(np.isfinite(y))
+    assert np.all(np.isfinite(rhs))
+    assert np.linalg.norm(y) > 0.0
+    assert np.linalg.norm(rhs) > 0.0
 
 
 def test_plan_particle_t_groups_marks_axisymmetric_particles_separately():

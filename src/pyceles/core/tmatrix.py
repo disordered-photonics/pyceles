@@ -1,4 +1,4 @@
-"""Spherical response kernels: homogeneous/layered Mie and CELES T entries.
+"""Spherical response kernels and CELES-style T-entry dispatch.
 
 CPU-first implementation using NumPy + SciPy.
 
@@ -13,8 +13,8 @@ Conventions
 - `mie_ab` returns the standard Mie scattering coefficients (a_l, b_l)
   for l=1..lmax.
 
-- `sphere_T_diagonal` maps homogeneous-sphere Mie coefficients into CELES'
-  diagonal T entries.
+- `sphere_T_diagonal` and `pec_sphere_T_diagonal` map homogeneous and
+  perfect-conductor sphere Mie coefficients into CELES' diagonal T entries.
 
 - `layered_sphere_T_diagonal` does the same for concentric multilayer spheres
   through interface transfer matrices.
@@ -22,13 +22,14 @@ Conventions
 - `layered_internal_ab_ratios` provides per-layer radial coefficients for
   piecewise internal near-field evaluation in layered spheres.
 
-- `sphere_internal_ratios` provides the per-l conversion factors used by CELES
-  for homogeneous spheres.
-  following `T_entry.m` in the CELES MATLAB code:
+- CELES' diagonal scattering entries follow `T_entry.m` in the MATLAB code:
 
     tau=1 (M/TE-like) uses -b_l
     tau=2 (N/TM-like) uses -a_l
 
+- `sphere_internal_ratios` provides the per-l conversion factors used by CELES
+  for homogeneous spheres. PEC spheres have zero physical interior field and
+  therefore use zero internal/scattered conversion ratios.
 """
 
 from __future__ import annotations
@@ -40,6 +41,7 @@ from .indexing import n_modes
 from .particles import (
     LayeredSphere,
     Particle,
+    PECSphere,
     Sphere,
     Spheroid,
     particle_intrinsic_t_signature,
@@ -253,6 +255,40 @@ def mie_ab(
     return a, b
 
 
+def pec_mie_ab(
+    lmax: int,
+    k_medium: complex,
+    radius: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute Mie coefficients for a perfect-electric-conductor sphere.
+
+    For ``x = k_medium * radius`` and Riccati-Bessel functions
+    ``psi_l(x) = x j_l(x)`` and ``xi_l(x) = x h_l^(1)(x)``, the conducting
+    boundary condition gives
+
+    ``a_l = psi_l'(x) / xi_l'(x)`` and ``b_l = psi_l(x) / xi_l(x)``.
+
+    This is the stable large-relative-index limit of the non-magnetic Mie
+    coefficients; it avoids representing a perfect conductor with an artificial
+    extreme complex refractive index.
+    """
+    lmax = int(lmax)
+    radius = float(radius)
+    if radius <= 0.0:
+        raise ValueError("radius must be positive")
+    x = complex(k_medium) * radius
+    if x == 0:
+        raise ValueError("k_medium * radius must be non-zero for PEC Mie coefficients")
+
+    a = np.zeros(lmax + 1, dtype=np.complex128)
+    b = np.zeros(lmax + 1, dtype=np.complex128)
+    for l in range(1, lmax + 1):
+        psi, dpsi, xi, dxi = _riccati_jh(l, x)
+        a[l] = dpsi / dxi
+        b[l] = psi / xi
+    return a, b
+
+
 def layered_mie_ab(
     lmax: int,
     k_medium: complex,
@@ -367,6 +403,23 @@ def sphere_T_diagonal(
     return {1: sign * b, 2: sign * a}
 
 
+def pec_sphere_T_diagonal(
+    lmax: int,
+    k_medium: complex,
+    radius: float,
+    *,
+    sign: int = -1,
+) -> dict[int, np.ndarray]:
+    """PEC-sphere diagonal T entries in CELES' (M,N) ordering.
+
+    Uses the same CELES mapping as homogeneous spheres:
+      tau=1: ``Q = -b_l``
+      tau=2: ``Q = -a_l``
+    """
+    a, b = pec_mie_ab(lmax=lmax, k_medium=k_medium, radius=radius)
+    return {1: sign * b, 2: sign * a}
+
+
 def layered_sphere_T_diagonal(
     lmax: int,
     k_medium: complex,
@@ -469,7 +522,7 @@ def _unsupported_particle_message(particle: Particle) -> str:
     """Human-readable dispatch error for not-yet-supported particle types."""
     return (
         f"T-matrix for particle type '{type(particle).__name__}' is not implemented yet. "
-        "Supported particle backends are Sphere, LayeredSphere, and Spheroid "
+        "Supported particle backends are Sphere, PECSphere, LayeredSphere, and Spheroid "
         "(via spherical-basis T blocks). "
         "Non-spherical solvers are planned separately."
     )
@@ -484,6 +537,13 @@ def particle_T_diagonal(
     sign: int = -1,
 ) -> dict[int, np.ndarray]:
     """Dispatch diagonal T entries by particle type."""
+    if isinstance(particle, PECSphere):
+        return pec_sphere_T_diagonal(
+            lmax=lmax,
+            k_medium=k_medium,
+            radius=particle.radius,
+            sign=sign,
+        )
     if isinstance(particle, Sphere):
         return sphere_T_diagonal(
             lmax=lmax,
@@ -738,6 +798,9 @@ def particle_internal_ratios(
     (`A` for layer index 0, where `B=0` by regularity). Full layer-wise `(A,B)`
     data are available via :func:`layered_internal_ab_ratios`.
     """
+    if isinstance(particle, PECSphere):
+        zeros = np.zeros(int(lmax) + 1, dtype=np.complex128)
+        return {1: zeros.copy(), 2: zeros.copy()}
     if isinstance(particle, Sphere):
         return sphere_internal_ratios(
             lmax=lmax,
@@ -795,6 +858,31 @@ def mie_cross_sections(
         n_particle=n_particle,
         n_medium=n_medium,
     )
+    return _mie_cross_sections_from_coefficients(k, a, b)
+
+
+def pec_mie_cross_sections(
+    lmax: int,
+    k_medium: complex,
+    radius: float,
+) -> dict[str, float]:
+    """Single PEC-sphere cross sections from the perfect-conductor Mie series."""
+    k = complex(k_medium)
+    if k == 0:
+        raise ValueError("k_medium must be non-zero")
+    a, b = pec_mie_ab(lmax=lmax, k_medium=k_medium, radius=radius)
+    return _mie_cross_sections_from_coefficients(k, a, b)
+
+
+def _mie_cross_sections_from_coefficients(
+    k: complex,
+    a: np.ndarray,
+    b: np.ndarray,
+) -> dict[str, float]:
+    """Evaluate standard single-sphere cross sections from Mie coefficients."""
+    if a.shape != b.shape:
+        raise ValueError(f"a and b must have matching shapes. Got {a.shape} and {b.shape}.")
+    lmax = int(a.shape[0] - 1)
     l = np.arange(1, lmax + 1, dtype=np.float64)
     w = 2.0 * l + 1.0
 
@@ -823,6 +911,29 @@ def mie_efficiencies(
         radius=radius,
         n_particle=n_particle,
         n_medium=n_medium,
+    )
+    geom = np.pi * radius * radius
+    return {
+        "Q_ext": float(cs["C_ext"] / geom),
+        "Q_sca": float(cs["C_sca"] / geom),
+        "Q_abs": float(cs["C_abs"] / geom),
+    }
+
+
+def pec_mie_efficiencies(
+    lmax: int,
+    k_medium: complex,
+    radius: float,
+) -> dict[str, float]:
+    """PEC-sphere Mie efficiencies normalized by geometric area pi*radius^2."""
+    radius = float(radius)
+    if radius <= 0:
+        raise ValueError("radius must be positive")
+
+    cs = pec_mie_cross_sections(
+        lmax=lmax,
+        k_medium=k_medium,
+        radius=radius,
     )
     geom = np.pi * radius * radius
     return {

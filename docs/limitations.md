@@ -20,7 +20,7 @@ This page records current limitations.
 
 - Local dipole sources are supported in the homogeneous host medium.
 - Dipole-driven local absorbed-power diagnostics are available.
-- Embedded dipoles inside `Sphere` or `LayeredSphere` particles are not supported in the main solver path yet.
+- Embedded dipoles inside particles are not supported in the main solver path yet.
 - Dipole near-field initial fields mask exact dipole-center grid hits as `NaN`.
 
 ## Periodic workflows
@@ -66,7 +66,8 @@ Dense/direct periodic validation can remain memory-sensitive on small GPUs. Even
 pyceles is pre-1.0. The intended public surface is:
 
 - `Simulation`, `SimulationConfig`, and result objects,
-- particle descriptors such as `Sphere`, `LayeredSphere`, and `Spheroid`,
+- particle descriptors such as `Sphere`, `PECSphere`, `LayeredSphere`, and
+  `Spheroid`,
 - source descriptors such as `PlaneWave`, Gaussian/Laguerre-Gaussian/Bessel sources, SLM wrappers, and dipole sources,
 - HDF5 save/load helpers,
 - near-field and far-field user-facing helpers.

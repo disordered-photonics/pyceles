@@ -19,9 +19,11 @@ from pyceles.core.lattice import RectangularLattice2D
 from pyceles.core.particles import (
     LayeredSphere,
     Particle,
+    PECSphere,
     Sphere,
     Spheroid,
     layered_spheres_from_arrays,
+    pec_spheres_from_arrays,
     spheres_from_arrays,
     spheroids_from_arrays,
 )
@@ -63,6 +65,7 @@ __all__ = [
     "LayeredSphere",
     "MultiSourceSimulationResult",
     "NearFieldSlice",
+    "PECSphere",
     "Particle",
     "PeriodicFarFieldPayload",
     "PeriodicOptions",
@@ -90,6 +93,7 @@ __all__ = [
     "load_simulation_h5",
     "mix_near_field_components",
     "mix_near_field_slices",
+    "pec_spheres_from_arrays",
     "postprocessing",
     "print_logo",
     "project_source_basis_to_svwf",

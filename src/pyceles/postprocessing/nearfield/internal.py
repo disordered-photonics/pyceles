@@ -12,6 +12,7 @@ from pyceles.core.indexing import n_modes
 from pyceles.core.particles import (
     LayeredSphere,
     Particle,
+    PECSphere,
     Sphere,
     Spheroid,
     particle_contains_points,
@@ -368,6 +369,21 @@ def _compute_internal_field_particles(
         )
     c = c.reshape(n_particles, n_modes_total)
 
+    pec_idx = [j for j, p in enumerate(part) if isinstance(p, PECSphere)]
+    if pec_idx:
+        for j in pec_idx:
+            if classification is None:
+                idx = np.flatnonzero(particle_contains_points(part[j], pts)).astype(
+                    np.intp, copy=False
+                )
+            else:
+                idx = np.asarray(
+                    classification.point_indices_by_particle[j], dtype=np.intp
+                ).reshape(-1)
+            inside[idx] = True
+        if len(pec_idx) == n_particles:
+            return e, h, inside
+
     spheres = [p for p in part if isinstance(p, Sphere)]
     if len(spheres) == n_particles:
         positions = np.asarray([sp.position for sp in spheres], dtype=float).reshape(n_particles, 3)
@@ -396,11 +412,11 @@ def _compute_internal_field_particles(
             accum_dtype=accum_dtype,
         )
 
-    supported = (Sphere, LayeredSphere, Spheroid)
+    supported = (Sphere, PECSphere, LayeredSphere, Spheroid)
     bad = [type(p).__name__ for p in part if not isinstance(p, supported)]
     if bad:
         raise TypeError(
-            "compute_internal_field currently supports Sphere, LayeredSphere, and Spheroid in "
+            "compute_internal_field currently supports Sphere, PECSphere, LayeredSphere, and Spheroid in "
             f"particle-dispatch mode. Got {bad}."
         )
 

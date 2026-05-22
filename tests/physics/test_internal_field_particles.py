@@ -1,7 +1,7 @@
 import numpy as np
 
 from pyceles.core.indexing import n_modes
-from pyceles.core.particles import LayeredSphere, Sphere, Spheroid
+from pyceles.core.particles import LayeredSphere, PECSphere, Sphere, Spheroid
 from pyceles.postprocessing.nearfield import compute_internal_field
 
 
@@ -61,6 +61,34 @@ def test_internal_field_particles_single_layer_matches_homogeneous_kernel():
     np.testing.assert_array_equal(inside_new, inside_ref)
     np.testing.assert_allclose(E_new, E_ref, rtol=2e-8, atol=1e-9)
     np.testing.assert_allclose(H_new, H_ref, rtol=2e-8, atol=1e-9)
+
+
+def test_internal_field_pec_sphere_marks_inside_and_returns_zero_fields():
+    lmax = 3
+    nm = n_modes(lmax)
+    rng = np.random.default_rng(23)
+    coeffs = rng.standard_normal((1, nm)) + 1j * rng.standard_normal((1, nm))
+    points = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [50.0, 0.0, 0.0],
+            [120.0, 0.0, 0.0],
+        ],
+        dtype=float,
+    )
+
+    E, H, inside = compute_internal_field(
+        points,
+        coeffs=coeffs,
+        k=2.0 * np.pi / 550.0,
+        lmax=lmax,
+        particles=[PECSphere(position=(0.0, 0.0, 0.0), radius=100.0)],
+        n_medium=1.0 + 0j,
+    )
+
+    np.testing.assert_array_equal(inside, np.asarray([True, True, False]))
+    np.testing.assert_allclose(E, 0.0, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(H, 0.0, rtol=0.0, atol=0.0)
 
 
 def test_internal_field_particles_layered_masks_and_finiteness():

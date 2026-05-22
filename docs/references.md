@@ -50,6 +50,9 @@ multiple-scattering literature and ideas demonstrated in earlier implementations
 - Markkanen and Yuffa, *Fast superposition T-matrix solution for clusters with
   arbitrarily shaped constituent particles*, JQSRT 189 (2017) 181-188.
   https://doi.org/10.1016/j.jqsrt.2016.11.004
+- Batool et al., *Scattering from multiple PEC sphere using Translation
+  Addition Theorems for Spherical Vector Wave Function*, JQSRT 248 (2020)
+  106905. https://doi.org/10.1016/j.jqsrt.2020.106905
 - Stilgoe et al., *Computational toolbox for scattering of focused light from
   flattened or elongated particles using spheroidal wavefunctions*, JQSRT 331
   (2025) 109267. https://doi.org/10.1016/j.jqsrt.2024.109267

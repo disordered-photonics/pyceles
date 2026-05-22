@@ -8,12 +8,14 @@ import pytest
 from pyceles.core.particles import (
     LayeredSphere,
     Particle,
+    PECSphere,
     Sphere,
     Spheroid,
     layered_spheres_from_arrays,
     particle_contains_points,
     particle_intrinsic_t_signature,
     particle_t_signature,
+    pec_spheres_from_arrays,
     spheres_from_arrays,
     spheroids_from_arrays,
 )
@@ -44,6 +46,10 @@ def test_particle_contains_points_handles_supported_particle_families():
         euler_angles=(0.0, np.pi / 2.0, 0.0),
     )
     assert particle_contains_points(sphere, pts).tolist() == [True, True, False]
+    assert particle_contains_points(
+        PECSphere(position=(0.0, 0.0, 0.0), radius=2.0),
+        pts,
+    ).tolist() == [True, True, False]
     assert particle_contains_points(layered, pts).tolist() == [True, True, False]
     assert particle_contains_points(spheroid, pts).tolist() == [True, True, False]
 
@@ -71,6 +77,7 @@ def test_particle_base_api_and_representation_defaults():
         refractive_index=1.5 + 0j,
     )
     assert sphere.t_operator_representation == "diagonal"
+    assert PECSphere(position=(0.0, 0.0, 0.0), radius=1.0).t_operator_representation == "diagonal"
     assert layered.t_operator_representation == "diagonal"
     assert spheroid.t_operator_representation == "axisymmetric"
 
@@ -78,6 +85,8 @@ def test_particle_base_api_and_representation_defaults():
 def test_particle_signatures_ignore_position_and_intrinsic_signature_ignores_orientation():
     sphere0 = Sphere(position=(0.0, 0.0, 0.0), radius=2.0, refractive_index=1.5 + 0j)
     sphere1 = Sphere(position=(5.0, -3.0, 2.0), radius=2.0, refractive_index=1.5 + 0j)
+    pec0 = PECSphere(position=(0.0, 0.0, 0.0), radius=2.0)
+    pec1 = PECSphere(position=(5.0, -3.0, 2.0), radius=2.0)
     spheroid0 = Spheroid(
         position=(0.0, 0.0, 0.0),
         equatorial_radius=2.0,
@@ -93,6 +102,7 @@ def test_particle_signatures_ignore_position_and_intrinsic_signature_ignores_ori
         euler_angles=(0.4, -0.2, 0.1),
     )
     assert particle_t_signature(sphere0) == particle_t_signature(sphere1)
+    assert particle_t_signature(pec0) == particle_t_signature(pec1)
     assert particle_t_signature(spheroid0) != particle_t_signature(spheroid1)
     assert particle_intrinsic_t_signature(spheroid0) == particle_intrinsic_t_signature(spheroid1)
 
@@ -100,6 +110,13 @@ def test_particle_signatures_ignore_position_and_intrinsic_signature_ignores_ori
 @pytest.mark.parametrize(
     ("factory", "match"),
     [
+        (
+            lambda: PECSphere(
+                position=(0.0, 0.0, 0.0),
+                radius=0.0,
+            ),
+            "radius must be positive",
+        ),
         (
             lambda: LayeredSphere(
                 position=(0.0, 0.0, 0.0),
@@ -169,13 +186,22 @@ def test_particle_constructors_broadcast_inputs_and_append_into_existing_list():
     assert out is into
     assert len(out) == 3
 
+    out = pec_spheres_from_arrays(
+        positions=positions,
+        radii=np.array([1.5, 2.5], dtype=float),
+        into=out,
+    )
+    assert len(out) == 5
+    assert isinstance(out[-1], PECSphere)
+    assert out[-1].radius == 2.5
+
     out = layered_spheres_from_arrays(
         positions=positions,
         layer_radii=np.array([0.5, 1.5], dtype=float),
         layer_refractive_indices=np.array([1.3 + 0j, 1.5 + 0j], dtype=np.complex128),
         into=out,
     )
-    assert len(out) == 5
+    assert len(out) == 7
     assert isinstance(out[-1], LayeredSphere)
     assert out[-1].layer_radii == (0.5, 1.5)
 
@@ -187,7 +213,7 @@ def test_particle_constructors_broadcast_inputs_and_append_into_existing_list():
         euler_angles=np.array([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]], dtype=float),
         into=out,
     )
-    assert len(out) == 7
+    assert len(out) == 9
     assert isinstance(out[-1], Spheroid)
     spheroid_prev = cast(Spheroid, out[-2])
     assert spheroid_prev.euler_angles == (0.1, 0.2, 0.3)
@@ -241,6 +267,22 @@ def test_particle_constructors_broadcast_inputs_and_append_into_existing_list():
                 "refractive_indices": 0.0 + 0j,
             },
             "Real part of `refractive_indices` must be strictly positive",
+        ),
+        (
+            pec_spheres_from_arrays,
+            {
+                "positions": np.array([[0.0, 0.0, 0.0]], dtype=float),
+                "radii": np.array([1.0, 2.0], dtype=float),
+            },
+            "`radii` length",
+        ),
+        (
+            pec_spheres_from_arrays,
+            {
+                "positions": np.array([[0.0, 0.0, 0.0]], dtype=float),
+                "radii": np.array([0.0], dtype=float),
+            },
+            "strictly positive",
         ),
         (
             layered_spheres_from_arrays,

@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 import pyceles.core.tmatrix as tmatrix_mod
-from pyceles.core.particles import LayeredSphere, Particle, Sphere, Spheroid
+from pyceles.core.particles import LayeredSphere, Particle, PECSphere, Sphere, Spheroid
 from pyceles.core.tmatrix import (
     layered_internal_ab_ratios,
     layered_sphere_T_diagonal,
@@ -10,6 +10,7 @@ from pyceles.core.tmatrix import (
     particle_T_diagonal,
     particle_T_matrix_block,
     particle_T_matrix_blocks,
+    pec_sphere_T_diagonal,
     sphere_T_diagonal,
 )
 
@@ -32,6 +33,22 @@ def test_particle_t_diagonal_sphere_dispatch():
         n_particle=p.refractive_index,
         n_medium=n_medium,
     )
+    assert 1 in out and 2 in out
+    np.testing.assert_allclose(out[1], ref[1], rtol=1e-13, atol=1e-13)
+    np.testing.assert_allclose(out[2], ref[2], rtol=1e-13, atol=1e-13)
+
+
+def test_particle_t_diagonal_pec_sphere_dispatch():
+    lmax = 3
+    k_medium = 2.0 * np.pi / 550.0
+    p = PECSphere(position=(0.0, 0.0, 0.0), radius=100.0)
+    out = particle_T_diagonal(
+        lmax=lmax,
+        k_medium=k_medium,
+        particle=p,
+        n_medium=1.0 + 0j,
+    )
+    ref = pec_sphere_T_diagonal(lmax=lmax, k_medium=k_medium, radius=p.radius)
     assert 1 in out and 2 in out
     np.testing.assert_allclose(out[1], ref[1], rtol=1e-13, atol=1e-13)
     np.testing.assert_allclose(out[2], ref[2], rtol=1e-13, atol=1e-13)
@@ -77,6 +94,23 @@ def test_particle_t_matrix_block_sphere_dispatch_is_exact_diagonal():
 
     repeats = 2 * np.arange(1, lmax + 1) + 1
     diag = np.concatenate([np.repeat(Td[1][1:], repeats), np.repeat(Td[2][1:], repeats)])
+    np.testing.assert_allclose(block, np.diag(diag), rtol=1e-13, atol=1e-13)
+
+
+def test_particle_t_matrix_block_pec_sphere_dispatch_is_exact_diagonal():
+    lmax = 3
+    k_medium = 2.0 * np.pi / 550.0
+    p = PECSphere(position=(0.0, 0.0, 0.0), radius=100.0)
+    block = particle_T_matrix_block(
+        lmax=lmax,
+        k_medium=k_medium,
+        particle=p,
+        n_medium=1.0 + 0j,
+    )
+    td = particle_T_diagonal(lmax=lmax, k_medium=k_medium, particle=p, n_medium=1.0 + 0j)
+
+    repeats = 2 * np.arange(1, lmax + 1) + 1
+    diag = np.concatenate([np.repeat(td[1][1:], repeats), np.repeat(td[2][1:], repeats)])
     np.testing.assert_allclose(block, np.diag(diag), rtol=1e-13, atol=1e-13)
 
 
@@ -217,6 +251,17 @@ def test_particle_internal_ratios_layered_returns_core_regular_ratios():
     )
     np.testing.assert_allclose(out[1], ref[1]["A"][0, :], rtol=1e-12, atol=1e-12)
     np.testing.assert_allclose(out[2], ref[2]["A"][0, :], rtol=1e-12, atol=1e-12)
+
+
+def test_particle_internal_ratios_pec_sphere_are_zero():
+    out = particle_internal_ratios(
+        lmax=3,
+        k_medium=2.0 * np.pi / 550.0,
+        particle=PECSphere(position=(0.0, 0.0, 0.0), radius=80.0),
+        n_medium=1.0 + 0j,
+    )
+    np.testing.assert_array_equal(out[1], np.zeros(4, dtype=np.complex128))
+    np.testing.assert_array_equal(out[2], np.zeros(4, dtype=np.complex128))
 
 
 def test_particle_t_diagonal_spheroid_diagonal_path_raises():
