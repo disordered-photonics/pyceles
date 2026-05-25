@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Added `PECSphere` particle descriptors and PEC-sphere helpers based on the
   analytic perfect-conductor Mie limit.
+- Added geometry-only Rayleigh/Wood anomaly diagnostics for rectangular
+  periodic cells, including threshold enumeration and safe period-scale
+  suggestions.
 
 ## [0.4.0] - 2026-05-17
 
