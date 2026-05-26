@@ -76,6 +76,9 @@ Experimental periodic workflows use:
 - `pyceles.RectangularLattice2D`
 - `pyceles.PeriodicSpec`
 - `pyceles.PeriodicOptions`
+- `pyceles.core.periodic.rayleigh_report`
+- `pyceles.core.periodic.rayleigh_threshold_scales`
+- `pyceles.core.periodic.suggest_safe_period_scales`
 
 ## I/O
 

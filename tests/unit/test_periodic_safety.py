@@ -111,3 +111,21 @@ def test_oblique_rectangular_threshold_formula_hits_light_circle() -> None:
     assert any((m, n) in item.orders for item in thresholds)
     q = np.array([u[0] + m / scale, u[1] + n / (aspect * scale)])
     assert float(np.linalg.norm(q)) == pytest.approx(1.0, rel=1.0e-12)
+
+
+def test_threshold_grouping_tolerance_must_be_positive() -> None:
+    with pytest.raises(ValueError, match="grouping_rtol"):
+        rayleigh_threshold_scales(
+            scale_min=0.5,
+            scale_max=3.0,
+            grouping_rtol=0.0,
+        )
+
+
+def test_safe_period_suggestion_policy_inputs_are_validated() -> None:
+    with pytest.raises(ValueError, match="min_gap_width"):
+        suggest_safe_period_scales(scale_min=0.5, scale_max=3.0, min_gap_width=-1.0e-6)
+    with pytest.raises(ValueError, match="prefer_smaller_period"):
+        suggest_safe_period_scales(scale_min=0.5, scale_max=3.0, prefer_smaller_period=math.inf)
+    with pytest.raises(ValueError, match="max_results"):
+        suggest_safe_period_scales(scale_min=0.5, scale_max=3.0, max_results=0)

@@ -171,6 +171,8 @@ Homogeneous rectangular 2D periodic-cell workflows currently include:
 - `RectangularLattice2D`, `PeriodicSpec`, and `PeriodicOptions`,
 - plane-wave Bloch source validation through incident `k_parallel`,
 - periodic Ewald coupling with a direct-sum oracle for small checks,
+- geometry-only Rayleigh/Wood anomaly diagnostics for artificial periodicity
+  checks,
 - periodic diffraction-order payloads on `SimulationResult.periodic`,
 - reflected/transmitted diffraction-order amplitudes and `R/T/A` totals,
 - periodic near-field slices:

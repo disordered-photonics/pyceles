@@ -1,4 +1,10 @@
-"""Rayleigh/Wood-anomaly diagnostics for rectangular periodic cells."""
+"""Rayleigh/Wood-anomaly diagnostics for rectangular periodic cells.
+
+The helpers in this module are deliberately geometry-only. They locate and rank
+clearance from Rayleigh/Wood thresholds, where a reciprocal diffraction order is
+grazing. They do not evaluate the full periodic coupling operator and therefore
+should not be interpreted as a coupling-norm optimizer.
+"""
 
 from __future__ import annotations
 
@@ -52,7 +58,12 @@ class PeriodicRayleighThreshold:
 
 @dataclass(frozen=True)
 class SafePeriodScaleCandidate:
-    """One robust period-scale candidate between neighboring thresholds."""
+    """One Rayleigh-clear period-scale candidate between thresholds.
+
+    The score favors wide threshold gaps and large grazing-order clearance. It is
+    a cheap preflight ranking, not a guarantee that the full periodic coupling
+    norm is minimal for a particular multipole truncation or particle system.
+    """
 
     scale: float
     left_threshold: float
@@ -252,6 +263,9 @@ def rayleigh_threshold_scales(
     aspect = float(aspect_y_over_x)
     ux, uy = (float(u_parallel[0]), float(u_parallel[1]))
     u_norm = math.hypot(ux, uy)
+    grouping = float(grouping_rtol)
+    if not np.isfinite(grouping) or grouping <= 0.0:
+        raise ValueError("`grouping_rtol` must be finite and positive.")
     if u_norm >= 1.0:
         raise ValueError("`u_parallel` must satisfy |u_parallel| < 1.")
     mmax = math.ceil((1.0 + u_norm) * s1) + 2
@@ -278,7 +292,7 @@ def rayleigh_threshold_scales(
             continue
         scale = item[0]
         reference = grouped[-1][0][0]
-        if abs(scale - reference) <= float(grouping_rtol) * max(1.0, abs(reference)):
+        if abs(scale - reference) <= grouping * max(1.0, abs(reference)):
             grouped[-1].append(item)
         else:
             grouped.append([item])
@@ -325,7 +339,23 @@ def suggest_safe_period_scales(
     prefer_smaller_period: float = 0.15,
     max_results: int = 12,
 ) -> tuple[SafePeriodScaleCandidate, ...]:
-    """Rank robust mid-gap period ratios away from Rayleigh thresholds."""
+    """Rank Rayleigh-clear period ratios between neighboring thresholds.
+
+    The returned scales are good candidates for artificial-period preflights
+    because they sit away from grazing diffraction orders. For fine selection
+    inside a gap, a coupling-norm scan can still move the optimum away from this
+    geometric mid-gap value.
+    """
+
+    gap_min = float(min_gap_width)
+    small_period_bias = float(prefer_smaller_period)
+    n_results = int(max_results)
+    if not np.isfinite(gap_min) or gap_min < 0.0:
+        raise ValueError("`min_gap_width` must be finite and nonnegative.")
+    if not np.isfinite(small_period_bias):
+        raise ValueError("`prefer_smaller_period` must be finite.")
+    if n_results < 1:
+        raise ValueError("`max_results` must be positive.")
 
     thresholds = rayleigh_threshold_scales(
         scale_min=scale_min,
@@ -337,7 +367,7 @@ def suggest_safe_period_scales(
     candidates: list[SafePeriodScaleCandidate] = []
     for left, right in pairwise(edges):
         width = float(right - left)
-        if width < float(min_gap_width):
+        if width < gap_min:
             continue
         scale = 0.5 * (float(left) + float(right))
         clearance, orders = _scaled_clearance(
@@ -345,7 +375,7 @@ def suggest_safe_period_scales(
             aspect_y_over_x=float(aspect_y_over_x),
             u_parallel=u_parallel,
         )
-        score = (width * clearance) / (scale ** float(prefer_smaller_period))
+        score = (width * clearance) / (scale**small_period_bias)
         candidates.append(
             SafePeriodScaleCandidate(
                 scale=scale,
@@ -358,7 +388,7 @@ def suggest_safe_period_scales(
             )
         )
     candidates.sort(key=lambda item: item.score, reverse=True)
-    return tuple(candidates[: int(max_results)])
+    return tuple(candidates[:n_results])
 
 
 __all__ = [

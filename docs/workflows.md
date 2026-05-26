@@ -268,6 +268,56 @@ particles = pcl.spheres_from_arrays(
 sim = pcl.Simulation(cfg, particles=particles)
 ```
 
+## Periodic Rayleigh/Wood safety checks
+
+Artificial periodic cells have geometric Rayleigh/Wood anomalies when a
+reciprocal-lattice diffraction order becomes grazing:
+
+```text
+|k_parallel + m*b1 + n*b2| = k_host
+```
+
+These are not Ewald bugs; they are singular channels of the artificial lattice.
+Before using a periodic cell to mimic a laterally large disordered sample, check
+the host-wavelength-scaled periods and their nearest grazing orders:
+
+```python
+source = pcl.PlaneWave(
+    wavelength=550.0,
+    medium_n=1.0 + 0j,
+    polarization="TE",
+)
+lattice = pcl.RectangularLattice2D(ax=7.5 * source.wavelength, ay=7.5 * source.wavelength)
+k = 2 * np.pi * source.medium_n.real / source.wavelength
+
+report = pcl.core.periodic.rayleigh_report(
+    lattice,
+    k=k,
+    k_parallel=pcl.core.plane_wave_k_parallel(source),
+)
+print(report.warning_level)
+print(report.message)
+```
+
+For square or scaled rectangular cells, `suggest_safe_period_scales(...)` ranks
+wide Rayleigh-clear candidates in units of host wavelength:
+
+```python
+candidates = pcl.core.periodic.suggest_safe_period_scales(
+    scale_min=5.0,
+    scale_max=10.0,
+)
+for candidate in candidates[:3]:
+    print(candidate.scale, candidate.clearance)
+```
+
+This helper is intentionally geometry-only. It predicts where singularities can
+occur, but it does not decide whether a particular material system will respond
+strongly or where the minimum of a full coupling-norm scan sits inside a gap.
+More expensive coupling-norm scans can be useful for internal diagnostics, but
+they depend on modal truncation, norm convention, representative displacement,
+and Ewald convergence policy.
+
 ## Source-only runs
 
 For beam inspection/debugging, run a simulation with no particles:
