@@ -250,6 +250,10 @@ def _mlfmm_options(args: argparse.Namespace) -> MLFMMOptions:
         leaf_size_radius_factor=float(args.mlfmm_leaf_size_radius_factor),
         accuracy_level=int(args.mlfmm_accuracy_level),
         order_additive=int(args.mlfmm_order_additive),
+        hf_start_level=None
+        if args.mlfmm_hf_start_level is None
+        else int(args.mlfmm_hf_start_level),
+        hf_wavelength_divisor=float(args.mlfmm_hf_wavelength_divisor),
     )
 
 
@@ -282,6 +286,10 @@ def _benchmark_config(args: argparse.Namespace) -> dict[str, Any]:
             "leaf_size_radius_factor": float(args.mlfmm_leaf_size_radius_factor),
             "accuracy_level": int(args.mlfmm_accuracy_level),
             "order_additive": int(args.mlfmm_order_additive),
+            "hf_start_level": None
+            if args.mlfmm_hf_start_level is None
+            else int(args.mlfmm_hf_start_level),
+            "hf_wavelength_divisor": float(args.mlfmm_hf_wavelength_divisor),
         },
     }
 
@@ -343,6 +351,21 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     tmp.replace(path)
 
 
+def _operator_diagnostics(sim: pcl.Simulation) -> dict[str, Any]:
+    """Return compact prepared-operator diagnostics when the backend exposes them."""
+
+    prepared = getattr(sim, "_prepared_operator_cache", None)
+    coupling = None if prepared is None else getattr(prepared, "coupling", None)
+    if coupling is None:
+        return {}
+    diagnostics: dict[str, Any] = {}
+    for name in ("plan_summary", "hierarchy_diagnostics", "memory_diagnostics"):
+        method = getattr(coupling, name, None)
+        if callable(method):
+            diagnostics[name] = method()
+    return diagnostics
+
+
 def _run_one(
     *,
     args: argparse.Namespace,
@@ -382,6 +405,7 @@ def _run_one(
     start = time.perf_counter()
     run = sim.run(include_farfield=False)
     wall_time = time.perf_counter() - start
+    operator_diagnostics = _operator_diagnostics(sim)
     solver = run.solver_result
     phase_timings = {}
     metadata = solver.block_metadata or {}
@@ -405,6 +429,7 @@ def _run_one(
             "residual_norm": float(np.asarray(solver.residual_norm)),
         },
         "phase_timings_s": phase_timings,
+        "operator_diagnostics": operator_diagnostics,
         "geometry": _geometry_summary(geometry),
     }
     return payload
@@ -564,11 +589,13 @@ def main() -> None:
     )
     parser.add_argument("--seed", type=int, default=12345)
     parser.add_argument("--max-attempts-per-particle", type=int, default=2000)
-    parser.add_argument("--mlfmm-max-leaf-particles", type=int, default=8)
+    parser.add_argument("--mlfmm-max-leaf-particles", type=int, default=256)
     parser.add_argument("--mlfmm-max-depth", type=int, default=12)
     parser.add_argument("--mlfmm-leaf-size-radius-factor", type=float, default=4.0)
     parser.add_argument("--mlfmm-accuracy-level", type=int, default=3)
     parser.add_argument("--mlfmm-order-additive", type=int, default=2)
+    parser.add_argument("--mlfmm-hf-start-level", type=int, default=None)
+    parser.add_argument("--mlfmm-hf-wavelength-divisor", type=float, default=5.0)
     parser.add_argument("--plot", action="store_true")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--check-geometry", action="store_true")
