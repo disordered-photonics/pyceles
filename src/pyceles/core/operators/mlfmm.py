@@ -1817,22 +1817,20 @@ def build_multilevel_mlfmm_operators(
         ).reshape(-1, 3)
 
     near_neighbors_by_level: list[tuple[np.ndarray, np.ndarray]] = []
-    near_levels_iter = (
-        tqdm(range(len(coords_by_level)), desc="[MLFMM] near-neighbor levels", unit="level")
-        if show_progress
-        else range(len(coords_by_level))
-    )
-    for level in near_levels_iter:
+    for level in range(len(coords_by_level)):
         near_neighbors_by_level.append(_coords_near_neighbors(coords_by_level[level]))
 
     levels: list[MLFMMLevelOperators] = []
     dummy_directional = directional_transforms(1, grid_order=1)
-    level_iter = (
+    level_progress = (
         tqdm(range(leaf_level + 1), desc="[MLFMM] build levels", unit="level")
         if show_progress
-        else range(leaf_level + 1)
+        else None
     )
+    level_iter = level_progress if level_progress is not None else range(leaf_level + 1)
     for level in level_iter:
+        if level_progress is not None:
+            level_progress.set_postfix_str(f"L{level}: topology", refresh=True)
         coords = coords_by_level[level]
         if level == 0:
             parent_indices = np.full((coords.shape[0],), -1, dtype=np.int64)
@@ -1889,22 +1887,34 @@ def build_multilevel_mlfmm_operators(
         if level < hf_start_level or level > hf_end_level:
             directional = dummy_directional
         else:
+            if level_progress is not None:
+                level_progress.set_postfix_str(
+                    f"L{level}: directional basis order={level_box_order}",
+                    refresh=True,
+                )
             directional = directional_transforms(
                 int(level_box_order), grid_order=int(level_box_order)
             )
         if level == 0:
             far_offset_batches = {}
         else:
+            if level_progress is not None:
+                level_progress.set_postfix_str(f"L{level}: far schedule", refresh=True)
             far_offset_batches = _build_multilevel_far_offset_batches(
                 coords=coords,
                 parent_indices=parent_indices,
                 near_neighbors=near_neighbors_by_level[level],
                 parent_near_neighbors=near_neighbors_by_level[level - 1],
                 children_by_parent=children_by_parent_current,
-                progress_desc=f"[MLFMM] far-batches L{level}" if show_progress else None,
             )
-        offset_diagonals = (
-            {
+        offset_diagonals: dict[tuple[int, int, int], np.ndarray] = {}
+        if hf_start_level <= level <= hf_end_level:
+            if level_progress is not None:
+                level_progress.set_postfix_str(
+                    f"L{level}: translators order={level_box_order} offsets={len(far_offset_batches)}",
+                    refresh=True,
+                )
+            offset_diagonals = {
                 offset: _sampled_rokhlin_translator(
                     _offset_delta_from_half_size(half_size, offset),
                     k=complex(k),
@@ -1915,9 +1925,8 @@ def build_multilevel_mlfmm_operators(
                 )
                 for offset in far_offset_batches
             }
-            if hf_start_level <= level <= hf_end_level
-            else {}
-        )
+        if level_progress is not None:
+            level_progress.set_postfix_str(f"L{level}: done", refresh=False)
         levels.append(
             MLFMMLevelOperators(
                 level=level,
@@ -1942,16 +1951,7 @@ def build_multilevel_mlfmm_operators(
         )
 
     transfers: list[MLFMMTransferOperators] = []
-    transfer_iter = (
-        tqdm(
-            range(max(1, hf_start_level + 1), hf_end_level + 1),
-            desc="[MLFMM] build transfers",
-            unit="level",
-        )
-        if show_progress
-        else range(max(1, hf_start_level + 1), hf_end_level + 1)
-    )
-    for child_level in transfer_iter:
+    for child_level in range(max(1, hf_start_level + 1), hf_end_level + 1):
         parent_level = child_level - 1
         child = levels[child_level]
         parent = levels[parent_level]
