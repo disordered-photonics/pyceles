@@ -781,14 +781,17 @@ def _resolve_multilevel_hf_start_level(
     hf_start_level: int | None,
     hf_wavelength_divisor: float,
 ) -> int:
-    """Resolve sampled HF start level from a box-size versus wavelength rule.
+    """Resolve the first sampled HF ownership level.
 
     Policy:
     - explicit `hf_start_level` wins when provided;
-    - otherwise select the first level whose box side is below `lambda/divisor`,
-      which keeps sampled directional operators out of very large coarse boxes;
-    - if no level satisfies the threshold (very large-box regime), keep only
-      the two finest sampled levels by default (`leaf_level - 1` to `leaf`).
+    - otherwise include level 2, the first level that can own same-level far
+      interactions in the current hierarchy.
+
+    Starting later than level 2 without remapping ownership omits far
+    interactions whose parents are already far at the skipped levels. Such
+    coarse-level skipping is therefore an explicit expert/diagnostic choice, not
+    the automatic production policy.
     """
 
     leaf = int(leaf_level)
@@ -811,17 +814,7 @@ def _resolve_multilevel_hf_start_level(
             "mlfmm_options.hf_wavelength_divisor must be finite and > 0. "
             f"Got {hf_wavelength_divisor!r}."
         )
-    k_abs = float(abs(complex(k)))
-    if k_abs > 0.0:
-        wavelength = (2.0 * np.pi) / k_abs
-        threshold = wavelength / divisor
-        root_side = 2.0 * float(partition.root_half_size)
-        for level in range(min_level, leaf + 1):
-            box_side = root_side / float(1 << level)
-            if box_side <= threshold:
-                return int(level)
-
-    return int(max(min_level, leaf - 1))
+    return int(min_level)
 
 
 def _offset_delta_from_half_size(half_size: float, offset: tuple[int, int, int]) -> np.ndarray:
@@ -1792,9 +1785,9 @@ def build_multilevel_mlfmm_operators(
     The hierarchy stores only occupied boxes, together with same-level far
     batches and parent/child transfer operators for the upward and downward
     sampled passes. Sampled start level is either explicitly forced via
-    `hf_start_level` or chosen where box size becomes small enough compared to
-    wavelength (`box_side <= wavelength / hf_wavelength_divisor`), which avoids
-    activating expensive sampled transforms on overly coarse boxes.
+    `hf_start_level` or chosen as the first same-level far ownership level. The
+    automatic path does not skip coarse owned levels, because doing so would
+    drop interactions instead of approximating them elsewhere.
     """
 
     if not partition.leaves:

@@ -14,6 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   periodic cells, including threshold enumeration and safe period-scale
   suggestions.
 
+### Fixed
+- Fixed the automatic multilevel MLFMM sampled-level policy so it no longer
+  skips coarse same-level far interactions when the resolved hierarchy grows
+  beyond depth 3.
+
 ## [0.4.0] - 2026-05-17
 
 ### Added
