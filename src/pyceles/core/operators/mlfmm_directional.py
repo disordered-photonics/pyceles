@@ -10,7 +10,7 @@ import numpy as np
 import scipy.sparse
 
 from pyceles.core.indexing import n_scalar, scalar_index
-from pyceles.core.spherical import legendre_normalized_trigon_scalar
+from pyceles.core.spherical import legendre_normalized_trigon, legendre_normalized_trigon_scalar
 
 Array = np.ndarray
 
@@ -107,6 +107,33 @@ def _legendre2(n: int, x: float) -> Array:
     phase = np.where(np.arange(n_i + 1, dtype=np.int32) & 1, -1.0, 1.0)
     return np.asarray(
         phase * plm[n_i, : n_i + 1] / math.sqrt(2.0 * np.pi),
+        dtype=np.float64,
+    )
+
+
+def _directional_legendre_beta_table(beta: Array, max_degree: int) -> Array:
+    """Return 4pi-normalized Legendre values on the directional polar grid.
+
+    MLFMM directional grids are tensor-product alpha/beta grids. The associated
+    Legendre factors depend only on beta, so this table is built once per polar
+    ring and reused for every azimuthal sample.
+    """
+
+    max_degree_i = int(max_degree)
+    beta_arr = np.asarray(beta, dtype=np.float64).reshape(-1)
+    cos_beta = np.cos(beta_arr)
+    sin_beta = np.sin(beta_arr)
+    plm = np.asarray(
+        legendre_normalized_trigon(cos_beta, sin_beta, max_degree_i, xp=np),
+        dtype=np.float64,
+    )
+    m_phase = np.where(
+        np.arange(max_degree_i + 1, dtype=np.int32) & 1,
+        -1.0,
+        1.0,
+    )
+    return np.asarray(
+        plm * (m_phase[None, :, None] / math.sqrt(2.0 * np.pi)),
         dtype=np.float64,
     )
 
@@ -237,63 +264,61 @@ def _cached_directional_transforms(
     alpha_factor_key: int,
     beta_factor_key: int,
 ) -> MLFMMDirectionalTransforms:
+    box_order_i = int(box_order)
     grid = directional_grid(
         int(grid_order),
         alpha_factor=_from_cache_key_factor(alpha_factor_key),
         beta_factor=_from_cache_key_factor(beta_factor_key),
     )
     ndir = int(grid.directions.shape[0])
-    nscl = n_scalar(int(box_order))
+    nscl = n_scalar(box_order_i)
     fth = np.zeros((ndir, nscl), dtype=np.complex128)
     fph = np.zeros_like(fth)
+    n_alpha = int(grid.alpha.size)
+    n_beta = int(grid.beta.size)
+    if ndir != n_alpha * n_beta:
+        raise ValueError("Directional grid shape is inconsistent with alpha/beta samples.")
 
-    for idir, direction in enumerate(np.asarray(grid.directions, dtype=float)):
-        theta = float(np.arccos(np.clip(direction[2], -1.0, 1.0)))
-        phi = float(np.arctan2(direction[1], direction[0]))
-        if phi < 0.0:
-            phi += 2.0 * np.pi
-        sin_theta = max(1.0e-15, float(np.sin(theta)))
-        exp_cache: dict[int, complex] = {}
-        legendre_by_n = {
-            n: _legendre2(n, float(np.cos(theta))) for n in range(0, int(box_order) + 2)
-        }
-        for l in range(1, int(box_order) + 1):
-            l_arr = legendre_by_n[l]
-            l1_arr = legendre_by_n[l + 1]
-            l2_arr = legendre_by_n[l - 1] if l > 1 else legendre_by_n[0]
-            q = math.sqrt(l * (l + 1.0)) / ((2.0 * l + 1.0) * sin_theta)
-            for m in range(-l, l + 1):
-                mm = abs(m)
-                if m not in exp_cache:
-                    exp_cache[m] = complex(np.exp(1j * m * phi))
-                phase = exp_cache[m]
-                y = complex(l_arr[mm] * phase)
-                y1 = complex(
-                    math.sqrt(
-                        (2.0 * l + 1.0)
-                        / (2.0 * l + 3.0)
-                        * (((l + 1.0) * (l + 1.0) - mm * mm) / ((l + 1.0) * (l + 1.0)))
-                    )
-                    * l1_arr[mm]
-                    * phase
+    fth_grid = fth.reshape(n_alpha, n_beta, nscl)
+    fph_grid = fph.reshape(n_alpha, n_beta, nscl)
+    beta = np.asarray(grid.beta, dtype=np.float64).reshape(-1)
+    alpha = np.asarray(grid.alpha, dtype=np.float64).reshape(-1)
+    sin_beta = np.maximum(1.0e-15, np.sin(beta))
+    legendre = _directional_legendre_beta_table(beta, box_order_i + 1)
+    m_values = np.arange(-box_order_i, box_order_i + 1, dtype=np.float64)
+    phase_by_m = np.exp(1j * m_values[:, None] * alpha[None, :])
+    m_offset = box_order_i
+
+    for l in range(1, box_order_i + 1):
+        prefactor = 1j * (1j**l)
+        q_beta = math.sqrt(l * (l + 1.0)) / ((2.0 * l + 1.0) * sin_beta)
+        l_scale = (2.0 * l + 1.0) / (l * (l + 1.0))
+        for m in range(-l, l + 1):
+            mm = abs(m)
+            phase = phase_by_m[m + m_offset, :, None]
+            y_beta = legendre[l, mm, :]
+            y1_beta = (
+                math.sqrt(
+                    (2.0 * l + 1.0)
+                    / (2.0 * l + 3.0)
+                    * (((l + 1.0) * (l + 1.0) - mm * mm) / ((l + 1.0) * (l + 1.0)))
                 )
-                y2 = (
-                    0.0j
-                    if mm == l
-                    else complex(
-                        math.sqrt((2.0 * l + 1.0) / (2.0 * l - 1.0) * ((l * l - mm * mm) / (l * l)))
-                        * l2_arr[mm]
-                        * phase
-                    )
-                )
-                b_theta = (y1 - y2) * q
-                b_phi = (1j * m * (2.0 * l + 1.0) / (l * (l + 1.0)) * y) * q
-                idx = scalar_index(l, m)
-                fth[idir, idx] = 1j * (1j**l) * b_theta
-                fph[idir, idx] = 1j * (1j**l) * b_phi
+                * legendre[l + 1, mm, :]
+            )
+            y2_beta = (
+                0.0
+                if mm == l
+                else math.sqrt((2.0 * l + 1.0) / (2.0 * l - 1.0) * ((l * l - mm * mm) / (l * l)))
+                * legendre[l - 1, mm, :]
+            )
+            idx = scalar_index(l, m)
+            fth_grid[:, :, idx] = prefactor * phase * ((y1_beta - y2_beta) * q_beta)[None, :]
+            fph_grid[:, :, idx] = (
+                prefactor * phase * ((1j * m * l_scale * y_beta) * q_beta)[None, :]
+            )
 
     return MLFMMDirectionalTransforms(
-        box_order=int(box_order),
+        box_order=box_order_i,
         grid=grid,
         Fth=fth,
         Fph=fph,
