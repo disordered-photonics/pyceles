@@ -271,8 +271,10 @@ class CuPyDirectionalTransformsData:
     Matrices are prepacked for batched GEMM on repeated apply:
     - `forward_F` maps one scalar SVWF block (`nscl`) to two reflected
       directional channels (`theta`, `phi`) with shape `(2*ndir, nscl)`.
-    - `inverse_A_adj` and `inverse_G_adj` are reflected adjoint blocks used by
-      the inverse map with shapes `(nscl, 2*ndir)`.
+    - `inverse_A_adj` is the reflected adjoint block used by the inverse map
+      with shape `(nscl, 2*ndir)`. The paired `G` adjoint is analytic and is
+      applied by rotating directional channels before a second `inverse_A_adj`
+      multiply, avoiding one more dense resident matrix.
     """
 
     box_order: int
@@ -281,7 +283,6 @@ class CuPyDirectionalTransformsData:
     nscl: int
     forward_F: Any
     inverse_A_adj: Any
-    inverse_G_adj: Any
 
 
 @dataclass(frozen=True)
@@ -1135,39 +1136,26 @@ def _upload_directional_transforms(
     nscl = int(fth.shape[1])
     perm = np.asarray(reflection, dtype=np.int32)
     inv_perm = np.ascontiguousarray(np.argsort(perm), dtype=np.int32)
-    perm_gpu = cupy.asarray(perm, dtype=cupy.int32)
-    inv_perm_gpu = cupy.asarray(inv_perm, dtype=cupy.int32)
 
-    # Build packed directional operators on GPU so the prepare path avoids
-    # large host-side stack/hstack temporaries before upload.
-    fth_gpu = cupy.asarray(fth, dtype=cupy.complex128)
-    fph_gpu = cupy.asarray(fph, dtype=cupy.complex128)
+    def upload_into(dst: Any, src: np.ndarray) -> None:
+        staged = cupy.asarray(np.ascontiguousarray(src, dtype=np.complex128))
+        dst[...] = staged
+        del staged
+        cupy.get_default_memory_pool().free_all_blocks()
 
-    # Outgoing map: pre-fold reflection row permutation and stack theta/phi
-    # into one (2*ndir, nscl) matrix for batched GEMM.
-    f_stack = cupy.concatenate((fth_gpu[perm_gpu, :], fph_gpu[perm_gpu, :]), axis=0)
+    # Fill the packed operators one half at a time. This avoids the previous
+    # advanced-indexing + concatenate peak, which could transiently hold Fth,
+    # Fph, both reflected copies, and the final stack on device.
+    f_stack = cupy.empty((2 * n_dir, nscl), dtype=cupy.complex128)
+    upload_into(f_stack[:n_dir, :], fth[perm, :])
+    upload_into(f_stack[n_dir:, :], fph[perm, :])
 
     # Incoming map: pre-fold reflection on columns via A @ P equivalence
     # (implemented as column reindex by inverse permutation), then stack
-    # [theta,phi] blocks for compact batched GEMM.
-    fth_adj_perm = cupy.conjugate(fth_gpu.T)[:, inv_perm_gpu]
-    fph_adj_perm = cupy.conjugate(fph_gpu.T)[:, inv_perm_gpu]
-    a_adj = cupy.concatenate(
-        (
-            fth_adj_perm,
-            fph_adj_perm,
-        ),
-        axis=1,
-    )
-    # G operators are analytically linked to F operators by the directional
-    # basis convention: Gth_adj=-1j*Fph_adj and Gph_adj=+1j*Fth_adj.
-    g_adj = cupy.concatenate(
-        (
-            -1j * fph_adj_perm,
-            1j * fth_adj_perm,
-        ),
-        axis=1,
-    )
+    # [theta,phi] adjoint blocks for compact batched GEMM.
+    a_adj = cupy.empty((nscl, 2 * n_dir), dtype=cupy.complex128)
+    upload_into(a_adj[:, :n_dir], np.conjugate(fth[inv_perm, :].T))
+    upload_into(a_adj[:, n_dir:], np.conjugate(fph[inv_perm, :].T))
 
     return CuPyDirectionalTransformsData(
         box_order=int(transforms.box_order),
@@ -1175,12 +1163,11 @@ def _upload_directional_transforms(
         grid=CuPyDirectionalGridData(
             order=int(grid.order),
             n_directions=int(n_dir),
-            reflection_permutation=perm_gpu,
+            reflection_permutation=cupy.asarray(perm, dtype=cupy.int32),
         ),
         nscl=nscl,
         forward_F=f_stack,
         inverse_A_adj=a_adj,
-        inverse_G_adj=g_adj,
     )
 
 
@@ -3644,7 +3631,15 @@ def _directional_to_box_regular_cupy(
     ch_bb = cupy.concatenate((channels[:, 2], channels[:, 3]), axis=1)
     ch_pair = cupy.concatenate((ch_ab, ch_bb), axis=0)
     a_pair = cupy.matmul(directional.inverse_A_adj[None, :, :], ch_pair)
-    g_pair = cupy.matmul(directional.inverse_G_adj[None, :, :], ch_pair)
+    # Gth/Gph are analytically tied to F by Gth_adj=-1j*Fph_adj,
+    # Gph_adj=+1j*Fth_adj. Reuse A_adj after rotating channels instead of
+    # storing another dense adjoint matrix for every sampled level.
+    rot_ab = cupy.concatenate((1j * channels[:, 1], -1j * channels[:, 0]), axis=1)
+    rot_bb = cupy.concatenate((1j * channels[:, 3], -1j * channels[:, 2]), axis=1)
+    g_pair = cupy.matmul(
+        directional.inverse_A_adj[None, :, :],
+        cupy.concatenate((rot_ab, rot_bb), axis=0),
+    )
     a_ab = a_pair[:n_batch]
     a_bb = a_pair[n_batch:]
     g_ab = g_pair[:n_batch]

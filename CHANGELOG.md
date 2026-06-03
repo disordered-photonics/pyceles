@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed the automatic multilevel MLFMM sampled-level policy so it no longer
   skips coarse same-level far interactions when the resolved hierarchy grows
   beyond depth 3.
+- Reduced CuPy MLFMM directional-transform upload and resident memory so larger
+  multilevel runs avoid avoidable out-of-memory failures.
 
 ### Changed
 - Accelerated MLFMM directional-basis preparation by reusing Legendre tables
