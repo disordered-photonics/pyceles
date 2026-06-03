@@ -73,6 +73,23 @@ class MLFMMDirectionalTransforms:
 
 
 @dataclass(frozen=True)
+class MLFMMDirectionalStructuredTransforms:
+    """Separable SVWF <-> sampled-direction transform factors.
+
+    For tensor-product directional grids, each dense transform entry factors
+    into an azimuthal phase `exp(i*m*alpha)` and a beta-dependent coefficient.
+    This representation is algebraically equivalent to `MLFMMDirectionalTransforms`
+    while avoiding dense `(n_alpha*n_beta, n_scalar)` storage.
+    """
+
+    box_order: int
+    grid: MLFMMDirectionalGrid
+    fth_beta: Array
+    fph_beta: Array
+    m_of_scalar: Array
+
+
+@dataclass(frozen=True)
 class MLFMMDirectionalInterpolation:
     """Interpolation matrix between two sampled directional grids."""
 
@@ -257,6 +274,97 @@ def directional_grid(
     )
 
 
+def _scalar_m_values(box_order: int) -> Array:
+    box_order_i = int(box_order)
+    out = np.zeros((n_scalar(box_order_i),), dtype=np.int32)
+    for l in range(1, box_order_i + 1):
+        for m in range(-l, l + 1):
+            out[scalar_index(l, m)] = int(m)
+    return out
+
+
+def _directional_beta_factors(
+    box_order: int,
+    grid: MLFMMDirectionalGrid,
+) -> tuple[Array, Array, Array]:
+    box_order_i = int(box_order)
+    nscl = n_scalar(box_order_i)
+    beta = np.asarray(grid.beta, dtype=np.float64).reshape(-1)
+    sin_beta = np.maximum(1.0e-15, np.sin(beta))
+    legendre = _directional_legendre_beta_table(beta, box_order_i + 1)
+    fth_beta = np.zeros((beta.size, nscl), dtype=np.complex128)
+    fph_beta = np.zeros_like(fth_beta)
+    m_of_scalar = _scalar_m_values(box_order_i)
+
+    for l in range(1, box_order_i + 1):
+        prefactor = 1j * (1j**l)
+        q_beta = math.sqrt(l * (l + 1.0)) / ((2.0 * l + 1.0) * sin_beta)
+        l_scale = (2.0 * l + 1.0) / (l * (l + 1.0))
+        for m in range(-l, l + 1):
+            mm = abs(m)
+            y_beta = legendre[l, mm, :]
+            y1_beta = (
+                math.sqrt(
+                    (2.0 * l + 1.0)
+                    / (2.0 * l + 3.0)
+                    * (((l + 1.0) * (l + 1.0) - mm * mm) / ((l + 1.0) * (l + 1.0)))
+                )
+                * legendre[l + 1, mm, :]
+            )
+            y2_beta = (
+                0.0
+                if mm == l
+                else math.sqrt((2.0 * l + 1.0) / (2.0 * l - 1.0) * ((l * l - mm * mm) / (l * l)))
+                * legendre[l - 1, mm, :]
+            )
+            idx = scalar_index(l, m)
+            fth_beta[:, idx] = prefactor * ((y1_beta - y2_beta) * q_beta)
+            fph_beta[:, idx] = prefactor * ((1j * m * l_scale * y_beta) * q_beta)
+
+    return fth_beta, fph_beta, m_of_scalar
+
+
+@cache
+def _cached_structured_directional_transforms(
+    box_order: int,
+    grid_order: int,
+    alpha_factor_key: int,
+    beta_factor_key: int,
+) -> MLFMMDirectionalStructuredTransforms:
+    box_order_i = int(box_order)
+    grid = directional_grid(
+        int(grid_order),
+        alpha_factor=_from_cache_key_factor(alpha_factor_key),
+        beta_factor=_from_cache_key_factor(beta_factor_key),
+    )
+    fth_beta, fph_beta, m_of_scalar = _directional_beta_factors(box_order_i, grid)
+    return MLFMMDirectionalStructuredTransforms(
+        box_order=box_order_i,
+        grid=grid,
+        fth_beta=fth_beta,
+        fph_beta=fph_beta,
+        m_of_scalar=m_of_scalar,
+    )
+
+
+def structured_directional_transforms(
+    box_order: int,
+    *,
+    grid_order: int | None = None,
+    alpha_factor: float = 1.0,
+    beta_factor: float = 1.0,
+) -> MLFMMDirectionalStructuredTransforms:
+    """Return cached separable directional transforms for one box order."""
+
+    effective_grid_order = int(box_order) if grid_order is None else int(grid_order)
+    return _cached_structured_directional_transforms(
+        int(box_order),
+        effective_grid_order,
+        _cache_key_factor(alpha_factor),
+        _cache_key_factor(beta_factor),
+    )
+
+
 @cache
 def _cached_directional_transforms(
     box_order: int,
@@ -279,49 +387,31 @@ def _cached_directional_transforms(
     if ndir != n_alpha * n_beta:
         raise ValueError("Directional grid shape is inconsistent with alpha/beta samples.")
 
-    fth_grid = fth.reshape(n_alpha, n_beta, nscl)
-    fph_grid = fph.reshape(n_alpha, n_beta, nscl)
-    beta = np.asarray(grid.beta, dtype=np.float64).reshape(-1)
     alpha = np.asarray(grid.alpha, dtype=np.float64).reshape(-1)
-    sin_beta = np.maximum(1.0e-15, np.sin(beta))
-    legendre = _directional_legendre_beta_table(beta, box_order_i + 1)
-    m_values = np.arange(-box_order_i, box_order_i + 1, dtype=np.float64)
-    phase_by_m = np.exp(1j * m_values[:, None] * alpha[None, :])
-    m_offset = box_order_i
-
-    for l in range(1, box_order_i + 1):
-        prefactor = 1j * (1j**l)
-        q_beta = math.sqrt(l * (l + 1.0)) / ((2.0 * l + 1.0) * sin_beta)
-        l_scale = (2.0 * l + 1.0) / (l * (l + 1.0))
-        for m in range(-l, l + 1):
-            mm = abs(m)
-            phase = phase_by_m[m + m_offset, :, None]
-            y_beta = legendre[l, mm, :]
-            y1_beta = (
-                math.sqrt(
-                    (2.0 * l + 1.0)
-                    / (2.0 * l + 3.0)
-                    * (((l + 1.0) * (l + 1.0) - mm * mm) / ((l + 1.0) * (l + 1.0)))
-                )
-                * legendre[l + 1, mm, :]
-            )
-            y2_beta = (
-                0.0
-                if mm == l
-                else math.sqrt((2.0 * l + 1.0) / (2.0 * l - 1.0) * ((l * l - mm * mm) / (l * l)))
-                * legendre[l - 1, mm, :]
-            )
-            idx = scalar_index(l, m)
-            fth_grid[:, :, idx] = prefactor * phase * ((y1_beta - y2_beta) * q_beta)[None, :]
-            fph_grid[:, :, idx] = (
-                prefactor * phase * ((1j * m * l_scale * y_beta) * q_beta)[None, :]
-            )
+    fth_beta, fph_beta, m_of_scalar = _directional_beta_factors(box_order_i, grid)
+    phase_by_scalar = np.asarray(
+        np.exp(1j * alpha[:, None] * m_of_scalar[None, :]),
+        dtype=np.complex128,
+    )
+    fth.reshape(n_alpha, n_beta, nscl)[:, :, :] = phase_by_scalar[:, None, :] * fth_beta[None, :, :]
+    fph.reshape(n_alpha, n_beta, nscl)[:, :, :] = phase_by_scalar[:, None, :] * fph_beta[None, :, :]
 
     return MLFMMDirectionalTransforms(
         box_order=box_order_i,
         grid=grid,
         Fth=fth,
         Fph=fph,
+    )
+
+
+def _phase_by_m(alpha: Array, m_values: Array) -> Array:
+    return np.asarray(
+        np.exp(
+            1j
+            * np.asarray(alpha, dtype=np.float64).reshape(-1)[:, None]
+            * np.asarray(m_values, dtype=np.float64).reshape(1, -1)
+        ),
+        dtype=np.complex128,
     )
 
 
@@ -340,6 +430,51 @@ def directional_transforms(
         effective_grid_order,
         _cache_key_factor(alpha_factor),
         _cache_key_factor(beta_factor),
+    )
+
+
+def box_outgoing_to_directional_structured(
+    transforms: MLFMMDirectionalStructuredTransforms,
+    box_state: Array,
+) -> tuple[Array, Array, Array, Array]:
+    """Map one outgoing box state with separable directional factors."""
+
+    coeffs = np.asarray(box_state, dtype=np.complex128).reshape(-1)
+    nscl = int(transforms.fth_beta.shape[1])
+    if coeffs.size != 2 * nscl:
+        raise ValueError(f"box_state must have length {2 * nscl}, got {coeffs.size}.")
+
+    n_alpha = int(transforms.grid.alpha.size)
+    n_beta = int(transforms.grid.beta.size)
+    m_values = np.arange(-int(transforms.box_order), int(transforms.box_order) + 1, dtype=np.int32)
+    phase = _phase_by_m(transforms.grid.alpha, m_values)
+    a_box = coeffs[:nscl]
+    b_box = coeffs[nscl:]
+    a_theta = np.zeros((n_alpha, n_beta), dtype=np.complex128)
+    a_phi = np.zeros_like(a_theta)
+    b_theta = np.zeros_like(a_theta)
+    b_phi = np.zeros_like(a_theta)
+
+    for im, m in enumerate(m_values.tolist()):
+        mode_mask = transforms.m_of_scalar == int(m)
+        if not np.any(mode_mask):
+            continue
+        phase_m = phase[:, im][:, None]
+        fth_m = transforms.fth_beta[:, mode_mask]
+        fph_m = transforms.fph_beta[:, mode_mask]
+        a_m = a_box[mode_mask]
+        b_m = b_box[mode_mask]
+        a_theta += phase_m * (fth_m @ a_m)[None, :]
+        a_phi += phase_m * (fph_m @ a_m)[None, :]
+        b_theta += phase_m * (fth_m @ b_m)[None, :]
+        b_phi += phase_m * (fph_m @ b_m)[None, :]
+
+    return apply_directional_reflection(
+        transforms.grid.reflection_permutation,
+        a_theta.reshape(-1),
+        a_phi.reshape(-1),
+        b_theta.reshape(-1),
+        b_phi.reshape(-1),
     )
 
 
@@ -366,6 +501,63 @@ def box_outgoing_to_directional(
         np.asarray(b_theta, dtype=np.complex128, copy=False),
         np.asarray(b_phi, dtype=np.complex128, copy=False),
     )
+
+
+def directional_to_box_regular_structured(
+    transforms: MLFMMDirectionalStructuredTransforms,
+    a_theta: Array,
+    a_phi: Array,
+    b_theta: Array,
+    b_phi: Array,
+) -> Array:
+    """Map sampled directional channels to one regular box state with separable factors."""
+
+    a_theta_arr, a_phi_arr, b_theta_arr, b_phi_arr = apply_directional_reflection(
+        transforms.grid.reflection_permutation,
+        np.asarray(a_theta, dtype=np.complex128).reshape(-1),
+        np.asarray(a_phi, dtype=np.complex128).reshape(-1),
+        np.asarray(b_theta, dtype=np.complex128).reshape(-1),
+        np.asarray(b_phi, dtype=np.complex128).reshape(-1),
+    )
+    n_alpha = int(transforms.grid.alpha.size)
+    n_beta = int(transforms.grid.beta.size)
+    nscl = int(transforms.fth_beta.shape[1])
+    grids = (
+        a_theta_arr.reshape(n_alpha, n_beta),
+        a_phi_arr.reshape(n_alpha, n_beta),
+        b_theta_arr.reshape(n_alpha, n_beta),
+        b_phi_arr.reshape(n_alpha, n_beta),
+    )
+    m_values = np.arange(-int(transforms.box_order), int(transforms.box_order) + 1, dtype=np.int32)
+    phase_adj = np.conjugate(_phase_by_m(transforms.grid.alpha, m_values))
+    top = np.zeros((nscl,), dtype=np.complex128)
+    bottom = np.zeros_like(top)
+
+    for im, m in enumerate(m_values.tolist()):
+        mode_mask = transforms.m_of_scalar == int(m)
+        if not np.any(mode_mask):
+            continue
+        phase_m = phase_adj[:, im]
+        a_theta_m = phase_m @ grids[0]
+        a_phi_m = phase_m @ grids[1]
+        b_theta_m = phase_m @ grids[2]
+        b_phi_m = phase_m @ grids[3]
+        fth_h = np.conjugate(transforms.fth_beta[:, mode_mask])
+        fph_h = np.conjugate(transforms.fph_beta[:, mode_mask])
+        top[mode_mask] = (
+            fth_h.T @ a_theta_m
+            + fph_h.T @ a_phi_m
+            - 1j * (fph_h.T @ b_theta_m)
+            + 1j * (fth_h.T @ b_phi_m)
+        )
+        bottom[mode_mask] = (
+            fth_h.T @ b_theta_m
+            + fph_h.T @ b_phi_m
+            - 1j * (fph_h.T @ a_theta_m)
+            + 1j * (fth_h.T @ a_phi_m)
+        )
+
+    return np.concatenate((top, bottom)).astype(np.complex128, copy=False)
 
 
 def directional_to_box_regular(
@@ -619,12 +811,16 @@ def directional_anterpolation(
 __all__ = [
     "MLFMMDirectionalGrid",
     "MLFMMDirectionalInterpolation",
+    "MLFMMDirectionalStructuredTransforms",
     "MLFMMDirectionalTransforms",
     "apply_directional_reflection",
     "box_outgoing_to_directional",
+    "box_outgoing_to_directional_structured",
     "directional_anterpolation",
     "directional_grid",
     "directional_interpolation",
     "directional_to_box_regular",
+    "directional_to_box_regular_structured",
     "directional_transforms",
+    "structured_directional_transforms",
 ]

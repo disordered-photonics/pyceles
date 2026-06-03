@@ -11,11 +11,14 @@ from pyceles.core.operators.mlfmm_directional import (
     _legendre2,
     apply_directional_reflection,
     box_outgoing_to_directional,
+    box_outgoing_to_directional_structured,
     directional_anterpolation,
     directional_grid,
     directional_interpolation,
     directional_to_box_regular,
+    directional_to_box_regular_structured,
     directional_transforms,
+    structured_directional_transforms,
 )
 from pyceles.core.translation import translation_ab5_table, translation_block_regular
 
@@ -121,6 +124,71 @@ def test_directional_transform_basis_matches_direct_scipy_reference() -> None:
                     rtol=5e-13,
                     atol=5e-13,
                 )
+
+
+def test_structured_directional_forward_matches_dense() -> None:
+    box_order = 5
+    dense = directional_transforms(box_order, grid_order=6)
+    structured = structured_directional_transforms(box_order, grid_order=6)
+    rng = np.random.default_rng(51)
+    box_state = rng.standard_normal(n_modes(box_order)) + 1j * rng.standard_normal(
+        n_modes(box_order)
+    )
+
+    expected = box_outgoing_to_directional(dense, box_state)
+    got = box_outgoing_to_directional_structured(structured, box_state)
+    for lhs, rhs in zip(got, expected, strict=True):
+        np.testing.assert_allclose(lhs, rhs, rtol=2.0e-13, atol=2.0e-13)
+
+
+def test_structured_directional_adjoint_matches_dense() -> None:
+    box_order = 5
+    dense = directional_transforms(box_order, grid_order=6)
+    structured = structured_directional_transforms(box_order, grid_order=6)
+    rng = np.random.default_rng(52)
+    n_dir = int(dense.grid.directions.shape[0])
+    channels = tuple(
+        np.asarray(
+            rng.standard_normal(n_dir) + 1j * rng.standard_normal(n_dir),
+            dtype=np.complex128,
+        )
+        for _ in range(4)
+    )
+
+    expected = directional_to_box_regular(dense, *channels)
+    got = directional_to_box_regular_structured(structured, *channels)
+    np.testing.assert_allclose(got, expected, rtol=2.0e-13, atol=2.0e-13)
+
+
+def test_structured_directional_roundtrip_matches_dense() -> None:
+    box_order = 6
+    dense = directional_transforms(box_order, grid_order=7)
+    structured = structured_directional_transforms(box_order, grid_order=7)
+    rng = np.random.default_rng(53)
+    box_state = rng.standard_normal(n_modes(box_order)) + 1j * rng.standard_normal(
+        n_modes(box_order)
+    )
+
+    dense_roundtrip = directional_to_box_regular(
+        dense, *box_outgoing_to_directional(dense, box_state)
+    )
+    structured_roundtrip = directional_to_box_regular_structured(
+        structured,
+        *box_outgoing_to_directional_structured(structured, box_state),
+    )
+    np.testing.assert_allclose(structured_roundtrip, dense_roundtrip, rtol=2.0e-13, atol=2.0e-13)
+
+
+def test_structured_directional_storage_is_smaller_than_dense() -> None:
+    box_order = 20
+    dense = directional_transforms(box_order)
+    structured = structured_directional_transforms(box_order)
+    dense_bytes = int(dense.Fth.nbytes + dense.Fph.nbytes)
+    structured_bytes = int(
+        structured.fth_beta.nbytes + structured.fph_beta.nbytes + structured.m_of_scalar.nbytes
+    )
+
+    assert structured_bytes < dense_bytes // 10
 
 
 def test_directional_interpolation_anterpolation_transpose_relation() -> None:

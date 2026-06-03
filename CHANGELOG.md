@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added geometry-only Rayleigh/Wood anomaly diagnostics for rectangular
   periodic cells, including threshold enumeration and safe period-scale
   suggestions.
+- Added separable MLFMM directional-transform helpers as the NumPy reference
+  path for lower-memory sampled-basis evaluation.
 
 ### Fixed
 - Fixed the automatic multilevel MLFMM sampled-level policy so it no longer
