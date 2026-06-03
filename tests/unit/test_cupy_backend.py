@@ -20,7 +20,17 @@ from pyceles.core.operators import (
     prepare_mlfmm_cupy_coupling,
     prepare_mlfmm_cupy_data,
 )
-from pyceles.core.operators.mlfmm_cupy import _upload_offset_batches
+from pyceles.core.operators.mlfmm_cupy import (
+    _box_outgoing_to_directional_cupy,
+    _directional_to_box_regular_cupy,
+    _upload_directional_transforms,
+    _upload_offset_batches,
+)
+from pyceles.core.operators.mlfmm_directional import (
+    box_outgoing_to_directional,
+    directional_to_box_regular,
+    directional_transforms,
+)
 from pyceles.core.particles import Particle, spheres_from_arrays
 from pyceles.core.translation import RadialLUT
 from pyceles.io import far_field_intensity
@@ -98,6 +108,69 @@ def _mixed_cluster_particles() -> tuple[Particle, ...]:
             euler_angles=(0.1, 0.35, -0.2),
         ),
     )
+
+
+def test_cupy_mlfmm_directional_upload_uses_structured_factors() -> None:
+    cupy, _ = import_cupy()
+    transforms = directional_transforms(5, grid_order=6)
+    uploaded = _upload_directional_transforms(transforms, cupy=cupy)
+
+    assert not hasattr(uploaded, "forward_F")
+    assert not hasattr(uploaded, "inverse_A_adj")
+    assert tuple(uploaded.fth_beta.shape) == (transforms.grid.beta.size, transforms.Fth.shape[1])
+    assert tuple(uploaded.fph_beta.shape) == (transforms.grid.beta.size, transforms.Fph.shape[1])
+    dense_bytes = int(transforms.Fth.nbytes + transforms.Fph.nbytes)
+    structured_bytes = int(
+        uploaded.fth_beta.nbytes
+        + uploaded.fph_beta.nbytes
+        + uploaded.phase_by_m.nbytes
+        + uploaded.m_of_scalar.nbytes
+    )
+    assert structured_bytes < dense_bytes // 4
+
+
+def test_cupy_mlfmm_structured_directional_maps_match_dense_reference() -> None:
+    cupy, _ = import_cupy()
+    transforms = directional_transforms(4, grid_order=5)
+    uploaded = _upload_directional_transforms(transforms, cupy=cupy)
+    rng = np.random.default_rng(20260603)
+    state = np.asarray(
+        rng.standard_normal((2, n_modes(4), 3)) + 1j * rng.standard_normal((2, n_modes(4), 3)),
+        dtype=np.complex128,
+    )
+
+    got = asnumpy(_box_outgoing_to_directional_cupy(uploaded, cupy.asarray(state), cupy=cupy))
+    for batch in range(state.shape[0]):
+        for rhs in range(state.shape[2]):
+            expected = box_outgoing_to_directional(transforms, state[batch, :, rhs])
+            for channel in range(4):
+                np.testing.assert_allclose(
+                    got[batch, channel, :, rhs],
+                    expected[channel],
+                    rtol=2.0e-12,
+                    atol=2.0e-12,
+                )
+
+    channels = np.asarray(
+        rng.standard_normal(got.shape) + 1j * rng.standard_normal(got.shape),
+        dtype=np.complex128,
+    )
+    got_box = asnumpy(_directional_to_box_regular_cupy(uploaded, cupy.asarray(channels), cupy=cupy))
+    for batch in range(channels.shape[0]):
+        for rhs in range(channels.shape[3]):
+            expected_box = directional_to_box_regular(
+                transforms,
+                channels[batch, 0, :, rhs],
+                channels[batch, 1, :, rhs],
+                channels[batch, 2, :, rhs],
+                channels[batch, 3, :, rhs],
+            )
+            np.testing.assert_allclose(
+                got_box[batch, :, rhs],
+                expected_box,
+                rtol=2.0e-12,
+                atol=2.0e-12,
+            )
 
 
 def test_cupy_mlfmm_upload_offset_batches_rejects_nonunique() -> None:

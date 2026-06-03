@@ -32,7 +32,7 @@ from .mlfmm import (
     MLFMMSingleLevelOperators,
     MLFMMTransferOperators,
 )
-from .mlfmm_directional import MLFMMDirectionalTransforms
+from .mlfmm_directional import MLFMMDirectionalTransforms, structured_directional_transforms
 from .mlfmm_partition import MLFMMPartition
 from .mode_metadata import (
     mode_m_table,
@@ -138,8 +138,11 @@ class CuPyDirectionalGridData:
     """Device copy of one directional sampling grid."""
 
     order: int
+    n_alpha: int
+    n_beta: int
     n_directions: int
     reflection_permutation: Any
+    beta_reflection_permutation: Any
 
 
 @dataclass(frozen=True)
@@ -147,19 +150,23 @@ class CuPyHostDirectionalGridData:
     """Compact host directional-grid payload used for cache serialization."""
 
     order: int
+    n_alpha: int
+    n_beta: int
     n_directions: int
+    alpha: np.ndarray
     reflection_permutation: np.ndarray
 
 
 @dataclass(frozen=True)
 class CuPyHostDirectionalTransformsData:
-    """Compact host directional transform payload with canonical F operators only."""
+    """Compact host directional transform payload with separable factors only."""
 
     box_order: int
     grid_order: int
     grid: CuPyHostDirectionalGridData
-    Fth: np.ndarray
-    Fph: np.ndarray
+    fth_beta: np.ndarray
+    fph_beta: np.ndarray
+    m_of_scalar: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -268,21 +275,21 @@ class CuPyMLFMMHostCacheData:
 class CuPyDirectionalTransformsData:
     """Device directional transform payload for one box/grid order.
 
-    Matrices are prepacked for batched GEMM on repeated apply:
-    - `forward_F` maps one scalar SVWF block (`nscl`) to two reflected
-      directional channels (`theta`, `phi`) with shape `(2*ndir, nscl)`.
-    - `inverse_A_adj` is the reflected adjoint block used by the inverse map
-      with shape `(nscl, 2*ndir)`. The paired `G` adjoint is analytic and is
-      applied by rotating directional channels before a second `inverse_A_adj`
-      multiply, avoiding one more dense resident matrix.
+    The CuPy path stores beta factors and azimuthal phases instead of dense
+    `(n_alpha*n_beta, n_scalar)` F matrices. Repeated apply expands the
+    directional channels on demand, which trades explicit `m` sums for a much
+    lower resident memory footprint on coarse high-frequency levels.
     """
 
     box_order: int
     grid_order: int
     grid: CuPyDirectionalGridData
     nscl: int
-    forward_F: Any
-    inverse_A_adj: Any
+    fth_beta: Any
+    fph_beta: Any
+    m_of_scalar: Any
+    phase_by_m: Any
+    mode_indices_by_m: tuple[Any, ...]
 
 
 @dataclass(frozen=True)
@@ -1098,14 +1105,16 @@ def build_leaf_box_maps_cupy(
     return aggregation, receive
 
 
-def _upload_directional_transforms(
-    transforms: MLFMMDirectionalTransforms | CuPyHostDirectionalTransformsData, *, cupy: Any
-) -> CuPyDirectionalTransformsData:
-    grid = transforms.grid
-    n_dir: int
-    if hasattr(grid, "n_directions"):
+def _host_directional_grid_size(grid: Any) -> tuple[int, int, int]:
+    """Return `(n_alpha, n_beta, n_directions)` for one host directional grid."""
+
+    if hasattr(grid, "n_alpha") and hasattr(grid, "n_beta"):
+        n_alpha = int(grid.n_alpha)
+        n_beta = int(grid.n_beta)
         n_dir = int(grid.n_directions)
     else:
+        alpha = _as_numpy_1d(grid.alpha, dtype=np.float64, name="directional.grid.alpha")
+        beta = _as_numpy_1d(grid.beta, dtype=np.float64, name="directional.grid.beta")
         directions = _as_numpy_3cols(
             grid.directions, dtype=np.float64, name="directional.grid.directions"
         )
@@ -1115,7 +1124,80 @@ def _upload_directional_transforms(
                 "Directional grid directions/weights mismatch: "
                 f"{directions.shape[0]} vs {weights.size}."
             )
+        n_alpha = int(alpha.size)
+        n_beta = int(beta.size)
         n_dir = int(directions.shape[0])
+    if n_alpha <= 0 or n_beta <= 0 or n_dir != n_alpha * n_beta:
+        raise ValueError(
+            "Directional grid dimensions are inconsistent: "
+            f"n_alpha={n_alpha}, n_beta={n_beta}, n_directions={n_dir}."
+        )
+    return n_alpha, n_beta, n_dir
+
+
+def _directional_structured_host_view(
+    transforms: MLFMMDirectionalTransforms | CuPyHostDirectionalTransformsData,
+) -> tuple[CuPyHostDirectionalGridData, np.ndarray, np.ndarray, np.ndarray]:
+    """Return compact structured factors for one host directional transform."""
+
+    if isinstance(transforms, CuPyHostDirectionalTransformsData):
+        grid = transforms.grid
+        fth_beta = _as_numpy_2d(
+            transforms.fth_beta, dtype=np.complex128, name="directional.fth_beta"
+        )
+        fph_beta = _as_numpy_2d(
+            transforms.fph_beta, dtype=np.complex128, name="directional.fph_beta"
+        )
+        m_of_scalar = _as_numpy_1d(
+            transforms.m_of_scalar, dtype=np.int32, name="directional.m_of_scalar"
+        )
+        return grid, fth_beta, fph_beta, m_of_scalar
+
+    structured = structured_directional_transforms(
+        int(transforms.box_order), grid_order=int(transforms.grid.order)
+    )
+    grid_raw = structured.grid
+    n_alpha = int(grid_raw.alpha.size)
+    n_beta = int(grid_raw.beta.size)
+    grid = CuPyHostDirectionalGridData(
+        order=int(grid_raw.order),
+        n_alpha=n_alpha,
+        n_beta=n_beta,
+        n_directions=n_alpha * n_beta,
+        alpha=np.ascontiguousarray(np.asarray(grid_raw.alpha, dtype=np.float64).reshape(-1)),
+        reflection_permutation=np.ascontiguousarray(
+            np.asarray(grid_raw.reflection_permutation, dtype=np.int32).reshape(-1)
+        ),
+    )
+    return (
+        grid,
+        np.ascontiguousarray(np.asarray(structured.fth_beta, dtype=np.complex128)),
+        np.ascontiguousarray(np.asarray(structured.fph_beta, dtype=np.complex128)),
+        np.ascontiguousarray(np.asarray(structured.m_of_scalar, dtype=np.int32).reshape(-1)),
+    )
+
+
+def _beta_reflection_permutation(
+    reflection: np.ndarray,
+    *,
+    n_alpha: int,
+    n_beta: int,
+) -> np.ndarray:
+    """Extract the beta-only reflection permutation from one directional grid."""
+
+    reflection_grid = np.asarray(reflection, dtype=np.int32).reshape(int(n_alpha), int(n_beta))
+    beta_perm = np.ascontiguousarray(reflection_grid[0], dtype=np.int32)
+    expected = np.arange(int(n_alpha), dtype=np.int32)[:, None] * int(n_beta) + beta_perm[None, :]
+    if not np.array_equal(reflection_grid, expected):
+        raise ValueError("Directional reflection must preserve alpha and permute beta only.")
+    return beta_perm
+
+
+def _upload_directional_transforms(
+    transforms: MLFMMDirectionalTransforms | CuPyHostDirectionalTransformsData, *, cupy: Any
+) -> CuPyDirectionalTransformsData:
+    grid, fth_beta, fph_beta, m_of_scalar = _directional_structured_host_view(transforms)
+    n_alpha, n_beta, n_dir = _host_directional_grid_size(grid)
     reflection = _as_numpy_1d(
         grid.reflection_permutation,
         dtype=np.int32,
@@ -1125,49 +1207,58 @@ def _upload_directional_transforms(
         raise ValueError(
             f"Directional grid reflection-permutation size mismatch: {reflection.size} vs {n_dir}."
         )
-
-    # Directional transforms are complex128 reference operators; keep them exact.
-    fth = _as_numpy_2d(transforms.Fth, dtype=np.complex128, name="directional.Fth")
-    fph = _as_numpy_2d(transforms.Fph, dtype=np.complex128, name="directional.Fph")
-    if fth.shape[0] != n_dir or fph.shape[0] != n_dir:
+    beta_reflection = _beta_reflection_permutation(
+        reflection,
+        n_alpha=n_alpha,
+        n_beta=n_beta,
+    )
+    if fth_beta.shape != fph_beta.shape:
+        raise ValueError("Directional theta/phi beta-factor shapes must match.")
+    if fth_beta.shape[0] != n_beta:
         raise ValueError(
-            "Directional forward transform row count must match sampled direction count."
+            "Directional beta-factor row count must match beta grid size: "
+            f"{fth_beta.shape[0]} vs {n_beta}."
         )
-    nscl = int(fth.shape[1])
-    perm = np.asarray(reflection, dtype=np.int32)
-    inv_perm = np.ascontiguousarray(np.argsort(perm), dtype=np.int32)
+    nscl = int(fth_beta.shape[1])
+    if m_of_scalar.size != nscl:
+        raise ValueError(
+            f"Directional m table length must match scalar modes: {m_of_scalar.size} vs {nscl}."
+        )
 
-    def upload_into(dst: Any, src: np.ndarray) -> None:
-        staged = cupy.asarray(np.ascontiguousarray(src, dtype=np.complex128))
-        dst[...] = staged
-        del staged
-        cupy.get_default_memory_pool().free_all_blocks()
-
-    # Fill the packed operators one half at a time. This avoids the previous
-    # advanced-indexing + concatenate peak, which could transiently hold Fth,
-    # Fph, both reflected copies, and the final stack on device.
-    f_stack = cupy.empty((2 * n_dir, nscl), dtype=cupy.complex128)
-    upload_into(f_stack[:n_dir, :], fth[perm, :])
-    upload_into(f_stack[n_dir:, :], fph[perm, :])
-
-    # Incoming map: pre-fold reflection on columns via A @ P equivalence
-    # (implemented as column reindex by inverse permutation), then stack
-    # [theta,phi] adjoint blocks for compact batched GEMM.
-    a_adj = cupy.empty((nscl, 2 * n_dir), dtype=cupy.complex128)
-    upload_into(a_adj[:, :n_dir], np.conjugate(fth[inv_perm, :].T))
-    upload_into(a_adj[:, n_dir:], np.conjugate(fph[inv_perm, :].T))
+    box_order = int(transforms.box_order)
+    m_values = np.arange(-box_order, box_order + 1, dtype=np.int32)
+    alpha = _as_numpy_1d(grid.alpha, dtype=np.float64, name="directional.grid.alpha")
+    if alpha.size != n_alpha:
+        raise ValueError(f"Directional alpha size mismatch: {alpha.size} vs {n_alpha}.")
+    phase_by_m = np.asarray(
+        np.exp(1j * alpha[:, None] * m_values[None, :]),
+        dtype=np.complex128,
+    )
+    mode_indices_by_m = tuple(
+        cupy.asarray(
+            np.ascontiguousarray(np.flatnonzero(m_of_scalar == int(m)).astype(np.int32)),
+            dtype=cupy.int32,
+        )
+        for m in m_values.tolist()
+    )
 
     return CuPyDirectionalTransformsData(
-        box_order=int(transforms.box_order),
-        grid_order=int(transforms.grid.order),
+        box_order=box_order,
+        grid_order=int(grid.order),
         grid=CuPyDirectionalGridData(
             order=int(grid.order),
+            n_alpha=n_alpha,
+            n_beta=n_beta,
             n_directions=int(n_dir),
-            reflection_permutation=cupy.asarray(perm, dtype=cupy.int32),
+            reflection_permutation=cupy.asarray(np.asarray(reflection, dtype=np.int32)),
+            beta_reflection_permutation=cupy.asarray(beta_reflection, dtype=cupy.int32),
         ),
         nscl=nscl,
-        forward_F=f_stack,
-        inverse_A_adj=a_adj,
+        fth_beta=cupy.asarray(np.ascontiguousarray(fth_beta, dtype=np.complex128)),
+        fph_beta=cupy.asarray(np.ascontiguousarray(fph_beta, dtype=np.complex128)),
+        m_of_scalar=cupy.asarray(np.ascontiguousarray(m_of_scalar, dtype=np.int32)),
+        phase_by_m=cupy.asarray(np.ascontiguousarray(phase_by_m, dtype=np.complex128)),
+        mode_indices_by_m=mode_indices_by_m,
     )
 
 
@@ -1305,21 +1396,31 @@ def _copy_batches_host(
 def _copy_directional_host(
     transforms: MLFMMDirectionalTransforms,
 ) -> CuPyHostDirectionalTransformsData:
-    """Extract canonical directional operators into a compact host payload."""
+    """Extract separable directional factors into a compact host payload."""
 
-    n_dir = int(np.asarray(transforms.grid.reflection_permutation).size)
+    structured = structured_directional_transforms(
+        int(transforms.box_order), grid_order=int(transforms.grid.order)
+    )
+    n_alpha = int(structured.grid.alpha.size)
+    n_beta = int(structured.grid.beta.size)
     return CuPyHostDirectionalTransformsData(
-        box_order=int(transforms.box_order),
-        grid_order=int(transforms.grid.order),
+        box_order=int(structured.box_order),
+        grid_order=int(structured.grid.order),
         grid=CuPyHostDirectionalGridData(
-            order=int(transforms.grid.order),
-            n_directions=n_dir,
+            order=int(structured.grid.order),
+            n_alpha=n_alpha,
+            n_beta=n_beta,
+            n_directions=n_alpha * n_beta,
+            alpha=np.ascontiguousarray(np.asarray(structured.grid.alpha, dtype=np.float64)),
             reflection_permutation=np.ascontiguousarray(
-                np.asarray(transforms.grid.reflection_permutation, dtype=np.int32).reshape(-1)
+                np.asarray(structured.grid.reflection_permutation, dtype=np.int32).reshape(-1)
             ),
         ),
-        Fth=np.ascontiguousarray(np.asarray(transforms.Fth, dtype=np.complex128)),
-        Fph=np.ascontiguousarray(np.asarray(transforms.Fph, dtype=np.complex128)),
+        fth_beta=np.ascontiguousarray(np.asarray(structured.fth_beta, dtype=np.complex128)),
+        fph_beta=np.ascontiguousarray(np.asarray(structured.fph_beta, dtype=np.complex128)),
+        m_of_scalar=np.ascontiguousarray(
+            np.asarray(structured.m_of_scalar, dtype=np.int32).reshape(-1)
+        ),
     )
 
 
@@ -3592,23 +3693,36 @@ def _box_outgoing_to_directional_cupy(
         )
     ndir = int(directional.grid.n_directions)
     n_batch = int(states.shape[0])
+    n_rhs = int(states.shape[2])
+    n_alpha = int(directional.grid.n_alpha)
+    n_beta = int(directional.grid.n_beta)
     a_box = states[:, :nscl, :]
     b_box = states[:, nscl:, :]
-    pair_dir = cupy.matmul(
-        directional.forward_F[None, :, :],
-        cupy.concatenate((a_box, b_box), axis=0),
-    )
-    a_dir = pair_dir[:n_batch]
-    b_dir = pair_dir[n_batch:]
     out_arr = (
         cupy.asarray(out, dtype=cupy.complex128)
         if out is not None
-        else cupy.empty((n_batch, 4, ndir, int(states.shape[2])), dtype=cupy.complex128)
+        else cupy.empty((n_batch, 4, ndir, n_rhs), dtype=cupy.complex128)
     )
-    out_arr[:, 0, :, :] = a_dir[:, :ndir, :]
-    out_arr[:, 1, :, :] = a_dir[:, ndir:, :]
-    out_arr[:, 2, :, :] = b_dir[:, :ndir, :]
-    out_arr[:, 3, :, :] = b_dir[:, ndir:, :]
+    out_arr.fill(0)
+    work = out_arr.reshape(n_batch, 4, n_alpha, n_beta, n_rhs)
+    beta_perm = directional.grid.beta_reflection_permutation
+
+    for im, mode_idx in enumerate(directional.mode_indices_by_m):
+        if int(mode_idx.size) == 0:
+            continue
+        phase = directional.phase_by_m[:, im].reshape(1, n_alpha, 1, 1)
+        fth_m = directional.fth_beta[beta_perm][:, mode_idx]
+        fph_m = directional.fph_beta[beta_perm][:, mode_idx]
+        a_m = a_box[:, mode_idx, :]
+        b_m = b_box[:, mode_idx, :]
+        a_theta_beta = cupy.matmul(fth_m[None, :, :], a_m)
+        a_phi_beta = cupy.matmul(fph_m[None, :, :], a_m)
+        b_theta_beta = cupy.matmul(fth_m[None, :, :], b_m)
+        b_phi_beta = cupy.matmul(fph_m[None, :, :], b_m)
+        work[:, 0] += phase * a_theta_beta[:, None, :, :]
+        work[:, 1] += phase * a_phi_beta[:, None, :, :]
+        work[:, 2] += phase * b_theta_beta[:, None, :, :]
+        work[:, 3] += phase * b_phi_beta[:, None, :, :]
     return out_arr
 
 
@@ -3627,34 +3741,44 @@ def _directional_to_box_regular_cupy(
             f"directional channel batch must have 4 channels, got {int(channels.shape[1])}."
         )
     n_batch = int(channels.shape[0])
-    ch_ab = cupy.concatenate((channels[:, 0], channels[:, 1]), axis=1)
-    ch_bb = cupy.concatenate((channels[:, 2], channels[:, 3]), axis=1)
-    ch_pair = cupy.concatenate((ch_ab, ch_bb), axis=0)
-    a_pair = cupy.matmul(directional.inverse_A_adj[None, :, :], ch_pair)
-    # Gth/Gph are analytically tied to F by Gth_adj=-1j*Fph_adj,
-    # Gph_adj=+1j*Fth_adj. Reuse A_adj after rotating channels instead of
-    # storing another dense adjoint matrix for every sampled level.
-    rot_ab = cupy.concatenate((1j * channels[:, 1], -1j * channels[:, 0]), axis=1)
-    rot_bb = cupy.concatenate((1j * channels[:, 3], -1j * channels[:, 2]), axis=1)
-    g_pair = cupy.matmul(
-        directional.inverse_A_adj[None, :, :],
-        cupy.concatenate((rot_ab, rot_bb), axis=0),
-    )
-    a_ab = a_pair[:n_batch]
-    a_bb = a_pair[n_batch:]
-    g_ab = g_pair[:n_batch]
-    g_bb = g_pair[n_batch:]
+    n_rhs = int(channels.shape[3])
+    n_alpha = int(directional.grid.n_alpha)
+    n_beta = int(directional.grid.n_beta)
+    nscl = int(directional.nscl)
+    reflected = channels.reshape(n_batch, 4, n_alpha, n_beta, n_rhs)[
+        :, :, :, directional.grid.beta_reflection_permutation, :
+    ]
     out_arr = (
         cupy.asarray(out, dtype=cupy.complex128)
         if out is not None
-        else cupy.empty(
-            (n_batch, int(directional.nscl) * 2, int(channels.shape[3])),
-            dtype=cupy.complex128,
-        )
+        else cupy.empty((n_batch, 2 * nscl, n_rhs), dtype=cupy.complex128)
     )
-    nscl = int(directional.nscl)
-    out_arr[:, :nscl, :] = a_ab + g_bb
-    out_arr[:, nscl:, :] = g_ab + a_bb
+    top = out_arr[:, :nscl, :]
+    bottom = out_arr[:, nscl:, :]
+    top.fill(0)
+    bottom.fill(0)
+    phase_adj = cupy.conjugate(directional.phase_by_m)
+
+    for im, mode_idx in enumerate(directional.mode_indices_by_m):
+        if int(mode_idx.size) == 0:
+            continue
+        phase_m = phase_adj[:, im]
+        a_theta_m = cupy.einsum("a,bakr->bkr", phase_m, reflected[:, 0], optimize=True)
+        a_phi_m = cupy.einsum("a,bakr->bkr", phase_m, reflected[:, 1], optimize=True)
+        b_theta_m = cupy.einsum("a,bakr->bkr", phase_m, reflected[:, 2], optimize=True)
+        b_phi_m = cupy.einsum("a,bakr->bkr", phase_m, reflected[:, 3], optimize=True)
+        fth_h = cupy.conjugate(cupy.swapaxes(directional.fth_beta[:, mode_idx], 0, 1))
+        fph_h = cupy.conjugate(cupy.swapaxes(directional.fph_beta[:, mode_idx], 0, 1))
+        fth_a_theta = cupy.matmul(fth_h[None, :, :], a_theta_m)
+        fph_a_phi = cupy.matmul(fph_h[None, :, :], a_phi_m)
+        fph_b_theta = cupy.matmul(fph_h[None, :, :], b_theta_m)
+        fth_b_phi = cupy.matmul(fth_h[None, :, :], b_phi_m)
+        top[:, mode_idx, :] = fth_a_theta + fph_a_phi - 1j * fph_b_theta + 1j * fth_b_phi
+        fth_b_theta = cupy.matmul(fth_h[None, :, :], b_theta_m)
+        fph_b_phi = cupy.matmul(fph_h[None, :, :], b_phi_m)
+        fph_a_theta = cupy.matmul(fph_h[None, :, :], a_theta_m)
+        fth_a_phi = cupy.matmul(fth_h[None, :, :], a_phi_m)
+        bottom[:, mode_idx, :] = fth_b_theta + fph_b_phi - 1j * fph_a_theta + 1j * fth_a_phi
     return out_arr
 
 
