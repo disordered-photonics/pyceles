@@ -47,8 +47,6 @@ Offset3 = tuple[int, int, int]
 # available only for validation/debug parity against the CPU reference plan.
 CuPyMLFMMLeafApplyMode = Literal["dense", "on_the_fly"]
 CuPyMLFMMHostCacheRetention = Literal["full", "summary", "none"]
-CuPyDirectionalAlphaMethod = Literal["explicit", "fft"]
-_DEFAULT_CUPY_DIRECTIONAL_ALPHA_METHOD: CuPyDirectionalAlphaMethod = "explicit"
 
 
 @dataclass(frozen=True)
@@ -3678,26 +3676,15 @@ def _apply_directional_map(
     return mapped_flat.reshape(n_batch, n_chan, n_rhs, target_order).transpose(0, 1, 3, 2)
 
 
-def _resolve_directional_alpha_method(
-    alpha_method: CuPyDirectionalAlphaMethod | str | None,
-) -> CuPyDirectionalAlphaMethod:
-    method = _DEFAULT_CUPY_DIRECTIONAL_ALPHA_METHOD if alpha_method is None else str(alpha_method)
-    if method not in {"explicit", "fft"}:
-        raise ValueError(f"unknown CuPy directional alpha method: {method!r}")
-    return cast(CuPyDirectionalAlphaMethod, method)
-
-
 def _box_outgoing_to_directional_cupy(
     directional: CuPyDirectionalTransformsData,
     box_states: Any,
     *,
     out: Any | None = None,
     cupy: Any,
-    alpha_method: CuPyDirectionalAlphaMethod | str | None = None,
 ) -> Any:
     """Map batched outgoing box SVWF states to directional channels on device."""
 
-    method = _resolve_directional_alpha_method(alpha_method)
     states = cupy.asarray(box_states, dtype=cupy.complex128)
     nscl = int(directional.nscl)
     if int(states.shape[1]) != 2 * nscl:
@@ -3722,6 +3709,10 @@ def _box_outgoing_to_directional_cupy(
     fth_reflected = directional.fth_beta[beta_perm]
     fph_reflected = directional.fph_beta[beta_perm]
 
+    # An FFT over alpha was tested on large-scale CuPy MLFMM smokes. It gave
+    # effectively identical runtime while increasing peak memory, so keep the
+    # simpler explicit phase contraction until profiling shows a different
+    # bottleneck.
     for im, mode_idx in enumerate(directional.mode_indices_by_m):
         if int(mode_idx.size) == 0:
             continue
@@ -3733,22 +3724,11 @@ def _box_outgoing_to_directional_cupy(
         a_phi_beta = cupy.matmul(fph_m[None, :, :], a_m)
         b_theta_beta = cupy.matmul(fth_m[None, :, :], b_m)
         b_phi_beta = cupy.matmul(fph_m[None, :, :], b_m)
-        if method == "explicit":
-            phase = directional.phase_by_m[:, im].reshape(1, n_alpha, 1, 1)
-            work[:, 0] += phase * a_theta_beta[:, None, :, :]
-            work[:, 1] += phase * a_phi_beta[:, None, :, :]
-            work[:, 2] += phase * b_theta_beta[:, None, :, :]
-            work[:, 3] += phase * b_phi_beta[:, None, :, :]
-        else:
-            m = int(im) - int(directional.box_order)
-            alpha_index = int(m % n_alpha)
-            phase_shift = directional.phase_by_m[0, im]
-            work[:, 0, alpha_index, :, :] += phase_shift * a_theta_beta
-            work[:, 1, alpha_index, :, :] += phase_shift * a_phi_beta
-            work[:, 2, alpha_index, :, :] += phase_shift * b_theta_beta
-            work[:, 3, alpha_index, :, :] += phase_shift * b_phi_beta
-    if method == "fft":
-        work[...] = cupy.fft.ifft(work, axis=2) * n_alpha
+        phase = directional.phase_by_m[:, im].reshape(1, n_alpha, 1, 1)
+        work[:, 0] += phase * a_theta_beta[:, None, :, :]
+        work[:, 1] += phase * a_phi_beta[:, None, :, :]
+        work[:, 2] += phase * b_theta_beta[:, None, :, :]
+        work[:, 3] += phase * b_phi_beta[:, None, :, :]
     return out_arr
 
 
@@ -3758,11 +3738,9 @@ def _directional_to_box_regular_cupy(
     *,
     out: Any | None = None,
     cupy: Any,
-    alpha_method: CuPyDirectionalAlphaMethod | str | None = None,
 ) -> Any:
     """Map batched directional channels to regular box SVWF states on device."""
 
-    method = _resolve_directional_alpha_method(alpha_method)
     channels = cupy.asarray(directional_channels, dtype=cupy.complex128)
     if int(channels.shape[1]) != 4:
         raise ValueError(
@@ -3788,26 +3766,15 @@ def _directional_to_box_regular_cupy(
     phase_adj = cupy.conjugate(directional.phase_by_m)
     fth_h_all = cupy.conjugate(cupy.swapaxes(directional.fth_beta, 0, 1))
     fph_h_all = cupy.conjugate(cupy.swapaxes(directional.fph_beta, 0, 1))
-    if method == "fft":
-        reflected = cupy.fft.fft(reflected, axis=2)
 
     for im, mode_idx in enumerate(directional.mode_indices_by_m):
         if int(mode_idx.size) == 0:
             continue
-        if method == "explicit":
-            phase_m = phase_adj[:, im]
-            a_theta_m = cupy.einsum("a,bakr->bkr", phase_m, reflected[:, 0], optimize=True)
-            a_phi_m = cupy.einsum("a,bakr->bkr", phase_m, reflected[:, 1], optimize=True)
-            b_theta_m = cupy.einsum("a,bakr->bkr", phase_m, reflected[:, 2], optimize=True)
-            b_phi_m = cupy.einsum("a,bakr->bkr", phase_m, reflected[:, 3], optimize=True)
-        else:
-            m = int(im) - int(directional.box_order)
-            alpha_index = int(m % n_alpha)
-            phase_m = phase_adj[0, im]
-            a_theta_m = phase_m * reflected[:, 0, alpha_index, :, :]
-            a_phi_m = phase_m * reflected[:, 1, alpha_index, :, :]
-            b_theta_m = phase_m * reflected[:, 2, alpha_index, :, :]
-            b_phi_m = phase_m * reflected[:, 3, alpha_index, :, :]
+        phase_m = phase_adj[:, im]
+        a_theta_m = cupy.einsum("a,bakr->bkr", phase_m, reflected[:, 0], optimize=True)
+        a_phi_m = cupy.einsum("a,bakr->bkr", phase_m, reflected[:, 1], optimize=True)
+        b_theta_m = cupy.einsum("a,bakr->bkr", phase_m, reflected[:, 2], optimize=True)
+        b_phi_m = cupy.einsum("a,bakr->bkr", phase_m, reflected[:, 3], optimize=True)
         fth_h = fth_h_all[mode_idx, :]
         fph_h = fph_h_all[mode_idx, :]
         fth_a_theta = cupy.matmul(fth_h[None, :, :], a_theta_m)
