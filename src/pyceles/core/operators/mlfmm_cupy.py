@@ -47,6 +47,8 @@ Offset3 = tuple[int, int, int]
 # available only for validation/debug parity against the CPU reference plan.
 CuPyMLFMMLeafApplyMode = Literal["dense", "on_the_fly"]
 CuPyMLFMMHostCacheRetention = Literal["full", "summary", "none"]
+CuPyDirectionalAlphaMethod = Literal["explicit", "fft"]
+_DEFAULT_CUPY_DIRECTIONAL_ALPHA_METHOD: CuPyDirectionalAlphaMethod = "explicit"
 
 
 @dataclass(frozen=True)
@@ -3676,15 +3678,26 @@ def _apply_directional_map(
     return mapped_flat.reshape(n_batch, n_chan, n_rhs, target_order).transpose(0, 1, 3, 2)
 
 
+def _resolve_directional_alpha_method(
+    alpha_method: CuPyDirectionalAlphaMethod | str | None,
+) -> CuPyDirectionalAlphaMethod:
+    method = _DEFAULT_CUPY_DIRECTIONAL_ALPHA_METHOD if alpha_method is None else str(alpha_method)
+    if method not in {"explicit", "fft"}:
+        raise ValueError(f"unknown CuPy directional alpha method: {method!r}")
+    return cast(CuPyDirectionalAlphaMethod, method)
+
+
 def _box_outgoing_to_directional_cupy(
     directional: CuPyDirectionalTransformsData,
     box_states: Any,
     *,
     out: Any | None = None,
     cupy: Any,
+    alpha_method: CuPyDirectionalAlphaMethod | str | None = None,
 ) -> Any:
     """Map batched outgoing box SVWF states to directional channels on device."""
 
+    method = _resolve_directional_alpha_method(alpha_method)
     states = cupy.asarray(box_states, dtype=cupy.complex128)
     nscl = int(directional.nscl)
     if int(states.shape[1]) != 2 * nscl:
@@ -3706,23 +3719,36 @@ def _box_outgoing_to_directional_cupy(
     out_arr.fill(0)
     work = out_arr.reshape(n_batch, 4, n_alpha, n_beta, n_rhs)
     beta_perm = directional.grid.beta_reflection_permutation
+    fth_reflected = directional.fth_beta[beta_perm]
+    fph_reflected = directional.fph_beta[beta_perm]
 
     for im, mode_idx in enumerate(directional.mode_indices_by_m):
         if int(mode_idx.size) == 0:
             continue
-        phase = directional.phase_by_m[:, im].reshape(1, n_alpha, 1, 1)
-        fth_m = directional.fth_beta[beta_perm][:, mode_idx]
-        fph_m = directional.fph_beta[beta_perm][:, mode_idx]
+        fth_m = fth_reflected[:, mode_idx]
+        fph_m = fph_reflected[:, mode_idx]
         a_m = a_box[:, mode_idx, :]
         b_m = b_box[:, mode_idx, :]
         a_theta_beta = cupy.matmul(fth_m[None, :, :], a_m)
         a_phi_beta = cupy.matmul(fph_m[None, :, :], a_m)
         b_theta_beta = cupy.matmul(fth_m[None, :, :], b_m)
         b_phi_beta = cupy.matmul(fph_m[None, :, :], b_m)
-        work[:, 0] += phase * a_theta_beta[:, None, :, :]
-        work[:, 1] += phase * a_phi_beta[:, None, :, :]
-        work[:, 2] += phase * b_theta_beta[:, None, :, :]
-        work[:, 3] += phase * b_phi_beta[:, None, :, :]
+        if method == "explicit":
+            phase = directional.phase_by_m[:, im].reshape(1, n_alpha, 1, 1)
+            work[:, 0] += phase * a_theta_beta[:, None, :, :]
+            work[:, 1] += phase * a_phi_beta[:, None, :, :]
+            work[:, 2] += phase * b_theta_beta[:, None, :, :]
+            work[:, 3] += phase * b_phi_beta[:, None, :, :]
+        else:
+            m = int(im) - int(directional.box_order)
+            alpha_index = int(m % n_alpha)
+            phase_shift = directional.phase_by_m[0, im]
+            work[:, 0, alpha_index, :, :] += phase_shift * a_theta_beta
+            work[:, 1, alpha_index, :, :] += phase_shift * a_phi_beta
+            work[:, 2, alpha_index, :, :] += phase_shift * b_theta_beta
+            work[:, 3, alpha_index, :, :] += phase_shift * b_phi_beta
+    if method == "fft":
+        work[...] = cupy.fft.ifft(work, axis=2) * n_alpha
     return out_arr
 
 
@@ -3732,9 +3758,11 @@ def _directional_to_box_regular_cupy(
     *,
     out: Any | None = None,
     cupy: Any,
+    alpha_method: CuPyDirectionalAlphaMethod | str | None = None,
 ) -> Any:
     """Map batched directional channels to regular box SVWF states on device."""
 
+    method = _resolve_directional_alpha_method(alpha_method)
     channels = cupy.asarray(directional_channels, dtype=cupy.complex128)
     if int(channels.shape[1]) != 4:
         raise ValueError(
@@ -3758,17 +3786,30 @@ def _directional_to_box_regular_cupy(
     top.fill(0)
     bottom.fill(0)
     phase_adj = cupy.conjugate(directional.phase_by_m)
+    fth_h_all = cupy.conjugate(cupy.swapaxes(directional.fth_beta, 0, 1))
+    fph_h_all = cupy.conjugate(cupy.swapaxes(directional.fph_beta, 0, 1))
+    if method == "fft":
+        reflected = cupy.fft.fft(reflected, axis=2)
 
     for im, mode_idx in enumerate(directional.mode_indices_by_m):
         if int(mode_idx.size) == 0:
             continue
-        phase_m = phase_adj[:, im]
-        a_theta_m = cupy.einsum("a,bakr->bkr", phase_m, reflected[:, 0], optimize=True)
-        a_phi_m = cupy.einsum("a,bakr->bkr", phase_m, reflected[:, 1], optimize=True)
-        b_theta_m = cupy.einsum("a,bakr->bkr", phase_m, reflected[:, 2], optimize=True)
-        b_phi_m = cupy.einsum("a,bakr->bkr", phase_m, reflected[:, 3], optimize=True)
-        fth_h = cupy.conjugate(cupy.swapaxes(directional.fth_beta[:, mode_idx], 0, 1))
-        fph_h = cupy.conjugate(cupy.swapaxes(directional.fph_beta[:, mode_idx], 0, 1))
+        if method == "explicit":
+            phase_m = phase_adj[:, im]
+            a_theta_m = cupy.einsum("a,bakr->bkr", phase_m, reflected[:, 0], optimize=True)
+            a_phi_m = cupy.einsum("a,bakr->bkr", phase_m, reflected[:, 1], optimize=True)
+            b_theta_m = cupy.einsum("a,bakr->bkr", phase_m, reflected[:, 2], optimize=True)
+            b_phi_m = cupy.einsum("a,bakr->bkr", phase_m, reflected[:, 3], optimize=True)
+        else:
+            m = int(im) - int(directional.box_order)
+            alpha_index = int(m % n_alpha)
+            phase_m = phase_adj[0, im]
+            a_theta_m = phase_m * reflected[:, 0, alpha_index, :, :]
+            a_phi_m = phase_m * reflected[:, 1, alpha_index, :, :]
+            b_theta_m = phase_m * reflected[:, 2, alpha_index, :, :]
+            b_phi_m = phase_m * reflected[:, 3, alpha_index, :, :]
+        fth_h = fth_h_all[mode_idx, :]
+        fph_h = fph_h_all[mode_idx, :]
         fth_a_theta = cupy.matmul(fth_h[None, :, :], a_theta_m)
         fph_a_phi = cupy.matmul(fph_h[None, :, :], a_phi_m)
         fph_b_theta = cupy.matmul(fph_h[None, :, :], b_theta_m)
@@ -6325,6 +6366,75 @@ class CuPyMLFMMCouplingOperator:
         pool_total = int(cupy.get_default_memory_pool().total_bytes())
         if pool_total > int(self._device_pool_peak_total_bytes):
             self._device_pool_peak_total_bytes = int(pool_total)
+
+    def hierarchy_diagnostics(self) -> dict[str, object]:
+        """Return sampled-level order and grid diagnostics for the CuPy MLFMM plan."""
+
+        data = self.prepared_data
+        if data.single_level is not None:
+            single = data.single_level
+            plan_summary = (self.host_cache_summary or {}).get("plan_summary")
+            level_id = (
+                int(plan_summary.get("selected_depth", 0)) if isinstance(plan_summary, dict) else 0
+            )
+            return {
+                "stage": str(data.stage),
+                "levels": {
+                    "n_levels": 1,
+                    "translator_orders": [int(single.translator_order)],
+                    "grid_orders": [int(single.grid_order)],
+                    "direction_counts": [int(single.directional.grid.n_directions)],
+                    "levels": [
+                        {
+                            "level": level_id,
+                            "n_boxes": int(single.n_leaves),
+                            "box_order": int(single.box_order),
+                            "translator_order": int(single.translator_order),
+                            "grid_order": int(single.grid_order),
+                            "n_directions": int(single.directional.grid.n_directions),
+                            "far_offset_count": len(single.far_offset_batches),
+                        }
+                    ],
+                },
+            }
+        multilevel = data.multilevel
+        if multilevel is None:
+            raise RuntimeError("Internal error: CuPy MLFMM prepared data has no far plan.")
+        hf_start_level = int(multilevel.hf_start_level)
+        return {
+            "stage": str(data.stage),
+            "leaf_level": int(multilevel.leaf_level),
+            "hf_start_level": int(multilevel.hf_start_level),
+            "hf_end_level": int(multilevel.hf_end_level),
+            "transfer_edges": [
+                {
+                    "child_level": int(transfer.child_level),
+                    "parent_level": int(transfer.parent_level),
+                }
+                for transfer in multilevel.transfers
+            ],
+            "levels": {
+                "n_levels": len(multilevel.levels),
+                "translator_orders": [int(level.translator_order) for level in multilevel.levels],
+                "grid_orders": [int(level.grid_order) for level in multilevel.levels],
+                "direction_counts": sorted(
+                    {int(level.directional.grid.n_directions) for level in multilevel.levels}
+                ),
+                "levels": [
+                    {
+                        "level": int(level.level),
+                        "n_boxes": int(level.n_boxes),
+                        "box_order": int(level.box_order),
+                        "translator_order": int(level.translator_order),
+                        "grid_order": int(level.grid_order),
+                        "n_directions": int(level.directional.grid.n_directions),
+                        "far_offset_count": len(level.far_offset_batches),
+                        "parity_from_hf_start": int((int(level.level) - hf_start_level) % 2),
+                    }
+                    for level in multilevel.levels
+                ],
+            },
+        }
 
     def memory_diagnostics(self) -> dict[str, object]:
         """Return runtime memory diagnostics for the CuPy MLFMM operator."""

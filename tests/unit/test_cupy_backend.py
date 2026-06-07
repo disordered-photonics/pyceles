@@ -139,38 +139,58 @@ def test_cupy_mlfmm_structured_directional_maps_match_dense_reference() -> None:
         dtype=np.complex128,
     )
 
-    got = asnumpy(_box_outgoing_to_directional_cupy(uploaded, cupy.asarray(state), cupy=cupy))
-    for batch in range(state.shape[0]):
-        for rhs in range(state.shape[2]):
-            expected = box_outgoing_to_directional(transforms, state[batch, :, rhs])
-            for channel in range(4):
+    got_by_method = {
+        method: asnumpy(
+            _box_outgoing_to_directional_cupy(
+                uploaded,
+                cupy.asarray(state),
+                cupy=cupy,
+                alpha_method=method,
+            )
+        )
+        for method in ("explicit", "fft")
+    }
+    for got in got_by_method.values():
+        for batch in range(state.shape[0]):
+            for rhs in range(state.shape[2]):
+                expected = box_outgoing_to_directional(transforms, state[batch, :, rhs])
+                for channel in range(4):
+                    np.testing.assert_allclose(
+                        got[batch, channel, :, rhs],
+                        expected[channel],
+                        rtol=2.0e-12,
+                        atol=2.0e-12,
+                    )
+
+    channels = np.asarray(
+        rng.standard_normal(got_by_method["explicit"].shape)
+        + 1j * rng.standard_normal(got_by_method["explicit"].shape),
+        dtype=np.complex128,
+    )
+    for method in ("explicit", "fft"):
+        got_box = asnumpy(
+            _directional_to_box_regular_cupy(
+                uploaded,
+                cupy.asarray(channels),
+                cupy=cupy,
+                alpha_method=method,
+            )
+        )
+        for batch in range(channels.shape[0]):
+            for rhs in range(channels.shape[3]):
+                expected_box = directional_to_box_regular(
+                    transforms,
+                    channels[batch, 0, :, rhs],
+                    channels[batch, 1, :, rhs],
+                    channels[batch, 2, :, rhs],
+                    channels[batch, 3, :, rhs],
+                )
                 np.testing.assert_allclose(
-                    got[batch, channel, :, rhs],
-                    expected[channel],
+                    got_box[batch, :, rhs],
+                    expected_box,
                     rtol=2.0e-12,
                     atol=2.0e-12,
                 )
-
-    channels = np.asarray(
-        rng.standard_normal(got.shape) + 1j * rng.standard_normal(got.shape),
-        dtype=np.complex128,
-    )
-    got_box = asnumpy(_directional_to_box_regular_cupy(uploaded, cupy.asarray(channels), cupy=cupy))
-    for batch in range(channels.shape[0]):
-        for rhs in range(channels.shape[3]):
-            expected_box = directional_to_box_regular(
-                transforms,
-                channels[batch, 0, :, rhs],
-                channels[batch, 1, :, rhs],
-                channels[batch, 2, :, rhs],
-                channels[batch, 3, :, rhs],
-            )
-            np.testing.assert_allclose(
-                got_box[batch, :, rhs],
-                expected_box,
-                rtol=2.0e-12,
-                atol=2.0e-12,
-            )
 
 
 def test_cupy_mlfmm_upload_offset_batches_rejects_nonunique() -> None:
@@ -403,6 +423,14 @@ def test_cupy_prepare_coupling_detaches_host_cache_by_default(
     assert isinstance(payload_obj, (int, np.integer))
     payload = int(payload_obj)
     assert payload > 0
+    hierarchy = runtime.hierarchy_diagnostics()
+    assert hierarchy.get("stage") == str(coupling.resolved_plan.stage)
+    levels = hierarchy.get("levels")
+    assert isinstance(levels, dict)
+    level_rows = levels.get("levels")
+    assert isinstance(level_rows, list)
+    assert level_rows
+    assert all("box_order" in row and "n_directions" in row for row in level_rows)
 
 
 def test_cupy_prepare_coupling_can_retain_host_cache_when_requested(
