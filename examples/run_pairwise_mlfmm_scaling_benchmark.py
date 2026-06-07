@@ -254,6 +254,7 @@ def _mlfmm_options(args: argparse.Namespace) -> MLFMMOptions:
         if args.mlfmm_hf_start_level is None
         else int(args.mlfmm_hf_start_level),
         hf_wavelength_divisor=float(args.mlfmm_hf_wavelength_divisor),
+        collect_stream_stats=bool(args.mlfmm_collect_stream_stats),
     )
 
 
@@ -290,6 +291,7 @@ def _benchmark_config(args: argparse.Namespace) -> dict[str, Any]:
             if args.mlfmm_hf_start_level is None
             else int(args.mlfmm_hf_start_level),
             "hf_wavelength_divisor": float(args.mlfmm_hf_wavelength_divisor),
+            "collect_stream_stats": bool(args.mlfmm_collect_stream_stats),
         },
     }
 
@@ -596,6 +598,11 @@ def main() -> None:
     parser.add_argument("--mlfmm-order-additive", type=int, default=2)
     parser.add_argument("--mlfmm-hf-start-level", type=int, default=None)
     parser.add_argument("--mlfmm-hf-wavelength-divisor", type=float, default=5.0)
+    parser.add_argument(
+        "--mlfmm-collect-stream-stats",
+        action="store_true",
+        help="Collect per-apply CuPy MLFMM streaming diagnostics in the JSON output.",
+    )
     parser.add_argument("--plot", action="store_true")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--check-geometry", action="store_true")

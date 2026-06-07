@@ -5142,7 +5142,6 @@ def _apply_same_level_far_streamed_chunk_group(
 
     if not chunks:
         return
-    subset_filter_started = time.perf_counter() if stream_stats is not None else 0.0
     level = levels[int(level_idx)]
     source_box_cap = _level_chunk_box_cap(
         level=level,
@@ -5155,6 +5154,7 @@ def _apply_same_level_far_streamed_chunk_group(
     full_source_ids: Any | None = None
     full_source_outgoing: Any | None = None
     if int(source_box_cap) >= int(level.n_boxes):
+        full_source_started = time.perf_counter() if stream_stats is not None else 0.0
         full_source_ids = cupy.arange(int(level.n_boxes), dtype=cupy.int32)
         full_source_outgoing = _build_outgoing_subset_streamed(
             levels=levels,
@@ -5176,11 +5176,18 @@ def _apply_same_level_far_streamed_chunk_group(
             cupy=cupy,
             stream_stats=stream_stats,
         )
+        _accumulate_stream_seconds(
+            stream_stats,
+            level_idx=int(level_idx),
+            key="same_level_full_source_outgoing_build",
+            seconds=time.perf_counter() - full_source_started,
+        )
         if stream_stats is not None:
             fast_counts = cast(
                 dict[str, int], stream_stats.setdefault("full_level_outgoing_reuse_count", {})
             )
             fast_counts[str(level_idx)] = int(fast_counts.get(str(level_idx), 0) + len(chunks))
+    subset_filter_started = time.perf_counter() if stream_stats is not None else 0.0
     filtered_by_chunk: list[list[tuple[Offset3, Any, Any]]] = []
     source_batches: list[Any] = []
     for box_ids, _incoming in chunks:
@@ -5199,6 +5206,12 @@ def _apply_same_level_far_streamed_chunk_group(
             source_batches.append(source_ids_all)
         filtered_by_chunk.append(filtered_offsets)
     if not source_batches:
+        _accumulate_stream_seconds(
+            stream_stats,
+            level_idx=int(level_idx),
+            key="same_level_subset_filter",
+            seconds=time.perf_counter() - subset_filter_started,
+        )
         return
     if full_source_outgoing is not None and full_source_ids is not None:
         _accumulate_stream_seconds(
@@ -5469,7 +5482,7 @@ def _build_outgoing_subset_streamed(
         _accumulate_stream_seconds(
             stream_stats,
             level_idx=int(level_idx),
-            key="outgoing_build_total",
+            key="outgoing_build_total_inclusive",
             seconds=time.perf_counter() - build_started,
         )
         return outgoing
@@ -5503,7 +5516,7 @@ def _build_outgoing_subset_streamed(
         _accumulate_stream_seconds(
             stream_stats,
             level_idx=int(level_idx),
-            key="outgoing_build_total",
+            key="outgoing_build_total_inclusive",
             seconds=time.perf_counter() - build_started,
         )
         return outgoing_leaf
@@ -5571,7 +5584,7 @@ def _build_outgoing_subset_streamed(
         _accumulate_stream_seconds(
             stream_stats,
             level_idx=int(level_idx),
-            key="outgoing_build_total",
+            key="outgoing_build_total_inclusive",
             seconds=time.perf_counter() - build_started,
         )
         return outgoing
@@ -5622,7 +5635,7 @@ def _build_outgoing_subset_streamed(
         _accumulate_stream_seconds(
             stream_stats,
             level_idx=int(level_idx),
-            key="outgoing_build_total",
+            key="outgoing_build_total_inclusive",
             seconds=time.perf_counter() - build_started,
         )
         return outgoing
@@ -5711,7 +5724,7 @@ def _build_outgoing_subset_streamed(
     _accumulate_stream_seconds(
         stream_stats,
         level_idx=int(level_idx),
-        key="outgoing_build_total",
+        key="outgoing_build_total_inclusive",
         seconds=time.perf_counter() - build_started,
     )
     return outgoing

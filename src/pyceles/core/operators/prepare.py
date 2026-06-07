@@ -32,7 +32,7 @@ from .groups import (
     plan_particle_t_groups,
 )
 from .mlfmm import MLFMMCouplingOperator, MLFMMOptions, prepare_mlfmm_coupling
-from .mlfmm_cupy import prepare_mlfmm_cupy_coupling
+from .mlfmm_cupy import CuPyMLFMMHostCachePolicy, prepare_mlfmm_cupy_coupling
 from .single_body import CompositeParticleTOperator, ParticleTOperator
 from .single_body_cupy import wrap_particle_t_groups_cupy
 
@@ -435,9 +435,15 @@ def prepare_matvec(
                     ),
                 )
             else:
+                host_cache_policy = CuPyMLFMMHostCachePolicy(
+                    collect_stream_stats=bool(resolved_mlfmm_options.collect_stream_stats)
+                )
                 coupling = cast(
                     CouplingOperator,
-                    prepare_mlfmm_cupy_coupling(cast(MLFMMCouplingOperator, cpu_mlfmm)),
+                    prepare_mlfmm_cupy_coupling(
+                        cast(MLFMMCouplingOperator, cpu_mlfmm),
+                        host_cache_policy=host_cache_policy,
+                    ),
                 )
         else:
             raise ValueError(

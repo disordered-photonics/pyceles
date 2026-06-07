@@ -899,6 +899,33 @@ def test_cupy_mlfmm_prepared_operator_matches_numpy_reference(
     np.testing.assert_allclose(y_cupy, y_numpy, rtol=1e-10, atol=1e-10)
 
 
+def test_cupy_mlfmm_options_collect_stream_stats_reaches_runtime_policy() -> None:
+    lmax = 1
+    wavelength = 550.0
+    n_medium = 1.0 + 0j
+    k = 2.0 * np.pi / wavelength
+    particles = _mlfmm_transition_particles()
+    prepared_cupy = prepare_matvec(
+        lmax=lmax,
+        k=k,
+        particles=particles,
+        n_medium=n_medium,
+        radial_lut_dr=0.5,
+        cache_translation_blocks=False,
+        operator_dtype=np.complex128,
+        coupling_backend="mlfmm",
+        mlfmm_options=MLFMMOptions(
+            max_leaf_particles=4,
+            max_depth=4,
+            collect_stream_stats=True,
+        ),
+        backend="cupy",
+    )
+
+    assert isinstance(prepared_cupy.coupling, CuPyMLFMMCouplingOperator)
+    assert prepared_cupy.coupling.host_cache_policy.collect_stream_stats is True
+
+
 def test_cupy_mlfmm_prepared_operator_block_rhs_matches_columnwise() -> None:
     lmax = 1
     wavelength = 550.0

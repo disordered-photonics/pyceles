@@ -71,6 +71,7 @@ class MLFMMOptions:
     order_additive: int = 2
     hf_start_level: int | None = None
     hf_wavelength_divisor: float = 5.0
+    collect_stream_stats: bool = False
 
 
 @dataclass(frozen=True)
