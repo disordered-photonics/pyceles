@@ -1225,21 +1225,33 @@ def test_solve_linear_system_bicgstab_cupy_skip_final_residual_avoids_extra_appl
 
 @pytest.mark.gpu
 @pytest.mark.parametrize(
-    ("dtype",),
+    ("dtype", "residual_atol", "solution_rtol", "solution_atol"),
     [
-        (np.complex64,),
-        (np.complex128,),
+        (np.complex64, 1e-6, 1e-6, 1e-6),
+        (np.complex128, 1e-12, 1e-12, 1e-12),
     ],
 )
 def test_gmres_cupy_native_matches_builtin_cupy_on_real_device(
     dtype: np.dtype,
+    residual_atol: float,
+    solution_rtol: float,
+    solution_atol: float,
     cupy_runtime: tuple[Any, Any],
 ) -> None:
     cupy, cupyx_sparse_linalg = cupy_runtime
     rng = np.random.default_rng(41)
     n = 80
-    M = (rng.standard_normal((n, n)) + 1j * rng.standard_normal((n, n))).astype(dtype)
-    A = M.conj().T @ M + (0.5 + 0.0j) * np.eye(n, dtype=dtype)
+    restart = 20
+    maxiter = 40
+
+    # Use a controlled Hermitian positive-definite system rather than a random
+    # normal-equation matrix.  This keeps the test focused on the native CuPy
+    # GMRES implementation and its iteration accounting instead of comparing
+    # three libraries at a complex64 stagnation plateau.
+    Z = (rng.standard_normal((n, n)) + 1j * rng.standard_normal((n, n))).astype(dtype)
+    Q, _ = np.linalg.qr(Z.astype(np.complex128))
+    eigs = np.linspace(1.0, 3.0, n, dtype=float)
+    A = (Q @ np.diag(eigs) @ Q.conj().T).astype(dtype)
     b = (rng.standard_normal(n) + 1j * rng.standard_normal(n)).astype(dtype)
     A_gpu = cupy.asarray(A)
     b_gpu = cupy.asarray(b)
@@ -1254,8 +1266,8 @@ def test_gmres_cupy_native_matches_builtin_cupy_on_real_device(
         b,
         rtol=0.0,
         atol=0.0,
-        restart=20,
-        maxiter=40,
+        restart=restart,
+        maxiter=maxiter,
         callback=_scipy_cb,
         callback_type="legacy",
     )
@@ -1266,8 +1278,8 @@ def test_gmres_cupy_native_matches_builtin_cupy_on_real_device(
         b,
         rtol=0.0,
         atol=0.0,
-        restart=20,
-        maxiter=40,
+        restart=restart,
+        maxiter=maxiter,
         callback=native_hist.append,
         show_progress=False,
     )
@@ -1277,6 +1289,8 @@ def test_gmres_cupy_native_matches_builtin_cupy_on_real_device(
         matvec=lambda v: A_gpu @ v,
         dtype=dtype,
     )
+    builtin_restart_hist: list[float] = []
+
     x_builtin, info_builtin = cupyx_sparse_linalg.gmres(
         Aop_gpu,
         b_gpu,
@@ -1284,25 +1298,42 @@ def test_gmres_cupy_native_matches_builtin_cupy_on_real_device(
         M=None,
         rtol=0.0,
         atol=0.0,
-        restart=20,
-        maxiter=40,
-        callback=None,
-        callback_type=None,
+        restart=restart,
+        maxiter=maxiter,
+        callback=lambda v: builtin_restart_hist.append(float(v)),
+        callback_type="pr_norm",
     )
     cupy.cuda.Stream.null.synchronize()
+
+    x_builtin_np = cupy.asnumpy(x_builtin)
     rel_scipy = float(np.linalg.norm(A @ np.asarray(x_scipy) - b) / np.linalg.norm(b))
-    rel_builtin = float(cupy.linalg.norm(A_gpu @ x_builtin - b_gpu) / cupy.linalg.norm(b_gpu))
+    rel_builtin = float(
+        np.linalg.norm(A @ np.asarray(x_builtin_np, dtype=dtype) - b) / np.linalg.norm(b)
+    )
     rel_native = float(out_native.relative_residual)
-    rel_diff_native_builtin = abs(rel_native - rel_builtin) / max(abs(rel_builtin), 1e-30)
-    rel_diff_scipy_builtin = abs(rel_scipy - rel_builtin) / max(abs(rel_builtin), 1e-30)
+    residuals = np.asarray([rel_scipy, rel_builtin, rel_native], dtype=float)
 
     assert int(out_native.info) == int(info_builtin)
     assert int(info_scipy) == int(info_builtin)
+    assert int(info_builtin) == maxiter
+    assert int(out_native.iterations) == maxiter
     assert int(out_native.iterations) == len(native_hist)
-    assert len(scipy_hist) == 40
-    # Native GMRES should match built-in CuPy at least at the same residual
-    # agreement level observed between SciPy legacy-inner and built-in CuPy.
-    assert rel_diff_native_builtin <= 1.1 * rel_diff_scipy_builtin + 1e-12
+    assert len(scipy_hist) == maxiter
+    # CuPy's built-in GMRES reports restart-boundary residuals for pr_norm;
+    # pyceles also records true residuals at the initial point and at restart
+    # boundaries.  Compare external-cycle accounting, not unavailable CuPy
+    # internal Arnoldi iterations.
+    assert len(builtin_restart_hist) == maxiter // restart
+    assert out_native.true_residual_history is not None
+    assert len(out_native.true_residual_history) - 1 == len(builtin_restart_hist)
+    assert np.all(np.isfinite(residuals))
+    assert float(np.max(residuals)) <= residual_atol
+    np.testing.assert_allclose(
+        out_native.x,
+        x_builtin_np,
+        rtol=solution_rtol,
+        atol=solution_atol,
+    )
 
 
 def test_solve_linear_system_preconditioner_hook_identity():

@@ -1013,7 +1013,7 @@ def test_cupy_mlfmm_complex64_request_matches_numpy_with_far_complex128() -> Non
         "cs_delta_atol",
     ),
     [
-        (np.complex64, 3e-5, 3e-6, 4e-5, 2e-6, 3e-5, 3e-6, 3e-5, 1e-4, 1e-8, 3e-5, 1e-4),
+        (np.complex64, 3e-5, 3e-6, 4e-5, 2e-6, 3e-5, 3e-6, 3e-5, 1e-4, 1e-8, 1e-4, 1e-4),
         (np.complex128, 5e-9, 5e-10, 5e-9, 5e-10, 1e-8, 1e-9, 5e-9, 1e-9, 1e-8, 5e-9, 1e-9),
     ],
 )
@@ -1098,7 +1098,6 @@ def test_cupy_simulation_run_matches_numpy_for_coeffs_farfield_and_nearfield(
         "C_abs",
         "C_ext_raw",
         "C_sca_raw",
-        "C_abs_raw_diff",
     ):
         np.testing.assert_allclose(
             run_cupy.cross_sections[key],
@@ -1106,6 +1105,15 @@ def test_cupy_simulation_run_matches_numpy_for_coeffs_farfield_and_nearfield(
             rtol=cs_main_rtol,
             atol=cs_main_atol,
         )
+    # `C_abs_raw_diff` subtracts two large integrated quantities.  In complex64
+    # CPU/GPU parity it is more sensitive to reduction order than the fields or
+    # the primary extinction/scattering diagnostics above.
+    np.testing.assert_allclose(
+        run_cupy.cross_sections["C_abs_raw_diff"],
+        run_numpy.cross_sections["C_abs_raw_diff"],
+        rtol=cs_delta_rtol,
+        atol=cs_delta_atol,
+    )
     np.testing.assert_allclose(
         run_cupy.cross_sections["C_abs_local"],
         run_numpy.cross_sections["C_abs_local"],
