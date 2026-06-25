@@ -29,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Accelerated MLFMM directional-basis preparation by reusing Legendre tables
   across azimuthal samples on each polar ring.
+- Fused CuPy MLFMM on-the-fly leaf aggregation so sampled-far applies avoid
+  materializing aggregate-side dense leaf translation blocks.
 
 ## [0.4.0] - 2026-05-17
 

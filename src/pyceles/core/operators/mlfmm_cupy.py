@@ -3864,10 +3864,11 @@ def _leaf_translation_blocks_from_pair_deltas(
 
 
 @cache
-def _leaf_otf_aggregate_contract_raw_kernel(coeff_dtype_name: str) -> Any:
-    """Return a RawKernel for leaf on-the-fly aggregation contractions."""
+def _leaf_otf_aggregate_fused_raw_kernel(full_order: int, coeff_dtype_name: str) -> Any:
+    """Return a RawKernel that builds leaf translations and aggregates directly."""
 
     cupy, _ = import_cupy()
+    order = int(full_order)
     coeff_dtype = np.dtype(coeff_dtype_name)
     if coeff_dtype == np.dtype(np.complex64):
         coeff_t = "complex<float>"
@@ -3875,55 +3876,280 @@ def _leaf_otf_aggregate_contract_raw_kernel(coeff_dtype_name: str) -> Any:
         coeff_t = "complex<double>"
     else:
         raise ValueError(
-            "Leaf on-the-fly aggregation supports only complex64/complex128 coefficients. "
+            "Fused leaf aggregation supports only complex64/complex128 coefficients. "
             f"Got {coeff_dtype!r}."
         )
+    n_orders = 2 * order + 1
+    n_p_pdm = n_orders * (n_orders + 1) // 2
+    n_phase = 2 * n_orders - 1
     source = f"""
+    #include <cupy/atomics.cuh>
     #include <cupy/complex.cuh>
 
-    __device__ complex<double> coeff_to_c128(const {coeff_t} value) {{
+    __device__ double assoc_legendre_function_fused(
+        const int l,
+        const int m,
+        const double ct,
+        const double st,
+        const double* plm_coeffs
+    ) {{
+        double plm = 0.0;
+        const double st_pow = (m == 0) ? 1.0 : pow(st, (double)m);
+        int jj = 0;
+        for (int lambda = l - m; lambda >= 0; lambda -= 2) {{
+            const int idx = jj * ({n_orders} * {n_orders}) + m * {n_orders} + l;
+            plm += st_pow * pow(ct, (double)lambda) * plm_coeffs[idx];
+            jj += 1;
+        }}
+        return plm;
+    }}
+
+    __device__ complex<double> bessel_lookup_linear_fused(
+        const int p,
+        const double r,
+        const double* re_table,
+        const double* im_table,
+        const double inv_dr,
+        const int last_index
+    ) {{
+        if (r <= 0.0) {{
+            return complex<double>(re_table[p], im_table[p]);
+        }}
+        double t = r * inv_dr;
+        int i0 = (int)floor(t);
+        double frac = t - (double)i0;
+        if (i0 < 0) {{
+            i0 = 0;
+            frac = 0.0;
+        }}
+        if (i0 >= last_index) {{
+            i0 = last_index - 1;
+            frac = 1.0;
+        }}
+        const int base0 = i0 * {n_orders} + p;
+        const int base1 = (i0 + 1) * {n_orders} + p;
+        const double re_val = (1.0 - frac) * re_table[base0] + frac * re_table[base1];
+        const double im_val = (1.0 - frac) * im_table[base0] + frac * im_table[base1];
+        return complex<double>(re_val, im_val);
+    }}
+
+    __device__ complex<double> coeff_to_c128_fused(const {coeff_t} value) {{
         return complex<double>((double)value.real(), (double)value.imag());
     }}
 
-    extern "C" __global__ void mlfmm_leaf_otf_aggregate_contract(
-        const long long n_items,
+    __device__ void atomic_add_c128(complex<double>* address, const complex<double> value) {{
+        double* raw = reinterpret_cast<double*>(address);
+        atomicAdd(raw, value.real());
+        atomicAdd(raw + 1, value.imag());
+    }}
+
+    extern "C" __global__ void mlfmm_leaf_otf_aggregate_fused(
+        const int n_pairs,
         const int occupancy,
-        const int box_nm,
-        const int nmodes,
+        const int n_out_modes,
+        const int n_in_modes,
         const int n_rhs,
-        const complex<double>* pair_blocks,
-        const {coeff_t}* coeffs,
+        const double* pair_deltas,
+        const int* particle_indices,
+        const int* row_indices,
         const int* target_rows,
+        const {coeff_t}* x_states,
+        const int* out_mode_indices,
+        const int* in_mode_indices,
+        const int* mode_m_out,
+        const int* mode_m_in,
+        const double* re_j,
+        const double* im_j,
+        const double inv_dr,
+        const int last_index,
+        const double* plm_coeffs,
+        const double* re_ab,
+        const double* im_ab,
+        const int* pair_offset,
+        const int* pair_pmin,
+        const int* pair_pcount,
         complex<double>* out
     ) {{
-        for (long long item = blockIdx.x * blockDim.x + threadIdx.x;
-             item < n_items;
-             item += (long long)blockDim.x * gridDim.x) {{
-            const int rhs = (int)(item % n_rhs);
-            const long long tmp0 = item / n_rhs;
-            const int box_mode = (int)(tmp0 % box_nm);
-            const int leaf_row = (int)(tmp0 / box_nm);
+        for (int pair_idx = blockIdx.x; pair_idx < n_pairs; pair_idx += gridDim.x) {{
+            const int tid = threadIdx.x;
+            const int n_threads = blockDim.x;
+            const int leaf_row = pair_idx / occupancy;
+            const int occ = pair_idx - leaf_row * occupancy;
+            const int group_row = row_indices[leaf_row];
+            const int group_pair_idx = group_row * occupancy + occ;
+            const int particle = particle_indices[group_pair_idx];
+            const int out_row = target_rows[leaf_row];
 
-            complex<double> acc(0.0, 0.0);
-            for (int occ = 0; occ < occupancy; ++occ) {{
-                const long long block_base =
-                    (((long long)leaf_row * occupancy + occ) * box_nm + box_mode) * nmodes;
-                const long long coeff_base =
-                    (((long long)leaf_row * occupancy + occ) * nmodes) * n_rhs + rhs;
-                for (int mode = 0; mode < nmodes; ++mode) {{
-                    const complex<double> w = pair_blocks[block_base + mode];
-                    const complex<double> c = coeff_to_c128(
-                        coeffs[coeff_base + (long long)mode * n_rhs]
-                    );
-                    acc += w * c;
+            __shared__ double r_shared;
+            __shared__ double ct_shared;
+            __shared__ double st_shared;
+            __shared__ double phi_shared;
+            __shared__ double re_j_shared[{n_orders}];
+            __shared__ double im_j_shared[{n_orders}];
+            __shared__ double p_pdm_shared[{n_p_pdm}];
+            __shared__ double cos_mphi_shared[{n_phase}];
+            __shared__ double sin_mphi_shared[{n_phase}];
+
+            if (tid == 0) {{
+                const double dx = pair_deltas[3 * group_pair_idx + 0];
+                const double dy = pair_deltas[3 * group_pair_idx + 1];
+                const double dz = pair_deltas[3 * group_pair_idx + 2];
+                const double rr = sqrt(dx * dx + dy * dy + dz * dz);
+                r_shared = rr;
+                if (rr > 0.0) {{
+                    ct_shared = dz / rr;
+                    st_shared = sqrt(fmax(0.0, 1.0 - ct_shared * ct_shared));
+                    phi_shared = atan2(dy, dx);
+                }} else {{
+                    ct_shared = 1.0;
+                    st_shared = 0.0;
+                    phi_shared = 0.0;
                 }}
             }}
-            const int out_row = target_rows[leaf_row];
-            out[((long long)out_row * box_nm + box_mode) * n_rhs + rhs] = acc;
+            __syncthreads();
+
+            if (r_shared > 0.0) {{
+                for (int p = tid; p < {n_orders}; p += n_threads) {{
+                    const complex<double> radial =
+                        bessel_lookup_linear_fused(p, r_shared, re_j, im_j, inv_dr, last_index);
+                    re_j_shared[p] = radial.real();
+                    im_j_shared[p] = radial.imag();
+                    for (int absdm = 0; absdm <= p; ++absdm) {{
+                        p_pdm_shared[p * (p + 1) / 2 + absdm] =
+                            assoc_legendre_function_fused(
+                                p, absdm, ct_shared, st_shared, plm_coeffs
+                            );
+                    }}
+                }}
+                if (tid == 0) {{
+                    for (int dm = -2 * {order}; dm <= 2 * {order}; ++dm) {{
+                        const int phase_idx = dm + 2 * {order};
+                        cos_mphi_shared[phase_idx] = cos((double)dm * phi_shared);
+                        sin_mphi_shared[phase_idx] = sin((double)dm * phi_shared);
+                    }}
+                }}
+            }}
+            __syncthreads();
+
+            const int n_outputs = n_out_modes * n_rhs;
+            for (int flat = tid; flat < n_outputs; flat += n_threads) {{
+                const int rhs = flat % n_rhs;
+                const int out_idx = flat / n_rhs;
+                complex<double> acc(0.0, 0.0);
+                for (int in_idx = 0; in_idx < n_in_modes; ++in_idx) {{
+                    complex<double> coeff(0.0, 0.0);
+                    if (r_shared <= 0.0) {{
+                        if (out_mode_indices[out_idx] == in_mode_indices[in_idx]) {{
+                            coeff = complex<double>(1.0, 0.0);
+                        }}
+                    }} else {{
+                        const int delta_m = mode_m_in[in_idx] - mode_m_out[out_idx];
+                        const int phase_idx = delta_m + 2 * {order};
+                        const int table_idx = out_idx * n_in_modes + in_idx;
+                        const int base = pair_offset[table_idx];
+                        const int p_min = pair_pmin[table_idx];
+                        const int p_count = pair_pcount[table_idx];
+                        double re_acc = 0.0;
+                        double im_acc = 0.0;
+                        for (int ip = 0; ip < p_count; ++ip) {{
+                            const int p = p_min + ip;
+                            const int ab_idx = base + ip;
+                            const double plm =
+                                p_pdm_shared[p * (p + 1) / 2 + abs(delta_m)];
+                            const double re_abp = re_ab[ab_idx] * plm;
+                            const double im_abp = im_ab[ab_idx] * plm;
+                            const double re_abpr =
+                                re_abp * re_j_shared[p] - im_abp * im_j_shared[p];
+                            const double im_abpr =
+                                re_abp * im_j_shared[p] + im_abp * re_j_shared[p];
+                            const double re_phase =
+                                re_abpr * cos_mphi_shared[phase_idx]
+                                - im_abpr * sin_mphi_shared[phase_idx];
+                            const double im_phase =
+                                re_abpr * sin_mphi_shared[phase_idx]
+                                + im_abpr * cos_mphi_shared[phase_idx];
+                            re_acc += re_phase;
+                            im_acc += im_phase;
+                        }}
+                        coeff = complex<double>(re_acc, im_acc);
+                    }}
+                    const complex<double> x = coeff_to_c128_fused(
+                        x_states[((long long)particle * n_in_modes + in_idx) * n_rhs + rhs]
+                    );
+                    acc += coeff * x;
+                }}
+                atomic_add_c128(
+                    out + ((long long)out_row * n_out_modes + out_idx) * n_rhs + rhs,
+                    acc
+                );
+            }}
+            __syncthreads();
         }}
     }}
     """
-    return cupy.RawKernel(source, "mlfmm_leaf_otf_aggregate_contract")
+    return cupy.RawKernel(source, "mlfmm_leaf_otf_aggregate_fused")
+
+
+def _launch_leaf_otf_aggregate_fused(
+    *,
+    pair_deltas: Any,
+    particle_indices: Any,
+    row_indices: Any,
+    target_rows: Any,
+    x_states: Any,
+    out: Any,
+    tables: CuPyLeafTranslationTablesData,
+    occupancy: int,
+    box_nm: int,
+    nmodes: int,
+    nrhs: int,
+    cupy: Any,
+) -> None:
+    """Build on-the-fly leaf translations and aggregate without pair-block tensors."""
+
+    count = int(row_indices.size)
+    if count <= 0:
+        return
+    n_pairs = int(count * int(occupancy))
+    kernel = _leaf_otf_aggregate_fused_raw_kernel(
+        int(tables.full_order), np.dtype(x_states.dtype).str
+    )
+    props = cupy.cuda.runtime.getDeviceProperties(cupy.cuda.runtime.getDevice())
+    max_grid_pairs = int(props["maxGridSize"][0])
+    max_threads = int(props["maxThreadsPerBlock"])
+    threads = 256 if max_threads >= 256 else 128 if max_threads >= 128 else 64
+    blocks = max(1, min(max_grid_pairs, n_pairs))
+    kernel(
+        (blocks,),
+        (threads,),
+        (
+            np.int32(n_pairs),
+            np.int32(occupancy),
+            np.int32(box_nm),
+            np.int32(nmodes),
+            np.int32(nrhs),
+            pair_deltas.reshape(-1),
+            particle_indices.reshape(-1),
+            cupy.asarray(row_indices, dtype=cupy.int32).reshape(-1),
+            cupy.asarray(target_rows, dtype=cupy.int32).reshape(-1),
+            x_states.reshape(-1),
+            tables.out_mode_indices,
+            tables.in_mode_indices,
+            tables.mode_m_out,
+            tables.mode_m_in,
+            tables.re_j,
+            tables.im_j,
+            np.float64(float(tables.inv_dr)),
+            np.int32(int(tables.last_index)),
+            tables.plm_coeffs,
+            tables.compact_re_ab,
+            tables.compact_im_ab,
+            tables.pair_offset,
+            tables.pair_pmin,
+            tables.pair_pcount,
+            out.reshape(-1),
+        ),
+    )
 
 
 @cache
@@ -3973,44 +4199,6 @@ def _leaf_otf_receive_contract_raw_kernel() -> Any:
     }
     """
     return cupy.RawKernel(source, "mlfmm_leaf_otf_receive_contract")
-
-
-def _launch_leaf_otf_aggregate_contract(
-    pair_blocks: Any,
-    coeffs: Any,
-    target_rows: Any,
-    out: Any,
-    *,
-    occupancy: int,
-    box_nm: int,
-    nmodes: int,
-    nrhs: int,
-    cupy: Any,
-) -> None:
-    """Contract on-the-fly leaf translation blocks into box states."""
-
-    count = int(target_rows.size)
-    if count <= 0:
-        return
-    n_items = int(count * int(box_nm) * int(nrhs))
-    kernel = _leaf_otf_aggregate_contract_raw_kernel(np.dtype(coeffs.dtype).str)
-    threads = 256
-    blocks = max(1, min(65535, (n_items + threads - 1) // threads))
-    kernel(
-        (blocks,),
-        (threads,),
-        (
-            np.int64(n_items),
-            np.int32(occupancy),
-            np.int32(box_nm),
-            np.int32(nmodes),
-            np.int32(nrhs),
-            pair_blocks,
-            coeffs,
-            cupy.asarray(target_rows, dtype=cupy.int32),
-            out,
-        ),
-    )
 
 
 def _launch_leaf_otf_receive_contract(
@@ -4082,6 +4270,20 @@ def _leaf_otf_group_chunk_leaves(
     live_bytes_per_leaf = int(pair_block_bytes_per_leaf + coeff_bytes_per_leaf + out_bytes_per_leaf)
     by_bytes = max(1, int(bytes_budget) // max(1, live_bytes_per_leaf))
     return max(1, min(int(n_group), int(by_leaves), int(by_bytes)))
+
+
+def _leaf_otf_fused_aggregate_chunk_leaves(
+    *,
+    n_group: int,
+    chunk_leaves: int | None,
+) -> int:
+    """Choose leaf chunks for fused aggregation, which has no pair-block tensor."""
+
+    if int(n_group) <= 0:
+        return 1
+    if chunk_leaves is None:
+        return int(n_group)
+    return max(1, min(int(n_group), int(chunk_leaves)))
 
 
 def _leaf_otf_resolved_chunk_summary(
@@ -4162,7 +4364,7 @@ def _aggregate_selected_leaf_box_states(
 
     selected_ids = cupy.asarray(selected_leaf_ids, dtype=cupy.int32).reshape(-1)
     n_selected = int(selected_ids.size)
-    out = cupy.empty((n_selected, int(box_nm), int(nrhs)), dtype=cupy.complex128)
+    out = cupy.zeros((n_selected, int(box_nm), int(nrhs)), dtype=cupy.complex128)
     if n_selected == 0:
         return out
     for group in leaf_groups:
@@ -4183,32 +4385,20 @@ def _aggregate_selected_leaf_box_states(
                     "Internal CuPy MLFMM error: on-the-fly leaf aggregation requires translation "
                     "tables and pair-delta schedules."
                 )
-            pair_rows = group.pair_deltas.reshape(-1, occupancy, 3)[group_rows]
-            idx_rows = group.particle_indices[group_rows]
-            chunk_leaves = _leaf_otf_group_chunk_leaves(
+            chunk_leaves = _leaf_otf_fused_aggregate_chunk_leaves(
                 n_group=n_group_rows,
                 chunk_leaves=leaf_otf_chunk_leaves,
-                occupancy=occupancy,
-                box_nm=int(box_nm),
-                nmodes=nmodes,
-                nrhs=int(nrhs),
-                bytes_budget=leaf_otf_bytes_budget,
             )
             for start in range(0, n_group_rows, chunk_leaves):
                 end = min(n_group_rows, start + chunk_leaves)
-                count = int(end - start)
-                pair_blocks = _leaf_translation_blocks_from_pair_deltas(
-                    pair_rows[start:end].reshape(-1, 3),
+                _launch_leaf_otf_aggregate_fused(
+                    pair_deltas=group.pair_deltas,
+                    particle_indices=group.particle_indices,
+                    row_indices=group_rows[start:end],
+                    target_rows=selected_rows[start:end],
+                    x_states=x_states,
+                    out=out,
                     tables=leaf_translation_tables,
-                    pair_blocks_scratch=pair_blocks_scratch,
-                    cupy=cupy,
-                ).reshape(count, occupancy, int(box_nm), nmodes)
-                coeffs = x_states[idx_rows[start:end]].reshape(count, occupancy, nmodes, int(nrhs))
-                _launch_leaf_otf_aggregate_contract(
-                    pair_blocks,
-                    coeffs,
-                    selected_rows[start:end],
-                    out,
                     occupancy=occupancy,
                     box_nm=int(box_nm),
                     nmodes=nmodes,
@@ -4358,32 +4548,21 @@ def _aggregate_leaf_box_states(
                     "Internal CuPy MLFMM error: on-the-fly leaf aggregation requires translation "
                     "tables and pair-delta schedules."
                 )
-            chunk_leaves = _leaf_otf_group_chunk_leaves(
+            chunk_leaves = _leaf_otf_fused_aggregate_chunk_leaves(
                 n_group=n_group,
                 chunk_leaves=leaf_otf_chunk_leaves,
-                occupancy=occupancy,
-                box_nm=int(box_nm),
-                nmodes=nmodes,
-                nrhs=int(nrhs),
-                bytes_budget=leaf_otf_bytes_budget,
             )
+            row_indices = cupy.arange(n_group, dtype=cupy.int32)
             for start in range(0, n_group, chunk_leaves):
                 end = min(n_group, start + chunk_leaves)
-                count = int(end - start)
-                pair_start = int(start * occupancy)
-                pair_end = int(end * occupancy)
-                pair_blocks = _leaf_translation_blocks_from_pair_deltas(
-                    group.pair_deltas[pair_start:pair_end],
+                _launch_leaf_otf_aggregate_fused(
+                    pair_deltas=group.pair_deltas,
+                    particle_indices=group.particle_indices,
+                    row_indices=row_indices[start:end],
+                    target_rows=group.leaf_ids[start:end],
+                    x_states=x_states,
+                    out=box_states,
                     tables=leaf_translation_tables,
-                    pair_blocks_scratch=pair_blocks_scratch,
-                    cupy=cupy,
-                ).reshape(count, occupancy, int(box_nm), nmodes)
-                coeffs = x_states[idx[start:end]].reshape(count, occupancy, nmodes, int(nrhs))
-                _launch_leaf_otf_aggregate_contract(
-                    pair_blocks,
-                    coeffs,
-                    group.leaf_ids[start:end],
-                    box_states,
                     occupancy=occupancy,
                     box_nm=int(box_nm),
                     nmodes=nmodes,
