@@ -3863,6 +3863,196 @@ def _leaf_translation_blocks_from_pair_deltas(
     return blocks
 
 
+@cache
+def _leaf_otf_aggregate_contract_raw_kernel(coeff_dtype_name: str) -> Any:
+    """Return a RawKernel for leaf on-the-fly aggregation contractions."""
+
+    cupy, _ = import_cupy()
+    coeff_dtype = np.dtype(coeff_dtype_name)
+    if coeff_dtype == np.dtype(np.complex64):
+        coeff_t = "complex<float>"
+    elif coeff_dtype == np.dtype(np.complex128):
+        coeff_t = "complex<double>"
+    else:
+        raise ValueError(
+            "Leaf on-the-fly aggregation supports only complex64/complex128 coefficients. "
+            f"Got {coeff_dtype!r}."
+        )
+    source = f"""
+    #include <cupy/complex.cuh>
+
+    __device__ complex<double> coeff_to_c128(const {coeff_t} value) {{
+        return complex<double>((double)value.real(), (double)value.imag());
+    }}
+
+    extern "C" __global__ void mlfmm_leaf_otf_aggregate_contract(
+        const long long n_items,
+        const int occupancy,
+        const int box_nm,
+        const int nmodes,
+        const int n_rhs,
+        const complex<double>* pair_blocks,
+        const {coeff_t}* coeffs,
+        const int* target_rows,
+        complex<double>* out
+    ) {{
+        for (long long item = blockIdx.x * blockDim.x + threadIdx.x;
+             item < n_items;
+             item += (long long)blockDim.x * gridDim.x) {{
+            const int rhs = (int)(item % n_rhs);
+            const long long tmp0 = item / n_rhs;
+            const int box_mode = (int)(tmp0 % box_nm);
+            const int leaf_row = (int)(tmp0 / box_nm);
+
+            complex<double> acc(0.0, 0.0);
+            for (int occ = 0; occ < occupancy; ++occ) {{
+                const long long block_base =
+                    (((long long)leaf_row * occupancy + occ) * box_nm + box_mode) * nmodes;
+                const long long coeff_base =
+                    (((long long)leaf_row * occupancy + occ) * nmodes) * n_rhs + rhs;
+                for (int mode = 0; mode < nmodes; ++mode) {{
+                    const complex<double> w = pair_blocks[block_base + mode];
+                    const complex<double> c = coeff_to_c128(
+                        coeffs[coeff_base + (long long)mode * n_rhs]
+                    );
+                    acc += w * c;
+                }}
+            }}
+            const int out_row = target_rows[leaf_row];
+            out[((long long)out_row * box_nm + box_mode) * n_rhs + rhs] = acc;
+        }}
+    }}
+    """
+    return cupy.RawKernel(source, "mlfmm_leaf_otf_aggregate_contract")
+
+
+@cache
+def _leaf_otf_receive_contract_raw_kernel() -> Any:
+    """Return a RawKernel for leaf on-the-fly receive contractions."""
+
+    cupy, _ = import_cupy()
+    source = """
+    #include <cupy/complex.cuh>
+
+    extern "C" __global__ void mlfmm_leaf_otf_receive_contract(
+        const long long n_items,
+        const int occupancy,
+        const int box_nm,
+        const int nmodes,
+        const int n_rhs,
+        const complex<double>* pair_blocks,
+        const complex<double>* incoming,
+        const int* incoming_rows,
+        const int* particle_indices,
+        complex<double>* out
+    ) {
+        for (long long item = blockIdx.x * blockDim.x + threadIdx.x;
+             item < n_items;
+             item += (long long)blockDim.x * gridDim.x) {
+            const int rhs = (int)(item % n_rhs);
+            const long long tmp0 = item / n_rhs;
+            const int mode = (int)(tmp0 % nmodes);
+            const long long tmp1 = tmp0 / nmodes;
+            const int occ = (int)(tmp1 % occupancy);
+            const int leaf_row = (int)(tmp1 / occupancy);
+
+            complex<double> acc(0.0, 0.0);
+            const int incoming_row = incoming_rows[leaf_row];
+            for (int box_mode = 0; box_mode < box_nm; ++box_mode) {
+                const complex<double> w =
+                    pair_blocks[(((long long)leaf_row * occupancy + occ) * box_nm + box_mode)
+                                * nmodes + mode];
+                const complex<double> w_conj(w.real(), -w.imag());
+                const complex<double> x =
+                    incoming[((long long)incoming_row * box_nm + box_mode) * n_rhs + rhs];
+                acc += w_conj * x;
+            }
+            const int particle = particle_indices[(long long)leaf_row * occupancy + occ];
+            out[((long long)particle * nmodes + mode) * n_rhs + rhs] += acc;
+        }
+    }
+    """
+    return cupy.RawKernel(source, "mlfmm_leaf_otf_receive_contract")
+
+
+def _launch_leaf_otf_aggregate_contract(
+    pair_blocks: Any,
+    coeffs: Any,
+    target_rows: Any,
+    out: Any,
+    *,
+    occupancy: int,
+    box_nm: int,
+    nmodes: int,
+    nrhs: int,
+    cupy: Any,
+) -> None:
+    """Contract on-the-fly leaf translation blocks into box states."""
+
+    count = int(target_rows.size)
+    if count <= 0:
+        return
+    n_items = int(count * int(box_nm) * int(nrhs))
+    kernel = _leaf_otf_aggregate_contract_raw_kernel(np.dtype(coeffs.dtype).str)
+    threads = 256
+    blocks = max(1, min(65535, (n_items + threads - 1) // threads))
+    kernel(
+        (blocks,),
+        (threads,),
+        (
+            np.int64(n_items),
+            np.int32(occupancy),
+            np.int32(box_nm),
+            np.int32(nmodes),
+            np.int32(nrhs),
+            pair_blocks,
+            coeffs,
+            cupy.asarray(target_rows, dtype=cupy.int32),
+            out,
+        ),
+    )
+
+
+def _launch_leaf_otf_receive_contract(
+    pair_blocks: Any,
+    incoming: Any,
+    incoming_rows: Any,
+    particle_indices: Any,
+    out: Any,
+    *,
+    occupancy: int,
+    box_nm: int,
+    nmodes: int,
+    nrhs: int,
+    cupy: Any,
+) -> None:
+    """Contract on-the-fly incoming box states back to particle coefficients."""
+
+    count = int(incoming_rows.size)
+    if count <= 0:
+        return
+    n_items = int(count * int(occupancy) * int(nmodes) * int(nrhs))
+    kernel = _leaf_otf_receive_contract_raw_kernel()
+    threads = 256
+    blocks = max(1, min(65535, (n_items + threads - 1) // threads))
+    kernel(
+        (blocks,),
+        (threads,),
+        (
+            np.int64(n_items),
+            np.int32(occupancy),
+            np.int32(box_nm),
+            np.int32(nmodes),
+            np.int32(nrhs),
+            pair_blocks,
+            incoming,
+            cupy.asarray(incoming_rows, dtype=cupy.int32),
+            cupy.asarray(particle_indices, dtype=cupy.int32).reshape(-1),
+            out,
+        ),
+    )
+
+
 def _leaf_otf_group_chunk_leaves(
     *,
     n_group: int,
@@ -4014,10 +4204,16 @@ def _aggregate_selected_leaf_box_states(
                     cupy=cupy,
                 ).reshape(count, occupancy, int(box_nm), nmodes)
                 coeffs = x_states[idx_rows[start:end]].reshape(count, occupancy, nmodes, int(nrhs))
-                out[selected_rows[start:end]] = cupy.einsum(
-                    "cobm,comr->cbr",
+                _launch_leaf_otf_aggregate_contract(
                     pair_blocks,
                     coeffs,
+                    selected_rows[start:end],
+                    out,
+                    occupancy=occupancy,
+                    box_nm=int(box_nm),
+                    nmodes=nmodes,
+                    nrhs=int(nrhs),
+                    cupy=cupy,
                 )
         else:
             if group.aggregation is None:
@@ -4095,12 +4291,18 @@ def _receive_selected_leaf_boxes_to_particles(
                     pair_blocks_scratch=pair_blocks_scratch,
                     cupy=cupy,
                 ).reshape(count, occupancy, int(leaf_translation_tables.nmodes_out), int(nm))
-                contribution = cupy.einsum(
-                    "cobm,cbr->comr",
-                    pair_blocks.conj(),
-                    incoming[selected_rows[start:end]],
+                _launch_leaf_otf_receive_contract(
+                    pair_blocks,
+                    incoming,
+                    selected_rows[start:end],
+                    idx_rows[start:end],
+                    y,
+                    occupancy=occupancy,
+                    box_nm=int(leaf_translation_tables.nmodes_out),
+                    nmodes=int(nm),
+                    nrhs=int(incoming.shape[2]),
+                    cupy=cupy,
                 )
-                y[idx_rows[start:end]] += contribution
         else:
             if group.aggregation is None:
                 raise RuntimeError(
@@ -4150,7 +4352,6 @@ def _aggregate_leaf_box_states(
         n_group = int(idx.shape[0])
         occupancy = int(group.occupancy)
         nmodes = int(group.nmodes)
-        coeffs = x_states[idx].reshape(n_group, occupancy * nmodes, int(nrhs))
         if str(leaf_apply_mode) == "on_the_fly":
             if leaf_translation_tables is None or group.pair_deltas is None:
                 raise RuntimeError(
@@ -4177,16 +4378,24 @@ def _aggregate_leaf_box_states(
                     pair_blocks_scratch=pair_blocks_scratch,
                     cupy=cupy,
                 ).reshape(count, occupancy, int(box_nm), nmodes)
-                box_states[group.leaf_ids[start:end]] = cupy.einsum(
-                    "cobm,comr->cbr",
+                coeffs = x_states[idx[start:end]].reshape(count, occupancy, nmodes, int(nrhs))
+                _launch_leaf_otf_aggregate_contract(
                     pair_blocks,
-                    coeffs[start:end].reshape(count, occupancy, nmodes, int(nrhs)),
+                    coeffs,
+                    group.leaf_ids[start:end],
+                    box_states,
+                    occupancy=occupancy,
+                    box_nm=int(box_nm),
+                    nmodes=nmodes,
+                    nrhs=int(nrhs),
+                    cupy=cupy,
                 )
         else:
             if group.aggregation is None:
                 raise RuntimeError(
                     "Internal CuPy MLFMM error: dense leaf aggregation mode requires aggregation tensors."
                 )
+            coeffs = x_states[idx].reshape(n_group, occupancy * nmodes, int(nrhs))
             box_states[group.leaf_ids] = cupy.matmul(group.aggregation, coeffs)
     return box_states
 
@@ -4251,12 +4460,18 @@ def _receive_leaf_boxes_to_particles(
                     pair_blocks_scratch=pair_blocks_scratch,
                     cupy=cupy,
                 ).reshape(count, occupancy, int(leaf_translation_tables.nmodes_out), int(nm))
-                contribution = cupy.einsum(
-                    "cobm,cbr->comr",
-                    pair_blocks.conj(),
-                    incoming_box[leaf_ids[start:end]],
+                _launch_leaf_otf_receive_contract(
+                    pair_blocks,
+                    incoming_box,
+                    leaf_ids[start:end],
+                    idx[start:end],
+                    y,
+                    occupancy=occupancy,
+                    box_nm=int(leaf_translation_tables.nmodes_out),
+                    nmodes=int(nm),
+                    nrhs=int(nrhs),
+                    cupy=cupy,
                 )
-                y[idx[start:end]] += contribution
         else:
             if group.aggregation is None:
                 raise RuntimeError(
@@ -6329,6 +6544,9 @@ class CuPyMLFMMCouplingOperator:
         default=None, init=False, repr=False
     )
     _last_stream_stats: dict[str, object] | None = field(default=None, init=False, repr=False)
+    _last_apply_timing_seconds: dict[str, float] | None = field(
+        default=None, init=False, repr=False
+    )
     _device_pool_peak_total_bytes: int = field(default=0, init=False, repr=False)
     _near_workspace_cache: dict[CuPyMLFMMNearWorkspaceKey, CuPyMLFMMNearWorkspace] = field(
         default_factory=dict, init=False, repr=False
@@ -6589,6 +6807,11 @@ class CuPyMLFMMCouplingOperator:
                 "last_apply_stats": (
                     None if self._last_stream_stats is None else dict(self._last_stream_stats)
                 ),
+                "last_apply_timing_seconds": (
+                    None
+                    if self._last_apply_timing_seconds is None
+                    else dict(self._last_apply_timing_seconds)
+                ),
             }
 
         return {
@@ -6649,6 +6872,18 @@ class CuPyMLFMMCouplingOperator:
 
     def apply(self, x: Any) -> Any:
         cupy, _ = import_cupy()
+        collect_apply_timing = bool(self.host_cache_policy.collect_stream_stats)
+
+        def start_timer() -> float:
+            return time.perf_counter() if collect_apply_timing else 0.0
+
+        def elapsed_after_device_work(started: float) -> float:
+            if not collect_apply_timing:
+                return 0.0
+            cupy.cuda.Stream.null.synchronize()
+            return time.perf_counter() - float(started)
+
+        apply_started = start_timer()
         self._update_device_pool_peak(cupy=cupy)
         out_dtype = np.dtype(self.dtype)
         near_dtype = np.dtype(self.near_dtype)
@@ -6677,6 +6912,7 @@ class CuPyMLFMMCouplingOperator:
             dtype=out_dtype,
             cupy=cupy,
         )
+        setup_started = start_timer()
         near_ws = _ensure_exact_near_workspace(
             self.prepared_data,
             n_particles=n_particles,
@@ -6686,12 +6922,15 @@ class CuPyMLFMMCouplingOperator:
             cache=self._near_workspace_cache,
             cupy=cupy,
         )
+        setup_elapsed = elapsed_after_device_work(setup_started)
+        near_started = start_timer()
         y_near = _apply_exact_near_pairs(
             self.prepared_data,
             x_states,
             workspace=near_ws,
             cupy=cupy,
         )
+        near_elapsed = elapsed_after_device_work(near_started)
         stage = str(self.prepared_data.stage)
         resolved_leaf_otf_bytes_budget: int | None = None
         resolved_streamed_far_chunk_box_cap: int | None = None
@@ -6699,7 +6938,9 @@ class CuPyMLFMMCouplingOperator:
         resolved_streamed_far_chunk_bytes_budget: int | None = None
         resolved_streamed_far_frontier_bytes_budget: int | None = None
         stream_stats: dict[str, object] | None = None
+        far_setup_elapsed = 0.0
         if stage == "single_level":
+            far_setup_started = start_timer()
             single_ws = _ensure_single_level_workspace(
                 self.prepared_data,
                 n_particles=n_particles,
@@ -6708,6 +6949,7 @@ class CuPyMLFMMCouplingOperator:
                 cache=self._single_level_workspace_cache,
                 cupy=cupy,
             )
+            far_setup_elapsed += elapsed_after_device_work(far_setup_started)
             single = self.prepared_data.single_level
             if single is None:
                 raise RuntimeError("Internal CuPy MLFMM error: missing single-level prepared data.")
@@ -6720,6 +6962,7 @@ class CuPyMLFMMCouplingOperator:
                     minimum_bytes=8 * 1024**2,
                     maximum_bytes=256 * 1024**2,
                 )
+            far_started = start_timer()
             y_far = _apply_single_level_far(
                 self.prepared_data,
                 x_states,
@@ -6730,7 +6973,9 @@ class CuPyMLFMMCouplingOperator:
                 workspace=single_ws,
                 cupy=cupy,
             )
+            far_elapsed = elapsed_after_device_work(far_started)
         elif stage == "multilevel":
+            far_setup_started = start_timer()
             multi_ws = _ensure_multilevel_workspace(
                 self.prepared_data,
                 n_particles=n_particles,
@@ -6739,6 +6984,7 @@ class CuPyMLFMMCouplingOperator:
                 cache=self._multilevel_workspace_cache,
                 cupy=cupy,
             )
+            far_setup_elapsed += elapsed_after_device_work(far_setup_started)
             multilevel = self.prepared_data.multilevel
             if multilevel is None:
                 raise RuntimeError("Internal CuPy MLFMM error: missing multilevel prepared data.")
@@ -6836,6 +7082,7 @@ class CuPyMLFMMCouplingOperator:
                 )
                 if bool(self.host_cache_policy.collect_stream_stats):
                     stream_stats = {}
+            far_started = start_timer()
             y_far = _apply_multilevel_far(
                 self.prepared_data,
                 x_states,
@@ -6857,8 +7104,10 @@ class CuPyMLFMMCouplingOperator:
                 cupy=cupy,
                 stream_stats=stream_stats,
             )
+            far_elapsed = elapsed_after_device_work(far_started)
         else:
             raise RuntimeError(f"Unsupported CuPy MLFMM stage {stage!r}.")
+        combine_started = start_timer()
         self._last_resolved_leaf_otf_bytes_budget = resolved_leaf_otf_bytes_budget
         self._last_resolved_streamed_far_chunk_box_cap = resolved_streamed_far_chunk_box_cap
         self._last_resolved_streamed_far_frontier_box_cap = resolved_streamed_far_frontier_box_cap
@@ -6873,7 +7122,19 @@ class CuPyMLFMMCouplingOperator:
         self._last_stream_stats = None if stream_stats is None else dict(stream_stats)
         y_total = cupy.asarray(y_far, dtype=cupy.complex128)
         y_total += cupy.asarray(y_near, dtype=cupy.complex128)
+        combine_elapsed = elapsed_after_device_work(combine_started)
         self._update_device_pool_peak(cupy=cupy)
+        if collect_apply_timing:
+            total_elapsed = time.perf_counter() - apply_started
+            self._last_apply_timing_seconds = {
+                "total": float(total_elapsed),
+                "setup": float(setup_elapsed + far_setup_elapsed),
+                "exact_near": float(near_elapsed),
+                "sampled_far": float(far_elapsed),
+                "combine": float(combine_elapsed),
+            }
+        else:
+            self._last_apply_timing_seconds = None
         return _restore_unknown_shape(
             y_total.astype(_cupy_complex_dtype(out_dtype, cupy=cupy), copy=False),
             squeezed=squeezed,

@@ -681,11 +681,16 @@ def test_cupy_multilevel_stream_stats_collection_is_opt_in(collect_stream_stats:
         assert isinstance(stats, dict)
         assert "processed_chunk_count" in stats
         assert "timings_seconds_by_level" in stats
+        timings = streaming.get("last_apply_timing_seconds")
+        assert isinstance(timings, dict)
+        assert timings["total"] >= timings["sampled_far"] >= 0.0
+        assert timings["total"] >= timings["exact_near"] >= 0.0
         union_stats = stats.get("same_level_source_union_stats")
         assert union_stats is None or isinstance(union_stats, dict)
         assert "_internal_same_level_source_union_history" not in stats
     else:
         assert streaming.get("last_apply_stats") is None
+        assert streaming.get("last_apply_timing_seconds") is None
 
 
 @pytest.mark.parametrize(
