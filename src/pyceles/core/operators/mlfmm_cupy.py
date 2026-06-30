@@ -6599,6 +6599,31 @@ def _device_array_nbytes(arr: Any) -> int:
     return int(nbytes)
 
 
+def _cupy_allocator_memory_info(cupy: Any) -> dict[str, int]:
+    """Return raw and CuPy-pool-aware device-memory counters.
+
+    Streamed MLFMM budget selection must treat cached CuPy-pool blocks as
+    reusable. Raw `cudaMemGetInfo()` free bytes can be tiny after large prepare
+    or previous apply phases even though the memory pool can satisfy subsequent
+    CuPy allocations without asking the driver for new memory.
+    """
+
+    pool = cupy.get_default_memory_pool()
+    free_bytes, total_bytes = cupy.cuda.runtime.memGetInfo()
+    pool_used_bytes = int(pool.used_bytes())
+    pool_total_bytes = int(pool.total_bytes())
+    pool_cached_bytes = max(0, pool_total_bytes - pool_used_bytes)
+    effective_free_bytes = min(int(total_bytes), int(free_bytes) + int(pool_cached_bytes))
+    return {
+        "free_bytes": int(free_bytes),
+        "total_bytes": int(total_bytes),
+        "pool_used_bytes": int(pool_used_bytes),
+        "pool_total_bytes": int(pool_total_bytes),
+        "pool_cached_bytes": int(pool_cached_bytes),
+        "effective_free_bytes": int(effective_free_bytes),
+    }
+
+
 def _multilevel_full_incoming_bytes(
     multilevel: CuPyMLFMMMultilevelData,
     *,
@@ -6857,9 +6882,8 @@ class CuPyMLFMMCouplingOperator:
         """Return runtime memory diagnostics for the CuPy MLFMM operator."""
 
         cupy, _ = import_cupy()
-        pool = cupy.get_default_memory_pool()
         pinned_pool = cupy.get_default_pinned_memory_pool()
-        free_bytes, total_bytes = cupy.cuda.runtime.memGetInfo()
+        allocator_info = _cupy_allocator_memory_info(cupy)
 
         near_ws_total = int(
             sum(_device_array_nbytes(ws.y_states) for ws in self._near_workspace_cache.values())
@@ -7062,14 +7086,16 @@ class CuPyMLFMMCouplingOperator:
             ),
             "collect_stream_stats": bool(self.host_cache_policy.collect_stream_stats),
             "device_pool": {
-                "used_bytes": int(pool.used_bytes()),
-                "total_bytes": int(pool.total_bytes()),
+                "used_bytes": int(allocator_info["pool_used_bytes"]),
+                "total_bytes": int(allocator_info["pool_total_bytes"]),
+                "cached_bytes": int(allocator_info["pool_cached_bytes"]),
                 "peak_total_bytes_seen_by_operator": int(self._device_pool_peak_total_bytes),
                 "pinned_free_blocks": int(pinned_pool.n_free_blocks()),
             },
             "device_mem_info": {
-                "free_bytes": int(free_bytes),
-                "total_bytes": int(total_bytes),
+                "free_bytes": int(allocator_info["free_bytes"]),
+                "effective_free_bytes": int(allocator_info["effective_free_bytes"]),
+                "total_bytes": int(allocator_info["total_bytes"]),
             },
             "workspace_cache_entries": {
                 "near": len(self._near_workspace_cache),
@@ -7173,7 +7199,7 @@ class CuPyMLFMMCouplingOperator:
             if single is None:
                 raise RuntimeError("Internal CuPy MLFMM error: missing single-level prepared data.")
             if str(single.leaf_apply_mode) == "on_the_fly":
-                free_bytes, _ = cupy.cuda.runtime.memGetInfo()
+                free_bytes = _cupy_allocator_memory_info(cupy)["effective_free_bytes"]
                 resolved_leaf_otf_bytes_budget = _resolve_stream_bytes_budget(
                     explicit_budget=self.host_cache_policy.leaf_otf_bytes_budget,
                     free_bytes=int(free_bytes),
@@ -7208,7 +7234,7 @@ class CuPyMLFMMCouplingOperator:
             if multilevel is None:
                 raise RuntimeError("Internal CuPy MLFMM error: missing multilevel prepared data.")
             if str(multilevel.leaf_apply_mode) == "on_the_fly":
-                free_bytes, _ = cupy.cuda.runtime.memGetInfo()
+                free_bytes = _cupy_allocator_memory_info(cupy)["effective_free_bytes"]
                 nrhs = int(x_states.shape[2])
                 full_level_live_bytes = _multilevel_stream_full_level_live_bytes_theoretical(
                     multilevel,

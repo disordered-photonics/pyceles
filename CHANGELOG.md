@@ -25,6 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed CuPy MLFMM streamed traversal so recursive child-frontier buffers share
   one in-flight memory budget instead of each level treating the frontier budget
   as fresh headroom.
+- Fixed CuPy MLFMM streamed budget selection so reusable CuPy memory-pool
+  blocks count as available memory, avoiding severe over-fragmentation of
+  deep sampled-far traversals after large prepare/apply phases.
 - Reduced CuPy MLFMM directional-transform upload and resident memory by using
   separable alpha/beta factors instead of dense sampled-direction matrices, so
   larger multilevel runs avoid avoidable out-of-memory failures.

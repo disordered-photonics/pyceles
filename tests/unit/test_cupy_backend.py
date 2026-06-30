@@ -652,8 +652,14 @@ def test_cupy_multilevel_stream_stats_collection_is_opt_in(collect_stream_stats:
     diag = runtime.memory_diagnostics()
     streaming = diag.get("multilevel_streaming")
     rolling = diag.get("multilevel_rolling")
+    device_pool = diag.get("device_pool")
+    device_mem_info = diag.get("device_mem_info")
     assert isinstance(streaming, dict)
     assert isinstance(rolling, dict)
+    assert isinstance(device_pool, dict)
+    assert isinstance(device_mem_info, dict)
+    assert device_mem_info["effective_free_bytes"] >= device_mem_info["free_bytes"]
+    assert device_pool["cached_bytes"] == device_pool["total_bytes"] - device_pool["used_bytes"]
     assert streaming.get("collect_stream_stats") is collect_stream_stats
     chunk_box_cap = streaming.get("resolved_streamed_far_chunk_box_cap")
     frontier_box_cap = streaming.get("resolved_streamed_far_frontier_box_cap")
