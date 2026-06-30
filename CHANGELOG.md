@@ -22,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed the automatic multilevel MLFMM sampled-level policy so it no longer
   skips coarse same-level far interactions when the resolved hierarchy grows
   beyond depth 3.
+- Fixed CuPy MLFMM streamed traversal so recursive child-frontier buffers share
+  one in-flight memory budget instead of each level treating the frontier budget
+  as fresh headroom.
 - Reduced CuPy MLFMM directional-transform upload and resident memory by using
   separable alpha/beta factors instead of dense sampled-direction matrices, so
   larger multilevel runs avoid avoidable out-of-memory failures.
