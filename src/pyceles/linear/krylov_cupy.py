@@ -1305,8 +1305,10 @@ def bicgstab_cupy_native(
         )
 
     r_hat = cupy.asarray(r_vec, dtype=op_dtype)
-    p_vec = cupy.zeros_like(r_vec, dtype=op_dtype)
-    v_vec = cupy.zeros_like(r_vec, dtype=op_dtype)
+    # `p_vec` and `v_vec` are initialized during the first iteration. Avoid
+    # allocating full placeholders before the first matrix-free apply.
+    p_vec: Any | None = None
+    v_vec: Any | None = None
     rho_old = cupy.asarray(1.0 + 0.0j, dtype=acc_dtype)
     alpha = cupy.asarray(1.0 + 0.0j, dtype=acc_dtype)
     omega = cupy.asarray(1.0 + 0.0j, dtype=acc_dtype)
@@ -1322,6 +1324,8 @@ def bicgstab_cupy_native(
         if k == 0:
             p_vec = cupy.asarray(r_vec, dtype=op_dtype)
         else:
+            if p_vec is None or v_vec is None:
+                raise RuntimeError("Internal CuPy BiCGSTAB error: missing recurrence state.")
             if float(cupy.abs(omega)) <= breakdown_tol_f:
                 iterations = k + 1
                 info = k + 1
@@ -1331,6 +1335,9 @@ def bicgstab_cupy_native(
             p_vec = r_vec + cupy.asarray(beta, dtype=op_dtype) * (
                 p_vec - cupy.asarray(omega, dtype=op_dtype) * v_vec
             )
+            # The previous iteration's A*p is needed only for the recurrence
+            # above. Drop it before the next matrix-free operator application.
+            v_vec = None
 
         phat = _apply_minv(p_vec)
         v_vec = _apply(A_mv, phat)
@@ -1374,6 +1381,14 @@ def bicgstab_cupy_native(
         r_vec = s_vec - cupy.asarray(omega, dtype=op_dtype) * t_vec
         residual_norm = _norm(r_vec, cupy=cupy, accum_dtype=acc_dtype)
         relative_residual = residual_norm / b_norm if b_norm > 0 else residual_norm
+        # These temporaries are not part of the BiCGSTAB recurrence carried to
+        # the next iteration.  Releasing the Python references here avoids
+        # carrying stale Krylov-sized vectors into the next A*p application,
+        # which is important for memory-tight CuPy matrix-free operators.
+        phat = None
+        shat = None
+        s_vec = None
+        t_vec = None
         iterations = k + 1
         true_hist.append(relative_residual)
         if callback is not None:

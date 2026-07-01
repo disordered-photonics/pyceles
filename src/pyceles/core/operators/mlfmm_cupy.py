@@ -5226,6 +5226,20 @@ def _level_chunk_box_cap(
     return max(1, int(bytes_budget) // max(1, int(per_box_bytes)))
 
 
+def _child_outgoing_bytes_budget(
+    *,
+    level: CuPyMLFMMLevelData,
+    nrhs: int,
+    total_budget: int,
+    bytes_in_flight: int,
+) -> int:
+    """Return child outgoing budget after reserving live ancestor outgoing arrays."""
+
+    per_box_bytes = _level_chunk_bytes_per_box(level=level, nrhs=nrhs)
+    remaining = int(total_budget) - int(bytes_in_flight)
+    return max(int(per_box_bytes), int(remaining))
+
+
 def _iter_id_chunks(ids: Any, *, chunk_size: int) -> Iterator[Any]:
     """Yield chunk-sized views of one sorted id vector."""
 
@@ -5527,6 +5541,7 @@ def _apply_same_level_far_streamed_chunk_group(
             leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
             leaf_otf_bytes_budget=leaf_otf_bytes_budget,
             streamed_far_chunk_bytes_budget=int(streamed_far_chunk_bytes_budget),
+            outgoing_bytes_in_flight=0,
             level_idx=int(level_idx),
             leaf_level=int(leaf_level),
             box_ids_sorted=full_source_ids,
@@ -5646,6 +5661,7 @@ def _apply_same_level_far_streamed_chunk_group(
             leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
             leaf_otf_bytes_budget=leaf_otf_bytes_budget,
             streamed_far_chunk_bytes_budget=int(streamed_far_chunk_bytes_budget),
+            outgoing_bytes_in_flight=0,
             level_idx=int(level_idx),
             leaf_level=int(leaf_level),
             box_ids_sorted=source_chunk_ids,
@@ -5673,6 +5689,7 @@ def _apply_same_level_far_streamed_chunk_group(
                     level.offset_diagonals[offset],
                     cupy=cupy,
                 )
+        source_outgoing = None
 
 
 def _iter_child_chunk_specs_streamed(
@@ -5813,6 +5830,7 @@ def _build_outgoing_subset_streamed(
     leaf_otf_chunk_leaves: int | None,
     leaf_otf_bytes_budget: int | None,
     streamed_far_chunk_bytes_budget: int,
+    outgoing_bytes_in_flight: int,
     level_idx: int,
     leaf_level: int,
     box_ids_sorted: Any,
@@ -5849,6 +5867,17 @@ def _build_outgoing_subset_streamed(
         (n_boxes_sel, 4, int(level.directional.grid.n_directions), int(nrhs)),
         dtype=cupy.complex128,
     )
+    current_outgoing_bytes = _device_array_nbytes(outgoing)
+    child_outgoing_bytes_in_flight = int(outgoing_bytes_in_flight) + int(current_outgoing_bytes)
+    if stream_stats is not None:
+        peak_bytes = cast(
+            dict[str, int],
+            stream_stats.setdefault("outgoing_build_stack_peak_bytes", {}),
+        )
+        peak_bytes[str(level_idx)] = max(
+            int(peak_bytes.get(str(level_idx), 0)),
+            int(child_outgoing_bytes_in_flight),
+        )
     if n_boxes_sel == 0:
         _accumulate_stream_seconds(
             stream_stats,
@@ -5900,10 +5929,16 @@ def _build_outgoing_subset_streamed(
             f"{int(level_idx)}."
         )
     child_level = int(transfer.child_level)
+    child_bytes_budget = _child_outgoing_bytes_budget(
+        level=levels[child_level],
+        nrhs=int(nrhs),
+        total_budget=int(streamed_far_chunk_bytes_budget),
+        bytes_in_flight=int(child_outgoing_bytes_in_flight),
+    )
     child_box_cap = _level_chunk_box_cap(
         level=levels[child_level],
         nrhs=int(nrhs),
-        bytes_budget=int(streamed_far_chunk_bytes_budget),
+        bytes_budget=int(child_bytes_budget),
     )
     if stream_stats is not None:
         caps = cast(dict[str, int], stream_stats.setdefault("level_chunk_box_cap", {}))
@@ -5922,6 +5957,7 @@ def _build_outgoing_subset_streamed(
             leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
             leaf_otf_bytes_budget=leaf_otf_bytes_budget,
             streamed_far_chunk_bytes_budget=int(streamed_far_chunk_bytes_budget),
+            outgoing_bytes_in_flight=int(child_outgoing_bytes_in_flight),
             level_idx=child_level,
             leaf_level=int(leaf_level),
             box_ids_sorted=full_child_ids,
@@ -6043,6 +6079,7 @@ def _build_outgoing_subset_streamed(
             leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
             leaf_otf_bytes_budget=leaf_otf_bytes_budget,
             streamed_far_chunk_bytes_budget=int(streamed_far_chunk_bytes_budget),
+            outgoing_bytes_in_flight=int(child_outgoing_bytes_in_flight),
             level_idx=child_level,
             leaf_level=int(leaf_level),
             box_ids_sorted=child_chunk_ids,
@@ -6092,6 +6129,7 @@ def _build_outgoing_subset_streamed(
                     transfer.phase_up_by_shift[shift],
                     cupy=cupy,
                 )
+        child_outgoing = None
     _accumulate_stream_seconds(
         stream_stats,
         level_idx=int(level_idx),

@@ -19,6 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pairwise-vs-MLFMM scaling benchmark.
 
 ### Fixed
+- Fixed native CuPy BiCGSTAB device-vector lifetime so stale per-iteration
+  temporaries are released before the next matrix-free operator application,
+  avoiding avoidable OOMs for memory-tight streamed MLFMM solves.
+- Fixed CuPy MLFMM streamed outgoing construction so recursive child outgoing
+  chunks share the same in-flight memory budget as their live ancestor outgoing
+  arrays.
 - Fixed the automatic multilevel MLFMM sampled-level policy so it no longer
   skips coarse same-level far interactions when the resolved hierarchy grows
   beyond depth 3.

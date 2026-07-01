@@ -693,6 +693,9 @@ def test_cupy_multilevel_stream_stats_collection_is_opt_in(collect_stream_stats:
         assert timings["total"] >= timings["exact_near"] >= 0.0
         union_stats = stats.get("same_level_source_union_stats")
         assert union_stats is None or isinstance(union_stats, dict)
+        outgoing_stack_peak = stats.get("outgoing_build_stack_peak_bytes")
+        assert isinstance(outgoing_stack_peak, dict)
+        assert all(int(value) >= 0 for value in outgoing_stack_peak.values())
         assert "_internal_same_level_source_union_history" not in stats
     else:
         assert streaming.get("last_apply_stats") is None
