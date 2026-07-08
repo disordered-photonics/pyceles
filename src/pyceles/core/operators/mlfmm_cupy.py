@@ -4433,9 +4433,12 @@ def _receive_selected_leaf_boxes_to_particles(
     nm: int,
     out: Any,
     cupy: Any,
+    level_idx: int | None = None,
+    stream_stats: dict[str, object] | None = None,
 ) -> None:
     """Accumulate one selected leaf subset from regular box states to particles."""
 
+    receive_started = time.perf_counter() if stream_stats is not None else 0.0
     selected_ids = cupy.asarray(selected_leaf_ids, dtype=cupy.int32).reshape(-1)
     incoming = cupy.asarray(incoming_box, dtype=cupy.complex128)
     if int(selected_ids.size) != int(incoming.shape[0]):
@@ -4444,6 +4447,7 @@ def _receive_selected_leaf_boxes_to_particles(
             f"{int(selected_ids.size)} vs {int(incoming.shape[0])}."
         )
     y = cupy.asarray(out, dtype=cupy.complex128)
+    timing_level = int(level_idx) if level_idx is not None else 0
     for group in leaf_groups:
         matched = _matched_sorted_rows(
             container_ids=group.leaf_ids,
@@ -4475,12 +4479,27 @@ def _receive_selected_leaf_boxes_to_particles(
             for start in range(0, n_group_rows, chunk_leaves):
                 end = min(n_group_rows, start + chunk_leaves)
                 count = int(end - start)
+                pair_started = time.perf_counter() if stream_stats is not None else 0.0
                 pair_blocks = _leaf_translation_blocks_from_pair_deltas(
                     pair_rows[start:end].reshape(-1, 3),
                     tables=leaf_translation_tables,
                     pair_blocks_scratch=pair_blocks_scratch,
                     cupy=cupy,
                 ).reshape(count, occupancy, int(leaf_translation_tables.nmodes_out), int(nm))
+                if level_idx is not None:
+                    _record_leaf_receive_chunk_stats(
+                        stream_stats,
+                        level_idx=int(level_idx),
+                        leaves=count,
+                        pair_block_bytes=_device_array_nbytes(pair_blocks),
+                    )
+                _accumulate_stream_seconds(
+                    stream_stats,
+                    level_idx=timing_level,
+                    key="leaf_receive_pair_block_build",
+                    seconds=time.perf_counter() - pair_started,
+                )
+                contract_started = time.perf_counter() if stream_stats is not None else 0.0
                 _launch_leaf_otf_receive_contract(
                     pair_blocks,
                     incoming,
@@ -4492,6 +4511,12 @@ def _receive_selected_leaf_boxes_to_particles(
                     nmodes=int(nm),
                     nrhs=int(incoming.shape[2]),
                     cupy=cupy,
+                )
+                _accumulate_stream_seconds(
+                    stream_stats,
+                    level_idx=timing_level,
+                    key="leaf_receive_contract",
+                    seconds=time.perf_counter() - contract_started,
                 )
         else:
             if group.aggregation is None:
@@ -4512,6 +4537,12 @@ def _receive_selected_leaf_boxes_to_particles(
                 incoming[selected_rows],
             ).reshape(n_group_rows, occupancy, int(nm), int(incoming.shape[2]))
             y[idx_rows] += contribution
+    _accumulate_stream_seconds(
+        stream_stats,
+        level_idx=timing_level,
+        key="leaf_receive_total",
+        seconds=time.perf_counter() - receive_started,
+    )
 
 
 def _aggregate_leaf_box_states(
@@ -5394,6 +5425,34 @@ def _accumulate_stream_seconds(
     level_timings[str(key)] = float(level_timings.get(str(key), 0.0) + float(seconds))
 
 
+def _record_leaf_receive_chunk_stats(
+    stream_stats: dict[str, object] | None,
+    *,
+    level_idx: int,
+    leaves: int,
+    pair_block_bytes: int,
+) -> None:
+    """Record optional leaf receive chunk counters for streamed diagnostics."""
+
+    if stream_stats is None:
+        return
+    level_key = str(level_idx)
+    counts = cast(dict[str, int], stream_stats.setdefault("leaf_receive_chunk_count", {}))
+    counts[level_key] = int(counts.get(level_key, 0) + 1)
+    leaf_sums = cast(dict[str, int], stream_stats.setdefault("leaf_receive_leaf_sum", {}))
+    leaf_sums[level_key] = int(leaf_sums.get(level_key, 0) + int(leaves))
+    peak_leaves = cast(dict[str, int], stream_stats.setdefault("leaf_receive_peak_leaves", {}))
+    peak_leaves[level_key] = max(int(peak_leaves.get(level_key, 0)), int(leaves))
+    peak_pair_bytes = cast(
+        dict[str, int],
+        stream_stats.setdefault("leaf_receive_pair_blocks_peak_bytes", {}),
+    )
+    peak_pair_bytes[level_key] = max(
+        int(peak_pair_bytes.get(level_key, 0)),
+        int(pair_block_bytes),
+    )
+
+
 def _record_same_level_source_union_stats(
     stream_stats: dict[str, object] | None,
     *,
@@ -6206,10 +6265,17 @@ def _apply_multilevel_frontier_streamed(
 
     if int(level_idx) >= int(leaf_level):
         for box_ids, incoming_chunk in frontier_chunks:
+            receive_project_started = time.perf_counter() if stream_stats is not None else 0.0
             incoming_box = _directional_to_box_regular_cupy(
                 levels[int(leaf_level)].directional,
                 cupy.asarray(incoming_chunk, dtype=cupy.complex128),
                 cupy=cupy,
+            )
+            _accumulate_stream_seconds(
+                stream_stats,
+                level_idx=int(leaf_level),
+                key="leaf_receive_directional_to_box",
+                seconds=time.perf_counter() - receive_project_started,
             )
             _receive_selected_leaf_boxes_to_particles(
                 incoming_box,
@@ -6224,6 +6290,8 @@ def _apply_multilevel_frontier_streamed(
                 nm=int(nm),
                 out=y_out,
                 cupy=cupy,
+                level_idx=int(leaf_level),
+                stream_stats=stream_stats,
             )
         return
 
