@@ -41,6 +41,26 @@ from .mode_metadata import (
 )
 
 COMPLEX128_DTYPE = np.dtype(np.complex128)
+_MIB = 1024**2
+
+# Streamed CuPy MLFMM memory-policy constants.
+#
+# Automatic multilevel streaming first applies a hard CuPy pool ceiling below
+# physical device memory. Source/outgoing chunks and frontier incoming buffers
+# then share one transient budget inside the remaining active headroom. The
+# transient fraction is intentionally below 1.0 because the model does not
+# include short-lived traversal temporaries such as search/filter/concatenate
+# arrays or allocator fragmentation.
+_STREAMED_FAR_DEVICE_GUARD_FRACTION = 1.0 / 16.0
+_STREAMED_FAR_POOL_LIMIT_MIN_GUARD_BYTES = 256 * _MIB
+_STREAMED_FAR_POOL_LIMIT_MAX_GUARD_BYTES = 1024 * _MIB
+_STREAMED_FAR_TRANSIENT_FRACTION_OF_ACTIVE_HEADROOM = 0.86
+_STREAMED_FAR_FRONTIER_FRACTION_OF_TRANSIENT = 0.67
+_STREAMED_FAR_MIN_SOURCE_CHUNK_BYTES = 16 * _MIB
+_STREAMED_FAR_MIN_FRONTIER_BYTES = 64 * _MIB
+_SINGLE_LEVEL_LEAF_OTF_FRACTION_OF_EFFECTIVE_FREE = 0.05
+_SINGLE_LEVEL_LEAF_OTF_MIN_BYTES = 8 * _MIB
+_SINGLE_LEVEL_LEAF_OTF_MAX_BYTES = 256 * _MIB
 
 Offset3 = tuple[int, int, int]
 # CuPy production runs use on-the-fly leaf apply; dense leaf payloads remain
@@ -77,12 +97,15 @@ class CuPyMLFMMHostCachePolicy:
     leaf-count limiter; it does not directly bound the largest temporary bytes
     when one leaf has very high occupancy.
 
-    `leaf_otf_bytes_budget` bounds one on-the-fly leaf translation contraction
-    substep by estimated dense pair-block bytes. `streamed_far_chunk_bytes_budget`
-    bounds one sampled-far directional chunk by estimated directional-state
-    bytes. When omitted, both budgets are derived conservatively from currently
-    available device memory during apply, while runtime diagnostics report the
-    resolved chunking in native leaf/box units.
+    `leaf_otf_bytes_budget` bounds single-level on-the-fly leaf receive
+    substeps by estimated dense pair-block bytes. Multilevel streamed leaf
+    aggregation/receive uses fused kernels and does not materialize that
+    pair-block scratch.
+    `streamed_far_chunk_bytes_budget` bounds one sampled-far directional chunk
+    by estimated directional-state bytes. When omitted, source and frontier
+    budgets are derived together from one guarded device-residency plan during
+    apply, while runtime diagnostics report the resolved chunking in native
+    leaf/box units.
 
     `collect_stream_stats` enables profiling instrumentation for streamed
     multilevel chunk/build counters. Leave it off for production runs so
@@ -4283,6 +4306,304 @@ def _launch_leaf_otf_receive_contract(
     )
 
 
+@cache
+def _leaf_otf_receive_fused_raw_kernel(full_order: int) -> Any:
+    """Return a RawKernel for receive-side leaf translations without pair-block scratch."""
+
+    cupy, _ = import_cupy()
+    order = int(full_order)
+    n_orders = 2 * order + 1
+    n_p_pdm = n_orders * (n_orders + 1) // 2
+    n_phase = 2 * n_orders - 1
+    source = f"""
+    #include <cupy/complex.cuh>
+
+    __device__ double assoc_legendre_function_receive(
+        const int l,
+        const int m,
+        const double* ct_powers,
+        const double* st_powers,
+        const double* plm_coeffs
+    ) {{
+        double plm = 0.0;
+        const double st_pow = st_powers[m];
+        int jj = 0;
+        for (int lambda = l - m; lambda >= 0; lambda -= 2) {{
+            const int idx = jj * ({n_orders} * {n_orders}) + m * {n_orders} + l;
+            plm += st_pow * ct_powers[lambda] * plm_coeffs[idx];
+            jj += 1;
+        }}
+        return plm;
+    }}
+
+    __device__ complex<double> bessel_lookup_linear_receive(
+        const int p,
+        const double r,
+        const double* re_table,
+        const double* im_table,
+        const double inv_dr,
+        const int last_index
+    ) {{
+        if (r <= 0.0) {{
+            return complex<double>(re_table[p], im_table[p]);
+        }}
+        double t = r * inv_dr;
+        int i0 = (int)floor(t);
+        double frac = t - (double)i0;
+        if (i0 < 0) {{
+            i0 = 0;
+            frac = 0.0;
+        }}
+        if (i0 >= last_index) {{
+            i0 = last_index - 1;
+            frac = 1.0;
+        }}
+        const int base0 = i0 * {n_orders} + p;
+        const int base1 = (i0 + 1) * {n_orders} + p;
+        const double re_val = (1.0 - frac) * re_table[base0] + frac * re_table[base1];
+        const double im_val = (1.0 - frac) * im_table[base0] + frac * im_table[base1];
+        return complex<double>(re_val, im_val);
+    }}
+
+    extern "C" __global__ void mlfmm_leaf_otf_receive_fused(
+        const int n_pairs,
+        const int occupancy,
+        const int n_out_modes,
+        const int n_in_modes,
+        const int n_rhs,
+        const double* pair_deltas,
+        const int* particle_indices,
+        const int* row_indices,
+        const int* incoming_rows,
+        const complex<double>* incoming,
+        const int* out_mode_indices,
+        const int* in_mode_indices,
+        const int* mode_m_out,
+        const int* mode_m_in,
+        const double* re_j,
+        const double* im_j,
+        const double inv_dr,
+        const int last_index,
+        const double* plm_coeffs,
+        const double* re_ab,
+        const double* im_ab,
+        const int* pair_offset,
+        const int* pair_pmin,
+        const int* pair_pcount,
+        complex<double>* out
+    ) {{
+        const int lane = threadIdx.x & 31;
+        const int warp = threadIdx.x >> 5;
+        const int n_warps = blockDim.x >> 5;
+        const int tile_base = blockIdx.y * 32;
+        const int n_outputs = n_in_modes * n_rhs;
+
+        __shared__ double r_shared;
+        __shared__ double ct_shared;
+        __shared__ double st_shared;
+        __shared__ double phi_shared;
+        __shared__ double re_j_shared[{n_orders}];
+        __shared__ double im_j_shared[{n_orders}];
+        __shared__ double p_pdm_shared[{n_p_pdm}];
+        __shared__ double cos_mphi_shared[{n_phase}];
+        __shared__ double sin_mphi_shared[{n_phase}];
+        __shared__ double ct_pow_shared[{n_orders}];
+        __shared__ double st_pow_shared[{n_orders}];
+        __shared__ double partial_re[256];
+        __shared__ double partial_im[256];
+
+        for (int pair_idx = blockIdx.x; pair_idx < n_pairs; pair_idx += gridDim.x) {{
+            const int leaf_row = pair_idx / occupancy;
+            const int occ = pair_idx - leaf_row * occupancy;
+            const int group_row = row_indices[leaf_row];
+            const int group_pair_idx = group_row * occupancy + occ;
+
+            if (threadIdx.x == 0) {{
+                const double dx = pair_deltas[3 * group_pair_idx + 0];
+                const double dy = pair_deltas[3 * group_pair_idx + 1];
+                const double dz = pair_deltas[3 * group_pair_idx + 2];
+                const double rr = sqrt(dx * dx + dy * dy + dz * dz);
+                r_shared = rr;
+                if (rr > 0.0) {{
+                    ct_shared = dz / rr;
+                    st_shared = sqrt(fmax(0.0, 1.0 - ct_shared * ct_shared));
+                    phi_shared = atan2(dy, dx);
+                    ct_pow_shared[0] = 1.0;
+                    st_pow_shared[0] = 1.0;
+                    for (int p = 1; p < {n_orders}; ++p) {{
+                        ct_pow_shared[p] = ct_pow_shared[p - 1] * ct_shared;
+                        st_pow_shared[p] = st_pow_shared[p - 1] * st_shared;
+                    }}
+                }}
+            }}
+            __syncthreads();
+
+            if (r_shared > 0.0) {{
+                for (int p = threadIdx.x; p < {n_orders}; p += blockDim.x) {{
+                    const complex<double> radial =
+                        bessel_lookup_linear_receive(p, r_shared, re_j, im_j, inv_dr, last_index);
+                    re_j_shared[p] = radial.real();
+                    im_j_shared[p] = radial.imag();
+                    for (int absdm = 0; absdm <= p; ++absdm) {{
+                        p_pdm_shared[p * (p + 1) / 2 + absdm] =
+                            assoc_legendre_function_receive(
+                                p, absdm, ct_pow_shared, st_pow_shared, plm_coeffs
+                            );
+                    }}
+                }}
+                if (threadIdx.x == 0) {{
+                    for (int dm = -2 * {order}; dm <= 2 * {order}; ++dm) {{
+                        const int phase_idx = dm + 2 * {order};
+                        sincos((double)dm * phi_shared,
+                               &sin_mphi_shared[phase_idx],
+                               &cos_mphi_shared[phase_idx]);
+                    }}
+                }}
+            }}
+            __syncthreads();
+
+            const int flat = tile_base + lane;
+            double acc_re = 0.0;
+            double acc_im = 0.0;
+            int rhs = 0;
+            int in_idx = 0;
+            if (flat < n_outputs) {{
+                rhs = flat % n_rhs;
+                in_idx = flat / n_rhs;
+                const int incoming_row = incoming_rows[leaf_row];
+                for (int out_idx = warp; out_idx < n_out_modes; out_idx += n_warps) {{
+                    double coeff_re = 0.0;
+                    double coeff_im = 0.0;
+                    if (r_shared <= 0.0) {{
+                        if (out_mode_indices[out_idx] == in_mode_indices[in_idx]) {{
+                            coeff_re = 1.0;
+                        }}
+                    }} else {{
+                        const int delta_m = mode_m_in[in_idx] - mode_m_out[out_idx];
+                        const int phase_idx = delta_m + 2 * {order};
+                        const int table_idx = out_idx * n_in_modes + in_idx;
+                        const int base = pair_offset[table_idx];
+                        const int p_min = pair_pmin[table_idx];
+                        const int p_count = pair_pcount[table_idx];
+                        double re_sum = 0.0;
+                        double im_sum = 0.0;
+                        for (int ip = 0; ip < p_count; ++ip) {{
+                            const int p = p_min + ip;
+                            const int ab_idx = base + ip;
+                            const double plm = p_pdm_shared[p * (p + 1) / 2 + abs(delta_m)];
+                            const double re_abp = re_ab[ab_idx] * plm;
+                            const double im_abp = im_ab[ab_idx] * plm;
+                            const double re_abpr =
+                                re_abp * re_j_shared[p] - im_abp * im_j_shared[p];
+                            const double im_abpr =
+                                re_abp * im_j_shared[p] + im_abp * re_j_shared[p];
+                            const double re_phase =
+                                re_abpr * cos_mphi_shared[phase_idx]
+                                - im_abpr * sin_mphi_shared[phase_idx];
+                            const double im_phase =
+                                re_abpr * sin_mphi_shared[phase_idx]
+                                + im_abpr * cos_mphi_shared[phase_idx];
+                            re_sum += re_phase;
+                            im_sum += im_phase;
+                        }}
+                        coeff_re = re_sum;
+                        coeff_im = im_sum;
+                    }}
+                    const complex<double> x =
+                        incoming[((long long)incoming_row * n_out_modes + out_idx) * n_rhs + rhs];
+                    const double xr = x.real();
+                    const double xi = x.imag();
+                    acc_re += coeff_re * xr + coeff_im * xi;
+                    acc_im += coeff_re * xi - coeff_im * xr;
+                }}
+            }}
+
+            const int partial_idx = warp * 32 + lane;
+            partial_re[partial_idx] = acc_re;
+            partial_im[partial_idx] = acc_im;
+            __syncthreads();
+
+            if (warp == 0 && flat < n_outputs) {{
+                double sum_re = 0.0;
+                double sum_im = 0.0;
+                for (int w = 0; w < n_warps; ++w) {{
+                    const int idx = w * 32 + lane;
+                    sum_re += partial_re[idx];
+                    sum_im += partial_im[idx];
+                }}
+                const int particle = particle_indices[group_pair_idx];
+                out[((long long)particle * n_in_modes + in_idx) * n_rhs + rhs] +=
+                    complex<double>(sum_re, sum_im);
+            }}
+            __syncthreads();
+        }}
+    }}
+    """
+    return cupy.RawKernel(source, "mlfmm_leaf_otf_receive_fused")
+
+
+def _launch_leaf_otf_receive_fused(
+    *,
+    pair_deltas: Any,
+    particle_indices: Any,
+    row_indices: Any,
+    incoming_rows: Any,
+    incoming: Any,
+    out: Any,
+    tables: CuPyLeafTranslationTablesData,
+    occupancy: int,
+    box_nm: int,
+    nmodes: int,
+    nrhs: int,
+    cupy: Any,
+) -> None:
+    """Receive leaf box states without materializing the pair-block tensor."""
+
+    count = int(row_indices.size)
+    if count <= 0:
+        return
+    n_pairs = int(count * int(occupancy))
+    n_outputs = int(nmodes) * int(nrhs)
+    n_tiles = max(1, (n_outputs + 31) // 32)
+    kernel = _leaf_otf_receive_fused_raw_kernel(int(tables.full_order))
+    props = cupy.cuda.runtime.getDeviceProperties(cupy.cuda.runtime.getDevice())
+    max_grid_pairs = int(props["maxGridSize"][0])
+    max_threads = int(props["maxThreadsPerBlock"])
+    threads = 256 if max_threads >= 256 else 128 if max_threads >= 128 else 64
+    blocks_x = max(1, min(max_grid_pairs, n_pairs))
+    kernel(
+        (blocks_x, n_tiles),
+        (threads,),
+        (
+            np.int32(n_pairs),
+            np.int32(occupancy),
+            np.int32(box_nm),
+            np.int32(nmodes),
+            np.int32(nrhs),
+            pair_deltas.reshape(-1),
+            particle_indices.reshape(-1),
+            cupy.asarray(row_indices, dtype=cupy.int32).reshape(-1),
+            cupy.asarray(incoming_rows, dtype=cupy.int32).reshape(-1),
+            incoming.reshape(-1),
+            tables.out_mode_indices,
+            tables.in_mode_indices,
+            tables.mode_m_out,
+            tables.mode_m_in,
+            tables.re_j,
+            tables.im_j,
+            np.float64(float(tables.inv_dr)),
+            np.int32(int(tables.last_index)),
+            tables.plm_coeffs,
+            tables.compact_re_ab,
+            tables.compact_im_ab,
+            tables.pair_offset,
+            tables.pair_pmin,
+            tables.pair_pcount,
+            out.reshape(-1),
+        ),
+    )
+
+
 def _leaf_otf_group_chunk_leaves(
     *,
     n_group: int,
@@ -4332,11 +4653,8 @@ def _leaf_otf_resolved_chunk_summary(
     *,
     leaf_groups: tuple[CuPyLeafApplyGroupData, ...],
     leaf_otf_chunk_leaves: int | None,
-    leaf_otf_bytes_budget: int | None,
-    box_nm: int,
-    nrhs: int,
 ) -> dict[str, object] | None:
-    """Summarize resolved leaf OTF chunk sizes in native leaf units."""
+    """Summarize fused multilevel leaf OTF chunk sizes in native leaf units."""
 
     if not leaf_groups:
         return None
@@ -4346,14 +4664,9 @@ def _leaf_otf_resolved_chunk_summary(
         n_group = int(group.leaf_ids.shape[0])
         if n_group <= 0:
             continue
-        resolved_chunk = _leaf_otf_group_chunk_leaves(
+        resolved_chunk = _leaf_otf_fused_aggregate_chunk_leaves(
             n_group=n_group,
             chunk_leaves=leaf_otf_chunk_leaves,
-            occupancy=int(group.occupancy),
-            box_nm=int(box_nm),
-            nmodes=int(group.nmodes),
-            nrhs=int(nrhs),
-            bytes_budget=leaf_otf_bytes_budget,
         )
         resolved_by_occupancy[str(int(group.occupancy))] = int(resolved_chunk)
         chunk_values.append(int(resolved_chunk))
@@ -4395,9 +4708,7 @@ def _aggregate_selected_leaf_box_states(
     leaf_groups: tuple[CuPyLeafApplyGroupData, ...],
     leaf_apply_mode: CuPyMLFMMLeafApplyMode,
     leaf_translation_tables: CuPyLeafTranslationTablesData | None,
-    pair_blocks_scratch: dict[str, Any] | None,
     leaf_otf_chunk_leaves: int | None,
-    leaf_otf_bytes_budget: int | None,
     box_nm: int,
     nrhs: int,
     cupy: Any,
@@ -4468,9 +4779,7 @@ def _receive_selected_leaf_boxes_to_particles(
     leaf_groups: tuple[CuPyLeafApplyGroupData, ...],
     leaf_apply_mode: CuPyMLFMMLeafApplyMode,
     leaf_translation_tables: CuPyLeafTranslationTablesData | None,
-    pair_blocks_scratch: dict[str, Any] | None,
     leaf_otf_chunk_leaves: int | None,
-    leaf_otf_bytes_budget: int | None,
     receive_adjoint_cache: dict[int, Any] | None,
     nm: int,
     out: Any,
@@ -4508,46 +4817,29 @@ def _receive_selected_leaf_boxes_to_particles(
                     "Internal CuPy MLFMM error: on-the-fly leaf receive requires translation "
                     "tables and pair-delta schedules."
                 )
-            chunk_leaves = _leaf_otf_group_chunk_leaves(
+            chunk_leaves = _leaf_otf_fused_aggregate_chunk_leaves(
                 n_group=n_group_rows,
                 chunk_leaves=leaf_otf_chunk_leaves,
-                occupancy=occupancy,
-                box_nm=int(leaf_translation_tables.nmodes_out),
-                nmodes=int(nm),
-                nrhs=int(incoming.shape[2]),
-                bytes_budget=leaf_otf_bytes_budget,
             )
-            pair_rows = group.pair_deltas.reshape(-1, occupancy, 3)[group_rows]
             for start in range(0, n_group_rows, chunk_leaves):
                 end = min(n_group_rows, start + chunk_leaves)
                 count = int(end - start)
-                pair_started = time.perf_counter() if stream_stats is not None else 0.0
-                pair_blocks = _leaf_translation_blocks_from_pair_deltas(
-                    pair_rows[start:end].reshape(-1, 3),
-                    tables=leaf_translation_tables,
-                    pair_blocks_scratch=pair_blocks_scratch,
-                    cupy=cupy,
-                ).reshape(count, occupancy, int(leaf_translation_tables.nmodes_out), int(nm))
                 if level_idx is not None:
                     _record_leaf_receive_chunk_stats(
                         stream_stats,
                         level_idx=int(level_idx),
                         leaves=count,
-                        pair_block_bytes=_device_array_nbytes(pair_blocks),
+                        pair_block_bytes=0,
                     )
-                _accumulate_stream_seconds(
-                    stream_stats,
-                    level_idx=timing_level,
-                    key="leaf_receive_pair_block_build",
-                    seconds=time.perf_counter() - pair_started,
-                )
-                contract_started = time.perf_counter() if stream_stats is not None else 0.0
-                _launch_leaf_otf_receive_contract(
-                    pair_blocks,
-                    incoming,
-                    selected_rows[start:end],
-                    idx_rows[start:end],
-                    y,
+                fused_started = time.perf_counter() if stream_stats is not None else 0.0
+                _launch_leaf_otf_receive_fused(
+                    pair_deltas=group.pair_deltas,
+                    particle_indices=group.particle_indices,
+                    row_indices=group_rows[start:end],
+                    incoming_rows=selected_rows[start:end],
+                    incoming=incoming,
+                    out=y,
+                    tables=leaf_translation_tables,
                     occupancy=occupancy,
                     box_nm=int(leaf_translation_tables.nmodes_out),
                     nmodes=int(nm),
@@ -4557,8 +4849,8 @@ def _receive_selected_leaf_boxes_to_particles(
                 _accumulate_stream_seconds(
                     stream_stats,
                     level_idx=timing_level,
-                    key="leaf_receive_contract",
-                    seconds=time.perf_counter() - contract_started,
+                    key="leaf_receive_fused",
+                    seconds=time.perf_counter() - fused_started,
                 )
         else:
             if group.aggregation is None:
@@ -5601,9 +5893,7 @@ def _apply_same_level_far_streamed_chunk_group(
     leaf_groups: tuple[CuPyLeafApplyGroupData, ...],
     leaf_apply_mode: CuPyMLFMMLeafApplyMode,
     leaf_translation_tables: CuPyLeafTranslationTablesData | None,
-    pair_blocks_scratch: dict[str, Any] | None,
     leaf_otf_chunk_leaves: int | None,
-    leaf_otf_bytes_budget: int | None,
     streamed_far_chunk_bytes_budget: int,
     level_idx: int,
     leaf_level: int,
@@ -5638,9 +5928,7 @@ def _apply_same_level_far_streamed_chunk_group(
             leaf_groups=leaf_groups,
             leaf_apply_mode=leaf_apply_mode,
             leaf_translation_tables=leaf_translation_tables,
-            pair_blocks_scratch=pair_blocks_scratch,
             leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
-            leaf_otf_bytes_budget=leaf_otf_bytes_budget,
             streamed_far_chunk_bytes_budget=int(streamed_far_chunk_bytes_budget),
             outgoing_bytes_in_flight=0,
             level_idx=int(level_idx),
@@ -5758,9 +6046,7 @@ def _apply_same_level_far_streamed_chunk_group(
             leaf_groups=leaf_groups,
             leaf_apply_mode=leaf_apply_mode,
             leaf_translation_tables=leaf_translation_tables,
-            pair_blocks_scratch=pair_blocks_scratch,
             leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
-            leaf_otf_bytes_budget=leaf_otf_bytes_budget,
             streamed_far_chunk_bytes_budget=int(streamed_far_chunk_bytes_budget),
             outgoing_bytes_in_flight=0,
             level_idx=int(level_idx),
@@ -5927,9 +6213,7 @@ def _build_outgoing_subset_streamed(
     leaf_groups: tuple[CuPyLeafApplyGroupData, ...],
     leaf_apply_mode: CuPyMLFMMLeafApplyMode,
     leaf_translation_tables: CuPyLeafTranslationTablesData | None,
-    pair_blocks_scratch: dict[str, Any] | None,
     leaf_otf_chunk_leaves: int | None,
-    leaf_otf_bytes_budget: int | None,
     streamed_far_chunk_bytes_budget: int,
     outgoing_bytes_in_flight: int,
     level_idx: int,
@@ -5968,6 +6252,7 @@ def _build_outgoing_subset_streamed(
         (n_boxes_sel, 4, int(level.directional.grid.n_directions), int(nrhs)),
         dtype=cupy.complex128,
     )
+    _record_stream_pool_peak(cupy, stream_stats)
     current_outgoing_bytes = _device_array_nbytes(outgoing)
     child_outgoing_bytes_in_flight = int(outgoing_bytes_in_flight) + int(current_outgoing_bytes)
     if stream_stats is not None:
@@ -5995,9 +6280,7 @@ def _build_outgoing_subset_streamed(
             leaf_groups=leaf_groups,
             leaf_apply_mode=leaf_apply_mode,
             leaf_translation_tables=leaf_translation_tables,
-            pair_blocks_scratch=pair_blocks_scratch,
             leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
-            leaf_otf_bytes_budget=leaf_otf_bytes_budget,
             box_nm=int(box_nm_leaf),
             nrhs=int(nrhs),
             cupy=cupy,
@@ -6054,9 +6337,7 @@ def _build_outgoing_subset_streamed(
             leaf_groups=leaf_groups,
             leaf_apply_mode=leaf_apply_mode,
             leaf_translation_tables=leaf_translation_tables,
-            pair_blocks_scratch=pair_blocks_scratch,
             leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
-            leaf_otf_bytes_budget=leaf_otf_bytes_budget,
             streamed_far_chunk_bytes_budget=int(streamed_far_chunk_bytes_budget),
             outgoing_bytes_in_flight=int(child_outgoing_bytes_in_flight),
             level_idx=child_level,
@@ -6176,9 +6457,7 @@ def _build_outgoing_subset_streamed(
             leaf_groups=leaf_groups,
             leaf_apply_mode=leaf_apply_mode,
             leaf_translation_tables=leaf_translation_tables,
-            pair_blocks_scratch=pair_blocks_scratch,
             leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
-            leaf_otf_bytes_budget=leaf_otf_bytes_budget,
             streamed_far_chunk_bytes_budget=int(streamed_far_chunk_bytes_budget),
             outgoing_bytes_in_flight=int(child_outgoing_bytes_in_flight),
             level_idx=child_level,
@@ -6248,9 +6527,7 @@ def _apply_multilevel_frontier_streamed(
     leaf_apply_mode: CuPyMLFMMLeafApplyMode,
     leaf_translation_tables: CuPyLeafTranslationTablesData | None,
     receive_adjoint_cache: dict[int, Any] | None,
-    pair_blocks_scratch: dict[str, Any] | None,
     leaf_otf_chunk_leaves: int | None,
-    leaf_otf_bytes_budget: int | None,
     streamed_far_chunk_bytes_budget: int,
     streamed_far_frontier_bytes_budget: int,
     frontier_bytes_in_flight: int,
@@ -6276,6 +6553,10 @@ def _apply_multilevel_frontier_streamed(
     )
     current_frontier_bytes_in_flight = int(frontier_bytes_in_flight) + int(current_frontier_bytes)
     if stream_stats is not None:
+        stream_stats["frontier_in_flight_peak_bytes"] = max(
+            int(cast(int, stream_stats.get("frontier_in_flight_peak_bytes", 0))),
+            int(current_frontier_bytes_in_flight),
+        )
         level_counts = cast(dict[str, int], stream_stats.setdefault("processed_chunk_count", {}))
         level_counts[str(level_idx)] = int(
             level_counts.get(str(level_idx), 0) + len(frontier_chunks)
@@ -6291,9 +6572,7 @@ def _apply_multilevel_frontier_streamed(
         leaf_groups=leaf_groups,
         leaf_apply_mode=leaf_apply_mode,
         leaf_translation_tables=leaf_translation_tables,
-        pair_blocks_scratch=pair_blocks_scratch,
         leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
-        leaf_otf_bytes_budget=leaf_otf_bytes_budget,
         streamed_far_chunk_bytes_budget=int(streamed_far_chunk_bytes_budget),
         level_idx=int(level_idx),
         leaf_level=int(leaf_level),
@@ -6325,9 +6604,7 @@ def _apply_multilevel_frontier_streamed(
                 leaf_groups=leaf_groups,
                 leaf_apply_mode=leaf_apply_mode,
                 leaf_translation_tables=leaf_translation_tables,
-                pair_blocks_scratch=pair_blocks_scratch,
                 leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
-                leaf_otf_bytes_budget=leaf_otf_bytes_budget,
                 receive_adjoint_cache=receive_adjoint_cache,
                 nm=int(nm),
                 out=y_out,
@@ -6393,9 +6670,7 @@ def _apply_multilevel_frontier_streamed(
                     leaf_apply_mode=leaf_apply_mode,
                     leaf_translation_tables=leaf_translation_tables,
                     receive_adjoint_cache=receive_adjoint_cache,
-                    pair_blocks_scratch=pair_blocks_scratch,
                     leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
-                    leaf_otf_bytes_budget=leaf_otf_bytes_budget,
                     streamed_far_chunk_bytes_budget=int(streamed_far_chunk_bytes_budget),
                     streamed_far_frontier_bytes_budget=int(streamed_far_frontier_bytes_budget),
                     frontier_bytes_in_flight=int(current_frontier_bytes_in_flight),
@@ -6422,6 +6697,7 @@ def _apply_multilevel_frontier_streamed(
                 nrhs=int(nrhs),
                 cupy=cupy,
             )
+            _record_stream_pool_peak(cupy, stream_stats)
             child_chunk = (child_chunk_ids, child_incoming)
             child_frontier.append(child_chunk)
             child_frontier_boxes += int(child_boxes)
@@ -6435,9 +6711,7 @@ def _apply_multilevel_frontier_streamed(
         leaf_apply_mode=leaf_apply_mode,
         leaf_translation_tables=leaf_translation_tables,
         receive_adjoint_cache=receive_adjoint_cache,
-        pair_blocks_scratch=pair_blocks_scratch,
         leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
-        leaf_otf_bytes_budget=leaf_otf_bytes_budget,
         streamed_far_chunk_bytes_budget=int(streamed_far_chunk_bytes_budget),
         streamed_far_frontier_bytes_budget=int(streamed_far_frontier_bytes_budget),
         frontier_bytes_in_flight=int(current_frontier_bytes_in_flight),
@@ -6459,9 +6733,7 @@ def _apply_multilevel_far_streamed(
     x_states: Any,
     *,
     receive_adjoint_cache: dict[int, Any] | None,
-    pair_blocks_scratch: dict[str, Any] | None,
     leaf_otf_chunk_leaves: int | None,
-    leaf_otf_bytes_budget: int | None,
     streamed_far_chunk_bytes_budget: int,
     streamed_far_frontier_bytes_budget: int,
     workspace: CuPyMLFMMMultilevelWorkspace | None,
@@ -6480,6 +6752,7 @@ def _apply_multilevel_far_streamed(
         else cupy.zeros((n_particles, int(nm), int(nrhs)), dtype=cupy.complex128)
     )
     y_far.fill(0)
+    _record_stream_pool_peak(cupy, stream_stats)
     levels = multilevel.levels
     transfer_by_parent: dict[int, CuPyMLFMMTransferData] = {}
     for transfer in multilevel.transfers:
@@ -6527,9 +6800,7 @@ def _apply_multilevel_far_streamed(
             leaf_apply_mode=multilevel.leaf_apply_mode,
             leaf_translation_tables=multilevel.leaf_translation_tables,
             receive_adjoint_cache=receive_adjoint_cache,
-            pair_blocks_scratch=pair_blocks_scratch,
             leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
-            leaf_otf_bytes_budget=leaf_otf_bytes_budget,
             streamed_far_chunk_bytes_budget=int(streamed_far_chunk_bytes_budget),
             streamed_far_frontier_bytes_budget=int(streamed_far_frontier_bytes_budget),
             frontier_bytes_in_flight=0,
@@ -6544,6 +6815,7 @@ def _apply_multilevel_far_streamed(
             cupy=cupy,
             stream_stats=stream_stats,
         )
+    _record_stream_pool_peak(cupy, stream_stats)
     return y_far
 
 
@@ -6576,9 +6848,7 @@ def _apply_multilevel_far(
             prepared,
             x_states,
             receive_adjoint_cache=receive_adjoint_cache,
-            pair_blocks_scratch=pair_blocks_scratch,
             leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
-            leaf_otf_bytes_budget=leaf_otf_bytes_budget,
             streamed_far_chunk_bytes_budget=int(streamed_far_chunk_bytes_budget),
             streamed_far_frontier_bytes_budget=int(streamed_far_frontier_bytes_budget),
             workspace=workspace,
@@ -6747,6 +7017,39 @@ def _device_array_nbytes(arr: Any) -> int:
     return int(nbytes)
 
 
+@dataclass(frozen=True)
+class _CuPyAllocatorSnapshot:
+    """CuPy allocator counters used by streamed MLFMM memory planning."""
+
+    raw_free_bytes: int
+    raw_total_bytes: int
+    pool_used_bytes: int
+    pool_total_bytes: int
+    pool_free_bytes: int
+    pool_limit_bytes: int
+    effective_device_limit_bytes: int
+    active_headroom_bytes: int
+    pool_limit_applied: bool
+    pool_trimmed_to_limit: bool
+
+
+@dataclass(frozen=True)
+class _StreamedFarMemoryPlan:
+    """Resolved transient-memory plan for one streamed multilevel apply."""
+
+    device_limit_bytes: int
+    active_used_bytes_before_far: int
+    stream_transient_budget_bytes: int
+    frontier_bytes_budget: int
+    source_outgoing_bytes_budget: int
+    safety_margin_bytes: int
+    unmodeled_temp_reserve_bytes: int
+    pool_limit_bytes: int
+    pool_limit_applied: bool
+    source_outgoing_budget_clipped: bool
+    retry_count: int = 0
+
+
 def _cupy_allocator_memory_info(cupy: Any) -> dict[str, int]:
     """Return raw and CuPy-pool-aware device-memory counters.
 
@@ -6770,6 +7073,184 @@ def _cupy_allocator_memory_info(cupy: Any) -> dict[str, int]:
         "pool_cached_bytes": int(pool_cached_bytes),
         "effective_free_bytes": int(effective_free_bytes),
     }
+
+
+def _record_stream_pool_peak(cupy: Any, stream_stats: dict[str, object] | None) -> None:
+    """Record per-apply CuPy pool peaks when stream diagnostics are enabled."""
+
+    if stream_stats is None:
+        return
+    pool = cupy.get_default_memory_pool()
+    stream_stats["pool_peak_used_bytes"] = max(
+        int(cast(int, stream_stats.get("pool_peak_used_bytes", 0))),
+        int(pool.used_bytes()),
+    )
+    stream_stats["pool_peak_total_bytes"] = max(
+        int(cast(int, stream_stats.get("pool_peak_total_bytes", 0))),
+        int(pool.total_bytes()),
+    )
+
+
+def _cupy_pool_limit_bytes(pool: Any) -> int:
+    """Return the active CuPy pool limit, or zero when no limit is configured."""
+
+    get_limit = getattr(pool, "get_limit", None)
+    if get_limit is None:
+        return 0
+    try:
+        return int(get_limit())
+    except TypeError:
+        return int(get_limit(device_id=None))
+
+
+def _set_cupy_pool_limit(pool: Any, *, size: int) -> None:
+    """Set CuPy pool limit using the public API across supported versions."""
+
+    try:
+        pool.set_limit(size=int(size))
+    except TypeError:
+        pool.set_limit(size=int(size), device_id=None)
+
+
+def _guarded_device_limit_bytes(total_bytes: int) -> int:
+    """Return a conservative dedicated-device residency limit.
+
+    Windows/WDDM can otherwise let CuPy allocations spill into shared host
+    memory instead of failing fast. Keep the automatic MLFMM pool ceiling below
+    the physical device total so the streamed budget planner is portable to
+    Linux devices that fail with OOM rather than spill.
+    """
+
+    total = int(total_bytes)
+    device_guard = min(
+        _STREAMED_FAR_POOL_LIMIT_MAX_GUARD_BYTES,
+        max(
+            _STREAMED_FAR_POOL_LIMIT_MIN_GUARD_BYTES,
+            int(float(total) * _STREAMED_FAR_DEVICE_GUARD_FRACTION),
+        ),
+    )
+    return max(1, total - int(device_guard))
+
+
+def _cupy_allocator_snapshot(cupy: Any, *, apply_pool_limit: bool) -> _CuPyAllocatorSnapshot:
+    """Snapshot CuPy allocator state and optionally enforce a guarded pool limit."""
+
+    pool = cupy.get_default_memory_pool()
+    raw_free, raw_total = cupy.cuda.runtime.memGetInfo()
+    raw_total = int(raw_total)
+    guarded_limit = _guarded_device_limit_bytes(raw_total)
+    existing_limit = _cupy_pool_limit_bytes(pool)
+    effective_limit = (
+        guarded_limit if existing_limit <= 0 else min(int(existing_limit), guarded_limit)
+    )
+    pool_limit_applied = False
+    if bool(apply_pool_limit) and (
+        existing_limit <= 0 or int(existing_limit) > int(effective_limit)
+    ):
+        _set_cupy_pool_limit(pool, size=int(effective_limit))
+        pool_limit_applied = True
+    pool_used = int(pool.used_bytes())
+    pool_total = int(pool.total_bytes())
+    pool_free = max(0, pool_total - pool_used)
+    pool_trimmed_to_limit = False
+    if bool(apply_pool_limit) and pool_total > int(effective_limit) and pool_free > 0:
+        # A prior memory-aggressive run can leave cached blocks above the new
+        # guarded pool ceiling. Release free blocks before planning so Windows
+        # does not keep stale WDDM spill allocations alive and so diagnostics
+        # reflect the automatic MLFMM limit rather than historical pool growth.
+        pool.free_all_blocks()
+        pool_trimmed_to_limit = True
+        raw_free, raw_total = cupy.cuda.runtime.memGetInfo()
+        raw_total = int(raw_total)
+        pool_used = int(pool.used_bytes())
+        pool_total = int(pool.total_bytes())
+        pool_free = max(0, pool_total - pool_used)
+    active_headroom = max(0, int(effective_limit) - int(pool_used))
+    return _CuPyAllocatorSnapshot(
+        raw_free_bytes=int(raw_free),
+        raw_total_bytes=raw_total,
+        pool_used_bytes=pool_used,
+        pool_total_bytes=pool_total,
+        pool_free_bytes=pool_free,
+        pool_limit_bytes=int(effective_limit),
+        effective_device_limit_bytes=int(effective_limit),
+        active_headroom_bytes=int(active_headroom),
+        pool_limit_applied=pool_limit_applied,
+        pool_trimmed_to_limit=pool_trimmed_to_limit,
+    )
+
+
+def _streamed_far_memory_plan(
+    *,
+    snapshot: _CuPyAllocatorSnapshot,
+    explicit_source_budget: int | None,
+    hf_start_incoming_bytes: int,
+    full_level_live_bytes: int,
+    full_level_incoming_bytes: int,
+) -> _StreamedFarMemoryPlan:
+    """Resolve source/frontier budgets from one active-memory plan."""
+
+    safety_margin = 0
+    active_headroom = max(
+        0,
+        int(snapshot.effective_device_limit_bytes) - int(snapshot.pool_used_bytes),
+    )
+    # Only part of the active headroom is donated to streamed far transients.
+    # The rest covers short-lived CuPy temporaries, cached-block fragmentation,
+    # and traversal-local arrays that are not represented by the source/frontier
+    # directional byte models.
+    stream_transient_budget = max(
+        _STREAMED_FAR_MIN_SOURCE_CHUNK_BYTES,
+        int(float(active_headroom) * _STREAMED_FAR_TRANSIENT_FRACTION_OF_ACTIVE_HEADROOM),
+    )
+    unmodeled_temp_reserve = max(0, int(active_headroom) - int(stream_transient_budget))
+    min_frontier = max(
+        _STREAMED_FAR_MIN_FRONTIER_BYTES,
+        int(hf_start_incoming_bytes),
+    )
+    desired_frontier = max(
+        min_frontier,
+        int(float(stream_transient_budget) * _STREAMED_FAR_FRONTIER_FRACTION_OF_TRANSIENT),
+    )
+    frontier_budget = min(
+        int(full_level_incoming_bytes),
+        int(desired_frontier),
+        max(
+            _STREAMED_FAR_MIN_FRONTIER_BYTES,
+            int(stream_transient_budget) - _STREAMED_FAR_MIN_SOURCE_CHUNK_BYTES,
+        ),
+    )
+    frontier_budget = max(_STREAMED_FAR_MIN_FRONTIER_BYTES, int(frontier_budget))
+    source_room = max(
+        _STREAMED_FAR_MIN_SOURCE_CHUNK_BYTES,
+        int(stream_transient_budget) - int(frontier_budget),
+    )
+    if int(full_level_live_bytes) <= max(
+        _STREAMED_FAR_MIN_SOURCE_CHUNK_BYTES,
+        int(source_room) // 2,
+    ):
+        minimum_source = int(full_level_live_bytes)
+    else:
+        minimum_source = _STREAMED_FAR_MIN_SOURCE_CHUNK_BYTES
+    source_budget = max(int(minimum_source), int(source_room))
+    source_clipped = False
+    if explicit_source_budget is not None:
+        requested = int(explicit_source_budget)
+        source_clipped = requested > int(source_room)
+        source_budget = min(requested, max(int(minimum_source), int(source_room)))
+    return _StreamedFarMemoryPlan(
+        device_limit_bytes=int(snapshot.effective_device_limit_bytes),
+        active_used_bytes_before_far=int(snapshot.pool_used_bytes),
+        stream_transient_budget_bytes=int(stream_transient_budget),
+        frontier_bytes_budget=int(frontier_budget),
+        source_outgoing_bytes_budget=int(source_budget),
+        safety_margin_bytes=int(safety_margin),
+        unmodeled_temp_reserve_bytes=int(unmodeled_temp_reserve),
+        pool_limit_bytes=int(snapshot.pool_limit_bytes),
+        pool_limit_applied=bool(snapshot.pool_limit_applied),
+        source_outgoing_budget_clipped=bool(source_clipped),
+        retry_count=0,
+    )
 
 
 def _multilevel_full_incoming_bytes(
@@ -6935,10 +7416,17 @@ class CuPyMLFMMCouplingOperator:
     _last_resolved_streamed_far_frontier_bytes_budget: int | None = field(
         default=None, init=False, repr=False
     )
+    _last_stream_memory_plan: _StreamedFarMemoryPlan | None = field(
+        default=None, init=False, repr=False
+    )
+    _last_allocator_snapshot_before_stream_plan: _CuPyAllocatorSnapshot | None = field(
+        default=None, init=False, repr=False
+    )
     _last_stream_stats: dict[str, object] | None = field(default=None, init=False, repr=False)
     _last_apply_timing_seconds: dict[str, float] | None = field(
         default=None, init=False, repr=False
     )
+    _device_pool_peak_used_bytes: int = field(default=0, init=False, repr=False)
     _device_pool_peak_total_bytes: int = field(default=0, init=False, repr=False)
     _near_workspace_cache: dict[CuPyMLFMMNearWorkspaceKey, CuPyMLFMMNearWorkspace] = field(
         default_factory=dict, init=False, repr=False
@@ -6953,7 +7441,11 @@ class CuPyMLFMMCouplingOperator:
     def _update_device_pool_peak(self, *, cupy: Any) -> None:
         """Track high-watermark device-pool bytes observed by this runtime object."""
 
-        pool_total = int(cupy.get_default_memory_pool().total_bytes())
+        pool = cupy.get_default_memory_pool()
+        pool_used = int(pool.used_bytes())
+        pool_total = int(pool.total_bytes())
+        if pool_used > int(self._device_pool_peak_used_bytes):
+            self._device_pool_peak_used_bytes = int(pool_used)
         if pool_total > int(self._device_pool_peak_total_bytes):
             self._device_pool_peak_total_bytes = int(pool_total)
 
@@ -7101,9 +7593,6 @@ class CuPyMLFMMCouplingOperator:
                 else _leaf_otf_resolved_chunk_summary(
                     leaf_groups=multilevel.leaf_groups,
                     leaf_otf_chunk_leaves=self.host_cache_policy.leaf_otf_chunk_leaves,
-                    leaf_otf_bytes_budget=self._last_resolved_leaf_otf_bytes_budget,
-                    box_nm=int(multilevel.box_nm),
-                    nrhs=int(nrhs_ref),
                 )
             )
             if streamed_chunk_local:
@@ -7155,6 +7644,83 @@ class CuPyMLFMMCouplingOperator:
             streaming_diag = {
                 "leaf_apply_mode": str(multilevel.leaf_apply_mode),
                 "collect_stream_stats": bool(self.host_cache_policy.collect_stream_stats),
+                "device_limit_bytes": (
+                    None
+                    if self._last_stream_memory_plan is None
+                    else int(self._last_stream_memory_plan.device_limit_bytes)
+                ),
+                "pool_limit_bytes": (
+                    None
+                    if self._last_stream_memory_plan is None
+                    else int(self._last_stream_memory_plan.pool_limit_bytes)
+                ),
+                "pool_limit_applied_by_mlfmm": (
+                    None
+                    if self._last_stream_memory_plan is None
+                    else bool(self._last_stream_memory_plan.pool_limit_applied)
+                ),
+                "pool_trimmed_before_stream_plan": (
+                    None
+                    if self._last_allocator_snapshot_before_stream_plan is None
+                    else bool(
+                        self._last_allocator_snapshot_before_stream_plan.pool_trimmed_to_limit
+                    )
+                ),
+                "pool_used_bytes_before_stream_plan": (
+                    None
+                    if self._last_allocator_snapshot_before_stream_plan is None
+                    else int(self._last_allocator_snapshot_before_stream_plan.pool_used_bytes)
+                ),
+                "pool_total_bytes_before_stream_plan": (
+                    None
+                    if self._last_allocator_snapshot_before_stream_plan is None
+                    else int(self._last_allocator_snapshot_before_stream_plan.pool_total_bytes)
+                ),
+                "pool_free_bytes_before_stream_plan": (
+                    None
+                    if self._last_allocator_snapshot_before_stream_plan is None
+                    else int(self._last_allocator_snapshot_before_stream_plan.pool_free_bytes)
+                ),
+                "raw_free_bytes_before_stream_plan": (
+                    None
+                    if self._last_allocator_snapshot_before_stream_plan is None
+                    else int(self._last_allocator_snapshot_before_stream_plan.raw_free_bytes)
+                ),
+                "raw_total_bytes_before_stream_plan": (
+                    None
+                    if self._last_allocator_snapshot_before_stream_plan is None
+                    else int(self._last_allocator_snapshot_before_stream_plan.raw_total_bytes)
+                ),
+                "active_used_bytes_before_far": (
+                    None
+                    if self._last_stream_memory_plan is None
+                    else int(self._last_stream_memory_plan.active_used_bytes_before_far)
+                ),
+                "stream_transient_budget_bytes": (
+                    None
+                    if self._last_stream_memory_plan is None
+                    else int(self._last_stream_memory_plan.stream_transient_budget_bytes)
+                ),
+                "stream_safety_margin_bytes": (
+                    None
+                    if self._last_stream_memory_plan is None
+                    else int(self._last_stream_memory_plan.safety_margin_bytes)
+                ),
+                "stream_unmodeled_temp_reserve_bytes": (
+                    None
+                    if self._last_stream_memory_plan is None
+                    else int(self._last_stream_memory_plan.unmodeled_temp_reserve_bytes)
+                ),
+                "stream_memory_retry_count": (
+                    None
+                    if self._last_stream_memory_plan is None
+                    else int(self._last_stream_memory_plan.retry_count)
+                ),
+                "source_outgoing_budget_clipped": (
+                    None
+                    if self._last_stream_memory_plan is None
+                    else bool(self._last_stream_memory_plan.source_outgoing_budget_clipped)
+                ),
                 "resolved_streamed_far_chunk_box_cap": (
                     None
                     if self._last_resolved_streamed_far_chunk_box_cap is None
@@ -7179,11 +7745,6 @@ class CuPyMLFMMCouplingOperator:
                     None
                     if leaf_otf_chunk_summary is None
                     else int(cast(int, leaf_otf_chunk_summary["max"]))
-                ),
-                "resolved_leaf_otf_bytes_budget": (
-                    None
-                    if self._last_resolved_leaf_otf_bytes_budget is None
-                    else int(self._last_resolved_leaf_otf_bytes_budget)
                 ),
                 "resolved_streamed_far_chunk_bytes_budget": (
                     None
@@ -7237,6 +7798,7 @@ class CuPyMLFMMCouplingOperator:
                 "used_bytes": int(allocator_info["pool_used_bytes"]),
                 "total_bytes": int(allocator_info["pool_total_bytes"]),
                 "cached_bytes": int(allocator_info["pool_cached_bytes"]),
+                "peak_used_bytes_seen_by_operator": int(self._device_pool_peak_used_bytes),
                 "peak_total_bytes_seen_by_operator": int(self._device_pool_peak_total_bytes),
                 "pinned_free_blocks": int(pinned_pool.n_free_blocks()),
             },
@@ -7330,6 +7892,8 @@ class CuPyMLFMMCouplingOperator:
         resolved_streamed_far_frontier_box_cap: int | None = None
         resolved_streamed_far_chunk_bytes_budget: int | None = None
         resolved_streamed_far_frontier_bytes_budget: int | None = None
+        stream_memory_plan: _StreamedFarMemoryPlan | None = None
+        allocator_snapshot_before_stream_plan: _CuPyAllocatorSnapshot | None = None
         stream_stats: dict[str, object] | None = None
         far_setup_elapsed = 0.0
         if stage == "single_level":
@@ -7351,9 +7915,9 @@ class CuPyMLFMMCouplingOperator:
                 resolved_leaf_otf_bytes_budget = _resolve_stream_bytes_budget(
                     explicit_budget=self.host_cache_policy.leaf_otf_bytes_budget,
                     free_bytes=int(free_bytes),
-                    fraction=0.05,
-                    minimum_bytes=8 * 1024**2,
-                    maximum_bytes=256 * 1024**2,
+                    fraction=_SINGLE_LEVEL_LEAF_OTF_FRACTION_OF_EFFECTIVE_FREE,
+                    minimum_bytes=_SINGLE_LEVEL_LEAF_OTF_MIN_BYTES,
+                    maximum_bytes=_SINGLE_LEVEL_LEAF_OTF_MAX_BYTES,
                 )
             far_started = start_timer()
             y_far = _apply_single_level_far(
@@ -7382,7 +7946,6 @@ class CuPyMLFMMCouplingOperator:
             if multilevel is None:
                 raise RuntimeError("Internal CuPy MLFMM error: missing multilevel prepared data.")
             if str(multilevel.leaf_apply_mode) == "on_the_fly":
-                free_bytes = _cupy_allocator_memory_info(cupy)["effective_free_bytes"]
                 nrhs = int(x_states.shape[2])
                 full_level_live_bytes = _multilevel_stream_full_level_live_bytes_theoretical(
                     multilevel,
@@ -7403,38 +7966,23 @@ class CuPyMLFMMCouplingOperator:
                     * nrhs
                     * np.dtype(np.complex128).itemsize
                 )
-                # Streaming performance depends on two different reuse units.
-                # First, make the coarsest sampled frontier wide enough that we
-                # do not fragment same-level work there. After that point, the
-                # next useful headroom is usually larger finer-level source
-                # chunks, which reduce repeated outgoing rebuild/filter work
-                # more effectively than pushing the frontier even wider.
-                # Do not blindly maximize finest-level chunk residency: larger
-                # chunks can still regress end-to-end throughput even when they
-                # reduce chunk/build counters, so this auto policy stays
-                # deliberately conservative there.
-                resolved_leaf_otf_bytes_budget = _resolve_stream_bytes_budget(
-                    explicit_budget=self.host_cache_policy.leaf_otf_bytes_budget,
-                    free_bytes=int(free_bytes),
-                    fraction=0.05,
-                    minimum_bytes=8 * 1024**2,
-                    maximum_bytes=256 * 1024**2,
+                # Source/outgoing chunks and frontier incoming buffers share
+                # one guarded device-residency plan. This keeps automatic
+                # chunking below the CuPy pool limit instead of letting one
+                # component consume all freed headroom and spill on WDDM.
+                allocator_snapshot_before_stream_plan = _cupy_allocator_snapshot(
+                    cupy,
+                    apply_pool_limit=True,
                 )
-                resolved_streamed_far_frontier_bytes_budget = _resolve_stream_bytes_budget(
-                    explicit_budget=None,
-                    free_bytes=int(free_bytes),
-                    # Keep the coarsest sampled frontier whole when possible.
-                    # Once that reuse unit is covered, any remaining headroom is
-                    # often better spent on finer-level source chunks.
-                    fraction=0.50,
-                    minimum_bytes=max(64 * 1024**2, int(hf_start_incoming_bytes)),
-                    maximum_bytes=max(
-                        64 * 1024**2,
-                        min(
-                            int(full_level_incoming_bytes),
-                            max(256 * 1024**2, int(free_bytes) // 2),
-                        ),
-                    ),
+                stream_memory_plan = _streamed_far_memory_plan(
+                    snapshot=allocator_snapshot_before_stream_plan,
+                    explicit_source_budget=self.host_cache_policy.streamed_far_chunk_bytes_budget,
+                    hf_start_incoming_bytes=int(hf_start_incoming_bytes),
+                    full_level_live_bytes=int(full_level_live_bytes),
+                    full_level_incoming_bytes=int(full_level_incoming_bytes),
+                )
+                resolved_streamed_far_frontier_bytes_budget = (
+                    stream_memory_plan.frontier_bytes_budget
                 )
                 resolved_streamed_far_frontier_box_cap = min(
                     int(hf_start_level.n_boxes),
@@ -7444,26 +7992,8 @@ class CuPyMLFMMCouplingOperator:
                         bytes_budget=int(resolved_streamed_far_frontier_bytes_budget),
                     ),
                 )
-                remaining_chunk_bytes = max(
-                    16 * 1024**2,
-                    int(free_bytes)
-                    - int(resolved_leaf_otf_bytes_budget or 0)
-                    - int(resolved_streamed_far_frontier_bytes_budget or 0),
-                )
-                resolved_streamed_far_chunk_bytes_budget = _resolve_stream_bytes_budget(
-                    explicit_budget=self.host_cache_policy.streamed_far_chunk_bytes_budget,
-                    free_bytes=int(remaining_chunk_bytes),
-                    fraction=0.50,
-                    minimum_bytes=(
-                        int(full_level_live_bytes)
-                        if int(full_level_live_bytes)
-                        <= max(16 * 1024**2, int(remaining_chunk_bytes) // 2)
-                        else 16 * 1024**2
-                    ),
-                    maximum_bytes=max(
-                        256 * 1024**2,
-                        min(1024 * 1024**2, int(remaining_chunk_bytes)),
-                    ),
+                resolved_streamed_far_chunk_bytes_budget = (
+                    stream_memory_plan.source_outgoing_bytes_budget
                 )
                 resolved_streamed_far_chunk_box_cap = min(
                     int(hf_end_level.n_boxes),
@@ -7502,6 +8032,8 @@ class CuPyMLFMMCouplingOperator:
             raise RuntimeError(f"Unsupported CuPy MLFMM stage {stage!r}.")
         combine_started = start_timer()
         self._last_resolved_leaf_otf_bytes_budget = resolved_leaf_otf_bytes_budget
+        self._last_stream_memory_plan = stream_memory_plan
+        self._last_allocator_snapshot_before_stream_plan = allocator_snapshot_before_stream_plan
         self._last_resolved_streamed_far_chunk_box_cap = resolved_streamed_far_chunk_box_cap
         self._last_resolved_streamed_far_frontier_box_cap = resolved_streamed_far_frontier_box_cap
         self._last_resolved_streamed_far_chunk_bytes_budget = (

@@ -46,6 +46,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reduced CUDA arithmetic overhead in CuPy pairwise, MLFMM leaf, and periodic
   Ewald kernels by replacing repeated powers and separate phase trigonometry
   with shared or recurrent factors.
+- Fused CuPy MLFMM selected leaf receive contractions so streamed applies avoid
+  receive-side dense leaf translation scratch.
 
 ## [0.4.0] - 2026-05-17
 

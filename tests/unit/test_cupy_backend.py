@@ -666,16 +666,40 @@ def test_cupy_multilevel_stream_stats_collection_is_opt_in(collect_stream_stats:
     leaf_chunk_min = streaming.get("resolved_leaf_otf_chunk_leaves_min")
     leaf_chunk_max = streaming.get("resolved_leaf_otf_chunk_leaves_max")
     leaf_chunk_by_occupancy = streaming.get("resolved_leaf_otf_chunk_leaves_by_occupancy")
+    device_limit = streaming.get("device_limit_bytes")
+    pool_used_before_plan = streaming.get("pool_used_bytes_before_stream_plan")
+    pool_trimmed_before_plan = streaming.get("pool_trimmed_before_stream_plan")
+    transient_budget = streaming.get("stream_transient_budget_bytes")
+    unmodeled_temp_reserve = streaming.get("stream_unmodeled_temp_reserve_bytes")
+    chunk_bytes_budget = streaming.get("resolved_streamed_far_chunk_bytes_budget")
+    frontier_bytes_budget = streaming.get("resolved_streamed_far_frontier_bytes_budget")
     assert isinstance(chunk_box_cap, int)
     assert isinstance(frontier_box_cap, int)
     assert isinstance(leaf_chunk_min, int)
     assert isinstance(leaf_chunk_max, int)
     assert isinstance(leaf_chunk_by_occupancy, dict)
+    assert isinstance(device_limit, int)
+    assert isinstance(pool_used_before_plan, int)
+    assert isinstance(pool_trimmed_before_plan, bool)
+    assert isinstance(transient_budget, int)
+    assert isinstance(unmodeled_temp_reserve, int)
+    assert isinstance(chunk_bytes_budget, int)
+    assert isinstance(frontier_bytes_budget, int)
     assert chunk_box_cap > 0
     assert frontier_box_cap > 0
     assert leaf_chunk_min > 0
     assert leaf_chunk_max >= leaf_chunk_min
     assert leaf_chunk_by_occupancy
+    assert device_limit > 0
+    assert 0 <= pool_used_before_plan <= device_limit
+    assert transient_budget > 0
+    assert unmodeled_temp_reserve >= 0
+    assert chunk_bytes_budget > 0
+    assert frontier_bytes_budget > 0
+    assert chunk_bytes_budget + frontier_bytes_budget <= transient_budget
+    assert pool_used_before_plan + transient_budget + unmodeled_temp_reserve <= device_limit
+    assert "resolved_leaf_otf_bytes_budget" not in streaming
+    assert "resolved_streamed_far_safety_reserve_bytes" not in streaming
     assert rolling.get("execution_mode") == "streamed_chunk_local"
     assert rolling.get("rolling_incoming_bytes_actual_peak") is None
     assert rolling.get("rolling_outgoing_bytes_actual_peak") is None
@@ -696,6 +720,10 @@ def test_cupy_multilevel_stream_stats_collection_is_opt_in(collect_stream_stats:
         outgoing_stack_peak = stats.get("outgoing_build_stack_peak_bytes")
         assert isinstance(outgoing_stack_peak, dict)
         assert all(int(value) >= 0 for value in outgoing_stack_peak.values())
+        assert int(stats.get("frontier_in_flight_peak_bytes", 0)) >= 0
+        pool_peak_total = stats.get("pool_peak_total_bytes")
+        assert isinstance(pool_peak_total, int)
+        assert pool_peak_total <= device_limit
         assert "_internal_same_level_source_union_history" not in stats
     else:
         assert streaming.get("last_apply_stats") is None
