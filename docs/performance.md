@@ -128,13 +128,13 @@ Representative phase wall times:
   - Far-field: `19.6 s`,
   - Near-field: `146.7 s`.
 - CuPy, `complex128/complex128`, no preconditioner:
-  - Solver: `11.4 s`,
-  - Far-field: `1.9 s`,
-  - Near-field: `14.6 s`.
+  - Solver: `6.38 s`,
+  - Far-field: `1.76 s`,
+  - Near-field: `13.54 s`.
 - CuPy, `complex64/complex128`, no preconditioner:
-  - Solver: `1.16 s`,
-  - Far-field: `0.89 s`,
-  - Near-field: `4.53 s`.
+  - Solver: `0.61 s`,
+  - Far-field: `0.70 s`,
+  - Near-field: `3.07 s`.
 
 On this benchmark, native CuPy GMRES reduced restart overshoot on the
 no-preconditioner runs, from 40 to 22 iterations at `rtol=1e-4` and

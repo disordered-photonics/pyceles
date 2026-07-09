@@ -65,6 +65,24 @@ def _legendre_scalar_tables(
     return a0, b0, c_mm, a_lm, b_lm
 
 
+@cache
+def _legendre_backend_tables(
+    lmax: int,
+    dtype_name: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Typed host recurrence tables for array backends."""
+
+    dtype = np.dtype(dtype_name)
+    a0, b0, c_mm, a_lm, b_lm = _legendre_scalar_tables(int(lmax))
+    return (
+        np.asarray(a0, dtype=dtype),
+        np.asarray(b0, dtype=dtype),
+        np.asarray(c_mm, dtype=dtype),
+        np.asarray(a_lm, dtype=dtype),
+        np.asarray(b_lm, dtype=dtype),
+    )
+
+
 def legendre_normalized_trigon_scalar(ct: float, st: float, lmax: int) -> np.ndarray:
     """Fast scalar version of CELES-normalized associated Legendre values."""
     lmax = int(lmax)
@@ -92,6 +110,18 @@ def legendre_normalized_trigon_scalar(ct: float, st: float, lmax: int) -> np.nda
     return plm
 
 
+def _scalar_like(value: float, dtype: Any) -> Any:
+    """Return ``value`` as a NumPy scalar matching an array real dtype."""
+
+    return np.asarray(value, dtype=np.dtype(dtype))[()]
+
+
+def _legendre_tables_for_backend(
+    lmax: int, dtype: Any
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    return _legendre_backend_tables(int(lmax), np.dtype(dtype).name)
+
+
 def legendre_normalized_trigon(ct: Any, st: Any, lmax: int, xp=None):
     """CELES/Doicu-normalized associated Legendre values P_l^m(ct) for m>=0.
 
@@ -116,19 +146,14 @@ def legendre_normalized_trigon(ct: Any, st: Any, lmax: int, xp=None):
     ct = xp.asarray(ct)
     st = xp.asarray(st)
     lmax = int(lmax)
-    a0_np, b0_np, c_mm_np, a_lm_np, b_lm_np = _legendre_scalar_tables(lmax)
-    a0 = xp.asarray(a0_np, dtype=ct.dtype)
-    b0 = xp.asarray(b0_np, dtype=ct.dtype)
-    c_mm = xp.asarray(c_mm_np, dtype=ct.dtype)
-    a_lm = xp.asarray(a_lm_np, dtype=ct.dtype)
-    b_lm = xp.asarray(b_lm_np, dtype=ct.dtype)
+    a0, b0, c_mm, a_lm, b_lm = _legendre_tables_for_backend(lmax, ct.dtype)
 
     plm = xp.zeros((lmax + 1, lmax + 1, *ct.shape), dtype=ct.dtype)
 
     # m=0 base
-    plm[0, 0] = xp.ones_like(ct) * (xp.sqrt(2.0) / 2.0)
+    plm[0, 0] = xp.ones_like(ct) * _scalar_like(np.sqrt(2.0) / 2.0, ct.dtype)
     if lmax >= 1:
-        plm[1, 0] = xp.sqrt(3.0 / 2.0) * ct
+        plm[1, 0] = _scalar_like(np.sqrt(3.0 / 2.0), ct.dtype) * ct
 
     # m=0 recurrence for l>=2
     for l in range(1, lmax):
@@ -162,12 +187,7 @@ def spherical_functions_trigon(ct: Any, st: Any, lmax: int, xp=None, *, return_p
     ct = xp.asarray(ct)
     st = xp.asarray(st)
     lmax = int(lmax)
-    a0_np, b0_np, c_mm_np, a_lm_np, b_lm_np = _legendre_scalar_tables(lmax)
-    a0 = xp.asarray(a0_np, dtype=ct.dtype)
-    b0 = xp.asarray(b0_np, dtype=ct.dtype)
-    c_mm = xp.asarray(c_mm_np, dtype=ct.dtype)
-    a_lm = xp.asarray(a_lm_np, dtype=ct.dtype)
-    b_lm = xp.asarray(b_lm_np, dtype=ct.dtype)
+    a0, b0, c_mm, a_lm, b_lm = _legendre_tables_for_backend(lmax, ct.dtype)
 
     plm = xp.zeros((lmax + 1, lmax + 1, *ct.shape), dtype=ct.dtype)
     pi = xp.zeros_like(plm)
@@ -175,13 +195,13 @@ def spherical_functions_trigon(ct: Any, st: Any, lmax: int, xp=None, *, return_p
     pprimel0 = xp.zeros((lmax + 1, *ct.shape), dtype=ct.dtype)
 
     # base
-    plm[0, 0] = xp.ones_like(ct) * (xp.sqrt(2.0) / 2.0)
+    plm[0, 0] = xp.ones_like(ct) * _scalar_like(np.sqrt(2.0) / 2.0, ct.dtype)
     if lmax >= 1:
-        plm[1, 0] = xp.sqrt(3.0 / 2.0) * ct
+        plm[1, 0] = _scalar_like(np.sqrt(3.0 / 2.0), ct.dtype) * ct
 
     pprimel0[0] = xp.zeros_like(ct)
     if lmax >= 1:
-        pprimel0[1] = xp.sqrt(3.0) * plm[0, 0]
+        pprimel0[1] = _scalar_like(np.sqrt(3.0), ct.dtype) * plm[0, 0]
 
     tau[0, 0] = -st * pprimel0[0]
     if lmax >= 1:
@@ -191,7 +211,7 @@ def spherical_functions_trigon(ct: Any, st: Any, lmax: int, xp=None, *, return_p
     for l in range(1, lmax):
         lp1 = l + 1
         plm[lp1, 0] = a0[l] * ct * plm[l, 0] - b0[l] * plm[l - 1, 0]
-        coeff = xp.sqrt((2 * lp1 + 1.0) / (2 * lp1 - 1.0))
+        coeff = _scalar_like(np.sqrt((2 * lp1 + 1.0) / (2 * lp1 - 1.0)), ct.dtype)
         pprimel0[lp1] = lp1 * coeff * plm[l, 0] + coeff * ct * pprimel0[l]
         tau[lp1, 0] = -st * pprimel0[lp1]
 
@@ -216,7 +236,10 @@ def spherical_functions_trigon(ct: Any, st: Any, lmax: int, xp=None, *, return_p
             tau[lp1, m] = (
                 lp1 * ct * pi[lp1, m]
                 - (lp1 + m)
-                * xp.sqrt((2 * lp1 + 1.0) * (lp1 - m) / ((2 * lp1 - 1.0) * (lp1 + m)))
+                * _scalar_like(
+                    np.sqrt((2 * lp1 + 1.0) * (lp1 - m) / ((2 * lp1 - 1.0) * (lp1 + m))),
+                    ct.dtype,
+                )
                 * pi[l, m]
             )
         st_pow_prev = st_pow
@@ -231,3 +254,4 @@ def clear_caches() -> None:
     """Clear process-global spherical recurrence caches."""
 
     _legendre_scalar_tables.cache_clear()
+    _legendre_backend_tables.cache_clear()
