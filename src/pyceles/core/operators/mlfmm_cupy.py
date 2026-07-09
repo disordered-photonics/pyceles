@@ -702,21 +702,22 @@ def _leaf_translation_blocks_rect_raw_kernel(full_order: int, dtype_name: str) -
     n_orders = 2 * order + 1
     n_p_pdm = n_orders * (n_orders + 1) // 2
     n_phase = 2 * n_orders - 1
+    sincos_fn = "sincosf" if real_t == "float" else "sincos"
     source = f"""
     #include <cupy/complex.cuh>
     __device__ {real_t} assoc_legendre_function(
         const int l,
         const int m,
-        const {real_t} ct,
-        const {real_t} st,
+        const {real_t}* ct_powers,
+        const {real_t}* st_powers,
         const {real_t}* plm_coeffs
     ) {{
         {real_t} plm = ({real_t})0.0;
-        const {real_t} st_pow = (m == 0) ? ({real_t})1.0 : pow(st, ({real_t})m);
+        const {real_t} st_pow = st_powers[m];
         int jj = 0;
         for (int lambda = l - m; lambda >= 0; lambda -= 2) {{
             const int idx = jj * ({n_orders} * {n_orders}) + m * {n_orders} + l;
-            plm += st_pow * pow(ct, ({real_t})lambda) * plm_coeffs[idx];
+            plm += st_pow * ct_powers[lambda] * plm_coeffs[idx];
             jj += 1;
         }}
         return plm;
@@ -789,6 +790,8 @@ def _leaf_translation_blocks_rect_raw_kernel(full_order: int, dtype_name: str) -
         __shared__ {real_t} p_pdm_shared[{n_p_pdm}];
         __shared__ {real_t} cos_mphi_shared[{n_phase}];
         __shared__ {real_t} sin_mphi_shared[{n_phase}];
+        __shared__ {real_t} ct_pow_shared[{n_orders}];
+        __shared__ {real_t} st_pow_shared[{n_orders}];
 
         if (tid == 0) {{
             const {real_t} dx = pair_deltas[3 * pair_idx + 0];
@@ -824,20 +827,35 @@ def _leaf_translation_blocks_rect_raw_kernel(full_order: int, dtype_name: str) -
             return;
         }}
 
+        if (tid == 0) {{
+            ct_pow_shared[0] = ({real_t})1.0;
+            st_pow_shared[0] = ({real_t})1.0;
+            for (int p = 1; p < {n_orders}; ++p) {{
+                ct_pow_shared[p] = ct_pow_shared[p - 1] * ct_shared;
+                st_pow_shared[p] = st_pow_shared[p - 1] * st_shared;
+            }}
+        }}
+        __syncthreads();
+
         for (int p = tid; p < {n_orders}; p += n_threads) {{
             const {complex_t} radial = bessel_lookup_linear(p, r_shared, re_j, im_j, inv_dr, last_index);
             re_j_shared[p] = radial.real();
             im_j_shared[p] = radial.imag();
             for (int absdm = 0; absdm <= p; ++absdm) {{
                 p_pdm_shared[p * (p + 1) / 2 + absdm] =
-                    assoc_legendre_function(p, absdm, ct_shared, st_shared, plm_coeffs);
+                    assoc_legendre_function(
+                        p, absdm, ct_pow_shared, st_pow_shared, plm_coeffs
+                    );
             }}
         }}
         if (tid == 0) {{
             for (int dm = -2 * {order}; dm <= 2 * {order}; ++dm) {{
                 const int phase_idx = dm + 2 * {order};
-                cos_mphi_shared[phase_idx] = cos(({real_t})dm * phi_shared);
-                sin_mphi_shared[phase_idx] = sin(({real_t})dm * phi_shared);
+                {real_t} s_val;
+                {real_t} c_val;
+                {sincos_fn}(({real_t})dm * phi_shared, &s_val, &c_val);
+                cos_mphi_shared[phase_idx] = c_val;
+                sin_mphi_shared[phase_idx] = s_val;
             }}
         }}
         __syncthreads();
@@ -2619,11 +2637,9 @@ def _exact_near_pairs_leafpair_raw_kernel(lmax: int, near_dtype_name: str) -> An
         )
     math = {
         "atan2": "atan2f" if real_t == "float" else "atan2",
-        "cos": "cosf" if real_t == "float" else "cos",
         "floor": "floorf" if real_t == "float" else "floor",
         "max": "fmaxf" if real_t == "float" else "fmax",
-        "pow": "powf" if real_t == "float" else "pow",
-        "sin": "sinf" if real_t == "float" else "sin",
+        "sincos": "sincosf" if real_t == "float" else "sincos",
         "sqrt": "sqrtf" if real_t == "float" else "sqrt",
     }
     n_orders = 2 * lmax + 1
@@ -2634,16 +2650,16 @@ def _exact_near_pairs_leafpair_raw_kernel(lmax: int, near_dtype_name: str) -> An
     __device__ {real_t} assoc_legendre_function(
         const int l,
         const int m,
-        const {real_t} ct,
-        const {real_t} st,
+        const {real_t}* ct_powers,
+        const {real_t}* st_powers,
         const {real_t}* plm_coeffs
     ) {{
         {real_t} plm = ({real_t})0.0;
-        const {real_t} st_pow = (m == 0) ? ({real_t})1.0 : {math["pow"]}(st, ({real_t})m);
+        const {real_t} st_pow = st_powers[m];
         int jj = 0;
         for (int lambda = l - m; lambda >= 0; lambda -= 2) {{
             const int idx = jj * ({n_orders} * {n_orders}) + m * {n_orders} + l;
-            plm += st_pow * {math["pow"]}(ct, ({real_t})lambda) * plm_coeffs[idx];
+            plm += st_pow * ct_powers[lambda] * plm_coeffs[idx];
             jj += 1;
         }}
         return plm;
@@ -2713,6 +2729,8 @@ def _exact_near_pairs_leafpair_raw_kernel(lmax: int, near_dtype_name: str) -> An
         __shared__ int src_leaf_shared;
         __shared__ int dst_particle_shared;
         __shared__ int src_particle_shared;
+        __shared__ {real_t} ct_pow_shared[{n_orders}];
+        __shared__ {real_t} st_pow_shared[{n_orders}];
 
         const int m1 = active ? mode_m[n1] : 0;
         for (int rhs = blockIdx.z; rhs < nrhs; rhs += gridDim.z) {{
@@ -2751,6 +2769,12 @@ def _exact_near_pairs_leafpair_raw_kernel(lmax: int, near_dtype_name: str) -> An
                                 {math["max"]}(({real_t})0.0, ({real_t})1.0 - ct_shared * ct_shared)
                             );
                             phi_shared = {math["atan2"]}(y21, x21);
+                            ct_pow_shared[0] = ({real_t})1.0;
+                            st_pow_shared[0] = ({real_t})1.0;
+                            for (int p = 1; p < {n_orders}; ++p) {{
+                                ct_pow_shared[p] = ct_pow_shared[p - 1] * ct_shared;
+                                st_pow_shared[p] = st_pow_shared[p - 1] * st_shared;
+                            }}
                         }}
                         __syncthreads();
 
@@ -2759,14 +2783,19 @@ def _exact_near_pairs_leafpair_raw_kernel(lmax: int, near_dtype_name: str) -> An
                             im_h_shared[p] = hankel_lookup_linear(p, r_shared, im_h, inv_dr, last_index);
                             for (int absdm = 0; absdm <= p; ++absdm) {{
                                 p_pdm_shared[p * (p + 1) / 2 + absdm] =
-                                    assoc_legendre_function(p, absdm, ct_shared, st_shared, plm_coeffs);
+                                    assoc_legendre_function(
+                                        p, absdm, ct_pow_shared, st_pow_shared, plm_coeffs
+                                    );
                             }}
                         }}
                         if (threadIdx.x == 0) {{
                             for (int dm = -2 * {lmax}; dm <= 2 * {lmax}; ++dm) {{
                                 const int idx = dm + 2 * {lmax};
-                                cos_mphi_shared[idx] = {math["cos"]}(({real_t})dm * phi_shared);
-                                sin_mphi_shared[idx] = {math["sin"]}(({real_t})dm * phi_shared);
+                                {math["sincos"]}(
+                                    ({real_t})dm * phi_shared,
+                                    &sin_mphi_shared[idx],
+                                    &cos_mphi_shared[idx]
+                                );
                             }}
                         }}
                         __syncthreads();
@@ -3889,16 +3918,16 @@ def _leaf_otf_aggregate_fused_raw_kernel(full_order: int, coeff_dtype_name: str)
     __device__ double assoc_legendre_function_fused(
         const int l,
         const int m,
-        const double ct,
-        const double st,
+        const double* ct_powers,
+        const double* st_powers,
         const double* plm_coeffs
     ) {{
         double plm = 0.0;
-        const double st_pow = (m == 0) ? 1.0 : pow(st, (double)m);
+        const double st_pow = st_powers[m];
         int jj = 0;
         for (int lambda = l - m; lambda >= 0; lambda -= 2) {{
             const int idx = jj * ({n_orders} * {n_orders}) + m * {n_orders} + l;
-            plm += st_pow * pow(ct, (double)lambda) * plm_coeffs[idx];
+            plm += st_pow * ct_powers[lambda] * plm_coeffs[idx];
             jj += 1;
         }}
         return plm;
@@ -3989,6 +4018,8 @@ def _leaf_otf_aggregate_fused_raw_kernel(full_order: int, coeff_dtype_name: str)
             __shared__ double p_pdm_shared[{n_p_pdm}];
             __shared__ double cos_mphi_shared[{n_phase}];
             __shared__ double sin_mphi_shared[{n_phase}];
+            __shared__ double ct_pow_shared[{n_orders}];
+            __shared__ double st_pow_shared[{n_orders}];
 
             if (tid == 0) {{
                 const double dx = pair_deltas[3 * group_pair_idx + 0];
@@ -4009,6 +4040,16 @@ def _leaf_otf_aggregate_fused_raw_kernel(full_order: int, coeff_dtype_name: str)
             __syncthreads();
 
             if (r_shared > 0.0) {{
+                if (tid == 0) {{
+                    ct_pow_shared[0] = 1.0;
+                    st_pow_shared[0] = 1.0;
+                    for (int p = 1; p < {n_orders}; ++p) {{
+                        ct_pow_shared[p] = ct_pow_shared[p - 1] * ct_shared;
+                        st_pow_shared[p] = st_pow_shared[p - 1] * st_shared;
+                    }}
+                }}
+                __syncthreads();
+
                 for (int p = tid; p < {n_orders}; p += n_threads) {{
                     const complex<double> radial =
                         bessel_lookup_linear_fused(p, r_shared, re_j, im_j, inv_dr, last_index);
@@ -4017,15 +4058,16 @@ def _leaf_otf_aggregate_fused_raw_kernel(full_order: int, coeff_dtype_name: str)
                     for (int absdm = 0; absdm <= p; ++absdm) {{
                         p_pdm_shared[p * (p + 1) / 2 + absdm] =
                             assoc_legendre_function_fused(
-                                p, absdm, ct_shared, st_shared, plm_coeffs
+                                p, absdm, ct_pow_shared, st_pow_shared, plm_coeffs
                             );
                     }}
                 }}
                 if (tid == 0) {{
                     for (int dm = -2 * {order}; dm <= 2 * {order}; ++dm) {{
                         const int phase_idx = dm + 2 * {order};
-                        cos_mphi_shared[phase_idx] = cos((double)dm * phi_shared);
-                        sin_mphi_shared[phase_idx] = sin((double)dm * phi_shared);
+                        sincos((double)dm * phi_shared,
+                               &sin_mphi_shared[phase_idx],
+                               &cos_mphi_shared[phase_idx]);
                     }}
                 }}
             }}

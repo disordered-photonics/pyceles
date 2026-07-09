@@ -44,11 +44,9 @@ def _translation_matvec_raw_kernel(lmax: int, dtype_str: str):
     complex_type = "complex<float>" if dtype == np.dtype(np.complex64) else "complex<double>"
     math = {
         "atan2": "atan2f" if real_type == "float" else "atan2",
-        "cos": "cosf" if real_type == "float" else "cos",
         "floor": "floorf" if real_type == "float" else "floor",
         "max": "fmaxf" if real_type == "float" else "fmax",
-        "pow": "powf" if real_type == "float" else "pow",
-        "sin": "sinf" if real_type == "float" else "sin",
+        "sincos": "sincosf" if real_type == "float" else "sincos",
         "sqrt": "sqrtf" if real_type == "float" else "sqrt",
     }
     kernel_name = (
@@ -83,16 +81,16 @@ def _translation_matvec_raw_kernel(lmax: int, dtype_str: str):
     __device__ {real_type} assoc_legendre_function(
         const int l,
         const int m,
-        const {real_type} ct,
-        const {real_type} st,
+        const {real_type}* ct_powers,
+        const {real_type}* st_powers,
         const {real_type}* plm_coeffs
     ) {{
         {real_type} plm = 0;
-        {real_type} st_pow = (m == 0) ? ({real_type})1 : {math["pow"]}(st, ({real_type})m);
+        const {real_type} st_pow = st_powers[m];
         int jj = 0;
         for (int lambda = l - m; lambda >= 0; lambda -= 2) {{
             const int idx = jj * ({n_orders} * {n_orders}) + m * {n_orders} + l;
-            plm += st_pow * {math["pow"]}(ct, ({real_type})lambda) * plm_coeffs[idx];
+            plm += st_pow * ct_powers[lambda] * plm_coeffs[idx];
             jj += 1;
         }}
         return plm;
@@ -152,6 +150,8 @@ def _translation_matvec_raw_kernel(lmax: int, dtype_str: str):
         __shared__ {real_type} p_pdm_shared[{n_p_pdm}];
         __shared__ {real_type} cos_mphi_shared[{n_phase}];
         __shared__ {real_type} sin_mphi_shared[{n_phase}];
+        __shared__ {real_type} ct_pow_shared[{n_orders}];
+        __shared__ {real_type} st_pow_shared[{n_orders}];
         __shared__ {real_type} r_shared;
         __shared__ {real_type} ct_shared;
         __shared__ {real_type} st_shared;
@@ -183,6 +183,12 @@ def _translation_matvec_raw_kernel(lmax: int, dtype_str: str):
                             {math["max"]}(({real_type})0, ({real_type})1 - ct_shared * ct_shared)
                         );
                         phi_shared = {math["atan2"]}(y21, x21);
+                        ct_pow_shared[0] = ({real_type})1;
+                        st_pow_shared[0] = ({real_type})1;
+                        for (int p = 1; p < {n_orders}; ++p) {{
+                            ct_pow_shared[p] = ct_pow_shared[p - 1] * ct_shared;
+                            st_pow_shared[p] = st_pow_shared[p - 1] * st_shared;
+                        }}
                     }}
                     __syncthreads();
 
@@ -191,18 +197,19 @@ def _translation_matvec_raw_kernel(lmax: int, dtype_str: str):
                         im_h_shared[p] = hankel_lookup_linear(p, r_shared, im_h, inv_dr, last_index);
                         for (int absdm = 0; absdm <= p; ++absdm) {{
                             p_pdm_shared[p * (p + 1) / 2 + absdm] =
-                                assoc_legendre_function(p, absdm, ct_shared, st_shared, plm_coeffs);
+                                assoc_legendre_function(
+                                    p, absdm, ct_pow_shared, st_pow_shared, plm_coeffs
+                                );
                         }}
                     }}
                     if (threadIdx.x == 0) {{
-                        // We keep the direct trig form here for readability.
-                        // A recurrence-based phase-table fill was tested on the
-                        // 5k-particle c64 benchmark and did not produce a material
-                        // end-to-end improvement.
                         for (int dm = -2 * {lmax}; dm <= 2 * {lmax}; ++dm) {{
                             const int idx = dm + 2 * {lmax};
-                            cos_mphi_shared[idx] = {math["cos"]}(({real_type})dm * phi_shared);
-                            sin_mphi_shared[idx] = {math["sin"]}(({real_type})dm * phi_shared);
+                            {math["sincos"]}(
+                                ({real_type})dm * phi_shared,
+                                &sin_mphi_shared[idx],
+                                &cos_mphi_shared[idx]
+                            );
                         }}
                     }}
                     __syncthreads();

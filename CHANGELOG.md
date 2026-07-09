@@ -43,6 +43,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   across azimuthal samples on each polar ring.
 - Fused CuPy MLFMM on-the-fly leaf aggregation so sampled-far applies avoid
   materializing aggregate-side dense leaf translation blocks.
+- Reduced CUDA arithmetic overhead in CuPy pairwise, MLFMM leaf, and periodic
+  Ewald kernels by replacing repeated powers and separate phase trigonometry
+  with shared or recurrent factors.
 
 ## [0.4.0] - 2026-05-17
 

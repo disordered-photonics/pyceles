@@ -273,14 +273,16 @@ __device__ void _pyceles_real_integrals(
     vals[1] = sqrt(PYCELES_PI) * 2.0 / kr * exp_term * w.real();
     const double inv = 2.0 / kr;
     const double inv2 = inv * inv;
+    double alpha_power = 1.0 / root_alpha;
     for (int idx = 2; idx < order + 2; ++idx) {
         vals[idx] = inv2 * (
             0.5 * (double)(2 * (idx - 2) + 1) * vals[idx - 1]
             - vals[idx - 2]
-            + pow(alpha, -((double)(idx - 2)) - 0.5) * exp_term
+            + alpha_power * exp_term
         );
+        alpha_power /= alpha;
     }
-    double half_power = pow(0.5, 1.5);
+    double half_power = 0.5 * PYCELES_SQRT1_2;
     for (int l = 0; l <= order; ++l) {
         integral[l] = half_power * vals[l + 1];
         half_power *= 0.5;
@@ -356,7 +358,10 @@ extern "C" __global__ void pyceles_ewald_real_space_structural_c128(
                     continue;
                 }
                 const double angle = (double)m * phi;
-                const complex<double> azimuth(cos(angle), sin(angle));
+                double sin_angle;
+                double cos_angle;
+                sincos(angle, &sin_angle, &cos_angle);
+                const complex<double> azimuth(cos_angle, sin_angle);
                 const complex<double> contrib =
                     base * (plm[l * table_width + abs_m]) * azimuth;
                 const int entry = l * width + (m + order);
@@ -532,12 +537,14 @@ __device__ void _pyceles_shifted_delta_sequence(
         return;
     }
     delta[1] = complex<double>(0.0, sqrt(PYCELES_PI)) / z_arg * exp_term * (w_minus - w_plus);
+    complex<double> x_power = complex<double>(1.0, 0.0) / x;
     for (int idx = 2; idx <= order; ++idx) {
         delta[idx] = 4.0 / z_sq * (
             (1.5 - (double)idx) * delta[idx - 1]
             - delta[idx - 2]
-            + root_x * pow(x, 1 - idx) * exp_term
+            + root_x * x_power * exp_term
         );
+        x_power /= x;
     }
 }
 
@@ -581,7 +588,10 @@ extern "C" __global__ void pyceles_ewald_shifted_reciprocal_structural_c128(
         const double kx = kgt[2 * term_idx + 0];
         const double ky = kgt[2 * term_idx + 1];
         const double phase_angle = -(cx * kx + cy * ky);
-        const complex<double> phase(cos(phase_angle), sin(phase_angle));
+        double sin_phase;
+        double cos_phase;
+        sincos(phase_angle, &sin_phase, &cos_phase);
+        const complex<double> phase(cos_phase, sin_phase);
         const double rho_g = rho[term_idx];
         const double phi_g = phi[term_idx];
         const complex<double> gamma_g = gamma[term_idx];
@@ -629,7 +639,10 @@ extern "C" __global__ void pyceles_ewald_shifted_reciprocal_structural_c128(
                         * terms_acc;
                 }
                 const double angle = (double)m * phi_g;
-                const complex<double> azimuth(cos(angle), sin(angle));
+                double sin_angle;
+                double cos_angle;
+                sincos(angle, &sin_angle, &cos_angle);
+                const complex<double> azimuth(cos_angle, sin_angle);
                 const complex<double> contrib =
                     _pyceles_structural_m_norm(m) * prefactor * phase * azimuth * acc;
                 const int entry = l * width + (m + order);
