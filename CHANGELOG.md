@@ -39,6 +39,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   larger multilevel runs avoid avoidable out-of-memory failures.
 
 ### Changed
+- Parallelized CuPy pairwise angular-table setup across each destination block,
+  reducing serial phase and associated-Legendre work before mode contraction.
 - Accelerated CuPy periodic Ewald evaluation by caching the invariant nodes and
   exponential weights of the Faddeeva quadrature on device.
 - Reduced CuPy shifted-reciprocal Ewald contention by warp-reducing structural
