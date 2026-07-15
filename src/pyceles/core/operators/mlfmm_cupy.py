@@ -2804,22 +2804,25 @@ def _exact_near_pairs_leafpair_raw_kernel(lmax: int, near_dtype_name: str) -> An
                         for (int p = threadIdx.x; p < {n_orders}; p += blockDim.x) {{
                             re_h_shared[p] = hankel_lookup_linear(p, r_shared, re_h, inv_dr, last_index);
                             im_h_shared[p] = hankel_lookup_linear(p, r_shared, im_h, inv_dr, last_index);
-                            for (int absdm = 0; absdm <= p; ++absdm) {{
-                                p_pdm_shared[p * (p + 1) / 2 + absdm] =
-                                    assoc_legendre_function(
-                                        p, absdm, ct_pow_shared, st_pow_shared, plm_coeffs
-                                    );
-                            }}
                         }}
-                        if (threadIdx.x == 0) {{
-                            for (int dm = -2 * {lmax}; dm <= 2 * {lmax}; ++dm) {{
-                                const int idx = dm + 2 * {lmax};
-                                {math["sincos"]}(
-                                    ({real_t})dm * phi_shared,
-                                    &sin_mphi_shared[idx],
-                                    &cos_mphi_shared[idx]
-                                );
+                        for (int table_idx = threadIdx.x; table_idx < {n_p_pdm};
+                             table_idx += blockDim.x) {{
+                            int p = 0;
+                            while (table_idx >= (p + 1) * (p + 2) / 2) {{
+                                ++p;
                             }}
+                            const int absdm = table_idx - p * (p + 1) / 2;
+                            p_pdm_shared[table_idx] = assoc_legendre_function(
+                                p, absdm, ct_pow_shared, st_pow_shared, plm_coeffs
+                            );
+                        }}
+                        for (int idx = threadIdx.x; idx < {n_phase}; idx += blockDim.x) {{
+                            const int dm = idx - 2 * {lmax};
+                            {math["sincos"]}(
+                                ({real_t})dm * phi_shared,
+                                &sin_mphi_shared[idx],
+                                &cos_mphi_shared[idx]
+                            );
                         }}
                         __syncthreads();
 
