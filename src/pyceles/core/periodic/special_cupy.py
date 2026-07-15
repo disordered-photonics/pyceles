@@ -21,6 +21,28 @@ _SMALL_COMPLEX = 1.0e-14
 _DEFAULT_WOFZ_TERMS = 11
 
 
+@cache
+def _wtrap_quadrature_table_host(terms: int) -> np.ndarray:
+    """Return integer- and midpoint-rule ``(t**2, exp(-t**2))`` pairs."""
+    n_terms = int(terms)
+    h = math.sqrt(math.pi / float(n_terms + 1))
+    indices = np.arange(n_terms + 1, dtype=np.float64)
+    table = np.empty((2, n_terms + 1, 2), dtype=np.float64)
+    for branch, nodes in enumerate((h * indices, h * (indices + 0.5))):
+        squared = nodes * nodes
+        table[branch, :, 0] = squared
+        table[branch, :, 1] = np.exp(-squared)
+    return table
+
+
+@cache
+def _wtrap_quadrature_table_cupy(device_id: int, terms: int) -> Any:
+    """Cache the small W-trapezoidal quadrature table on one CUDA device."""
+    cp, _ = import_cupy()
+    with cp.cuda.Device(int(device_id)):
+        return cp.asarray(_wtrap_quadrature_table_host(int(terms)))
+
+
 # Source fragment reused by periodic Ewald RawKernels.  CuPy exposes complex
 # arithmetic through ``complex.cuh`` but not a Faddeeva implementation.
 _WTRAP_DEVICE_CUDA_SOURCE = r"""
@@ -28,6 +50,7 @@ _WTRAP_DEVICE_CUDA_SOURCE = r"""
 
 __device__ complex<double> _wtrap_upper_one(
     const complex<double> z,
+    const double* quadrature,
     const int terms,
     const double h,
     const double H
@@ -45,9 +68,8 @@ __device__ complex<double> _wtrap_upper_one(
     if (use_modified_trapezium) {
         complex<double> sum = complex<double>(0.0, 0.0);
         for (int j = 1; j <= terms; ++j) {
-            const double t = h * (double)j;
-            const double t2 = t * t;
-            const double et2 = exp(-t2);
+            const double t2 = quadrature[2 * j];
+            const double et2 = quadrature[2 * j + 1];
             sum += complex<double>(et2, 0.0) / (z2 - complex<double>(t2, 0.0));
         }
         const complex<double> exp_z2 = exp(z2);
@@ -57,13 +79,13 @@ __device__ complex<double> _wtrap_upper_one(
         return complex<double>(0.0, 1.0 / H) / z + az * sum + correction;
     }
 
-    const double h0 = 0.5 * h;
-    complex<double> sum = complex<double>(exp(-(h0 * h0)), 0.0)
-        / (z2 - complex<double>(h0 * h0, 0.0));
+    const int midpoint_offset = 2 * (terms + 1);
+    const double h0_squared = quadrature[midpoint_offset];
+    complex<double> sum = complex<double>(quadrature[midpoint_offset + 1], 0.0)
+        / (z2 - complex<double>(h0_squared, 0.0));
     for (int j = 1; j <= terms; ++j) {
-        const double t = h * ((double)j + 0.5);
-        const double t2 = t * t;
-        const double et2 = exp(-t2);
+        const double t2 = quadrature[midpoint_offset + 2 * j];
+        const double et2 = quadrature[midpoint_offset + 2 * j + 1];
         sum += complex<double>(et2, 0.0) / (z2 - complex<double>(t2, 0.0));
     }
     const complex<double> midpoint = az * sum;
@@ -80,6 +102,7 @@ __device__ complex<double> _wtrap_upper_one(
 
 __device__ complex<double> _wtrap_wofz_one(
     const complex<double> z0,
+    const double* quadrature,
     const int terms,
     const double h,
     const double H
@@ -96,7 +119,7 @@ __device__ complex<double> _wtrap_wofz_one(
         z = conj(z);
     }
 
-    complex<double> w = _wtrap_upper_one(z, terms, h, H);
+    complex<double> w = _wtrap_upper_one(z, quadrature, terms, h, H);
     if (not_both) {
         w = conj(w);
     }
@@ -115,6 +138,7 @@ extern "C" __global__ void pyceles_wofz_wtrap_c128(
     const long long n,
     const complex<double>* z_in,
     complex<double>* out,
+    const double* quadrature,
     const int terms,
     const double h,
     const double H
@@ -124,7 +148,7 @@ extern "C" __global__ void pyceles_wofz_wtrap_c128(
         return;
     }
 
-    out[idx] = _wtrap_wofz_one(z_in[idx], terms, h, H);
+    out[idx] = _wtrap_wofz_one(z_in[idx], quadrature, terms, h, H);
 }
 """
 )
@@ -165,6 +189,7 @@ def wofz_cupy(z: Any, *, terms: int = _DEFAULT_WOFZ_TERMS, cupy: Any | None = No
     z_flat = cp.ascontiguousarray(z_arr.reshape(-1))
     out_flat = cp.empty_like(z_flat, dtype=cp.complex128)
     h = math.sqrt(math.pi / float(n_terms + 1))
+    quadrature = _wtrap_quadrature_table_cupy(int(cp.cuda.runtime.getDevice()), n_terms)
     H = math.pi / h
     threads = 256
     blocks = (int(z_flat.size) + threads - 1) // threads
@@ -175,6 +200,7 @@ def wofz_cupy(z: Any, *, terms: int = _DEFAULT_WOFZ_TERMS, cupy: Any | None = No
             np.int64(int(z_flat.size)),
             z_flat,
             out_flat,
+            quadrature,
             np.int32(n_terms),
             np.float64(h),
             np.float64(H),

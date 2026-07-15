@@ -28,6 +28,7 @@ from pyceles.core.periodic.scalar import (
 from pyceles.core.periodic.special_cupy import (
     _DEFAULT_WOFZ_TERMS,
     _WTRAP_DEVICE_CUDA_SOURCE,
+    _wtrap_quadrature_table_cupy,
 )
 
 
@@ -357,6 +358,7 @@ __device__ void _pyceles_real_integrals(
     const int order,
     const double eta,
     const double k,
+    const double* quadrature,
     const int terms,
     const double h,
     const double H,
@@ -366,7 +368,7 @@ __device__ void _pyceles_real_integrals(
     const double root_alpha = sqrt(alpha);
     const double kr = k * r;
     const complex<double> z(root_alpha, kr / (2.0 * root_alpha));
-    const complex<double> w = _wtrap_wofz_one(z, terms, h, H);
+    const complex<double> w = _wtrap_wofz_one(z, quadrature, terms, h, H);
     const double exp_term = exp(alpha - (kr * kr) / (4.0 * alpha));
     double vals[PYCELES_REAL_MAX_ORDER + 2];
     for (int idx = 0; idx < PYCELES_REAL_MAX_ORDER + 2; ++idx) {
@@ -403,6 +405,7 @@ extern "C" __global__ void pyceles_ewald_real_space_structural_c128(
     complex<double>* sums,
     const double eta,
     const double k,
+    const double* quadrature,
     const int terms,
     const double h,
     const double H
@@ -444,7 +447,7 @@ extern "C" __global__ void pyceles_ewald_real_space_structural_c128(
         double integrals[PYCELES_REAL_MAX_ORDER + 1];
         double kr_pow[PYCELES_REAL_MAX_ORDER + 1];
         _pyceles_legendre_table(ct, st, order, plm);
-        _pyceles_real_integrals(r, order, eta, k, terms, h, H, integrals);
+        _pyceles_real_integrals(r, order, eta, k, quadrature, terms, h, H, integrals);
         kr_pow[0] = 1.0;
         for (int l = 1; l <= order; ++l) {
             kr_pow[l] = kr_pow[l - 1] * kr;
@@ -524,6 +527,7 @@ def _add_real_space_structural_sums_cupy(
     shared_bytes = 2 * n_entries * np.dtype(np.float64).itemsize
     terms = int(_DEFAULT_WOFZ_TERMS)
     h = math.sqrt(math.pi / float(terms + 1))
+    quadrature = _wtrap_quadrature_table_cupy(int(cp.cuda.runtime.getDevice()), terms)
     _real_space_structural_raw_kernel(int(order))(
         (n_pairs,),
         (threads,),
@@ -538,6 +542,7 @@ def _add_real_space_structural_sums_cupy(
             sums,
             np.float64(float(eta)),
             np.float64(float(k)),
+            quadrature,
             np.int32(terms),
             np.float64(h),
             np.float64(math.pi / h),
@@ -562,6 +567,7 @@ __device__ void _pyceles_shifted_delta_sequence(
     const complex<double> x,
     const complex<double> root_x,
     const double z_offset,
+    const double* quadrature,
     const int terms,
     const double h,
     const double H,
@@ -574,12 +580,14 @@ __device__ void _pyceles_shifted_delta_sequence(
     const complex<double> exp_term = exp(-x + z_sq / (4.0 * x));
     const complex<double> w_minus = _wtrap_wofz_one(
         -z_arg / (2.0 * root_x) + complex<double>(0.0, 1.0) * root_x,
+        quadrature,
         terms,
         h,
         H
     );
     const complex<double> w_plus = _wtrap_wofz_one(
         z_arg / (2.0 * root_x) + complex<double>(0.0, 1.0) * root_x,
+        quadrature,
         terms,
         h,
         H
@@ -617,6 +625,7 @@ extern "C" __global__ void pyceles_ewald_shifted_reciprocal_structural_c128(
     const double* inverse_denominator,
     complex<double>* sums,
     const double k,
+    const double* quadrature,
     const int terms,
     const double h,
     const double H
@@ -672,6 +681,7 @@ extern "C" __global__ void pyceles_ewald_shifted_reciprocal_structural_c128(
                 xarg[term_idx],
                 root_x[term_idx],
                 cz,
+                quadrature,
                 terms,
                 h,
                 H,
@@ -770,6 +780,7 @@ def _add_shifted_reciprocal_structural_sums_cupy(
     shared_bytes = (2 * n_entries + int(order) + 1) * np.dtype(np.float64).itemsize
     terms = int(_DEFAULT_WOFZ_TERMS)
     h = math.sqrt(math.pi / float(terms + 1))
+    quadrature = _wtrap_quadrature_table_cupy(int(cp.cuda.runtime.getDevice()), terms)
     _shifted_reciprocal_structural_raw_kernel(int(order))(
         (n_pairs,),
         (threads,),
@@ -790,6 +801,7 @@ def _add_shifted_reciprocal_structural_sums_cupy(
             shifted_tables.inverse_denominator,
             sums,
             np.float64(float(k)),
+            quadrature,
             np.int32(terms),
             np.float64(h),
             np.float64(math.pi / h),

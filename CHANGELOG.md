@@ -39,6 +39,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   larger multilevel runs avoid avoidable out-of-memory failures.
 
 ### Changed
+- Accelerated CuPy periodic Ewald evaluation by caching the invariant nodes and
+  exponential weights of the Faddeeva quadrature on device.
 - Reduced CuPy shifted-reciprocal Ewald contention by warp-reducing structural
   contributions before shared-memory atomic accumulation, accelerating
   cache-off matvecs, cache construction, and periodic interior near fields.
