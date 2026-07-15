@@ -39,6 +39,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   larger multilevel runs avoid avoidable out-of-memory failures.
 
 ### Changed
+- Accelerated CuPy periodic Ewald evaluation by caching reciprocal-term
+  azimuths, powers, square-root branches, and combinatorial factors on device,
+  removing repeated pair-local setup from cache-off matvecs, cache population,
+  and periodic interior near-field evaluation.
 - Accelerated MLFMM directional-basis preparation by reusing Legendre tables
   across azimuthal samples on each polar ring.
 - Fused CuPy MLFMM on-the-fly leaf aggregation so sampled-far applies avoid

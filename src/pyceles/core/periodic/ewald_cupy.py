@@ -50,6 +50,25 @@ class CupyReciprocalTerms:
     rho: Any
     phi: Any
     gamma: Any
+    xarg: Any
+
+
+@dataclass
+class CupyShiftedReciprocalTables:
+    """Pair-invariant device tables reused by the shifted reciprocal kernel.
+
+    Term tables use shape ``(n_terms, order + 1)`` except ``azimuth``, whose
+    second axis spans ``m=-order..order``.  ``prefactor`` is indexed by the
+    flattened structural entry, while ``inverse_denominator`` appends the
+    recurrence ``(n, s)`` axes.  None of these arrays scale with particle count.
+    """
+
+    azimuth: Any
+    rho_powers: Any
+    gamma_powers: Any
+    root_x: Any
+    prefactor: Any
+    inverse_denominator: Any
 
 
 @dataclass
@@ -79,6 +98,9 @@ class CupyEwaldShellWorkspace:
     eta: float
     reciprocal_cache: dict[int, CupyReciprocalShell] = field(default_factory=dict)
     reciprocal_terms_cache: dict[int, CupyReciprocalTerms] = field(default_factory=dict)
+    shifted_reciprocal_cache: dict[tuple[int, int], CupyShiftedReciprocalTables] = field(
+        default_factory=dict
+    )
     real_cache: dict[int, CupyRealShell] = field(default_factory=dict)
     real_terms_cache: dict[int, CupyRealTerms] = field(default_factory=dict)
     upper_gamma_cache: dict[tuple[int, int], Any] = field(default_factory=dict)
@@ -146,8 +168,89 @@ class CupyEwaldShellWorkspace:
         phi = cp.arctan2(kgt[:, 1], kgt[:, 0])
         gamma = cp.sqrt((float(self.k) * float(self.k) - rho * rho) + 0.0j)
         gamma = cp.where(gamma == 0.0, gamma + 1.0e-10j, gamma).astype(cp.complex128)
-        out = CupyReciprocalTerms(kgt=kgt, rho=rho, phi=phi, gamma=gamma)
+        xarg = -(gamma * gamma) / (4.0 * float(self.eta) * float(self.eta))
+        out = CupyReciprocalTerms(
+            kgt=kgt,
+            rho=rho,
+            phi=phi,
+            gamma=gamma,
+            xarg=xarg.astype(cp.complex128),
+        )
         self.reciprocal_terms_cache[count] = out
+        return out
+
+    def shifted_reciprocal_tables(
+        self, shell_count: int, order: int
+    ) -> CupyShiftedReciprocalTables:
+        """Return pair-invariant tables for the shifted reciprocal kernel."""
+        key = (int(shell_count), int(order))
+        cached = self.shifted_reciprocal_cache.get(key)
+        if cached is not None:
+            return cached
+        cp = self.cupy
+        terms = self.reciprocal_terms(int(shell_count))
+        order_i = int(order)
+        width = 2 * order_i + 1
+        n_terms = int(terms.rho.shape[0])
+        m_values = cp.arange(-order_i, order_i + 1, dtype=cp.float64)
+        azimuth = cp.exp(1j * terms.phi[:, None] * m_values[None, :]).astype(cp.complex128)
+
+        rho_base = terms.rho / float(self.k)
+        gamma_base = terms.gamma / float(self.k)
+        rho_powers = cp.empty((n_terms, order_i + 1), dtype=cp.float64)
+        gamma_powers = cp.empty((n_terms, order_i + 1), dtype=cp.complex128)
+        rho_powers[:, 0] = 1.0
+        gamma_powers[:, 0] = 1.0 / gamma_base
+        gamma_step = gamma_base * gamma_base
+        for exponent in range(1, order_i + 1):
+            rho_powers[:, exponent] = rho_powers[:, exponent - 1] * rho_base
+            gamma_powers[:, exponent] = gamma_powers[:, exponent - 1] * gamma_step
+        root_x = cp.where(
+            terms.xarg.real < 0.0,
+            -1j * cp.sqrt(cp.abs(terms.xarg)),
+            cp.sqrt(terms.xarg),
+        ).astype(cp.complex128)
+
+        n_entries = (order_i + 1) * width
+        prefactor = np.zeros(n_entries, dtype=np.complex128)
+        inverse_denominator = np.zeros((n_entries, order_i + 1, order_i + 1), dtype=np.float64)
+        for degree in range(order_i + 1):
+            for m in range(-degree, degree + 1):
+                entry = degree * width + m + order_i
+                m_norm = math.sqrt(2.0 * math.pi) * (-1.0 if m >= 0 and (m & 1) else 1.0)
+                root = (
+                    math.sqrt(2.0 * degree + 1.0)
+                    * math.sqrt(factorial_int(degree - m))
+                    * math.sqrt(factorial_int(degree + m))
+                )
+                prefactor[entry] = (
+                    m_norm
+                    * (-1j) ** m
+                    * root
+                    / ((-2.0) ** degree * self.lattice.area * float(self.k) ** 2)
+                )
+                n_max = degree - abs(m)
+                for n in range(n_max + 1):
+                    for s_val in range(n, min(n_max, 2 * n) + 1):
+                        if (s_val - n_max) & 1:
+                            continue
+                        denominator = (
+                            factorial_int(2 * n - s_val)
+                            * factorial_int(s_val - n)
+                            * factorial_int((degree + abs(m) - s_val) // 2)
+                            * factorial_int((degree - abs(m) - s_val) // 2)
+                        )
+                        inverse_denominator[entry, n, s_val] = 1.0 / float(denominator)
+
+        out = CupyShiftedReciprocalTables(
+            azimuth=azimuth,
+            rho_powers=cp.ascontiguousarray(rho_powers),
+            gamma_powers=cp.ascontiguousarray(gamma_powers),
+            root_x=cp.ascontiguousarray(root_x),
+            prefactor=cp.asarray(prefactor, dtype=cp.complex128),
+            inverse_denominator=cp.asarray(inverse_denominator, dtype=cp.float64),
+        )
+        self.shifted_reciprocal_cache[key] = out
         return out
 
     def real_shell(self, shell: int) -> CupyRealShell:
@@ -445,76 +548,17 @@ def _add_real_space_structural_sums_cupy(
 
 _SHIFTED_RECIPROCAL_STRUCTURAL_CUDA_SOURCE = r"""
 
-__device__ double _pyceles_factorial_double(const int n) {
-    double out = 1.0;
-    for (int idx = 2; idx <= n; ++idx) {
-        out *= (double)idx;
-    }
-    return out;
-}
-
-__device__ double _pyceles_int_power_real(const double base, const int exponent) {
-    if (exponent == 0) {
-        return 1.0;
-    }
-    double out = 1.0;
-    const int n = exponent < 0 ? -exponent : exponent;
-    for (int idx = 0; idx < n; ++idx) {
-        out *= base;
-    }
-    return exponent < 0 ? 1.0 / out : out;
-}
-
-__device__ complex<double> _pyceles_int_power_complex(
-    const complex<double> base,
-    const int exponent
-) {
-    if (exponent == 0) {
-        return complex<double>(1.0, 0.0);
-    }
-    complex<double> out(1.0, 0.0);
-    const int n = exponent < 0 ? -exponent : exponent;
-    for (int idx = 0; idx < n; ++idx) {
-        out *= base;
-    }
-    return exponent < 0 ? complex<double>(1.0, 0.0) / out : out;
-}
-
-__device__ complex<double> _pyceles_minus_i_power(const int exponent) {
-    int mod = exponent % 4;
-    if (mod < 0) {
-        mod += 4;
-    }
-    if (mod == 0) {
-        return complex<double>(1.0, 0.0);
-    }
-    if (mod == 1) {
-        return complex<double>(0.0, -1.0);
-    }
-    if (mod == 2) {
-        return complex<double>(-1.0, 0.0);
-    }
-    return complex<double>(0.0, 1.0);
-}
-
-__device__ double _pyceles_structural_m_norm(const int m) {
-    const double sign = (m >= 0 && ((m & 1) != 0)) ? -1.0 : 1.0;
-    return sqrt(2.0 * PYCELES_PI) * sign;
-}
-
 __device__ void _pyceles_shifted_delta_sequence(
     const int order,
     const complex<double> gamma,
+    const complex<double> x,
+    const complex<double> root_x,
     const double z_offset,
-    const double eta,
     const int terms,
     const double h,
     const double H,
     complex<double>* delta
 ) {
-    const complex<double> x = -(gamma * gamma) / (4.0 * eta * eta);
-    const complex<double> root_x =
-        x.real() < 0.0 ? complex<double>(0.0, -sqrt(abs(x))) : sqrt(x);
     const complex<double> scaled = gamma * z_offset;
     const complex<double> z_arg =
         x.real() < 0.0 ? scaled : complex<double>(0.0, abs(scaled));
@@ -555,12 +599,15 @@ extern "C" __global__ void pyceles_ewald_shifted_reciprocal_structural_c128(
     const double* c,
     const unsigned char* same_plane,
     const double* kgt,
-    const double* rho,
-    const double* phi,
+    const complex<double>* azimuth,
     const complex<double>* gamma,
+    const complex<double>* xarg,
+    const complex<double>* root_x,
+    const double* rho_powers,
+    const complex<double>* gamma_powers,
+    const complex<double>* prefactor,
+    const double* inverse_denominator,
     complex<double>* sums,
-    const double area,
-    const double eta,
     const double k,
     const int terms,
     const double h,
@@ -578,6 +625,14 @@ extern "C" __global__ void pyceles_ewald_shifted_reciprocal_structural_c128(
     for (int idx = tid; idx < 2 * n_entries; idx += (int)blockDim.x) {
         shared[idx] = 0.0;
     }
+    double* cz_powers = shared + 2 * n_entries;
+    if (tid == 0) {
+        cz_powers[0] = 1.0;
+        const double cz_base = -k * c[3 * pair + 2];
+        for (int exponent = 1; exponent <= order; ++exponent) {
+            cz_powers[exponent] = cz_powers[exponent - 1] * cz_base;
+        }
+    }
     __syncthreads();
 
     const double cx = c[3 * pair + 0];
@@ -592,24 +647,25 @@ extern "C" __global__ void pyceles_ewald_shifted_reciprocal_structural_c128(
         double cos_phase;
         sincos(phase_angle, &sin_phase, &cos_phase);
         const complex<double> phase(cos_phase, sin_phase);
-        const double rho_g = rho[term_idx];
-        const double phi_g = phi[term_idx];
         const complex<double> gamma_g = gamma[term_idx];
-        const complex<double> gamma_over_k = gamma_g / k;
 
         complex<double> delta[PYCELES_SHIFTED_MAX_ORDER + 1];
-        _pyceles_shifted_delta_sequence(order, gamma_g, cz, eta, terms, h, H, delta);
+        _pyceles_shifted_delta_sequence(
+            order,
+            gamma_g,
+            xarg[term_idx],
+            root_x[term_idx],
+            cz,
+            terms,
+            h,
+            H,
+            delta
+        );
 
         for (int l = 0; l <= order; ++l) {
-            const double root_l = sqrt(2.0 * l + 1.0);
-            const double pow_minus_two = _pyceles_int_power_real(-2.0, l);
             for (int m = -l; m <= l; ++m) {
                 const int abs_m = m < 0 ? -m : m;
-                const double root = root_l
-                    * sqrt(_pyceles_factorial_double(l - m))
-                    * sqrt(_pyceles_factorial_double(l + m));
-                const complex<double> prefactor =
-                    _pyceles_minus_i_power(m) * root / (pow_minus_two * area * k * k);
+                const int entry = l * width + (m + order);
                 complex<double> acc(0.0, 0.0);
                 const int n_max = l - abs_m;
                 for (int n = 0; n <= n_max; ++n) {
@@ -619,33 +675,22 @@ extern "C" __global__ void pyceles_ewald_shifted_reciprocal_structural_c128(
                         if (((s_val - n_max) & 1) != 0) {
                             continue;
                         }
-                        const int a = 2 * n - s_val;
-                        const int b = s_val - n;
-                        const int c1 = (l + abs_m - s_val) / 2;
-                        const int c2 = (l - abs_m - s_val) / 2;
-                        const double denom =
-                            _pyceles_factorial_double(a)
-                            * _pyceles_factorial_double(b)
-                            * _pyceles_factorial_double(c1)
-                            * _pyceles_factorial_double(c2);
-                        const double term =
-                            _pyceles_int_power_real(-k * cz, 2 * n - s_val)
-                            * _pyceles_int_power_real(rho_g / k, l - s_val)
-                            / denom;
+                        const long long denominator_idx =
+                            ((long long)entry * (order + 1) + n) * (order + 1) + s_val;
+                        const double term = cz_powers[2 * n - s_val]
+                            * rho_powers[term_idx * (order + 1) + (l - s_val)]
+                            * inverse_denominator[denominator_idx];
                         terms_acc += complex<double>(term, 0.0);
                     }
-                    acc += _pyceles_int_power_complex(gamma_over_k, 2 * n - 1)
+                    acc += gamma_powers[term_idx * (order + 1) + n]
                         * delta[n]
                         * terms_acc;
                 }
-                const double angle = (double)m * phi_g;
-                double sin_angle;
-                double cos_angle;
-                sincos(angle, &sin_angle, &cos_angle);
-                const complex<double> azimuth(cos_angle, sin_angle);
                 const complex<double> contrib =
-                    _pyceles_structural_m_norm(m) * prefactor * phase * azimuth * acc;
-                const int entry = l * width + (m + order);
+                    prefactor[entry]
+                    * phase
+                    * azimuth[term_idx * width + (m + order)]
+                    * acc;
                 atomicAdd(&shared[2 * entry], contrib.real());
                 atomicAdd(&shared[2 * entry + 1], contrib.imag());
             }
@@ -685,7 +730,6 @@ def _add_shifted_reciprocal_structural_sums_cupy(
     workspace: CupyEwaldShellWorkspace,
     reciprocal_shell_count: int,
     order: int,
-    eta: float,
     k: float,
 ) -> None:
     """Add shifted-pair reciprocal Ewald terms with one fused device kernel."""
@@ -694,12 +738,13 @@ def _add_shifted_reciprocal_structural_sums_cupy(
     if n_pairs == 0:
         return
     reciprocal_terms = workspace.reciprocal_terms(int(reciprocal_shell_count))
+    shifted_tables = workspace.shifted_reciprocal_tables(int(reciprocal_shell_count), int(order))
     n_terms = int(reciprocal_terms.rho.shape[0])
     if n_terms == 0:
         return
     threads = 128
     n_entries = (int(order) + 1) * (2 * int(order) + 1)
-    shared_bytes = 2 * n_entries * np.dtype(np.float64).itemsize
+    shared_bytes = (2 * n_entries + int(order) + 1) * np.dtype(np.float64).itemsize
     terms = int(_DEFAULT_WOFZ_TERMS)
     h = math.sqrt(math.pi / float(terms + 1))
     _shifted_reciprocal_structural_raw_kernel(int(order))(
@@ -712,12 +757,15 @@ def _add_shifted_reciprocal_structural_sums_cupy(
             cp.ascontiguousarray(c, dtype=cp.float64),
             cp.ascontiguousarray(same_plane.astype(cp.uint8, copy=False)),
             reciprocal_terms.kgt,
-            reciprocal_terms.rho,
-            reciprocal_terms.phi,
+            shifted_tables.azimuth,
             reciprocal_terms.gamma,
+            reciprocal_terms.xarg,
+            shifted_tables.root_x,
+            shifted_tables.rho_powers,
+            shifted_tables.gamma_powers,
+            shifted_tables.prefactor,
+            shifted_tables.inverse_denominator,
             sums,
-            np.float64(float(workspace.lattice.area)),
-            np.float64(float(eta)),
             np.float64(float(k)),
             np.int32(terms),
             np.float64(h),
@@ -731,8 +779,6 @@ def ewald_structural_sums_2d_fixed_cupy(
     *,
     relative_source_minus_destination: Any,
     lmax_struct: int,
-    k: float,
-    eta: float,
     workspace: CupyEwaldShellWorkspace,
     real_shell_count: int,
     reciprocal_shell_count: int,
@@ -751,6 +797,9 @@ def ewald_structural_sums_2d_fixed_cupy(
         Structural multipole order.  Coupling blocks use the particle ``lmax``;
         local-field projection may pass a smaller order selected by the output
         projection kernel.
+    workspace:
+        Device workspace owning the lattice, wavenumber, Ewald splitting
+        parameter, and all tables derived from them.
 
     Notes
     -----
@@ -759,6 +808,8 @@ def ewald_structural_sums_2d_fixed_cupy(
     source==destination self blocks; point-field evaluators must not add it.
     """
     cp = workspace.cupy
+    k = float(workspace.k)
+    eta = float(workspace.eta)
     c = cp.asarray(relative_source_minus_destination, dtype=cp.float64).reshape(-1, 3)
     n_pairs = int(c.shape[0])
     order = 2 * int(lmax_struct)
@@ -831,7 +882,6 @@ def ewald_structural_sums_2d_fixed_cupy(
         workspace=workspace,
         reciprocal_shell_count=int(reciprocal_shell_count),
         order=int(order),
-        eta=float(eta),
         k=float(k),
     )
 

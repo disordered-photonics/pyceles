@@ -156,8 +156,6 @@ def periodic_local_regular_l1_coeffs_cupy(
                 sums = ewald_structural_sums_2d_fixed_cupy(
                     relative_source_minus_destination=rel_cp,
                     lmax_struct=int(lmax_struct),
-                    k=float(k),
-                    eta=float(eta),
                     workspace=workspace,
                     real_shell_count=int(real_count),
                     reciprocal_shell_count=int(recip_count),

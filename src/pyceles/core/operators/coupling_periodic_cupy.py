@@ -235,8 +235,6 @@ class CuPyPeriodicCouplingOperator:
         sums = ewald_structural_sums_2d_fixed_cupy(
             relative_source_minus_destination=rel.reshape(-1, 3),
             lmax_struct=int(self.lmax),
-            k=float(self.k),
-            eta=self._ewald_eta(),
             workspace=self._workspace_device(),
             real_shell_count=int(real_count),
             reciprocal_shell_count=int(reciprocal_count),

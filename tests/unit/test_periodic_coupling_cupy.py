@@ -20,9 +20,12 @@ pytestmark = pytest.mark.gpu
 
 
 def _small_periodic_case(
-    *, cache_blocks: bool = False, dtype: Any = np.complex128, off_plane: bool = False
+    *,
+    cache_blocks: bool = False,
+    dtype: Any = np.complex128,
+    off_plane: bool = False,
+    lmax: int = 1,
 ) -> tuple[PeriodicCouplingOperator, CuPyPeriodicCouplingOperator]:
-    lmax = 1
     k = 2.0 * np.pi / 550.0
     positions = np.asarray(
         [
@@ -97,6 +100,28 @@ def test_periodic_cupy_coupling_apply_matches_numpy_off_plane_two_particle_cell(
     want = cpu.apply(x.astype(np.complex128))
 
     np.testing.assert_allclose(cp.asnumpy(got), want, rtol=1e-8, atol=1e-9)
+
+
+@pytest.mark.parametrize(
+    ("dtype", "rtol", "atol"),
+    [
+        (np.complex128, 1e-8, 1e-9),
+        (np.complex64, 3e-5, 3e-6),
+    ],
+)
+def test_periodic_cupy_shifted_reciprocal_tables_match_numpy_at_lmax3(
+    cupy_runtime: tuple[Any, Any], dtype: Any, rtol: float, atol: float
+) -> None:
+    cp, _ = cupy_runtime
+    cpu, gpu = _small_periodic_case(cache_blocks=False, dtype=dtype, off_plane=True, lmax=3)
+    rng = np.random.default_rng(20260714)
+    size = 2 * gpu.n_modes
+    x = rng.normal(size=size) + 1j * rng.normal(size=size)
+
+    got = gpu.apply(cp.asarray(x, dtype=dtype))
+    want = cpu.apply(x.astype(dtype))
+
+    np.testing.assert_allclose(cp.asnumpy(got), want, rtol=rtol, atol=atol)
 
 
 def test_periodic_cupy_coupling_cache_apply_parity(cupy_runtime: tuple[Any, Any]) -> None:
