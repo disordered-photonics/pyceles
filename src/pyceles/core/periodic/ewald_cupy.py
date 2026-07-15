@@ -548,6 +548,14 @@ def _add_real_space_structural_sums_cupy(
 
 _SHIFTED_RECIPROCAL_STRUCTURAL_CUDA_SOURCE = r"""
 
+__device__ double _pyceles_warp_sum(const double value) {
+    double out = value;
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        out += __shfl_down_sync(0xffffffffu, out, offset);
+    }
+    return out;
+}
+
 __device__ void _pyceles_shifted_delta_sequence(
     const int order,
     const complex<double> gamma,
@@ -638,61 +646,76 @@ extern "C" __global__ void pyceles_ewald_shifted_reciprocal_structural_c128(
     const double cx = c[3 * pair + 0];
     const double cy = c[3 * pair + 1];
     const double cz = c[3 * pair + 2];
+    const int lane = tid & 31;
 
-    for (long long term_idx = tid; term_idx < n_terms; term_idx += (long long)blockDim.x) {
-        const double kx = kgt[2 * term_idx + 0];
-        const double ky = kgt[2 * term_idx + 1];
-        const double phase_angle = -(cx * kx + cy * ky);
-        double sin_phase;
-        double cos_phase;
-        sincos(phase_angle, &sin_phase, &cos_phase);
-        const complex<double> phase(cos_phase, sin_phase);
-        const complex<double> gamma_g = gamma[term_idx];
-
+    // The 128-thread launch consists of complete warps.  Each lane retains one
+    // reciprocal term's delta sequence, then the warp combines contributions
+    // before touching shared memory.  This preserves one sequence evaluation
+    // per term while avoiding a contended double atomic from every lane.
+    for (long long term_base = 0; term_base < n_terms; term_base += (long long)blockDim.x) {
+        const long long term_idx = term_base + tid;
+        const bool has_term = term_idx < n_terms;
+        const unsigned int active_lanes = __ballot_sync(0xffffffffu, has_term);
+        complex<double> phase(0.0, 0.0);
         complex<double> delta[PYCELES_SHIFTED_MAX_ORDER + 1];
-        _pyceles_shifted_delta_sequence(
-            order,
-            gamma_g,
-            xarg[term_idx],
-            root_x[term_idx],
-            cz,
-            terms,
-            h,
-            H,
-            delta
-        );
+        if (has_term) {
+            const double kx = kgt[2 * term_idx + 0];
+            const double ky = kgt[2 * term_idx + 1];
+            const double phase_angle = -(cx * kx + cy * ky);
+            double sin_phase;
+            double cos_phase;
+            sincos(phase_angle, &sin_phase, &cos_phase);
+            phase = complex<double>(cos_phase, sin_phase);
+            _pyceles_shifted_delta_sequence(
+                order,
+                gamma[term_idx],
+                xarg[term_idx],
+                root_x[term_idx],
+                cz,
+                terms,
+                h,
+                H,
+                delta
+            );
+        }
 
         for (int l = 0; l <= order; ++l) {
             for (int m = -l; m <= l; ++m) {
-                const int abs_m = m < 0 ? -m : m;
                 const int entry = l * width + (m + order);
-                complex<double> acc(0.0, 0.0);
-                const int n_max = l - abs_m;
-                for (int n = 0; n <= n_max; ++n) {
-                    complex<double> terms_acc(0.0, 0.0);
-                    const int s_stop = min(n_max, 2 * n);
-                    for (int s_val = n; s_val <= s_stop; ++s_val) {
-                        if (((s_val - n_max) & 1) != 0) {
-                            continue;
+                complex<double> contrib(0.0, 0.0);
+                if (has_term) {
+                    const int abs_m = m < 0 ? -m : m;
+                    complex<double> acc(0.0, 0.0);
+                    const int n_max = l - abs_m;
+                    for (int n = 0; n <= n_max; ++n) {
+                        complex<double> terms_acc(0.0, 0.0);
+                        const int s_stop = min(n_max, 2 * n);
+                        for (int s_val = n; s_val <= s_stop; ++s_val) {
+                            if (((s_val - n_max) & 1) != 0) {
+                                continue;
+                            }
+                            const long long denominator_idx =
+                                ((long long)entry * (order + 1) + n) * (order + 1) + s_val;
+                            const double term = cz_powers[2 * n - s_val]
+                                * rho_powers[term_idx * (order + 1) + (l - s_val)]
+                                * inverse_denominator[denominator_idx];
+                            terms_acc += complex<double>(term, 0.0);
                         }
-                        const long long denominator_idx =
-                            ((long long)entry * (order + 1) + n) * (order + 1) + s_val;
-                        const double term = cz_powers[2 * n - s_val]
-                            * rho_powers[term_idx * (order + 1) + (l - s_val)]
-                            * inverse_denominator[denominator_idx];
-                        terms_acc += complex<double>(term, 0.0);
+                        acc += gamma_powers[term_idx * (order + 1) + n]
+                            * delta[n]
+                            * terms_acc;
                     }
-                    acc += gamma_powers[term_idx * (order + 1) + n]
-                        * delta[n]
-                        * terms_acc;
+                    contrib = prefactor[entry]
+                        * phase
+                        * azimuth[term_idx * width + (m + order)]
+                        * acc;
                 }
-                const complex<double> contrib =
-                    prefactor[entry]
-                    * phase
-                    * azimuth[term_idx * width + (m + order)]
-                    * acc;
-                atomicAdd(&shared[2 * entry], contrib.real());
-                atomicAdd(&shared[2 * entry + 1], contrib.imag());
+                const double re = _pyceles_warp_sum(contrib.real());
+                const double im = _pyceles_warp_sum(contrib.imag());
+                if (lane == 0 && active_lanes != 0) {
+                    atomicAdd(&shared[2 * entry], re);
+                    atomicAdd(&shared[2 * entry + 1], im);
+                }
             }
         }
     }

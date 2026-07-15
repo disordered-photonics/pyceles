@@ -39,6 +39,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   larger multilevel runs avoid avoidable out-of-memory failures.
 
 ### Changed
+- Reduced CuPy shifted-reciprocal Ewald contention by warp-reducing structural
+  contributions before shared-memory atomic accumulation, accelerating
+  cache-off matvecs, cache construction, and periodic interior near fields.
 - Accelerated CuPy periodic Ewald evaluation by caching reciprocal-term
   azimuths, powers, square-root branches, and combinatorial factors on device,
   removing repeated pair-local setup from cache-off matvecs, cache population,
