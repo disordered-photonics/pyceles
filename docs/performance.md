@@ -103,8 +103,10 @@ block builder on the public 500-particle benchmark: about `26x` slower at
 Measured on a laptop with:
 
 - CPU: `13th Gen Intel(R) Core(TM) i7-13850HX`,
+- GPU: `NVIDIA RTX 2000 Ada Generation Laptop GPU`,
 - Python: `3.12.10`,
 - NumPy/SciPy: `2.4.2 / 1.17.1`,
+- CuPy: `14.0.1`,
 - script: `examples/profile_pyceles_phases.py`.
 
 Common benchmark parameters:
@@ -115,30 +117,27 @@ Common benchmark parameters:
 - angular grids: `n_beta=3601`, `n_alpha=180`,
 - near-field slice: plane `y=0`, `x=[-4000, 4000]`,
   `z=[-3000, 5000]`, `dx=40`,
-- solver: `gmres`, `rtol=1e-4`, `restart=25`, `maxiter=100`.
+- solver: `bicgstab`, `rtol=1e-4`.
 
 Representative phase wall times:
 
 - NumPy, `complex128/complex128`, no preconditioner:
-  - Solver: `389.8 s`,
+  - Solver: `369.5 s`,
   - Far-field: `21.9 s`,
-  - Near-field: `181.2 s`.
+  - Near-field: `180.7 s`.
 - NumPy, `complex64/complex128`, no preconditioner:
-  - Solver: `324.9 s`,
-  - Far-field: `19.6 s`,
+  - Solver: `319.3 s`,
+  - Far-field: `19.5 s`,
   - Near-field: `146.7 s`.
 - CuPy, `complex128/complex128`, no preconditioner:
-  - Solver: `6.38 s`,
-  - Far-field: `1.76 s`,
-  - Near-field: `13.54 s`.
+  - Solver: `5.69 s`,
+  - Far-field: `2.04 s`,
+  - Near-field: `14.06 s`.
 - CuPy, `complex64/complex128`, no preconditioner:
-  - Solver: `0.61 s`,
+  - Solver: `0.46 s`,
   - Far-field: `0.70 s`,
-  - Near-field: `3.07 s`.
+  - Near-field: `3.12 s`.
 
-On this benchmark, native CuPy GMRES reduced restart overshoot on the
-no-preconditioner runs, from 40 to 22 iterations at `rtol=1e-4` and
-`restart=25`.
 
 The "no preconditioner" wording refers to a regular-grid block preconditioner
 that was previously shipped with pyceles, directly inspired by the CELES
@@ -198,7 +197,7 @@ Common benchmark parameters:
 - geometry: `N=500`, `lmax=3`, homogeneous medium, 3000 nm periodic square cell,
 - source: plane wave, `wavelength=550`, `n_medium=1.0`, TE, normal incidence,
 - source projection: analytic plane-wave RHS,
-- solver: `gmres`, `rtol=1e-4`, `restart=80`, `maxiter=800`,
+- solver: `bicgstab`, `rtol=1e-4`, `maxiter=800`,
 - periodic options: automatic `eta`, adaptive shell counts,
   `shell_tolerance=1e-10`,
 - precision: currently `complex128/complex128`.
@@ -206,37 +205,42 @@ Common benchmark parameters:
 Measured phase wall times on the same laptop/GPU:
 
 - CuPy, explicit periodic W cache:
-  - W-cache population: `18.5 s`,
-  - GMRES solve: `12.3 s` for 160 iterations,
-  - Full solve phase: `42.4 s`,
-  - Near field: xy `1.4 s`, xz `130 s`.
+  - W-cache population: `11.8 s`,
+  - BiCGSTAB solve: `12.9 s` for 111 iterations,
+  - Full solve phase: `42.3 s`,
+  - Near field: xy `1.4 s`, xz `112 s`.
 - CuPy, no periodic W cache:
-  - GMRES solve: `1941 s` for 160 iterations, about `12.1 s/iteration`,
-  - Full solve phase: `1952 s`,
-  - Near field: xy `1.4 s`, xz `132 s`.
+  - BiCGSTAB solve: `817 s` for 115 iterations, about `7.1 s/iteration`,
+  - Full solve phase: `828 s`,
+  - Near field: xy `1.4 s`, xz `112 s`.
 - NumPy, explicit periodic W cache:
-  - W-cache population: `116 s`,
-  - GMRES solve: `584 s` for 160 iterations,
-  - Full solve phase: `712 s`,
-  - Near field: xy `1.5 s`, xz `1443 s`.
+  - W-cache population: `120 s`,
+  - BiCGSTAB solve: `833 s` for 115 iterations,
+  - Full solve phase: `966 s`,
+  - Near field: xy `1.4 s`, xz `1443 s`.
 - NumPy, no periodic W cache:
-  - not run in the current snapshot: a rough lower-bound estimate is `116 s` per uncached source-sweep equivalent times 160 GMRES iterations, i.e. more than 5 h before postprocessing.
+  - not run in the current snapshot: even one uncached source sweep is about
+    `120 s`, while BiCGSTAB generally needs two operator applications per full
+    iteration. A 115-iteration solve would therefore take well over 7 h before
+    postprocessing.
 - CuPy direct dense validation, with near field and final residual check skipped:
-  - W-cache population: `19.1 s`,
+  - W-cache population: `10.5 s`,
   - dense `A` assembly from cached periodic blocks: `0.31 s`,
-  - dense LU factorization: `43.5 s`,
-  - full solve phase: `74.6 s`.
-- NumPy direct dense validation, with near field skipped:
-  - W-cache population: `116 s`,
-  - dense `A` assembly from cached periodic blocks: `3.23 s`,
-  - dense LU factorization: `19.8 s`,
-  - full solve phase: `152 s`.
+  - dense LU factorization: `43.9 s`,
+  - full solve phase: `67.4 s`.
+- NumPy direct dense validation, with near field and final residual check skipped:
+  - W-cache population: `130 s`,
+  - dense `A` assembly from cached periodic blocks: `3.65 s`,
+  - dense LU factorization: `21.6 s`,
+  - full solve phase: `168 s`.
 
 The direct dense rows are validation paths, not the intended scaling route. The
 cache-off periodic path is memory-light, but it recomputes periodic Ewald work
 on every Krylov matvec. For large periodic runs, explicit W-block caching is
-currently the practical path when memory permits. The remaining major GPU
-performance target is a fused cache-off periodic Ewald apply kernel.
+currently the practical path when memory permits. Profiling shows that the
+cache-off cost is dominated by shifted-reciprocal Ewald arithmetic rather than
+the final tensor contraction, so direct-to-output fusion is not presently a
+compelling option.
 
 ## Periodic optimization notes
 
