@@ -34,6 +34,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed CuPy MLFMM streamed budget selection so reusable CuPy memory-pool
   blocks count as available memory, avoiding severe over-fragmentation of
   deep sampled-far traversals after large prepare/apply phases.
+- Fixed CuPy MLFMM streamed planning so a large directional allocation is not
+  assumed to fit merely because the memory pool has enough aggregate cached
+  bytes. Under pressure, stale cached blocks are trimmed and source chunks are
+  bounded by fresh allocation headroom, avoiding later-iteration Linux OOMs.
 - Reduced CuPy MLFMM directional-transform upload and resident memory by using
   separable alpha/beta factors instead of dense sampled-direction matrices, so
   larger multilevel runs avoid avoidable out-of-memory failures.

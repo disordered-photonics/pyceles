@@ -22,6 +22,7 @@ from pyceles.core.operators import (
 )
 from pyceles.core.operators.mlfmm_cupy import (
     _box_outgoing_to_directional_cupy,
+    _cupy_allocator_snapshot,
     _directional_to_box_regular_cupy,
     _upload_directional_transforms,
     _upload_offset_batches,
@@ -669,10 +670,14 @@ def test_cupy_multilevel_stream_stats_collection_is_opt_in(collect_stream_stats:
     device_limit = streaming.get("device_limit_bytes")
     pool_used_before_plan = streaming.get("pool_used_bytes_before_stream_plan")
     pool_trimmed_before_plan = streaming.get("pool_trimmed_before_stream_plan")
+    pool_trimmed_for_fragmentation = streaming.get("pool_trimmed_for_fragmentation")
     transient_budget = streaming.get("stream_transient_budget_bytes")
     unmodeled_temp_reserve = streaming.get("stream_unmodeled_temp_reserve_bytes")
     chunk_bytes_budget = streaming.get("resolved_streamed_far_chunk_bytes_budget")
     frontier_bytes_budget = streaming.get("resolved_streamed_far_frontier_bytes_budget")
+    largest_stream_allocation = streaming.get("largest_single_stream_allocation_bytes")
+    guaranteed_fresh_allocation = streaming.get("guaranteed_fresh_allocation_bytes")
+    fragmentation_guard = streaming.get("stream_fragmentation_guard_bytes")
     assert isinstance(chunk_box_cap, int)
     assert isinstance(frontier_box_cap, int)
     assert isinstance(leaf_chunk_min, int)
@@ -681,10 +686,14 @@ def test_cupy_multilevel_stream_stats_collection_is_opt_in(collect_stream_stats:
     assert isinstance(device_limit, int)
     assert isinstance(pool_used_before_plan, int)
     assert isinstance(pool_trimmed_before_plan, bool)
+    assert isinstance(pool_trimmed_for_fragmentation, bool)
     assert isinstance(transient_budget, int)
     assert isinstance(unmodeled_temp_reserve, int)
     assert isinstance(chunk_bytes_budget, int)
     assert isinstance(frontier_bytes_budget, int)
+    assert isinstance(largest_stream_allocation, int)
+    assert isinstance(guaranteed_fresh_allocation, int)
+    assert isinstance(fragmentation_guard, int)
     assert chunk_box_cap > 0
     assert frontier_box_cap > 0
     assert leaf_chunk_min > 0
@@ -696,6 +705,9 @@ def test_cupy_multilevel_stream_stats_collection_is_opt_in(collect_stream_stats:
     assert unmodeled_temp_reserve >= 0
     assert chunk_bytes_budget > 0
     assert frontier_bytes_budget > 0
+    assert largest_stream_allocation > 0
+    assert guaranteed_fresh_allocation >= largest_stream_allocation
+    assert fragmentation_guard >= 0
     assert chunk_bytes_budget + frontier_bytes_budget <= transient_budget
     assert pool_used_before_plan + transient_budget + unmodeled_temp_reserve <= device_limit
     assert "resolved_leaf_otf_bytes_budget" not in streaming
@@ -728,6 +740,65 @@ def test_cupy_multilevel_stream_stats_collection_is_opt_in(collect_stream_stats:
     else:
         assert streaming.get("last_apply_stats") is None
         assert streaming.get("last_apply_timing_seconds") is None
+
+
+def test_cupy_stream_allocator_trims_fragmented_cache_for_large_fresh_block() -> None:
+    gib = 1024**3
+    mib = 1024**2
+
+    class FakeRuntime:
+        def __init__(self) -> None:
+            self.free_bytes = 200 * mib
+            self.total_bytes = 8 * gib
+
+        def memGetInfo(self) -> tuple[int, int]:
+            return self.free_bytes, self.total_bytes
+
+    runtime = FakeRuntime()
+
+    class FakePool:
+        def __init__(self) -> None:
+            self.used = 4 * gib
+            self.total = 7 * gib + 384 * mib
+            self.limit = 7 * gib + 512 * mib
+            self.trimmed = False
+
+        def used_bytes(self) -> int:
+            return self.used
+
+        def total_bytes(self) -> int:
+            return self.total
+
+        def get_limit(self) -> int:
+            return self.limit
+
+        def set_limit(self, *, size: int) -> None:
+            self.limit = int(size)
+
+        def free_all_blocks(self) -> None:
+            runtime.free_bytes += self.total - self.used
+            self.total = self.used
+            self.trimmed = True
+
+    pool = FakePool()
+
+    class FakeCuPy:
+        cuda = type("FakeCuda", (), {"runtime": runtime})()
+
+        @staticmethod
+        def get_default_memory_pool() -> FakePool:
+            return pool
+
+    snapshot = _cupy_allocator_snapshot(
+        FakeCuPy(),
+        apply_pool_limit=True,
+        required_fresh_allocation_bytes=300 * mib,
+    )
+
+    assert pool.trimmed is True
+    assert snapshot.pool_trimmed_for_fragmentation is True
+    assert snapshot.pool_trimmed_to_limit is False
+    assert snapshot.guaranteed_fresh_allocation_bytes >= 300 * mib
 
 
 @pytest.mark.parametrize(

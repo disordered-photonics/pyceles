@@ -7032,8 +7032,10 @@ class _CuPyAllocatorSnapshot:
     pool_limit_bytes: int
     effective_device_limit_bytes: int
     active_headroom_bytes: int
+    guaranteed_fresh_allocation_bytes: int
     pool_limit_applied: bool
     pool_trimmed_to_limit: bool
+    pool_trimmed_for_fragmentation: bool
 
 
 @dataclass(frozen=True)
@@ -7050,6 +7052,10 @@ class _StreamedFarMemoryPlan:
     pool_limit_bytes: int
     pool_limit_applied: bool
     source_outgoing_budget_clipped: bool
+    source_outgoing_budget_fragmentation_clipped: bool = False
+    largest_single_allocation_bytes: int = 0
+    guaranteed_fresh_allocation_bytes: int = 0
+    fragmentation_guard_bytes: int = 0
     retry_count: int = 0
 
 
@@ -7135,8 +7141,37 @@ def _guarded_device_limit_bytes(total_bytes: int) -> int:
     return max(1, total - int(device_guard))
 
 
-def _cupy_allocator_snapshot(cupy: Any, *, apply_pool_limit: bool) -> _CuPyAllocatorSnapshot:
-    """Snapshot CuPy allocator state and optionally enforce a guarded pool limit."""
+def _guaranteed_fresh_allocation_bytes(
+    *,
+    raw_free_bytes: int,
+    pool_total_bytes: int,
+    pool_limit_bytes: int,
+) -> int:
+    """Return bytes guaranteed available without reusing a cached pool block."""
+
+    return max(
+        0,
+        min(
+            int(raw_free_bytes),
+            int(pool_limit_bytes) - int(pool_total_bytes),
+        ),
+    )
+
+
+def _cupy_allocator_snapshot(
+    cupy: Any,
+    *,
+    apply_pool_limit: bool,
+    required_fresh_allocation_bytes: int = 0,
+) -> _CuPyAllocatorSnapshot:
+    """Snapshot CuPy allocator state and enforce the streamed-memory invariant.
+
+    Aggregate cached bytes are useful for budget selection, but they do not
+    guarantee that one sufficiently large block exists. When the next planned
+    directional allocation cannot be served from fresh driver/pool headroom,
+    release cached blocks before planning the traversal. Any split blocks that
+    remain cached after the trim are treated conservatively by the caller.
+    """
 
     pool = cupy.get_default_memory_pool()
     raw_free, raw_total = cupy.cuda.runtime.memGetInfo()
@@ -7156,18 +7191,39 @@ def _cupy_allocator_snapshot(cupy: Any, *, apply_pool_limit: bool) -> _CuPyAlloc
     pool_total = int(pool.total_bytes())
     pool_free = max(0, pool_total - pool_used)
     pool_trimmed_to_limit = False
-    if bool(apply_pool_limit) and pool_total > int(effective_limit) and pool_free > 0:
-        # A prior memory-aggressive run can leave cached blocks above the new
-        # guarded pool ceiling. Release free blocks before planning so Windows
-        # does not keep stale WDDM spill allocations alive and so diagnostics
-        # reflect the automatic MLFMM limit rather than historical pool growth.
+    pool_trimmed_for_fragmentation = False
+    guaranteed_fresh = _guaranteed_fresh_allocation_bytes(
+        raw_free_bytes=int(raw_free),
+        pool_total_bytes=int(pool_total),
+        pool_limit_bytes=int(effective_limit),
+    )
+    trim_to_limit = pool_total > int(effective_limit)
+    trim_for_fragmentation = (
+        int(required_fresh_allocation_bytes) > int(guaranteed_fresh) and pool_free > 0
+    )
+    if (
+        bool(apply_pool_limit)
+        and pool_free > 0
+        and (bool(trim_to_limit) or bool(trim_for_fragmentation))
+    ):
+        # A previous streamed apply can leave plenty of aggregate cached bytes
+        # but no block large enough for the next directional chunk. Linux then
+        # fails at the hard pool limit while WDDM may spill. Trim only under
+        # demonstrated large-block pressure so normal repeated applies retain
+        # useful cache reuse.
         pool.free_all_blocks()
-        pool_trimmed_to_limit = True
+        pool_trimmed_to_limit = bool(trim_to_limit)
+        pool_trimmed_for_fragmentation = bool(trim_for_fragmentation)
         raw_free, raw_total = cupy.cuda.runtime.memGetInfo()
         raw_total = int(raw_total)
         pool_used = int(pool.used_bytes())
         pool_total = int(pool.total_bytes())
         pool_free = max(0, pool_total - pool_used)
+        guaranteed_fresh = _guaranteed_fresh_allocation_bytes(
+            raw_free_bytes=int(raw_free),
+            pool_total_bytes=int(pool_total),
+            pool_limit_bytes=int(effective_limit),
+        )
     active_headroom = max(0, int(effective_limit) - int(pool_used))
     return _CuPyAllocatorSnapshot(
         raw_free_bytes=int(raw_free),
@@ -7178,8 +7234,10 @@ def _cupy_allocator_snapshot(cupy: Any, *, apply_pool_limit: bool) -> _CuPyAlloc
         pool_limit_bytes=int(effective_limit),
         effective_device_limit_bytes=int(effective_limit),
         active_headroom_bytes=int(active_headroom),
+        guaranteed_fresh_allocation_bytes=int(guaranteed_fresh),
         pool_limit_applied=pool_limit_applied,
         pool_trimmed_to_limit=pool_trimmed_to_limit,
+        pool_trimmed_for_fragmentation=pool_trimmed_for_fragmentation,
     )
 
 
@@ -7252,8 +7310,164 @@ def _streamed_far_memory_plan(
         pool_limit_bytes=int(snapshot.pool_limit_bytes),
         pool_limit_applied=bool(snapshot.pool_limit_applied),
         source_outgoing_budget_clipped=bool(source_clipped),
-        retry_count=0,
     )
+
+
+def _largest_streamed_directional_allocation_bytes(
+    multilevel: CuPyMLFMMMultilevelData,
+    *,
+    nrhs: int,
+    source_outgoing_bytes_budget: int,
+) -> int:
+    """Return the largest single directional array requested by streaming.
+
+    The source budget models three live directional arrays per box. Individual
+    outgoing and child-incoming allocations contain one such array, so their
+    actual allocation size is one third of the corresponding chunk model.
+    """
+
+    largest = 0
+    for level_idx in range(int(multilevel.hf_start_level), int(multilevel.hf_end_level) + 1):
+        level = multilevel.levels[level_idx]
+        box_cap = min(
+            int(level.n_boxes),
+            _level_chunk_box_cap(
+                level=level,
+                nrhs=int(nrhs),
+                bytes_budget=int(source_outgoing_bytes_budget),
+            ),
+        )
+        largest = max(
+            int(largest),
+            int(box_cap) * _level_group_bytes_per_box(level=level, nrhs=int(nrhs)),
+        )
+    return int(largest)
+
+
+def _clip_stream_plan_to_fresh_allocation_headroom(
+    plan: _StreamedFarMemoryPlan,
+    *,
+    multilevel: CuPyMLFMMMultilevelData,
+    nrhs: int,
+    guaranteed_fresh_allocation_bytes: int,
+) -> _StreamedFarMemoryPlan:
+    """Keep a source chunk allocatable when cached blocks remain fragmented."""
+
+    fresh_bytes = max(0, int(guaranteed_fresh_allocation_bytes))
+    largest = _largest_streamed_directional_allocation_bytes(
+        multilevel,
+        nrhs=int(nrhs),
+        source_outgoing_bytes_budget=int(plan.source_outgoing_bytes_budget),
+    )
+    source_budget = int(plan.source_outgoing_bytes_budget)
+    fragmentation_clipped = False
+    if largest > fresh_bytes:
+        minimum_fresh_bytes = max(
+            _level_group_bytes_per_box(
+                level=multilevel.levels[level_idx],
+                nrhs=int(nrhs),
+            )
+            for level_idx in range(int(multilevel.hf_start_level), int(multilevel.hf_end_level) + 1)
+        )
+        if fresh_bytes < int(minimum_fresh_bytes):
+            raise MemoryError(
+                "CuPy MLFMM cannot reserve one streamed directional box within the "
+                "guarded device-memory limit. Free other device allocations or set a "
+                "smaller problem/box order."
+            )
+        # `_level_chunk_bytes_per_box()` models three live directional arrays,
+        # while the allocator request contains one. Limiting the modeled source
+        # budget to three fresh blocks therefore bounds each individual request.
+        source_budget = min(int(source_budget), 3 * int(fresh_bytes))
+        fragmentation_clipped = source_budget < int(plan.source_outgoing_bytes_budget)
+        largest = _largest_streamed_directional_allocation_bytes(
+            multilevel,
+            nrhs=int(nrhs),
+            source_outgoing_bytes_budget=int(source_budget),
+        )
+        if largest > fresh_bytes:
+            raise MemoryError(
+                "CuPy MLFMM cannot fit its smallest streamed directional allocation "
+                "within guaranteed fresh device-memory headroom."
+            )
+    return replace(
+        plan,
+        source_outgoing_bytes_budget=int(source_budget),
+        source_outgoing_budget_clipped=(
+            bool(plan.source_outgoing_budget_clipped) or bool(fragmentation_clipped)
+        ),
+        source_outgoing_budget_fragmentation_clipped=bool(fragmentation_clipped),
+        largest_single_allocation_bytes=int(largest),
+        guaranteed_fresh_allocation_bytes=int(fresh_bytes),
+        fragmentation_guard_bytes=max(
+            0,
+            int(plan.source_outgoing_bytes_budget) - int(source_budget),
+        ),
+    )
+
+
+def _resolve_streamed_far_memory_plan(
+    cupy: Any,
+    *,
+    multilevel: CuPyMLFMMMultilevelData,
+    nrhs: int,
+    explicit_source_budget: int | None,
+    hf_start_incoming_bytes: int,
+    full_level_live_bytes: int,
+    full_level_incoming_bytes: int,
+) -> tuple[_CuPyAllocatorSnapshot, _StreamedFarMemoryPlan]:
+    """Resolve one allocation-shape-aware streamed-far memory plan."""
+
+    snapshot = _cupy_allocator_snapshot(cupy, apply_pool_limit=True)
+    plan = _streamed_far_memory_plan(
+        snapshot=snapshot,
+        explicit_source_budget=explicit_source_budget,
+        hf_start_incoming_bytes=int(hf_start_incoming_bytes),
+        full_level_live_bytes=int(full_level_live_bytes),
+        full_level_incoming_bytes=int(full_level_incoming_bytes),
+    )
+    largest_allocation = _largest_streamed_directional_allocation_bytes(
+        multilevel,
+        nrhs=int(nrhs),
+        source_outgoing_bytes_budget=int(plan.source_outgoing_bytes_budget),
+    )
+    if (
+        int(largest_allocation) > int(snapshot.guaranteed_fresh_allocation_bytes)
+        and int(snapshot.pool_free_bytes) > 0
+    ):
+        first_snapshot = snapshot
+        snapshot = _cupy_allocator_snapshot(
+            cupy,
+            apply_pool_limit=True,
+            required_fresh_allocation_bytes=int(largest_allocation),
+        )
+        snapshot = replace(
+            snapshot,
+            pool_limit_applied=(
+                bool(first_snapshot.pool_limit_applied) or bool(snapshot.pool_limit_applied)
+            ),
+            pool_trimmed_to_limit=(
+                bool(first_snapshot.pool_trimmed_to_limit) or bool(snapshot.pool_trimmed_to_limit)
+            ),
+            pool_trimmed_for_fragmentation=(
+                bool(first_snapshot.pool_trimmed_for_fragmentation)
+                or bool(snapshot.pool_trimmed_for_fragmentation)
+            ),
+        )
+        plan = _streamed_far_memory_plan(
+            snapshot=snapshot,
+            explicit_source_budget=explicit_source_budget,
+            hf_start_incoming_bytes=int(hf_start_incoming_bytes),
+            full_level_live_bytes=int(full_level_live_bytes),
+            full_level_incoming_bytes=int(full_level_incoming_bytes),
+        )
+    plan = _clip_stream_plan_to_fresh_allocation_headroom(
+        plan,
+        multilevel=multilevel,
+        nrhs=int(nrhs),
+        guaranteed_fresh_allocation_bytes=int(snapshot.guaranteed_fresh_allocation_bytes),
+    )
+    return snapshot, plan
 
 
 def _multilevel_full_incoming_bytes(
@@ -7667,6 +7881,14 @@ class CuPyMLFMMCouplingOperator:
                     if self._last_allocator_snapshot_before_stream_plan is None
                     else bool(
                         self._last_allocator_snapshot_before_stream_plan.pool_trimmed_to_limit
+                        or self._last_allocator_snapshot_before_stream_plan.pool_trimmed_for_fragmentation
+                    )
+                ),
+                "pool_trimmed_for_fragmentation": (
+                    None
+                    if self._last_allocator_snapshot_before_stream_plan is None
+                    else bool(
+                        self._last_allocator_snapshot_before_stream_plan.pool_trimmed_for_fragmentation
                     )
                 ),
                 "pool_used_bytes_before_stream_plan": (
@@ -7723,6 +7945,28 @@ class CuPyMLFMMCouplingOperator:
                     None
                     if self._last_stream_memory_plan is None
                     else bool(self._last_stream_memory_plan.source_outgoing_budget_clipped)
+                ),
+                "source_outgoing_budget_fragmentation_clipped": (
+                    None
+                    if self._last_stream_memory_plan is None
+                    else bool(
+                        self._last_stream_memory_plan.source_outgoing_budget_fragmentation_clipped
+                    )
+                ),
+                "largest_single_stream_allocation_bytes": (
+                    None
+                    if self._last_stream_memory_plan is None
+                    else int(self._last_stream_memory_plan.largest_single_allocation_bytes)
+                ),
+                "guaranteed_fresh_allocation_bytes": (
+                    None
+                    if self._last_stream_memory_plan is None
+                    else int(self._last_stream_memory_plan.guaranteed_fresh_allocation_bytes)
+                ),
+                "stream_fragmentation_guard_bytes": (
+                    None
+                    if self._last_stream_memory_plan is None
+                    else int(self._last_stream_memory_plan.fragmentation_guard_bytes)
                 ),
                 "resolved_streamed_far_chunk_box_cap": (
                     None
@@ -7973,12 +8217,13 @@ class CuPyMLFMMCouplingOperator:
                 # one guarded device-residency plan. This keeps automatic
                 # chunking below the CuPy pool limit instead of letting one
                 # component consume all freed headroom and spill on WDDM.
-                allocator_snapshot_before_stream_plan = _cupy_allocator_snapshot(
+                (
+                    allocator_snapshot_before_stream_plan,
+                    stream_memory_plan,
+                ) = _resolve_streamed_far_memory_plan(
                     cupy,
-                    apply_pool_limit=True,
-                )
-                stream_memory_plan = _streamed_far_memory_plan(
-                    snapshot=allocator_snapshot_before_stream_plan,
+                    multilevel=multilevel,
+                    nrhs=int(nrhs),
                     explicit_source_budget=self.host_cache_policy.streamed_far_chunk_bytes_budget,
                     hf_start_incoming_bytes=int(hf_start_incoming_bytes),
                     full_level_live_bytes=int(full_level_live_bytes),
