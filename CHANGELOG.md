@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pairwise-vs-MLFMM scaling benchmark.
 
 ### Fixed
+- Fixed the CuPy block-GMRES final residual path so host-owned multi-RHS
+  solutions are converted back to device arrays before applying a CuPy
+  operator.
 - Fixed native CuPy BiCGSTAB device-vector lifetime so stale per-iteration
   temporaries are released before the next matrix-free operator application,
   avoiding avoidable OOMs for memory-tight streamed MLFMM solves.

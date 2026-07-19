@@ -1428,6 +1428,23 @@ def test_apply_operator_falls_back_to_columnwise_vector_calls():
     assert len(calls) == 2
 
 
+def test_apply_operator_cupy_keeps_columnwise_inputs_on_backend():
+    cupy = _fake_cupy_numpy_backend()
+    calls: list[np.ndarray] = []
+
+    def _vec_only(x: np.ndarray) -> np.ndarray:
+        arr = np.asarray(x)
+        if arr.ndim != 1:
+            raise ValueError("vector-only operator")
+        calls.append(arr.copy())
+        return cast(np.ndarray, 3.0 * arr)
+
+    x = np.arange(6, dtype=np.complex128).reshape(3, 2)
+    out = solvers._apply_operator_cupy(_vec_only, x, cupy=cupy)
+    np.testing.assert_allclose(out, 3.0 * x)
+    assert len(calls) == 2
+
+
 @pytest.mark.api_contract
 @pytest.mark.parametrize(
     ("kwargs", "match"),

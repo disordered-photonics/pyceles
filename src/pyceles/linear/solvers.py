@@ -156,6 +156,26 @@ def _apply_operator(op: Callable[[np.ndarray], np.ndarray], x: np.ndarray) -> np
     return np.column_stack(cols)
 
 
+def _apply_operator_cupy(op: Callable[[Any], Any], x: Any, *, cupy: Any) -> Any:
+    """Apply an operator while keeping CuPy inputs on the device.
+
+    The public solve result is intentionally host-owned, but CuPy operators
+    require device vectors.  This helper is used for final block residual
+    diagnostics after a host copy of the converged multi-RHS solution.
+    """
+    x_gpu = cupy.asarray(x)
+    if int(x_gpu.ndim) == 1:
+        return cupy.asarray(op(x_gpu))
+    try:
+        y = cupy.asarray(op(x_gpu))
+        if tuple(y.shape) == tuple(x_gpu.shape):
+            return y
+    except (TypeError, ValueError):
+        pass
+    columns = [cupy.asarray(op(x_gpu[:, j])).reshape(-1, 1) for j in range(int(x_gpu.shape[1]))]
+    return cupy.concatenate(columns, axis=1)
+
+
 def _make_linear_operator(A_mv: Callable[[np.ndarray], np.ndarray], n: int, dtype: np.dtype):
     """Wrap matrix-free system matvec as a SciPy `LinearOperator`."""
     from scipy.sparse.linalg import LinearOperator
@@ -760,9 +780,9 @@ def gmres_cupy_block(
     progress_close()
 
     if compute_final_residual:
-        residual = np.asarray(_apply_operator(A_mv, x_out), dtype=np.complex128) - np.asarray(
-            b_mat, dtype=np.complex128
-        )
+        residual = asnumpy(_apply_operator_cupy(A_mv, x_out, cupy=cupy)).astype(
+            np.complex128, copy=False
+        ) - np.asarray(b_mat, dtype=np.complex128)
         residual_norm = np.linalg.norm(residual, axis=0)
         b_norm = np.linalg.norm(np.asarray(b_mat, dtype=np.complex128), axis=0)
         relative_residual = np.asarray(residual_norm, dtype=float).copy()
