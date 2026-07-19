@@ -13,22 +13,21 @@ _SLMModulation = complex | np.ndarray | Callable[[np.ndarray, np.ndarray], npt.A
 
 
 @dataclass(frozen=True)
-class SLMSource:
-    """Angular-spectrum wrapper that applies an SLM-style complex modulation."""
+class AngularSpectrumSLMSource:
+    """Angular-spectrum source wrapper that applies an SLM-style modulation.
 
-    base_source: JonesPolarizedSource
+    The same scalar modulation is applied to the TE and TM coefficients of
+    every angular-spectrum sample. The wrapper deliberately exposes only the
+    general source capabilities, so Cartesian-polarized focused beams do not
+    acquire a fictitious fixed Jones state.
+    """
+
+    base_source: Source
     modulation: _SLMModulation = 1.0 + 0.0j
 
     def __post_init__(self) -> None:
         if not isinstance(self.base_source, Source):
-            raise TypeError(
-                "`base_source` must satisfy the pyceles Source protocol "
-                "(wavelength/medium_n + incident_coeffs + has_finite_incident_power APIs)."
-            )
-        if not isinstance(self.base_source, JonesPolarizedSource):
-            raise TypeError(
-                "`base_source` must expose Jones metadata and `with_polarization(...)` for SLM wrapping."
-            )
+            raise TypeError("`base_source` must satisfy the pyceles Source protocol.")
         if not isinstance(self.base_source, AngularSpectrumSource):
             raise TypeError("`base_source` must expose `angular_spectrum(...)` for SLM modulation.")
         if not callable(self.modulation):
@@ -49,19 +48,8 @@ class SLMSource:
         return float(self.base_source.amplitude)
 
     @property
-    def polarization(self) -> PolarizationInput:
-        return self.base_source.polarization
-
-    @property
     def beam_width(self) -> float:
-        """Delegate beam width for finite-power diagnostics when available."""
         return float(getattr(self.base_source, "beam_width", np.inf))
-
-    def jones_coefficients(self) -> tuple[complex, complex]:
-        return self.base_source.jones_coefficients()
-
-    def with_polarization(self, polarization: PolarizationInput) -> SLMSource:
-        return replace(self, base_source=self.base_source.with_polarization(polarization))
 
     def has_finite_incident_power(self) -> bool:
         return bool(self.base_source.has_finite_incident_power())
@@ -94,7 +82,7 @@ class SLMSource:
     ) -> tuple[dict, dict]:
         base = self.base_source
         if not isinstance(base, AngularSpectrumSource):
-            raise TypeError("SLMSource requires a base source with `angular_spectrum(...)`.")
+            raise TypeError("AngularSpectrumSLMSource requires an angular-spectrum base source.")
         pwp_te, pwp_tm = base.angular_spectrum(
             k=float(k),
             polar_angles=np.asarray(polar_angles, dtype=float),
@@ -123,7 +111,8 @@ class SLMSource:
     ) -> np.ndarray:
         if polar_angles is None or azimuthal_angles is None:
             raise ValueError(
-                "SLMSource projection requires both `polar_angles` and `azimuthal_angles`."
+                "AngularSpectrumSLMSource projection requires both `polar_angles` and "
+                "`azimuthal_angles`."
             )
         k = 2.0 * np.pi / float(self.wavelength) * float(np.real(complex(self.medium_n)))
         return angular_spectrum_to_svwf_regular(
@@ -135,3 +124,32 @@ class SLMSource:
             azimuthal_angles=np.asarray(azimuthal_angles, dtype=float),
             dtype=dtype,
         )
+
+
+@dataclass(frozen=True)
+class SLMSource(AngularSpectrumSLMSource):
+    """Jones-polarized SLM wrapper retained for the existing API."""
+
+    base_source: JonesPolarizedSource
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.base_source, Source):
+            raise TypeError(
+                "`base_source` must satisfy the pyceles Source protocol "
+                "(wavelength/medium_n + incident_coeffs + has_finite_incident_power APIs)."
+            )
+        if not isinstance(self.base_source, JonesPolarizedSource):
+            raise TypeError(
+                "`base_source` must expose Jones metadata and `with_polarization(...)` for SLM wrapping."
+            )
+        super().__post_init__()
+
+    @property
+    def polarization(self) -> PolarizationInput:
+        return self.base_source.polarization
+
+    def jones_coefficients(self) -> tuple[complex, complex]:
+        return self.base_source.jones_coefficients()
+
+    def with_polarization(self, polarization: PolarizationInput) -> SLMSource:
+        return replace(self, base_source=self.base_source.with_polarization(polarization))

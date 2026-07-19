@@ -11,6 +11,7 @@ from _source_contract_helper import assert_source_compliance
 
 from pyceles.core.indexing import n_modes
 from pyceles.core.sources import (
+    AngularSpectrumSLMSource,
     BesselBeam,
     CartesianPolarizedBesselBeam,
     CartesianPolarizedFocusedLaguerreGaussianBeam,
@@ -18,6 +19,7 @@ from pyceles.core.sources import (
     DipoleSource,
     FocusedLaguerreGaussianBeam,
     GaussianBeam,
+    JonesPolarizedSource,
     LaguerreGaussianBeam,
     PlaneWave,
     SLMSource,
@@ -295,3 +297,41 @@ def test_finite_power_policy_honors_explicit_source_capability_contract():
             k0=2.0 * np.pi / 550.0,
             k_medium=2.0 * np.pi / 550.0,
         )
+
+
+def test_angular_spectrum_slm_wraps_cartesian_focused_source():
+    base = CartesianPolarizedFocusedLaguerreGaussianBeam(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        beam_width=900.0,
+        focal_length=1000.0,
+        numerical_aperture=0.75,
+        global_polarization=(1.0 + 0.0j, 0.0 + 0.0j, 0.0 + 0.0j),
+    )
+    alpha = np.linspace(0.0, 2.0 * np.pi, 13, endpoint=False)
+    beta = np.linspace(0.0, 0.7, 9)
+    modulation = np.exp(1j * (0.4 * np.cos(alpha[:, None]) + beta[None, :]))
+    source = AngularSpectrumSLMSource(base_source=base, modulation=modulation)
+
+    base_te, base_tm = base.angular_spectrum(
+        k=2.0 * np.pi / 550.0,
+        polar_angles=beta,
+        azimuthal_angles=alpha,
+    )
+    out_te, out_tm = source.angular_spectrum(
+        k=2.0 * np.pi / 550.0,
+        polar_angles=beta,
+        azimuthal_angles=alpha,
+    )
+    np.testing.assert_allclose(out_te["coeff"], base_te["coeff"] * modulation)
+    np.testing.assert_allclose(out_tm["coeff"], base_tm["coeff"] * modulation)
+    assert source.has_finite_incident_power() is True
+    assert not isinstance(source, JonesPolarizedSource)
+    assert not hasattr(source, "with_polarization")
+    projected = source.incident_coeffs(
+        np.array([[0.0, 0.0, 0.0], [100.0, 0.0, 0.0]]),
+        lmax=2,
+        polar_angles=beta,
+        azimuthal_angles=alpha,
+    )
+    assert projected.shape == (2, n_modes(2))

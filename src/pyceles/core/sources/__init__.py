@@ -23,9 +23,10 @@ from .gaussian import (
     LaguerreGaussianBeam,
 )
 from .plane_wave import PlaneWave
-from .slm import SLMSource
+from .slm import AngularSpectrumSLMSource, SLMSource
 
 __all__ = [
+    "AngularSpectrumSLMSource",
     "AngularSpectrumSource",
     "BesselBeam",
     "CartesianPolarizedBesselBeam",

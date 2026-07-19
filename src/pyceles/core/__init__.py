@@ -2,6 +2,7 @@
 
 from .angular import uniform_periodic_azimuth_grid, uniform_polar_grid
 from .fields import (
+    AngularSpectrumSLMSource,
     AngularSpectrumSource,
     BesselBeam,
     CartesianPolarizedBesselBeam,
@@ -96,6 +97,7 @@ def clear_caches() -> None:
 
 
 __all__ = [
+    "AngularSpectrumSLMSource",
     "AngularSpectrumSource",
     "AxisymmetricTGroup",
     "BesselBeam",

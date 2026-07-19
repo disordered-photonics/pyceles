@@ -22,6 +22,7 @@ from .projection import (
     project_source_to_svwf,
 )
 from .sources import (
+    AngularSpectrumSLMSource,
     AngularSpectrumSource,
     BesselBeam,
     CartesianPolarizedBesselBeam,
@@ -43,6 +44,7 @@ from .sources import (
 )
 
 __all__ = [
+    "AngularSpectrumSLMSource",
     "AngularSpectrumSource",
     "BesselBeam",
     "CartesianPolarizedBesselBeam",

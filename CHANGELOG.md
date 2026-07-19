@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Added `AngularSpectrumSLMSource` for applying one scalar SLM modulation to
+  the TE and TM spectra of arbitrary angular-spectrum sources, while retaining
+  `SLMSource` for Jones-polarized sources.
 - Added `PECSphere` particle descriptors and PEC-sphere helpers based on the
   analytic perfect-conductor Mie limit.
 - Added geometry-only Rayleigh/Wood anomaly diagnostics for rectangular

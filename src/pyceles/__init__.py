@@ -2,6 +2,7 @@ from pyceles import core, io, linear, postprocessing
 from pyceles._logo import print_logo
 from pyceles._version import __version__
 from pyceles.core.fields import (
+    AngularSpectrumSLMSource,
     BesselBeam,
     CartesianPolarizedBesselBeam,
     CartesianPolarizedFocusedLaguerreGaussianBeam,
@@ -53,6 +54,7 @@ from pyceles.simulation import (
 )
 
 __all__ = [
+    "AngularSpectrumSLMSource",
     "BesselBeam",
     "CartesianPolarizedBesselBeam",
     "CartesianPolarizedFocusedLaguerreGaussianBeam",
