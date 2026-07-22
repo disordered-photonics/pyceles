@@ -342,7 +342,7 @@ def _make_progress_tracker(
     history: list[float] = []
     if not show_progress:
 
-        def _noop_update(_: float | None) -> None:
+        def _noop_update(_: float | None, *, residual_label_override: str | None = None) -> None:
             return
 
         def _noop_close() -> None:
@@ -356,7 +356,7 @@ def _make_progress_tracker(
     # available we switch to dynamic total = done + estimated_left.
     pbar = tqdm(total=None, desc=f"{method.upper():8s}", leave=True)
 
-    def update(residual: float | None) -> None:
+    def update(residual: float | None, *, residual_label_override: str | None = None) -> None:
         """Record one progress sample and refresh tqdm output."""
         nonlocal n_updates
         n_updates += 1
@@ -376,7 +376,8 @@ def _make_progress_tracker(
             pbar.total = max(est_total, n_updates, 1)
         pbar.update(max(0, n_updates - int(pbar.n)))
         if r is not None and np.isfinite(r):
-            pbar.set_postfix_str(f"{residual_label}={r:.3e}", refresh=True)
+            label = residual_label if residual_label_override is None else residual_label_override
+            pbar.set_postfix_str(f"{label}={r:.3e}", refresh=True)
         elif target_rel > 0.0:
             pbar.set_postfix_str(f"target_rel={target_rel:.3e}", refresh=False)
 
@@ -406,6 +407,7 @@ def _prepare_cupy_restarted_solver(
     Literal["preconditioned", "true", "both"],
     Callable[[float], None] | None,
     Callable[[float], None] | None,
+    Callable[..., None],
     Callable[[], None],
 ]:
     """Prepare shared single-RHS CuPy restarted-Krylov wrapper plumbing."""
@@ -471,6 +473,7 @@ def _prepare_cupy_restarted_solver(
         monitor_mode,
         native_callback,
         native_restart_callback,
+        progress_update,
         progress_close,
     )
 
@@ -777,8 +780,6 @@ def gmres_cupy_block(
             }
         )
 
-    progress_close()
-
     if compute_final_residual:
         residual = asnumpy(_apply_operator_cupy(A_mv, x_out, cupy=cupy)).astype(
             np.complex128, copy=False
@@ -810,12 +811,21 @@ def gmres_cupy_block(
                 np.asarray(rhs_reason, dtype=object),
             ),
         )
+        if show_progress:
+            # The final residual is already required for correctness and is
+            # computed above; this update adds no operator evaluation.
+            progress_update(
+                float(block_relative),
+                residual_label_override="true_final_block_rel_res",
+            )
     else:
         residual_norm = np.full((nrhs,), np.nan, dtype=float)
         relative_residual = np.full((nrhs,), np.nan, dtype=float)
         block_residual = float("nan")
         block_relative = float("nan")
         rhs_target_abs = np.full((nrhs,), np.nan, dtype=float)
+
+    progress_close()
 
     pre_hist = (
         np.concatenate([h for h in precond_hist_all if h.size > 0])
@@ -941,9 +951,7 @@ def gmres_scipy(
         callback_type="pr_norm",
     )
 
-    progress_close()
-
-    return _finalize_result(
+    result = _finalize_result(
         A_mv,
         b,
         x,
@@ -953,6 +961,13 @@ def gmres_scipy(
         residual_history=history,
         compute_final_residual=compute_final_residual,
     )
+    if show_progress and compute_final_residual:
+        progress_update(
+            float(result.relative_residual),
+            residual_label_override="true_final_rel_res",
+        )
+    progress_close()
+    return result
 
 
 def gmres_cupy(
@@ -993,6 +1008,7 @@ def gmres_cupy(
         monitor_mode,
         native_callback,
         native_restart_callback,
+        progress_update,
         progress_close,
     ) = _prepare_cupy_restarted_solver(
         "gmres",
@@ -1025,8 +1041,16 @@ def gmres_cupy(
             happy_breakdown_tol=float(happy_breakdown_tol),
             compute_final_residual=bool(compute_final_residual),
         )
-    finally:
+    except BaseException:
         progress_close()
+        raise
+
+    if show_progress and compute_final_residual:
+        progress_update(
+            float(native.relative_residual),
+            residual_label_override="true_final_rel_res",
+        )
+    progress_close()
 
     _record_backend_solution(native.x)
     return _finalize_cupy_restarted_result(
@@ -1075,6 +1099,7 @@ def fgmres_cupy(
         monitor_mode,
         native_callback,
         native_restart_callback,
+        progress_update,
         progress_close,
     ) = _prepare_cupy_restarted_solver(
         "fgmres",
@@ -1107,8 +1132,16 @@ def fgmres_cupy(
             happy_breakdown_tol=float(happy_breakdown_tol),
             compute_final_residual=bool(compute_final_residual),
         )
-    finally:
+    except BaseException:
         progress_close()
+        raise
+
+    if show_progress and compute_final_residual:
+        progress_update(
+            float(native.relative_residual),
+            residual_label_override="true_final_rel_res",
+        )
+    progress_close()
 
     _record_backend_solution(native.x)
     return _finalize_cupy_restarted_result(
@@ -1160,6 +1193,7 @@ def lgmres_cupy(
         monitor_mode,
         native_callback,
         native_restart_callback,
+        progress_update,
         progress_close,
     ) = _prepare_cupy_restarted_solver(
         "lgmres",
@@ -1194,8 +1228,16 @@ def lgmres_cupy(
             happy_breakdown_tol=float(happy_breakdown_tol),
             compute_final_residual=bool(compute_final_residual),
         )
-    finally:
+    except BaseException:
         progress_close()
+        raise
+
+    if show_progress and compute_final_residual:
+        progress_update(
+            float(native.relative_residual),
+            residual_label_override="true_final_rel_res",
+        )
+    progress_close()
 
     _record_backend_solution(native.x)
     return _finalize_cupy_restarted_result(
@@ -1263,8 +1305,6 @@ def bicgstab_cupy(
         callback=_native_callback if (show_progress or callback is not None) else None,
         compute_final_residual=bool(compute_final_residual),
     )
-    progress_close()
-
     _record_backend_solution(native.x)
     x_np = asnumpy(native.x)
     if compute_final_residual:
@@ -1273,6 +1313,13 @@ def bicgstab_cupy(
     else:
         residual_norm = float("nan")
         relative_residual = float("nan")
+
+    if show_progress and compute_final_residual:
+        progress_update(
+            float(relative_residual),
+            residual_label_override="true_final_rel_res",
+        )
+    progress_close()
 
     true_hist = np.asarray(native.true_history, dtype=float)
     return LinearSolveResult(
@@ -1331,8 +1378,7 @@ def bicgstab_scipy(
         progress_update(None)
 
     x, info = bicgstab(Aop, b, x0=x0, M=Mop, rtol=rtol, atol=atol, maxiter=maxiter, callback=_cb)
-    progress_close()
-    return _finalize_result(
+    result = _finalize_result(
         A_mv,
         b,
         x,
@@ -1342,6 +1388,13 @@ def bicgstab_scipy(
         residual_history=history,
         compute_final_residual=compute_final_residual,
     )
+    if show_progress and compute_final_residual:
+        progress_update(
+            float(result.relative_residual),
+            residual_label_override="true_final_rel_res",
+        )
+    progress_close()
+    return result
 
 
 def lgmres_scipy(
@@ -1392,8 +1445,7 @@ def lgmres_scipy(
         maxiter=maxiter_resolved,
         callback=_cb,
     )
-    progress_close()
-    return _finalize_result(
+    result = _finalize_result(
         A_mv,
         b,
         x,
@@ -1403,6 +1455,13 @@ def lgmres_scipy(
         residual_history=history if history else None,
         compute_final_residual=compute_final_residual,
     )
+    if show_progress and compute_final_residual:
+        progress_update(
+            float(result.relative_residual),
+            residual_label_override="true_final_rel_res",
+        )
+    progress_close()
+    return result
 
 
 def gcrotmk_scipy(
@@ -1453,8 +1512,7 @@ def gcrotmk_scipy(
         maxiter=maxiter_resolved,
         callback=_cb,
     )
-    progress_close()
-    return _finalize_result(
+    result = _finalize_result(
         A_mv,
         b,
         x,
@@ -1464,6 +1522,13 @@ def gcrotmk_scipy(
         residual_history=history if history else None,
         compute_final_residual=compute_final_residual,
     )
+    if show_progress and compute_final_residual:
+        progress_update(
+            float(result.relative_residual),
+            residual_label_override="true_final_rel_res",
+        )
+    progress_close()
+    return result
 
 
 def direct_dense_scipy(
@@ -1750,7 +1815,9 @@ def solve_linear_system(
     gmres_monitor, gmres_progress_residual:
         CuPy-native GMRES monitor channels. `gmres_monitor` controls which
         residual history is retained in the result, while
-        `gmres_progress_residual` controls tqdm reporting when enabled.
+        `gmres_progress_residual` controls tqdm reporting when enabled. The
+        preconditioned channel is the default because it updates every inner
+        iteration; true-residual values are checked at restart boundaries.
     gmres_orthogonalization, gmres_cgs_refinement, gmres_happy_breakdown_tol:
         CuPy-native GMRES Arnoldi controls. Orthogonalization can be modified
         Gram-Schmidt (`mgs`) or classical Gram-Schmidt (`cgs`) with optional

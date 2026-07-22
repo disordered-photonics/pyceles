@@ -22,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pairwise-vs-MLFMM scaling benchmark.
 
 ### Fixed
+- Fixed CuPy block-GMRES progress reporting so the existing final true
+  residual check is shown in the progress bar without adding another operator
+  evaluation.
 - Fixed the CuPy block-GMRES final residual path so host-owned multi-RHS
   solutions are converted back to device arrays before applying a CuPy
   operator.

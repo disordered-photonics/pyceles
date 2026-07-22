@@ -40,7 +40,7 @@ Array = np.ndarray
 
 
 _CUPY_MLFMM_DEFAULT_OPTIONS = MLFMMOptions(
-    max_leaf_particles=256,
+    max_leaf_particles=32,
     max_depth=12,
     leaf_size_radius_factor=4.0,
     accuracy_level=3,
