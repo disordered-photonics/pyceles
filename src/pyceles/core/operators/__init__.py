@@ -53,8 +53,8 @@ from .mlfmm_cupy import (
     prepare_mlfmm_cupy_coupling,
     prepare_mlfmm_cupy_data,
 )
-from .prepare import build_T_mode_diagonal, precompute_T_diagonal, prepare_matvec, rhs_Tb_numpy
-from .single_body import CompositeParticleTOperator, ParticleTOperator
+from .prepare import precompute_T_diagonal, prepare_matvec, rhs_Tb_numpy
+from .single_body import CompositeParticleTOperator, ParticleTOperator, build_T_mode_diagonal
 from .single_body_cupy import CuPyDiagonalParticleTOperator
 
 __all__ = [

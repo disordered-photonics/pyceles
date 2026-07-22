@@ -16,6 +16,31 @@ Array = np.ndarray
 COMPLEX128_DTYPE = np.dtype(np.complex128)
 
 
+def build_T_mode_diagonal(lmax: int, T_M: Array, T_N: Array) -> Array:
+    """Expand per-particle degree diagonals into flattened SVWF mode order."""
+
+    lmax_i = int(lmax)
+    t_m = np.asarray(T_M)
+    t_n = np.asarray(T_N)
+    if t_m.shape != t_n.shape:
+        raise ValueError(
+            f"T_M and T_N must have identical shapes. Got {t_m.shape} and {t_n.shape}."
+        )
+
+    n_particles = int(t_m.shape[0])
+    n_scalar = lmax_i * (lmax_i + 2)
+    out = np.zeros(
+        (n_particles, n_modes(lmax_i)),
+        dtype=np.result_type(t_m.dtype, t_n.dtype, np.complex64),
+    )
+    for degree in range(1, lmax_i + 1):
+        start = (degree - 1) * (degree + 1)
+        stop = start + (2 * degree + 1)
+        out[:, start:stop] = t_m[:, degree : degree + 1]
+        out[:, n_scalar + start : n_scalar + stop] = t_n[:, degree : degree + 1]
+    return out
+
+
 class ParticleTOperator(Protocol):
     """Prepared particle-local (single-particle) scattering operator `T`."""
 
@@ -113,4 +138,4 @@ class CompositeParticleTOperator:
         return out_m, out_n
 
 
-__all__ = ["CompositeParticleTOperator", "ParticleTOperator"]
+__all__ = ["CompositeParticleTOperator", "ParticleTOperator", "build_T_mode_diagonal"]

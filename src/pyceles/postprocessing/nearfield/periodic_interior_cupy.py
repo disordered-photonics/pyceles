@@ -20,7 +20,7 @@ from pyceles.core.periodic.ewald_cupy import (
     ewald_structural_sums_2d_fixed_cupy,
 )
 
-from .periodic_interior import _l1_projection_data
+from .periodic_projection import l1_projection_data
 
 
 def _build_source_projection_kernels_cupy(
@@ -30,7 +30,7 @@ def _build_source_projection_kernels_cupy(
     cupy: Any,
 ) -> tuple[int, int, Any]:
     """Return source-specific ``l=1`` projection kernels on the GPU."""
-    lmax_struct, _m_offset, kernel_np, _row_idx = _l1_projection_data(int(lmax))
+    lmax_struct, _m_offset, kernel_np, _row_idx = l1_projection_data(int(lmax))
     p_count = int(kernel_np.shape[3])
     # kernel: (row, coeff, m, p), coeffs: (source, coeff)
     source_kernel = np.einsum(

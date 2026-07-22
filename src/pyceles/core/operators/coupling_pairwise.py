@@ -13,6 +13,7 @@ from pyceles.core.indexing import n_modes
 from pyceles.core.translation import RadialLUT, translation_ab5_table, translation_block
 
 from .base import CouplingOperator
+from .single_body import build_T_mode_diagonal
 
 COMPLEX128_DTYPE = np.dtype(np.complex128)
 
@@ -127,8 +128,6 @@ def apply_A_numpy(
     block_cache: dict[tuple[int, int], np.ndarray] | None = None,
 ) -> np.ndarray:
     """Compute y = (I - T W) x with precomputed diagonal T entries."""
-    from .prepare import build_T_mode_diagonal
-
     out_dtype = np.dtype(dtype)
     ns = positions.shape[0]
     nm = n_modes(lmax)

@@ -33,7 +33,7 @@ from .groups import (
 )
 from .mlfmm import MLFMMCouplingOperator, MLFMMOptions, prepare_mlfmm_coupling
 from .mlfmm_cupy import CuPyMLFMMHostCachePolicy, prepare_mlfmm_cupy_coupling
-from .single_body import CompositeParticleTOperator, ParticleTOperator
+from .single_body import CompositeParticleTOperator, ParticleTOperator, build_T_mode_diagonal
 from .single_body_cupy import wrap_particle_t_groups_cupy
 
 Array = np.ndarray
@@ -53,32 +53,6 @@ reference baseline so the resolved tree lands in a shallower (GPU-friendlier)
 regime on large workloads, while still honoring the leaf-size floor and max
 depth safety cap.
 """
-
-
-def build_T_mode_diagonal(lmax: int, T_M: Array, T_N: Array) -> Array:
-    """Expand per-(sphere,l) diagonal entries to per-(sphere,mode) factors."""
-    lmax = int(lmax)
-    T_M = np.asarray(T_M)
-    T_N = np.asarray(T_N)
-
-    if T_M.shape != T_N.shape:
-        raise ValueError(
-            f"T_M and T_N must have identical shapes. Got {T_M.shape} and {T_N.shape}."
-        )
-
-    ns = T_M.shape[0]
-    nm = n_modes(lmax)
-    nscl = lmax * (lmax + 2)
-    out_dtype = np.result_type(T_M.dtype, T_N.dtype, np.complex64)
-    T_diag = np.zeros((ns, nm), dtype=out_dtype)
-
-    for l in range(1, lmax + 1):
-        start = (l - 1) * (l + 1)
-        end = start + (2 * l + 1)
-        T_diag[:, start:end] = T_M[:, l : l + 1]
-        T_diag[:, nscl + start : nscl + end] = T_N[:, l : l + 1]
-
-    return T_diag
 
 
 def _prepare_diagonal_group(
