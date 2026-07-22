@@ -36,6 +36,17 @@ def _as_1d_float_array(name: str, values: np.ndarray) -> np.ndarray:
     return arr
 
 
+def _owned_read_only_array(values: np.ndarray, *, dtype: np.dtype | None = None) -> np.ndarray:
+    out = np.array(
+        values,
+        dtype=np.asarray(values).dtype if dtype is None else dtype,
+        copy=True,
+        order="C",
+    )
+    out.setflags(write=False)
+    return out
+
+
 def validate_angular_grid_pair(
     *,
     polar_name: str,
@@ -186,6 +197,11 @@ class SimulationConfig:
             ws = np.asarray(self.solver_warm_start)
             if ws.ndim not in (1, 2):
                 raise ValueError("`solver_warm_start` must be 1D, 2D, or None.")
+            object.__setattr__(
+                self,
+                "solver_warm_start",
+                _owned_read_only_array(ws),
+            )
         resolve_compute_accum_dtypes(
             compute_dtype=self.compute_dtype,
             accum_dtype=self.accum_dtype,
@@ -232,11 +248,21 @@ class SimulationConfig:
                 "`cache_translation_blocks=True` is not supported with finite `operator_backend='cupy'`. "
                 "The finite CuPy direct-coupling path does not expose translation-block caching."
             )
-        _, az_shared = validate_angular_grid_pair(
+        polar_shared, az_shared = validate_angular_grid_pair(
             polar_name="polar_angles",
             azimuthal_name="azimuthal_angles",
             polar_values=self.polar_angles,
             azimuthal_values=self.azimuthal_angles,
+        )
+        object.__setattr__(
+            self,
+            "polar_angles",
+            _owned_read_only_array(polar_shared, dtype=np.dtype(float)),
+        )
+        object.__setattr__(
+            self,
+            "azimuthal_angles",
+            _owned_read_only_array(az_shared, dtype=np.dtype(float)),
         )
         warn_redundant_periodic_azimuth_endpoint(azimuth_name="azimuthal_angles", azimuth=az_shared)
 
@@ -247,11 +273,21 @@ class SimulationConfig:
                 "Set both `source_polar_angles` and `source_azimuthal_angles`, or set neither."
             )
         if has_source_polar:
-            _, az_source = validate_angular_grid_pair(
+            polar_source, az_source = validate_angular_grid_pair(
                 polar_name="source_polar_angles",
                 azimuthal_name="source_azimuthal_angles",
                 polar_values=np.asarray(self.source_polar_angles),
                 azimuthal_values=np.asarray(self.source_azimuthal_angles),
+            )
+            object.__setattr__(
+                self,
+                "source_polar_angles",
+                _owned_read_only_array(polar_source, dtype=np.dtype(float)),
+            )
+            object.__setattr__(
+                self,
+                "source_azimuthal_angles",
+                _owned_read_only_array(az_source, dtype=np.dtype(float)),
             )
             warn_redundant_periodic_azimuth_endpoint(
                 azimuth_name="source_azimuthal_angles", azimuth=az_source
@@ -264,11 +300,21 @@ class SimulationConfig:
                 "Set both `farfield_polar_angles` and `farfield_azimuthal_angles`, or set neither."
             )
         if has_farfield_polar:
-            _, az_farfield = validate_angular_grid_pair(
+            polar_farfield, az_farfield = validate_angular_grid_pair(
                 polar_name="farfield_polar_angles",
                 azimuthal_name="farfield_azimuthal_angles",
                 polar_values=np.asarray(self.farfield_polar_angles),
                 azimuthal_values=np.asarray(self.farfield_azimuthal_angles),
+            )
+            object.__setattr__(
+                self,
+                "farfield_polar_angles",
+                _owned_read_only_array(polar_farfield, dtype=np.dtype(float)),
+            )
+            object.__setattr__(
+                self,
+                "farfield_azimuthal_angles",
+                _owned_read_only_array(az_farfield, dtype=np.dtype(float)),
             )
             warn_redundant_periodic_azimuth_endpoint(
                 azimuth_name="farfield_azimuthal_angles", azimuth=az_farfield

@@ -382,6 +382,32 @@ def test_solve_sources_core_direct_cupy_reuses_lu_without_reassembling_dense_A(m
     assert apply_calls == first_apply_calls
 
 
+def test_simulation_clear_caches_rebuilds_equivalent_operator_state() -> None:
+    sim = _single_sphere_sim(operator_backend="numpy", solver_method="direct")
+    source = _plane_wave()
+
+    first = sim.solve_sources({"src": source})
+    assert sim._prepared_operator_cache is not None
+    assert sim._dense_lu_cache is not None
+
+    sim.clear_caches()
+    assert sim._prepared_operator_cache is None
+    assert sim._prepared_operator_dtype is None
+    assert sim._prepared_operator_periodic_key is None
+    assert sim._dense_operator_cache is None
+    assert sim._dense_operator_dtype is None
+    assert sim._dense_lu_cache is None
+    assert sim._dense_lu_dtype is None
+
+    second = sim.solve_sources({"src": source})
+    np.testing.assert_allclose(
+        second.coeffs["src"],
+        first.coeffs["src"],
+        rtol=1e-13,
+        atol=1e-13,
+    )
+
+
 def test_solve_sources_core_rejects_custom_preconditioner_on_cupy_backend(monkeypatch):
     sim = _single_sphere_sim(
         operator_backend="cupy",

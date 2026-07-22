@@ -40,13 +40,13 @@ def normalize_particle_geometry(
         bad = [type(p).__name__ for p in part if not isinstance(p, Particle)]
         raise TypeError(f"All entries in `particles` must be Particle instances. Got {bad}.")
 
-    pos = np.asarray([np.asarray(p.position, dtype=float) for p in part], dtype=float).reshape(
-        -1, 3
-    )
+    pos = np.asarray([p.position for p in part], dtype=float)
+    if pos.shape != (len(part), 3):
+        raise ValueError(f"Particle positions must have shape ({len(part)}, 3). Got {pos.shape}.")
     if not np.all(np.isfinite(pos)):
         raise ValueError("`particles` positions must contain only finite values.")
 
-    rad = np.asarray([float(p.circumscribing_radius()) for p in part], dtype=float).reshape(-1)
+    rad = np.asarray([float(p.circumscribing_radius()) for p in part], dtype=float)
     if np.any(~np.isfinite(rad)) or np.any(rad <= 0.0):
         raise ValueError("Particle circumscribing radii must be finite and strictly positive.")
 

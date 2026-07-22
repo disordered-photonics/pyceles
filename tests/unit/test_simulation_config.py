@@ -14,6 +14,33 @@ from pyceles.simulation import SimulationConfig
 pytestmark = pytest.mark.api_contract
 
 
+def test_simulation_config_owns_read_only_array_inputs() -> None:
+    polar = np.linspace(0.0, np.pi, 9)
+    azimuth = np.linspace(0.0, 2.0 * np.pi, 12, endpoint=False)
+    warm_start = np.arange(6, dtype=np.complex128)
+    cfg = SimulationConfig(
+        polar_angles=polar,
+        azimuthal_angles=azimuth,
+        solver_warm_start=warm_start,
+        verbose=False,
+    )
+
+    polar[:] = -1.0
+    azimuth[:] = -1.0
+    warm_start[:] = -1.0
+
+    np.testing.assert_allclose(cfg.polar_angles, np.linspace(0.0, np.pi, 9))
+    np.testing.assert_allclose(
+        cfg.azimuthal_angles,
+        np.linspace(0.0, 2.0 * np.pi, 12, endpoint=False),
+    )
+    np.testing.assert_array_equal(cfg.solver_warm_start, np.arange(6))
+    assert not cfg.polar_angles.flags.writeable
+    assert not cfg.azimuthal_angles.flags.writeable
+    assert cfg.solver_warm_start is not None
+    assert not cfg.solver_warm_start.flags.writeable
+
+
 def test_simulation_config_accepts_cupy_operator_backend() -> None:
     cfg = SimulationConfig(operator_backend="cupy", verbose=False)
     assert cfg.operator_backend == "cupy"

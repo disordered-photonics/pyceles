@@ -34,6 +34,10 @@ class AngularSpectrumSLMSource:
             weights = np.asarray(self.modulation, dtype=np.complex128)
             if not np.all(np.isfinite(weights.real)) or not np.all(np.isfinite(weights.imag)):
                 raise ValueError("`modulation` array/scalar must be finite.")
+            if weights.ndim > 0:
+                weights = np.array(weights, dtype=np.complex128, copy=True, order="C")
+                weights.setflags(write=False)
+                object.__setattr__(self, "modulation", weights)
 
     @property
     def wavelength(self) -> float:

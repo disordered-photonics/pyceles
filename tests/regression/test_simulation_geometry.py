@@ -105,6 +105,33 @@ def test_simulation_accepts_explicit_particle_descriptors() -> None:
     assert len(sim.particles) == 2
 
 
+def test_simulation_geometry_and_config_cannot_invalidate_prepared_caches() -> None:
+    cfg = SimulationConfig(verbose=False)
+    particles = [
+        Sphere(position=(0.0, 0.0, 0.0), radius=50.0, refractive_index=1.5 + 0j),
+        Sphere(position=(200.0, 0.0, 0.0), radius=50.0, refractive_index=1.5 + 0j),
+    ]
+    sim = Simulation(cfg, particles=particles)
+
+    assert not sim.positions.flags.writeable
+    assert not sim.circumscribing_radii.flags.writeable
+    with pytest.raises(ValueError, match="read-only"):
+        sim.positions[1, 0] = 260.0
+    with pytest.raises(ValueError, match="WRITEABLE"):
+        sim.positions.flags.writeable = True
+    with pytest.raises(ValueError, match="read-only"):
+        sim.circumscribing_radii[0] = 60.0
+
+    for name, value in (
+        ("config", SimulationConfig(verbose=False)),
+        ("particles", tuple(particles)),
+        ("positions", np.zeros((2, 3), dtype=float)),
+        ("circumscribing_radii", np.ones((2,), dtype=float)),
+    ):
+        with pytest.raises(AttributeError):
+            setattr(sim, name, value)
+
+
 def test_simulation_requires_explicit_particles_argument() -> None:
     cfg = SimulationConfig(verbose=False)
     with pytest.raises(TypeError, match="missing 1 required keyword-only argument"):

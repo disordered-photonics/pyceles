@@ -335,3 +335,55 @@ def test_angular_spectrum_slm_wraps_cartesian_focused_source():
         azimuthal_angles=alpha,
     )
     assert projected.shape == (2, n_modes(2))
+
+
+def test_angular_spectrum_slm_owns_read_only_modulation_array():
+    base = CartesianPolarizedFocusedLaguerreGaussianBeam(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        beam_width=900.0,
+        focal_length=1000.0,
+        numerical_aperture=0.75,
+        global_polarization=(1.0 + 0.0j, 0.0 + 0.0j, 0.0 + 0.0j),
+    )
+    modulation = np.ones((3, 4), dtype=np.complex128)
+    source = AngularSpectrumSLMSource(base_source=base, modulation=modulation)
+
+    modulation[:] = 2.0
+    assert isinstance(source.modulation, np.ndarray)
+    np.testing.assert_array_equal(source.modulation, np.ones((3, 4)))
+    assert not source.modulation.flags.writeable
+
+
+def test_dipole_collection_owns_read_only_array_inputs():
+    positions = np.array([[0.0, 0.0, 0.0], [150.0, 0.0, 0.0]])
+    moments = np.array(
+        [
+            [1.0 + 0.0j, 0.0 + 0.0j, 0.0 + 0.0j],
+            [0.0 + 0.0j, 1.0 + 0.0j, 0.0 + 0.0j],
+        ]
+    )
+    source = DipoleCollection(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        positions=positions,
+        dipole_moments=moments,
+    )
+
+    positions[:] = -1.0
+    moments[:] = -1.0
+    np.testing.assert_array_equal(
+        source.positions,
+        np.array([[0.0, 0.0, 0.0], [150.0, 0.0, 0.0]]),
+    )
+    np.testing.assert_array_equal(
+        source.dipole_moments,
+        np.array(
+            [
+                [1.0 + 0.0j, 0.0 + 0.0j, 0.0 + 0.0j],
+                [0.0 + 0.0j, 1.0 + 0.0j, 0.0 + 0.0j],
+            ]
+        ),
+    )
+    assert not source.positions.flags.writeable
+    assert not source.dipole_moments.flags.writeable

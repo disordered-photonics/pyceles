@@ -149,7 +149,15 @@ class DipoleCollection:
                 "DipoleCollection currently requires real `medium_n` in this homogeneous solver path "
                 "(legacy policy from the original beam-only workflow, not a dipole-physics limit)."
             )
-        _normalize_dipole_collection_inputs(self.positions, self.dipole_moments)
+        positions, moments = _normalize_dipole_collection_inputs(
+            self.positions, self.dipole_moments
+        )
+        positions = np.array(positions, dtype=float, copy=True, order="C")
+        moments = np.array(moments, dtype=np.complex128, copy=True, order="C")
+        positions.setflags(write=False)
+        moments.setflags(write=False)
+        object.__setattr__(self, "positions", positions)
+        object.__setattr__(self, "dipole_moments", moments)
         if not np.isfinite(float(self.amplitude)):
             raise ValueError(f"`amplitude` must be finite. Got {self.amplitude!r}.")
         if float(self.radial_lut_dr) < 0.0:

@@ -22,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pairwise-vs-MLFMM scaling benchmark.
 
 ### Fixed
+- Prevented mutation or rebinding of `Simulation` geometry and configuration
+  from silently invalidating prepared operator and dense-factorization caches.
 - Fixed CuPy block-GMRES progress reporting so the existing final true
   residual check is shown in the progress bar without adding another operator
   evaluation.

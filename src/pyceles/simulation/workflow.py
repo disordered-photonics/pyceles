@@ -35,11 +35,57 @@ from .solve import (
 class Simulation:
     """High-level orchestrator for one many-particle scattering experiment."""
 
-    particles: tuple[Particle, ...]
+    _config: SimulationConfig
+    _particles: tuple[Particle, ...]
+    _positions: np.ndarray
+    _circumscribing_radii: np.ndarray
+    _prepared_operator_cache: PreparedOperator | None
+    _prepared_operator_dtype: np.dtype | None
+    _prepared_operator_periodic_key: tuple[float, float] | None
+    _dense_operator_cache: np.ndarray | None
+    _dense_operator_dtype: np.dtype | None
+    _dense_lu_cache: DenseLUFactorization | None
+    _dense_lu_dtype: np.dtype | None
+
+    @property
+    def config(self) -> SimulationConfig:
+        """Immutable configuration identity used by prepared-operator caches."""
+        return self._config
+
+    @property
+    def particles(self) -> tuple[Particle, ...]:
+        """Canonical immutable particle descriptors for this simulation."""
+        return self._particles
+
+    @property
+    def positions(self) -> np.ndarray:
+        """Read-only particle-center array derived from ``particles``."""
+        return self._positions
+
+    @property
+    def circumscribing_radii(self) -> np.ndarray:
+        """Read-only circumscribing radii derived from ``particles``."""
+        return self._circumscribing_radii
 
     @property
     def n_particles(self) -> int:
         return int(self.positions.shape[0])
+
+    def clear_caches(self) -> None:
+        """Release prepared operator, dense matrix, and LU references.
+
+        The immutable experiment specification remains intact, so a later run
+        rebuilds equivalent execution state. CuPy may retain freed device
+        blocks in its process-wide allocator pool; use CuPy's pool controls
+        separately when returning cached device memory to the driver matters.
+        """
+        self._prepared_operator_cache = None
+        self._prepared_operator_dtype = None
+        self._prepared_operator_periodic_key = None
+        self._dense_operator_cache = None
+        self._dense_operator_dtype = None
+        self._dense_lu_cache = None
+        self._dense_lu_dtype = None
 
     def __init__(
         self,
@@ -47,19 +93,17 @@ class Simulation:
         *,
         particles: Sequence[Particle],
     ):
-        self.config = config
+        self._config = config
         part, pos, rad = normalize_particle_geometry(particles)
 
-        self.positions = pos
-        self.circumscribing_radii = rad
-        self.particles = part
-        self._prepared_operator_cache: PreparedOperator | None = None
-        self._prepared_operator_dtype: np.dtype | None = None
-        self._dense_operator_cache: np.ndarray | None = None
-        self._dense_operator_dtype: np.dtype | None = None
-        self._dense_lu_cache: DenseLUFactorization | None = None
-        self._dense_lu_dtype: np.dtype | None = None
-        self._prepared_operator_periodic_key: tuple[float, float] | None = None
+        # Keep owning arrays out of the public object. A read-only view backed
+        # by a read-only owner cannot have writes re-enabled through `.flags`.
+        pos.setflags(write=False)
+        rad.setflags(write=False)
+        self._positions = pos.view()
+        self._circumscribing_radii = rad.view()
+        self._particles = part
+        self.clear_caches()
         if bool(self.config.check_circumscribing_sphere_overlap):
             if self.config.periodic is None:
                 finite_overlap = first_overlapping_circumscribing_pair(
