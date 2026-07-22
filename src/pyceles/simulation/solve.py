@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Iterable, Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -392,13 +392,21 @@ def periodic_shared_k_parallel(
     return ref_kp
 
 
-def solve_sources_core(
+@dataclass(frozen=True)
+class _SolvedSourcesExecution:
+    """Private solve result plus short-lived backend data for immediate postprocessing."""
+
+    solved: SolvedSourcesResult
+    backend_coeffs: dict[str, Any] | None = None
+
+
+def _solve_sources_impl(
     sim: Simulation,
     labeled_sources: Mapping[str, Source],
     *,
     solver_compute_final_residual: bool | None = None,
-    retain_backend_handoff: bool = False,
-) -> SolvedSourcesResult:
+    retain_backend_handoff: bool,
+) -> _SolvedSourcesExecution:
     """Solve labeled sources with one shared operator build (solve-only)."""
     cfg = sim.config
     positions = sim.positions
@@ -738,9 +746,37 @@ def solve_sources_core(
         compute_dtype=str(compute_dtype),
         accum_dtype=str(accum_dtype),
     )
-    if backend_coeffs is not None:
-        sim._solve_backend_handoffs[id(solved)] = {"coeffs": backend_coeffs}
-    return solved
+    return _SolvedSourcesExecution(solved=solved, backend_coeffs=backend_coeffs)
+
+
+def solve_sources_core(
+    sim: Simulation,
+    labeled_sources: Mapping[str, Source],
+    *,
+    solver_compute_final_residual: bool | None = None,
+) -> SolvedSourcesResult:
+    """Solve labeled sources with one shared operator build (solve-only)."""
+    return _solve_sources_impl(
+        sim,
+        labeled_sources,
+        solver_compute_final_residual=solver_compute_final_residual,
+        retain_backend_handoff=False,
+    ).solved
+
+
+def _solve_sources_for_immediate_postprocess_core(
+    sim: Simulation,
+    labeled_sources: Mapping[str, Source],
+    *,
+    solver_compute_final_residual: bool | None = None,
+) -> _SolvedSourcesExecution:
+    """Solve sources while retaining backend coefficients for the immediate consumer."""
+    return _solve_sources_impl(
+        sim,
+        labeled_sources,
+        solver_compute_final_residual=solver_compute_final_residual,
+        retain_backend_handoff=sim.config.periodic is None,
+    )
 
 
 __all__ = [

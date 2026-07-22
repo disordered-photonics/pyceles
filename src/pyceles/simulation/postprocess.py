@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, cast
 
@@ -637,6 +638,7 @@ def postprocess_sources_impl(
     include_farfield: bool = True,
     farfield_polar_angles: np.ndarray | None = None,
     farfield_azimuthal_angles: np.ndarray | None = None,
+    backend_coeffs_by_label: Mapping[str, Any] | None = None,
 ) -> MultiSourceSimulationResult:
     """Postprocess solved channels into per-channel `SimulationResult` payloads."""
     cfg = sim.config
@@ -651,7 +653,6 @@ def postprocess_sources_impl(
 
     if periodic_run:
         periodic_runs: dict[str, SimulationResult] = {}
-        sim._solve_backend_handoffs.pop(id(solved), None)
         for j, label in enumerate(labels):
             if label not in solved.sources:
                 raise KeyError(f"Missing source payload for label '{label}'.")
@@ -745,8 +746,6 @@ def postprocess_sources_impl(
         )
 
     runs: dict[str, SimulationResult] = {}
-    backend_handoff = sim._solve_backend_handoffs.pop(id(solved), {})
-    backend_coeffs_by_label = backend_handoff.get("coeffs")
     for j, label in enumerate(labels):
         if label not in solved.sources:
             raise KeyError(f"Missing source payload for label '{label}'.")
@@ -813,12 +812,14 @@ def run_impl(sim: Simulation, *, include_farfield: bool = True) -> SimulationRes
         )
 
     if not bool(cfg.solve_polarization_basis):
-        solved = sim._solve_sources_for_immediate_postprocess({"mixed": source})
-        try:
-            multi = sim.postprocess_sources(solved, include_farfield=include_farfield)
-            return multi["mixed"]
-        finally:
-            sim._solve_backend_handoffs.pop(id(solved), None)
+        execution = sim._solve_sources_for_immediate_postprocess({"mixed": source})
+        multi = postprocess_sources_impl(
+            sim,
+            execution.solved,
+            include_farfield=include_farfield,
+            backend_coeffs_by_label=execution.backend_coeffs,
+        )
+        return multi["mixed"]
     if not isinstance(source, JonesPolarizedSource):
         raise ValueError(
             "`solve_polarization_basis=True` is only defined for TE/TM polarization sources "
@@ -828,12 +829,14 @@ def run_impl(sim: Simulation, *, include_farfield: bool = True) -> SimulationRes
     src_te = source.with_polarization("TE")
     src_tm = source.with_polarization("TM")
 
-    basis_solved = sim._solve_sources_for_immediate_postprocess({"te": src_te, "tm": src_tm})
-    try:
-        basis_backend_handoff = sim._solve_backend_handoffs.get(id(basis_solved), {})
-        basis_multi = sim.postprocess_sources(basis_solved, include_farfield=include_farfield)
-    finally:
-        sim._solve_backend_handoffs.pop(id(basis_solved), None)
+    basis_execution = sim._solve_sources_for_immediate_postprocess({"te": src_te, "tm": src_tm})
+    basis_solved = basis_execution.solved
+    basis_multi = postprocess_sources_impl(
+        sim,
+        basis_solved,
+        include_farfield=include_farfield,
+        backend_coeffs_by_label=basis_execution.backend_coeffs,
+    )
     run_te = basis_multi["te"]
     run_tm = basis_multi["tm"]
     compute_dtype = np.dtype(run_te.compute_dtype)
@@ -851,7 +854,7 @@ def run_impl(sim: Simulation, *, include_farfield: bool = True) -> SimulationRes
     x = a_te * x_te + a_tm * x_tm
     local_b: Any = b
     local_x: Any = x
-    backend_coeffs_by_label = basis_backend_handoff.get("coeffs")
+    backend_coeffs_by_label = basis_execution.backend_coeffs
     if backend_coeffs_by_label is not None:
         local_x = a_te * backend_coeffs_by_label["te"] + a_tm * backend_coeffs_by_label["tm"]
 

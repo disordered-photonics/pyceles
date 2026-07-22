@@ -600,7 +600,7 @@ def test_cupy_local_absorption_postprocess_uses_backend_coefficients(monkeypatch
     assert seen_backend_payloads
     assert seen_backend_payloads[-1] == (False, True)
     assert not hasattr(run.solver_result, "backend_x")
-    assert sim._solve_backend_handoffs == {}
+    assert not hasattr(sim, "_solve_backend_handoffs")
 
 
 def test_cupy_public_solve_sources_does_not_retain_backend_handoff() -> None:
@@ -630,7 +630,7 @@ def test_cupy_public_solve_sources_does_not_retain_backend_handoff() -> None:
     solved = sim.solve_sources({"mixed": source})
 
     assert not hasattr(solved.solver_result, "backend_x")
-    assert sim._solve_backend_handoffs == {}
+    assert not hasattr(sim, "_solve_backend_handoffs")
 
 
 @pytest.mark.parametrize("collect_stream_stats", [False, True])
