@@ -866,7 +866,7 @@ def main() -> None:
             "source_projection_s",
             "prepare_operator_s",
             "rhs_Tb_s",
-            "periodic_w_cache_populate_s",
+            "periodic_w_block_generation_s",
             "dense_operator_assembly_s",
             "dense_factorization_s",
             "linear_solve_s",

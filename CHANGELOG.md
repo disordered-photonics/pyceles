@@ -22,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pairwise-vs-MLFMM scaling benchmark.
 
 ### Fixed
+- Streamed periodic source-block batches directly into dense operators,
+  removing private cache swapping and the full temporary W-block cache from
+  direct solves.
 - Prevented mutation or rebinding of `Simulation` geometry and configuration
   from silently invalidating prepared operator and dense-factorization caches.
 - Fixed CuPy block-GMRES progress reporting so the existing final true

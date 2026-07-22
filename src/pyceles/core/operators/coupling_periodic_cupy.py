@@ -24,6 +24,8 @@ from pyceles.core.periodic.ewald_cupy import (
 from pyceles.core.periodic.scalar import same_plane_z_tolerance, structural_sum_m_normalization
 from pyceles.core.periodic.structural import translation_contraction_tensor
 
+from .base import SourceBlockBatch
+
 Array = np.ndarray
 
 
@@ -309,6 +311,31 @@ class CuPyPeriodicCouplingOperator:
         finally:
             if progress is not None:
                 progress.close()
+
+    def iter_source_block_batches(
+        self, *, show_progress: bool = False
+    ) -> Iterable[SourceBlockBatch]:
+        """Yield cached or ephemeral source-major blocks for dense assembly."""
+        batches: Iterable[tuple[int, ...]] = self._source_batches()
+        if show_progress:
+            batches = tqdm(
+                batches,
+                total=(self.n_particles + self._source_batch_size() - 1)
+                // self._source_batch_size(),
+                desc="Build periodic source blocks (CuPy)",
+            )
+        for source_indices in batches:
+            key = tuple(int(i) for i in source_indices)
+            blocks = (
+                self._cached_blocks_for_sources(key)
+                if self.cache_blocks
+                else self._blocks_for_sources(key)
+            )
+            yield SourceBlockBatch(source_indices=key, blocks=blocks)
+
+    def supports_source_block_dense_assembly(self) -> bool:
+        """Return whether Ewald source blocks are available for this operator."""
+        return self.periodic.options.method == "ewald"
 
     def _apply_gpu(self, x: Array | object) -> Any:
         cp = self._cupy()

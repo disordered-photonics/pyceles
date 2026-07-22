@@ -364,7 +364,7 @@ def test_periodic_ewald_apply_keeps_block_cache_empty_when_disabled() -> None:
     assert prepared.coupling._ewald_block_cache == {}
 
 
-def test_periodic_dense_assembly_uses_temporary_block_cache_only() -> None:
+def test_periodic_dense_assembly_streams_without_populating_cache() -> None:
     spec = pcl.PeriodicSpec(
         lattice=pcl.RectangularLattice2D(360.0, 390.0),
         options=pcl.PeriodicOptions(method="ewald", eta=0.02, real_shells=2, reciprocal_shells=2),
@@ -402,6 +402,53 @@ def test_periodic_dense_assembly_uses_temporary_block_cache_only() -> None:
     np.testing.assert_array_equal(
         prepared.coupling._ewald_block_cache[(99, 99)], sentinel_cache[(99, 99)]
     )
+
+
+def test_periodic_dense_assembly_applies_nondiagonal_particle_t_blocks() -> None:
+    spec = pcl.PeriodicSpec(
+        lattice=pcl.RectangularLattice2D(900.0, 850.0),
+        options=pcl.PeriodicOptions(
+            method="ewald",
+            eta=0.002,
+            real_shells=1,
+            reciprocal_shells=1,
+        ),
+    )
+    source = _plane_wave()
+    prepared = prepare_matvec(
+        lmax=1,
+        k=2.0 * np.pi / 550.0,
+        particles=[
+            pcl.Spheroid(
+                position=(0.0, 0.0, 40.0),
+                equatorial_radius=40.0,
+                polar_radius=50.0,
+                refractive_index=1.5 + 0j,
+            )
+        ],
+        n_medium=1.0 + 0j,
+        radial_lut_dr=1.0,
+        periodic=spec,
+        k_parallel=pcl.core.plane_wave_k_parallel(source),
+        show_progress=False,
+    )
+    assert isinstance(prepared.coupling, PeriodicCouplingOperator)
+    assert prepared.particle_t.mode_diagonal() is None
+
+    nm = n_modes(1)
+    dense = _assemble_dense_operator_for_prepared(
+        prepared=prepared,
+        A_mv=prepared.apply_A,
+        n=nm,
+        dtype=np.dtype(np.complex128),
+        show_progress=False,
+    )
+    eye = np.eye(nm, dtype=np.complex128)
+    expected = np.column_stack([prepared.apply_A(eye[:, j]) for j in range(nm)])
+
+    np.testing.assert_allclose(dense, expected, rtol=1e-12, atol=1e-12)
+    assert prepared.coupling.cache_blocks is False
+    assert prepared.coupling._ewald_block_cache == {}
 
 
 def test_prepare_matvec_periodic_does_not_build_radial_lut(

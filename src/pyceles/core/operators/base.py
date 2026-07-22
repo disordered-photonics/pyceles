@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import time
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Protocol, cast, runtime_checkable
+from typing import Any, Protocol, cast, runtime_checkable
 
 import numpy as np
 
-from pyceles._optional import coerce_array
+from pyceles._optional import coerce_array, import_cupy, is_cupy_array
+from pyceles.core.indexing import n_modes
 
 from .single_body import ParticleTOperator
 
@@ -27,6 +30,47 @@ class PrecomputableCouplingOperator(Protocol):
     """Optional coupling protocol for backends that support eager precomputation."""
 
     def populate(self, *, show_progress: bool = False) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class SourceBlockBatch:
+    """One source-major batch of dense coupling blocks.
+
+    ``blocks`` has shape ``(n_source, n_destination, n_mode, n_mode)``.
+    Couplings may produce these batches transiently or serve them from a
+    persistent cache; dense assembly does not need to know which policy owns
+    the data.
+    """
+
+    source_indices: tuple[int, ...]
+    blocks: Any
+
+
+@runtime_checkable
+class SourceBlockCouplingOperator(Protocol):
+    """Optional coupling protocol for source-streamed dense assembly."""
+
+    def supports_source_block_dense_assembly(self) -> bool: ...
+
+    def iter_source_block_batches(
+        self, *, show_progress: bool = False
+    ) -> Iterable[SourceBlockBatch]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class SourceBlockDenseAssembly:
+    """Dense matrix plus separately measured block-generation/assembly time."""
+
+    matrix: Any
+    block_generation_seconds: float
+    assembly_seconds: float
+
+
+def _synchronize_if_cupy(value: Any) -> None:
+    if not is_cupy_array(value):
+        return
+    cupy, _ = import_cupy()
+    cupy.cuda.Stream.null.synchronize()
 
 
 @dataclass
@@ -61,6 +105,116 @@ class PreparedOperator:
         if isinstance(self.coupling, PrecomputableCouplingOperator):
             self.coupling.populate(show_progress=show_progress)
 
+    def assemble_dense_from_source_blocks(
+        self, *, show_progress: bool = False
+    ) -> SourceBlockDenseAssembly | None:
+        """Stream optional source-major W blocks directly into dense ``A``.
+
+        This keeps temporary block ownership inside the coupling operator and
+        applies particle-local T blocks through the prepared boundary. The
+        diagonal path remains vectorized, while non-diagonal groups use the
+        canonical local-block operation.
+        """
+        coupling = self.coupling
+        if not isinstance(coupling, SourceBlockCouplingOperator):
+            return None
+        if not coupling.supports_source_block_dense_assembly():
+            return None
+
+        ns = int(np.asarray(self.positions).reshape(-1, 3).shape[0])
+        nm = int(n_modes(self.lmax))
+        n = ns * nm
+        batches = iter(coupling.iter_source_block_batches(show_progress=show_progress))
+        generation_seconds = 0.0
+        assembly_seconds = 0.0
+        matrix: Any | None = None
+        diagonal = self.particle_t.mode_diagonal()
+        assembled_sources = np.zeros((ns,), dtype=bool)
+
+        while True:
+            generation_t0 = time.perf_counter()
+            try:
+                batch = next(batches)
+            except StopIteration:
+                break
+            _synchronize_if_cupy(batch.blocks)
+            generation_seconds += time.perf_counter() - generation_t0
+
+            blocks = batch.blocks
+            if matrix is None:
+                if is_cupy_array(blocks):
+                    cupy, _ = import_cupy()
+                    matrix = cupy.empty((n, n), dtype=self.dtype, order="F")
+                    diag_backend = (
+                        None
+                        if diagonal is None
+                        else cupy.asarray(diagonal, dtype=self.dtype).reshape(ns, nm)
+                    )
+                else:
+                    matrix = np.empty((n, n), dtype=self.dtype)
+                    diag_backend = (
+                        None
+                        if diagonal is None
+                        else np.asarray(diagonal, dtype=self.dtype).reshape(ns, nm)
+                    )
+
+            assembly_t0 = time.perf_counter()
+            source_indices = tuple(int(i) for i in batch.source_indices)
+            if len(source_indices) == 0:
+                continue
+            if min(source_indices) < 0 or max(source_indices) >= ns:
+                raise IndexError("Source-block batch contains an out-of-range particle index.")
+            source_array = np.asarray(source_indices, dtype=np.int64)
+            if np.any(assembled_sources[source_array]):
+                raise ValueError("Source-block batches must not repeat source indices.")
+            assembled_sources[source_array] = True
+            if diag_backend is not None:
+                weighted = -(blocks.astype(self.dtype, copy=False) * diag_backend[None, :, :, None])
+            else:
+                weighted = blocks.copy()
+                for local_source in range(len(source_indices)):
+                    for destination in range(ns):
+                        weighted[local_source, destination] = -self.apply_particle_block(
+                            destination, blocks[local_source, destination]
+                        )
+
+            columns = weighted.transpose(1, 2, 0, 3).reshape(n, len(source_indices) * nm)
+            start = source_indices[0]
+            stop = source_indices[-1] + 1
+            if stop - start == len(source_indices):
+                matrix[:, start * nm : stop * nm] = columns
+            else:
+                for local_source, source_index in enumerate(source_indices):
+                    column_slice = slice(source_index * nm, (source_index + 1) * nm)
+                    local_slice = slice(local_source * nm, (local_source + 1) * nm)
+                    matrix[:, column_slice] = columns[:, local_slice]
+            _synchronize_if_cupy(matrix)
+            assembly_seconds += time.perf_counter() - assembly_t0
+
+        if matrix is None:
+            matrix = np.eye(n, dtype=self.dtype)
+        else:
+            if not bool(np.all(assembled_sources)):
+                missing = np.flatnonzero(~assembled_sources)
+                raise ValueError(
+                    "Source-block batches did not cover every source particle; "
+                    f"missing {missing[:8].tolist()}."
+                )
+            identity_t0 = time.perf_counter()
+            if is_cupy_array(matrix):
+                cupy, _ = import_cupy()
+                diagonal_indices = cupy.arange(n)
+            else:
+                diagonal_indices = np.arange(n)
+            matrix[diagonal_indices, diagonal_indices] += 1
+            _synchronize_if_cupy(matrix)
+            assembly_seconds += time.perf_counter() - identity_t0
+        return SourceBlockDenseAssembly(
+            matrix=matrix,
+            block_generation_seconds=float(generation_seconds),
+            assembly_seconds=float(assembly_seconds),
+        )
+
     @property
     def T_diag(self) -> Array:
         diag = self.particle_t.mode_diagonal()
@@ -83,4 +237,12 @@ class PreparedOperator:
         return diags[1]
 
 
-__all__ = ["Array", "CouplingOperator", "PrecomputableCouplingOperator", "PreparedOperator"]
+__all__ = [
+    "Array",
+    "CouplingOperator",
+    "PrecomputableCouplingOperator",
+    "PreparedOperator",
+    "SourceBlockBatch",
+    "SourceBlockCouplingOperator",
+    "SourceBlockDenseAssembly",
+]

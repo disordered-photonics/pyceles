@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -1436,6 +1436,65 @@ def _add_self_correction_to_batched_sums(
     )
 
 
+def periodic_ewald_blocks_for_source(
+    *,
+    source_index: int,
+    lmax: int,
+    k: float,
+    positions: Array,
+    lattice: RectangularLattice2D,
+    k_parallel: Array,
+    eta: float,
+    real_shells: int | None,
+    reciprocal_shells: int | None,
+    ab5: Array,
+    dtype: npt.DTypeLike,
+    shell_tolerance: float,
+    max_shells: int,
+    workspace: EwaldShellWorkspace,
+    contraction_tensor: Array | None = None,
+    destination_indices: Sequence[int] | None = None,
+) -> Array:
+    """Return selected destination blocks for one source in one structural batch."""
+    src_idx = int(source_index)
+    pos = np.asarray(positions, dtype=float).reshape(-1, 3)
+    destinations = (
+        np.arange(pos.shape[0], dtype=np.int64)
+        if destination_indices is None
+        else np.asarray(destination_indices, dtype=np.int64).reshape(-1)
+    )
+    sums = ewald_structural_sums_2d_batch(
+        lmax_struct=int(lmax),
+        k=float(k),
+        destinations=pos[destinations],
+        source=pos[src_idx],
+        lattice=lattice,
+        k_parallel=k_parallel,
+        eta=float(eta),
+        real_shells=real_shells,
+        reciprocal_shells=reciprocal_shells,
+        shell_tolerance=float(shell_tolerance),
+        max_shells=int(max_shells),
+        dtype=np.complex128,
+        workspace=workspace,
+    )
+    self_rows = np.flatnonzero(destinations == src_idx)
+    if self_rows.size:
+        _add_self_correction_to_batched_sums(
+            sums,
+            local_destination_index=int(self_rows[0]),
+            k=float(k),
+            eta=float(eta),
+        )
+    return blocks_from_structural_sums(
+        lmax=int(lmax),
+        structural_sums=sums,
+        ab5=ab5,
+        dtype=dtype,
+        contraction_tensor=contraction_tensor,
+    )
+
+
 def _fill_block_cache_for_source(
     *,
     source_index: int,
@@ -1461,37 +1520,26 @@ def _fill_block_cache_for_source(
     missing = [i for i in range(pos.shape[0]) if (i, src_idx) not in cache]
     if not missing:
         return
-    sums = ewald_structural_sums_2d_batch(
-        lmax_struct=int(lmax),
+    blocks = periodic_ewald_blocks_for_source(
+        source_index=src_idx,
+        lmax=int(lmax),
         k=float(k),
-        destinations=pos[missing],
-        source=pos[src_idx],
+        positions=pos,
         lattice=lattice,
         k_parallel=k_parallel,
         eta=float(eta),
         real_shells=real_shells,
         reciprocal_shells=reciprocal_shells,
-        shell_tolerance=float(shell_tolerance),
-        max_shells=int(max_shells),
-        dtype=np.complex128,
-        workspace=workspace,
-    )
-    if src_idx in missing:
-        _add_self_correction_to_batched_sums(
-            sums,
-            local_destination_index=missing.index(src_idx),
-            k=float(k),
-            eta=float(eta),
-        )
-    blocks = blocks_from_structural_sums(
-        lmax=int(lmax),
-        structural_sums=sums,
         ab5=ab5,
         dtype=dtype,
+        shell_tolerance=float(shell_tolerance),
+        max_shells=int(max_shells),
+        workspace=workspace,
         contraction_tensor=contraction_tensor,
+        destination_indices=missing,
     )
     for local_idx, dst_idx in enumerate(missing):
-        cache[(int(dst_idx), src_idx)] = blocks[local_idx]
+        cache[(int(dst_idx), src_idx)] = blocks[int(local_idx)]
 
 
 def fill_periodic_ewald_block_cache(

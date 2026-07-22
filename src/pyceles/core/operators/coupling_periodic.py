@@ -14,9 +14,12 @@ from pyceles.core.periodic.ewald import (
     EwaldShellWorkspace,
     apply_periodic_ewald_sum,
     fill_periodic_ewald_block_cache,
+    periodic_ewald_blocks_for_source,
     resolve_ewald_eta,
 )
 from pyceles.core.periodic.structural import translation_contraction_tensor
+
+from .base import SourceBlockBatch
 
 Array = np.ndarray
 
@@ -33,7 +36,9 @@ class PeriodicCouplingOperator:
     k_parallel: Array
     dtype: np.dtype
     cache_blocks: bool = False
-    _ewald_block_cache: dict[tuple[int, int], Array] = field(default_factory=dict)
+    _ewald_block_cache: dict[tuple[int, int], Array] = field(
+        default_factory=dict, init=False, repr=False
+    )
     _ewald_shell_workspace: EwaldShellWorkspace | None = field(default=None, init=False, repr=False)
     _resolved_ewald_eta: float | None = field(default=None, init=False, repr=False)
     _structural_contraction_tensor: Array | None = field(default=None, init=False, repr=False)
@@ -142,6 +147,76 @@ class PeriodicCouplingOperator:
             workspace=workspace,
             contraction_tensor=self._contraction_tensor(),
         )
+
+    def iter_source_block_batches(
+        self, *, show_progress: bool = False
+    ) -> Iterable[SourceBlockBatch]:
+        """Yield source-major block batches for dense assembly.
+
+        Cache-off operators return one ephemeral source batch at a time.
+        Cache-enabled operators populate and retain the same blocks as the
+        iterative reuse path.
+        """
+        pos = np.asarray(self.positions, dtype=float).reshape(-1, 3)
+        options = self.periodic.options
+        workspace = self._workspace()
+        sources: Iterable[int] = range(pos.shape[0])
+        if show_progress:
+            sources = tqdm(sources, total=pos.shape[0], desc="Build periodic source blocks")
+        for source_index in sources:
+            source = int(source_index)
+            if self.cache_blocks:
+                fill_periodic_ewald_block_cache(
+                    cache=self._ewald_block_cache,
+                    lmax=int(self.lmax),
+                    k=float(self.k),
+                    positions=pos,
+                    lattice=self.periodic.lattice,
+                    k_parallel=self.k_parallel,
+                    eta=self._ewald_eta(),
+                    real_shells=options.real_shells,
+                    reciprocal_shells=options.reciprocal_shells,
+                    ab5=self.ab5,
+                    dtype=self.dtype,
+                    shell_tolerance=float(options.shell_tolerance),
+                    max_shells=int(options.max_shells),
+                    source_indices=(source,),
+                    workspace=workspace,
+                    contraction_tensor=self._contraction_tensor(),
+                )
+                blocks = np.stack(
+                    [
+                        self._ewald_block_cache[(destination, source)]
+                        for destination in range(pos.shape[0])
+                    ],
+                    axis=0,
+                )
+            else:
+                blocks = periodic_ewald_blocks_for_source(
+                    source_index=source,
+                    lmax=int(self.lmax),
+                    k=float(self.k),
+                    positions=pos,
+                    lattice=self.periodic.lattice,
+                    k_parallel=self.k_parallel,
+                    eta=self._ewald_eta(),
+                    real_shells=options.real_shells,
+                    reciprocal_shells=options.reciprocal_shells,
+                    ab5=self.ab5,
+                    dtype=self.dtype,
+                    shell_tolerance=float(options.shell_tolerance),
+                    max_shells=int(options.max_shells),
+                    workspace=workspace,
+                    contraction_tensor=self._contraction_tensor(),
+                )
+            yield SourceBlockBatch(
+                source_indices=(source,),
+                blocks=np.asarray(blocks, dtype=self.dtype)[None, ...],
+            )
+
+    def supports_source_block_dense_assembly(self) -> bool:
+        """Return whether Ewald source blocks are available for this operator."""
+        return self.periodic.options.method == "ewald"
 
 
 __all__ = ["PeriodicCouplingOperator"]

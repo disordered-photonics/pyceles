@@ -224,17 +224,19 @@ Measured phase wall times on the same laptop/GPU:
     iteration. A 115-iteration solve would therefore take well over 7 h before
     postprocessing.
 - CuPy direct dense validation, with near field and final residual check skipped:
-  - W-cache population: `10.5 s`,
-  - dense `A` assembly from cached periodic blocks: `0.31 s`,
-  - dense LU factorization: `43.9 s`,
-  - full solve phase: `67.4 s`.
+  - periodic W-block generation: `8.4 s`,
+  - source-streamed dense `A` assembly: `1.70 s`,
+  - dense LU factorization: `43.4 s`,
+  - full solve phase: `65.5 s`.
 - NumPy direct dense validation, with near field and final residual check skipped:
-  - W-cache population: `130 s`,
-  - dense `A` assembly from cached periodic blocks: `3.65 s`,
-  - dense LU factorization: `21.6 s`,
-  - full solve phase: `168 s`.
+  - periodic W-block generation: `123 s`,
+  - source-streamed dense `A` assembly: `3.85 s`,
+  - dense LU factorization: `21.8 s`,
+  - full solve phase: `162 s`.
 
 The direct dense rows are validation paths, not the intended scaling route. The
+source-streamed assembler discards each periodic W-block batch after writing
+its columns into `A`, avoiding a second dense-matrix-sized temporary cache. The
 cache-off periodic path is memory-light, but it recomputes periodic Ewald work
 on every Krylov matvec. For large periodic runs, explicit W-block caching is
 currently the practical path when memory permits. Profiling shows that the
