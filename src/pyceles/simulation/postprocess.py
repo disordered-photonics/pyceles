@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, cast
 
@@ -45,7 +45,7 @@ if TYPE_CHECKING:
 
 
 def _is_numerically_lossless_cluster(
-    particles: tuple[Particle, ...], *, imag_tol: float = 0.0
+    particles: Sequence[Particle], *, imag_tol: float = 0.0
 ) -> bool:
     """Return True when all particle materials are numerically lossless."""
     tol = float(imag_tol)

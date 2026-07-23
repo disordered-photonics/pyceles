@@ -9,12 +9,12 @@ from pyceles.core.operators import (
     MLFMMOptions,
     prepare_matvec,
 )
-from pyceles.core.particles import Particle, spheres_from_arrays
+from pyceles.core.particles import ParticleCollection, spheres_from_arrays
 from pyceles.simulation import Simulation, SimulationConfig
 from pyceles.simulation.solve import solve_sources_core
 
 
-def _mlfmm_single_level_problem() -> tuple[int, float, tuple[Particle, ...]]:
+def _mlfmm_single_level_problem() -> tuple[int, float, ParticleCollection]:
     lmax = 1
     k = 2 * np.pi / 550.0
     positions = np.array(
@@ -30,29 +30,25 @@ def _mlfmm_single_level_problem() -> tuple[int, float, tuple[Particle, ...]]:
         ],
         dtype=float,
     )
-    particles = tuple(
-        spheres_from_arrays(
-            positions=positions,
-            radii=np.full((positions.shape[0],), 11.0, dtype=float),
-            refractive_indices=np.full((positions.shape[0],), 1.59 + 0.0j, dtype=np.complex128),
-        )
+    particles = spheres_from_arrays(
+        positions=positions,
+        radii=np.full((positions.shape[0],), 11.0, dtype=float),
+        refractive_indices=np.full((positions.shape[0],), 1.59 + 0.0j, dtype=np.complex128),
     )
     return lmax, k, particles
 
 
-def _mlfmm_multilevel_problem() -> tuple[int, float, tuple[Particle, ...]]:
+def _mlfmm_multilevel_problem() -> tuple[int, float, ParticleCollection]:
     lmax = 1
     k = 2 * np.pi / 550.0
     gx, gy, gz = np.meshgrid(np.arange(8), np.arange(8), np.arange(8), indexing="ij")
     # Keep the fixture geometry compact so far-order table setup stays fast
     # while preserving a true multilevel partition with max_leaf_particles=1.
     positions = (40.0 * np.stack((gx.ravel(), gy.ravel(), gz.ravel()), axis=1)[:9]).astype(float)
-    particles = tuple(
-        spheres_from_arrays(
-            positions=positions,
-            radii=np.full((positions.shape[0],), 8.0, dtype=float),
-            refractive_indices=np.full((positions.shape[0],), 1.59 + 0.0j, dtype=np.complex128),
-        )
+    particles = spheres_from_arrays(
+        positions=positions,
+        radii=np.full((positions.shape[0],), 8.0, dtype=float),
+        refractive_indices=np.full((positions.shape[0],), 1.59 + 0.0j, dtype=np.complex128),
     )
     return lmax, k, particles
 

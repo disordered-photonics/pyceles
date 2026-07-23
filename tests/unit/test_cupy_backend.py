@@ -32,7 +32,7 @@ from pyceles.core.operators.mlfmm_directional import (
     directional_to_box_regular,
     directional_transforms,
 )
-from pyceles.core.particles import Particle, spheres_from_arrays
+from pyceles.core.particles import Particle, ParticleCollection, spheres_from_arrays
 from pyceles.core.translation import RadialLUT
 from pyceles.io import far_field_intensity
 from pyceles.postprocessing.farfield import (
@@ -44,7 +44,7 @@ from pyceles.postprocessing.farfield import (
 pytestmark = pytest.mark.gpu
 
 
-def _small_cluster_particles() -> tuple[Particle, ...]:
+def _small_cluster_particles() -> ParticleCollection:
     positions = np.array(
         [
             [0.0, 0.0, 0.0],
@@ -55,26 +55,22 @@ def _small_cluster_particles() -> tuple[Particle, ...]:
     )
     radii = np.array([80.0, 82.0, 79.0], dtype=float)
     n_particle = np.array([1.59 + 0.0j, 1.61 + 0.0j, 1.58 + 0.0j], dtype=np.complex128)
-    return tuple(
-        spheres_from_arrays(
-            positions=positions,
-            radii=radii,
-            refractive_indices=n_particle,
-        )
+    return spheres_from_arrays(
+        positions=positions,
+        radii=radii,
+        refractive_indices=n_particle,
     )
 
 
-def _random_uniform_sphere_particles(*, n_particles: int, seed: int = 4) -> tuple[Particle, ...]:
+def _random_uniform_sphere_particles(*, n_particles: int, seed: int = 4) -> ParticleCollection:
     rng = np.random.default_rng(seed)
     positions = rng.uniform(-1000.0, 1000.0, size=(int(n_particles), 3))
     radii = np.full((positions.shape[0],), 20.0, dtype=float)
     n_particle = np.full((positions.shape[0],), 1.59 + 0.0j, dtype=np.complex128)
-    return tuple(
-        spheres_from_arrays(
-            positions=positions,
-            radii=radii,
-            refractive_indices=n_particle,
-        )
+    return spheres_from_arrays(
+        positions=positions,
+        radii=radii,
+        refractive_indices=n_particle,
     )
 
 
@@ -291,7 +287,7 @@ def _policy_numpy_mlfmm_coupling() -> MLFMMCouplingOperator:
     prepared = prepare_matvec(
         lmax=3,
         k=2.0 * np.pi / 550.0,
-        particles=list(_mlfmm_policy_particles()),
+        particles=_mlfmm_policy_particles(),
         n_medium=1.0 + 0j,
         radial_lut_dr=0.5,
         cache_translation_blocks=False,
@@ -332,8 +328,8 @@ def test_cupy_mlfmm_host_cache_recomputes_static_tables_during_upload(
 
 def test_cupy_host_cache_build_supports_sparse_cpu_staging_without_dense_leaf_maps() -> None:
     particles = _mlfmm_policy_particles()
-    positions = np.asarray([np.asarray(p.position, dtype=float) for p in particles], dtype=float)
-    radii = np.asarray([float(p.circumscribing_radius()) for p in particles], dtype=float)
+    positions = particles.positions
+    radii = particles.circumscribing_radii
     k = 2.0 * np.pi / 550.0
     radial_lut = RadialLUT(
         lmax=3,
@@ -377,7 +373,7 @@ def test_cupy_mlfmm_runtime_operator_is_non_picklable() -> None:
     prepared = prepare_matvec(
         lmax=3,
         k=2.0 * np.pi / 550.0,
-        particles=list(_mlfmm_policy_particles()),
+        particles=_mlfmm_policy_particles(),
         n_medium=1.0 + 0j,
         radial_lut_dr=0.5,
         cache_translation_blocks=False,
@@ -472,7 +468,7 @@ def test_cupy_prepare_coupling_rejects_nonpositive_streamed_far_chunk_bytes_budg
         )
 
 
-def _mlfmm_transition_particles() -> tuple[Particle, ...]:
+def _mlfmm_transition_particles() -> ParticleCollection:
     # 27 particles (seed=50) is the smallest deterministic fixture we found that
     # gives the intended stage split for this test surface:
     # - max_leaf_particles=8 -> single_level
@@ -488,7 +484,7 @@ def _transition_numpy_mlfmm_coupling(*, max_leaf_particles: int) -> MLFMMCouplin
     prepared = prepare_matvec(
         lmax=lmax,
         k=k,
-        particles=list(_mlfmm_transition_particles()),
+        particles=_mlfmm_transition_particles(),
         n_medium=n_medium,
         radial_lut_dr=0.5,
         cache_translation_blocks=False,
@@ -502,7 +498,7 @@ def _transition_numpy_mlfmm_coupling(*, max_leaf_particles: int) -> MLFMMCouplin
     return coupling
 
 
-def _mlfmm_policy_particles() -> tuple[Particle, ...]:
+def _mlfmm_policy_particles() -> ParticleCollection:
     # Policy/retention tests do not require a stage split; keep this fixture
     # small so host-cache/policy tests stay lightweight.
     return _random_uniform_sphere_particles(n_particles=24, seed=4)

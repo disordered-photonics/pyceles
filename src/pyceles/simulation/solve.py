@@ -304,7 +304,7 @@ def _solve_sources_impl(
             prepared = prepare_matvec(
                 lmax=cfg.lmax,
                 k=k,
-                particles=list(sim.particles),
+                particles=sim.particles,
                 n_medium=cfg.n_medium,
                 radial_lut_dr=cfg.radial_lut_dr,
                 cache_translation_blocks=cfg.cache_translation_blocks,

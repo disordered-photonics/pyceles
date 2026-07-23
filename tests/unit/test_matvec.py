@@ -31,10 +31,12 @@ from pyceles.core.operators import (
 from pyceles.core.particles import (
     LayeredSphere,
     Particle,
+    ParticleCollection,
     ParticleTRepresentation,
     PECSphere,
     Sphere,
     Spheroid,
+    pec_spheres_from_arrays,
     spheres_from_arrays,
 )
 from pyceles.core.tmatrix import particle_T_diagonal, sphere_T_diagonal
@@ -193,6 +195,95 @@ def test_prepare_matvec_matches_explicit_operator_kernels():
 
     np.testing.assert_allclose(A_prepared, A_ref, rtol=1e-12, atol=1e-12)
     np.testing.assert_allclose(rhs_prepared, rhs_ref, rtol=1e-12, atol=1e-12)
+
+
+@pytest.mark.parametrize("pec", [False, True])
+def test_array_native_sphere_t_preparation_matches_explicit_descriptors(pec: bool):
+    positions = np.array(
+        [[-140.0, 0.0, 0.0], [140.0, 0.0, 0.0], [0.0, 170.0, 0.0]],
+        dtype=float,
+    )
+    radii = np.array([55.0, 60.0, 55.0])
+    explicit_particles: list[Particle]
+    if pec:
+        array_particles = pec_spheres_from_arrays(positions=positions, radii=radii)
+        explicit_particles = [
+            PECSphere(
+                position=(float(position[0]), float(position[1]), float(position[2])),
+                radius=float(radius),
+            )
+            for position, radius in zip(positions, radii, strict=True)
+        ]
+    else:
+        indices = np.array([1.5 + 0.0j, 1.7 + 0.02j, 1.5 + 0.0j])
+        array_particles = spheres_from_arrays(
+            positions=positions,
+            radii=radii,
+            refractive_indices=indices,
+        )
+        explicit_particles = [
+            Sphere(
+                position=(float(position[0]), float(position[1]), float(position[2])),
+                radius=float(radius),
+                refractive_index=complex(index),
+            )
+            for position, radius, index in zip(positions, radii, indices, strict=True)
+        ]
+
+    array_prepared = prepare_matvec(
+        particles=array_particles,
+        lmax=3,
+        k=2.0 * np.pi / 550.0,
+        n_medium=1.0 + 0.0j,
+        radial_lut_dr=1.0,
+    )
+    explicit_prepared = prepare_matvec(
+        particles=explicit_particles,
+        lmax=3,
+        k=2.0 * np.pi / 550.0,
+        n_medium=1.0 + 0.0j,
+        radial_lut_dr=1.0,
+    )
+    array_diagonal = array_prepared.particle_t.mode_diagonal()
+    explicit_diagonal = explicit_prepared.particle_t.mode_diagonal()
+
+    assert array_diagonal is not None
+    assert explicit_diagonal is not None
+    np.testing.assert_allclose(array_diagonal, explicit_diagonal, rtol=1e-13, atol=1e-13)
+
+
+def test_mixed_array_particle_batches_match_explicit_t_preparation():
+    sphere = spheres_from_arrays(
+        positions=np.array([[-140.0, 0.0, 0.0]]),
+        radii=np.array([55.0]),
+        refractive_indices=np.array([1.6 + 0.01j]),
+    )
+    pec = pec_spheres_from_arrays(
+        positions=np.array([[140.0, 0.0, 0.0]]),
+        radii=np.array([60.0]),
+    )
+    mixed = ParticleCollection.concatenate(sphere, pec)
+    explicit = [sphere[0], pec[0]]
+    mixed_prepared = prepare_matvec(
+        particles=mixed,
+        lmax=2,
+        k=2.0 * np.pi / 550.0,
+        n_medium=1.0 + 0.0j,
+        radial_lut_dr=1.0,
+    )
+    explicit_prepared = prepare_matvec(
+        particles=explicit,
+        lmax=2,
+        k=2.0 * np.pi / 550.0,
+        n_medium=1.0 + 0.0j,
+        radial_lut_dr=1.0,
+    )
+    mixed_diagonal = mixed_prepared.particle_t.mode_diagonal()
+    explicit_diagonal = explicit_prepared.particle_t.mode_diagonal()
+
+    assert mixed_diagonal is not None
+    assert explicit_diagonal is not None
+    np.testing.assert_allclose(mixed_diagonal, explicit_diagonal, rtol=1e-13, atol=1e-13)
 
 
 def test_precompute_t_diagonal_reuses_identical_particle_kernels(monkeypatch):

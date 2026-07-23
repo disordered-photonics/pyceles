@@ -12,6 +12,7 @@ from pyceles.core.indexing import n_modes
 from pyceles.core.particles import (
     LayeredSphere,
     Particle,
+    ParticleCollection,
     PECSphere,
     Sphere,
     Spheroid,
@@ -333,9 +334,9 @@ def _compute_internal_field_particles(
     compute_dtype: npt.DTypeLike = np.complex128,
     accum_dtype: npt.DTypeLike = np.complex128,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Compute internal fields for explicit particle descriptors."""
+    """Compute internal fields for a canonical particle collection."""
     pts = np.asarray(field_points, dtype=float).reshape(-1, 3)
-    part = list(particles)
+    part = particles
     n_particles = len(part)
     n_points = pts.shape[0]
     compute_dtype = np.dtype(compute_dtype)
@@ -384,13 +385,23 @@ def _compute_internal_field_particles(
         if len(pec_idx) == n_particles:
             return e, h, inside
 
-    spheres = [p for p in part if isinstance(p, Sphere)]
-    if len(spheres) == n_particles:
-        positions = np.asarray([sp.position for sp in spheres], dtype=float).reshape(n_particles, 3)
-        radii = np.asarray([sp.radius for sp in spheres], dtype=float).reshape(n_particles)
-        n_particle = np.asarray(
-            [complex(sp.refractive_index) for sp in spheres], dtype=np.complex128
-        )
+    sphere_arrays = (
+        part.homogeneous_sphere_arrays() if isinstance(part, ParticleCollection) else None
+    )
+    spheres = None if sphere_arrays is not None else [p for p in part if isinstance(p, Sphere)]
+    if sphere_arrays is not None or (spheres is not None and len(spheres) == n_particles):
+        if sphere_arrays is None:
+            assert spheres is not None
+            positions = np.asarray([sp.position for sp in spheres], dtype=float).reshape(
+                n_particles, 3
+            )
+            radii = np.asarray([sp.radius for sp in spheres], dtype=float).reshape(n_particles)
+            n_particle = np.asarray(
+                [complex(sp.refractive_index) for sp in spheres],
+                dtype=np.complex128,
+            )
+        else:
+            positions, radii, n_particle = sphere_arrays
         inside_idx = (
             [np.asarray(v, dtype=np.intp) for v in classification.point_indices_by_particle]
             if classification is not None

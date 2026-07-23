@@ -31,6 +31,7 @@ Particle descriptors are passed to `Simulation`:
 - `pyceles.PECSphere`
 - `pyceles.LayeredSphere`
 - `pyceles.Spheroid`
+- `pyceles.ParticleCollection`
 - `pyceles.spheres_from_arrays`
 - `pyceles.pec_spheres_from_arrays`
 - `pyceles.layered_spheres_from_arrays`

@@ -12,7 +12,7 @@ from tqdm.auto import tqdm
 from pyceles._logo import print_logo
 from pyceles._version import __version__
 from pyceles.core.lattice import RectangularLattice2D
-from pyceles.core.particles import LayeredSphere, Particle, PECSphere, Sphere, Spheroid
+from pyceles.core.particles import Particle, ParticleCollection
 from pyceles.linear.solvers import LinearSolveResult
 
 _STARTUP_LOGO_PRINTED = False
@@ -28,47 +28,24 @@ def print_startup_logo_once() -> None:
 
 
 def normalize_particle_geometry(
-    particles: Sequence[Particle],
-) -> tuple[tuple[Particle, ...], np.ndarray, np.ndarray]:
-    """Normalize explicit particle descriptors into solver-ready geometry arrays."""
-    part = tuple(particles)
-    if len(part) == 0:
-        empty_pos = np.zeros((0, 3), dtype=float)
-        empty_rad = np.zeros((0,), dtype=float)
-        return part, empty_pos, empty_rad
-    if not all(isinstance(p, Particle) for p in part):
-        bad = [type(p).__name__ for p in part if not isinstance(p, Particle)]
-        raise TypeError(f"All entries in `particles` must be Particle instances. Got {bad}.")
-
-    pos = np.asarray([p.position for p in part], dtype=float)
+    particles: Sequence[Particle] | ParticleCollection,
+) -> tuple[ParticleCollection, np.ndarray, np.ndarray]:
+    """Normalize particle inputs into one immutable geometry owner."""
+    part = ParticleCollection.from_particles(particles)
+    pos = part.positions
+    rad = part.circumscribing_radii
     if pos.shape != (len(part), 3):
         raise ValueError(f"Particle positions must have shape ({len(part)}, 3). Got {pos.shape}.")
     if not np.all(np.isfinite(pos)):
         raise ValueError("`particles` positions must contain only finite values.")
-
-    rad = np.asarray([float(p.circumscribing_radius()) for p in part], dtype=float)
     if np.any(~np.isfinite(rad)) or np.any(rad <= 0.0):
         raise ValueError("Particle circumscribing radii must be finite and strictly positive.")
 
-    n_eff: list[complex] = []
-    for p in part:
-        if isinstance(p, Sphere):
-            n_eff.append(complex(p.refractive_index))
-        elif isinstance(p, PECSphere):
-            continue
-        elif isinstance(p, LayeredSphere):
-            n_eff.append(complex(p.layer_refractive_indices[-1]))
-        elif isinstance(p, Spheroid):
-            n_eff.append(complex(p.refractive_index))
-        else:
-            raise TypeError(
-                f"Unsupported particle type {type(p).__name__!r} for refractive-index checks."
-            )
-    n_eff_arr = np.asarray(n_eff, dtype=np.complex128)
-    if not np.all(np.isfinite(n_eff_arr.real)) or not np.all(np.isfinite(n_eff_arr.imag)):
-        raise ValueError("Particle refractive indices must be finite.")
-    if np.any(n_eff_arr.real <= 0.0):
-        raise ValueError("Real part of particle refractive indices must be strictly positive.")
+    for n_eff in part.outer_refractive_index_batches():
+        if not np.all(np.isfinite(n_eff.real)) or not np.all(np.isfinite(n_eff.imag)):
+            raise ValueError("Particle refractive indices must be finite.")
+        if np.any(n_eff.real <= 0.0):
+            raise ValueError("Real part of particle refractive indices must be strictly positive.")
     return part, pos, rad
 
 

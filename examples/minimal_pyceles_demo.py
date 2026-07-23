@@ -88,7 +88,7 @@ def _render_quick_ldos_map(
     cfg = sim.config
     sim_map = pcl.Simulation(
         replace(cfg, verbose=False),
-        particles=list(sim.particles),
+        particles=sim.particles,
     )
     x = np.arange(float(x_min), float(x_max) + 0.5 * float(dx), float(dx), dtype=float)
     z = np.arange(float(z_min), float(z_max) + 0.5 * float(dx), float(dx), dtype=float)

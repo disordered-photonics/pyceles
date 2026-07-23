@@ -20,6 +20,7 @@ from pyceles.core.lattice import RectangularLattice2D
 from pyceles.core.particles import (
     LayeredSphere,
     Particle,
+    ParticleCollection,
     PECSphere,
     Sphere,
     Spheroid,
@@ -69,6 +70,7 @@ __all__ = [
     "NearFieldSlice",
     "PECSphere",
     "Particle",
+    "ParticleCollection",
     "PeriodicFarFieldPayload",
     "PeriodicOptions",
     "PeriodicSpec",

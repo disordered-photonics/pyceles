@@ -52,6 +52,7 @@ from .operators import (
 from .particles import (
     LayeredSphere,
     Particle,
+    ParticleCollection,
     PECSphere,
     Sphere,
     Spheroid,
@@ -118,6 +119,7 @@ __all__ = [
     "LocalExpansionSource",
     "PECSphere",
     "Particle",
+    "ParticleCollection",
     "ParticleTGroupFactories",
     "ParticleTGroupPlan",
     "ParticleTPreparationContext",

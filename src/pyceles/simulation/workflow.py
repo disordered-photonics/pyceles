@@ -12,7 +12,7 @@ from collections.abc import Mapping, Sequence
 import numpy as np
 
 from pyceles.core.operators import PreparedOperator
-from pyceles.core.particles import Particle
+from pyceles.core.particles import Particle, ParticleCollection
 from pyceles.core.sources import Source
 from pyceles.linear.solvers import DenseLUFactorization
 
@@ -36,7 +36,7 @@ class Simulation:
     """High-level orchestrator for one many-particle scattering experiment."""
 
     _config: SimulationConfig
-    _particles: tuple[Particle, ...]
+    _particles: ParticleCollection
     _positions: np.ndarray
     _circumscribing_radii: np.ndarray
     _prepared_operator_cache: PreparedOperator | None
@@ -53,8 +53,8 @@ class Simulation:
         return self._config
 
     @property
-    def particles(self) -> tuple[Particle, ...]:
-        """Canonical immutable particle descriptors for this simulation."""
+    def particles(self) -> ParticleCollection:
+        """Canonical immutable particle collection for this simulation."""
         return self._particles
 
     @property
@@ -91,15 +91,13 @@ class Simulation:
         self,
         config: SimulationConfig,
         *,
-        particles: Sequence[Particle],
+        particles: Sequence[Particle] | ParticleCollection,
     ):
         self._config = config
         part, pos, rad = normalize_particle_geometry(particles)
 
-        # Keep owning arrays out of the public object. A read-only view backed
-        # by a read-only owner cannot have writes re-enabled through `.flags`.
-        pos.setflags(write=False)
-        rad.setflags(write=False)
+        # ParticleCollection owns the locked arrays; Simulation exposes only
+        # views of that canonical geometry.
         self._positions = pos.view()
         self._circumscribing_radii = rad.view()
         self._particles = part

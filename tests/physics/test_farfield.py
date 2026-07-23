@@ -5,7 +5,12 @@ import pytest
 from _flux_oracle import circumsphere_absorbed_power_quadrature
 
 from pyceles.core.fields import BesselBeam, GaussianBeam, PlaneWave, SLMSource
-from pyceles.core.particles import LayeredSphere, Spheroid, spheres_from_arrays
+from pyceles.core.particles import (
+    LayeredSphere,
+    ParticleCollection,
+    Spheroid,
+    spheres_from_arrays,
+)
 from pyceles.core.tmatrix import mie_cross_sections
 from pyceles.postprocessing.farfield import (
     absorption_cross_section,
@@ -30,7 +35,7 @@ def _single_sphere_particles(
     n_particle: complex,
     *,
     position: tuple[float, float, float] = (0.0, 0.0, 0.0),
-) -> list[Any]:
+) -> ParticleCollection:
     return spheres_from_arrays(
         positions=np.array([position], dtype=float),
         radii=np.array([radius], dtype=float),

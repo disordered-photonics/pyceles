@@ -13,12 +13,10 @@ def _run_no_scatterers(cfg: pcl.SimulationConfig) -> pcl.SimulationResult:
 
 
 def _single_sphere(radius: float, n_particle: complex):
-    return tuple(
-        spheres_from_arrays(
-            positions=np.array([[0.0, 0.0, 0.0]], dtype=float),
-            radii=np.array([radius], dtype=float),
-            refractive_indices=np.array([n_particle], dtype=np.complex128),
-        )
+    return spheres_from_arrays(
+        positions=np.array([[0.0, 0.0, 0.0]], dtype=float),
+        radii=np.array([radius], dtype=float),
+        refractive_indices=np.array([n_particle], dtype=np.complex128),
     )
 
 

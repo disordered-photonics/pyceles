@@ -61,12 +61,10 @@ def test_save_simulation_h5_writes_basis_and_diagnostics(tmp_path):
 
     run = SimulationResult(
         config=cfg,
-        particles=tuple(
-            spheres_from_arrays(
-                positions=np.array([[0.0, 0.0, 0.0]], dtype=float),
-                radii=np.array([100.0], dtype=float),
-                refractive_indices=np.array([1.5 + 0.0j], dtype=np.complex128),
-            )
+        particles=spheres_from_arrays(
+            positions=np.array([[0.0, 0.0, 0.0]], dtype=float),
+            radii=np.array([100.0], dtype=float),
+            refractive_indices=np.array([1.5 + 0.0j], dtype=np.complex128),
         ),
         k=2.0 * np.pi / 550.0,
         k0=2.0 * np.pi / 550.0,
@@ -207,12 +205,10 @@ def test_save_simulation_h5_geometry_loads_particles(tmp_path):
         solver_method="direct",
         verbose=False,
     )
-    particles = tuple(
-        spheres_from_arrays(
-            positions=np.array([[0.0, 0.0, 0.0]], dtype=float),
-            radii=np.array([120.0], dtype=float),
-            refractive_indices=np.array([1.5 + 0.01j], dtype=np.complex128),
-        )
+    particles = spheres_from_arrays(
+        positions=np.array([[0.0, 0.0, 0.0]], dtype=float),
+        radii=np.array([120.0], dtype=float),
+        refractive_indices=np.array([1.5 + 0.01j], dtype=np.complex128),
     )
     sim = Simulation(cfg, particles=particles)
     run = sim.run(include_farfield=False)

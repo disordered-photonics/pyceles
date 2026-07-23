@@ -18,7 +18,7 @@ from pyceles.core.particles import spheres_from_arrays
 pytestmark = pytest.mark.reference
 
 
-def _build_geometry(shift_z: float) -> list[pcl.core.Particle]:
+def _build_geometry(shift_z: float) -> pcl.ParticleCollection:
     positions = np.array(
         [
             [-360.0, 0.0, -120.0],
@@ -59,7 +59,7 @@ def _intensity(pwp_te: dict[str, np.ndarray], pwp_tm: dict[str, np.ndarray]) -> 
 def _run_case(
     *,
     source: pcl.DipoleSource | pcl.DipoleCollection,
-    particles: list[pcl.core.Particle],
+    particles: pcl.ParticleCollection,
     beta: np.ndarray,
     alpha: np.ndarray,
     probes: np.ndarray,

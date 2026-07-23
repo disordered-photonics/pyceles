@@ -268,6 +268,14 @@ particles = pcl.spheres_from_arrays(
 sim = pcl.Simulation(cfg, particles=particles)
 ```
 
+The array helpers return immutable `ParticleCollection` objects. Combine
+separate material or particle-family batches without expanding them into a
+mutable list:
+
+```python
+particles = pcl.ParticleCollection.concatenate(batch_a, batch_b)
+```
+
 ## Periodic Rayleigh/Wood safety checks
 
 Artificial periodic cells have geometric Rayleigh/Wood anomalies when a

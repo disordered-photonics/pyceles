@@ -8,6 +8,7 @@ import pytest
 from pyceles.core.particles import (
     LayeredSphere,
     Particle,
+    ParticleCollection,
     PECSphere,
     Sphere,
     Spheroid,
@@ -174,50 +175,90 @@ def test_particle_dataclass_validation(factory, match):
         factory()
 
 
-def test_particle_constructors_broadcast_inputs_and_append_into_existing_list():
-    into: list[Particle] = [Sphere(position=(9.0, 9.0, 9.0), radius=1.0, refractive_index=1.4 + 0j)]
-    positions = np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]], dtype=float)
-    out = spheres_from_arrays(
-        positions=positions,
-        radii=np.array([1.0, 2.0], dtype=float),
-        refractive_indices=1.6 + 0.0j,
-        into=into,
+def test_particle_constructors_broadcast_inputs_and_concatenate_batches():
+    initial = ParticleCollection.from_particles(
+        [Sphere(position=(9.0, 9.0, 9.0), radius=1.0, refractive_index=1.4 + 0j)]
     )
-    assert out is into
+    positions = np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]], dtype=float)
+    out = ParticleCollection.concatenate(
+        initial,
+        spheres_from_arrays(
+            positions=positions,
+            radii=np.array([1.0, 2.0], dtype=float),
+            refractive_indices=1.6 + 0.0j,
+        ),
+    )
     assert len(out) == 3
 
-    out = pec_spheres_from_arrays(
-        positions=positions,
-        radii=np.array([1.5, 2.5], dtype=float),
-        into=out,
+    out = ParticleCollection.concatenate(
+        out,
+        pec_spheres_from_arrays(
+            positions=positions,
+            radii=np.array([1.5, 2.5], dtype=float),
+        ),
     )
     assert len(out) == 5
     assert isinstance(out[-1], PECSphere)
     assert out[-1].radius == 2.5
 
-    out = layered_spheres_from_arrays(
-        positions=positions,
-        layer_radii=np.array([0.5, 1.5], dtype=float),
-        layer_refractive_indices=np.array([1.3 + 0j, 1.5 + 0j], dtype=np.complex128),
-        into=out,
+    out = ParticleCollection.concatenate(
+        out,
+        layered_spheres_from_arrays(
+            positions=positions,
+            layer_radii=np.array([0.5, 1.5], dtype=float),
+            layer_refractive_indices=np.array([1.3 + 0j, 1.5 + 0j], dtype=np.complex128),
+        ),
     )
     assert len(out) == 7
     assert isinstance(out[-1], LayeredSphere)
     assert out[-1].layer_radii == (0.5, 1.5)
 
-    out = spheroids_from_arrays(
-        positions=positions,
-        equatorial_radii=1.0,
-        polar_radii=np.array([2.0, 3.0], dtype=float),
-        refractive_indices=1.7 + 0.0j,
-        euler_angles=np.array([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]], dtype=float),
-        into=out,
+    out = ParticleCollection.concatenate(
+        out,
+        spheroids_from_arrays(
+            positions=positions,
+            equatorial_radii=1.0,
+            polar_radii=np.array([2.0, 3.0], dtype=float),
+            refractive_indices=1.7 + 0.0j,
+            euler_angles=np.array([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]], dtype=float),
+        ),
     )
     assert len(out) == 9
     assert isinstance(out[-1], Spheroid)
     spheroid_prev = cast(Spheroid, out[-2])
     assert spheroid_prev.euler_angles == (0.1, 0.2, 0.3)
     assert out[-1].euler_angles == (0.4, 0.5, 0.6)
+
+
+def test_array_particle_collection_owns_read_only_inputs_and_materializes_lazily():
+    positions = np.array([[0.0, 1.0, 2.0], [3.0, 4.0, 5.0]], dtype=float)
+    radii = np.array([10.0, 20.0], dtype=float)
+    refractive_indices = np.array([1.5 + 0.01j, 1.7 + 0.02j])
+    particles = spheres_from_arrays(
+        positions=positions,
+        radii=radii,
+        refractive_indices=refractive_indices,
+    )
+
+    positions[:] = -1.0
+    radii[:] = -1.0
+    refractive_indices[:] = 9.0
+
+    assert isinstance(particles, ParticleCollection)
+    np.testing.assert_array_equal(
+        particles.positions,
+        np.array([[0.0, 1.0, 2.0], [3.0, 4.0, 5.0]]),
+    )
+    np.testing.assert_array_equal(particles.circumscribing_radii, [10.0, 20.0])
+    assert particles[1] == Sphere(
+        position=(3.0, 4.0, 5.0),
+        radius=20.0,
+        refractive_index=1.7 + 0.02j,
+    )
+    with pytest.raises(ValueError, match="read-only"):
+        particles.positions[0, 0] = 99.0
+    with pytest.raises(ValueError, match="read-only"):
+        particles.circumscribing_radii[0] = 99.0
 
 
 @pytest.mark.parametrize(

@@ -105,6 +105,28 @@ def test_simulation_accepts_explicit_particle_descriptors() -> None:
     assert len(sim.particles) == 2
 
 
+def test_simulation_reuses_array_collection_as_canonical_geometry_owner() -> None:
+    particles = spheres_from_arrays(
+        positions=np.array([[0.0, 0.0, 0.0], [200.0, 0.0, 0.0]]),
+        radii=np.array([50.0, 60.0]),
+        refractive_indices=np.array([1.5 + 0j, 1.6 + 0j]),
+    )
+    sim = Simulation(
+        SimulationConfig(
+            check_circumscribing_sphere_overlap=False,
+            verbose=False,
+        ),
+        particles=particles,
+    )
+
+    assert sim.particles is particles
+    assert np.shares_memory(sim.positions, particles.positions)
+    assert np.shares_memory(
+        sim.circumscribing_radii,
+        particles.circumscribing_radii,
+    )
+
+
 def test_simulation_geometry_and_config_cannot_invalidate_prepared_caches() -> None:
     cfg = SimulationConfig(verbose=False)
     particles = [

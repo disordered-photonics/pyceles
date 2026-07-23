@@ -1,15 +1,16 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from bisect import bisect_right
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, fields
-from typing import Literal
+from typing import ClassVar, Literal, overload
 
 import numpy as np
 
 ParticleTRepresentation = Literal["diagonal", "axisymmetric", "dense"]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Particle:
     """Base particle descriptor.
 
@@ -48,7 +49,7 @@ class Particle:
         return "dense"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Sphere(Particle):
     """Homogeneous sphere supported by current scattering kernels."""
 
@@ -65,7 +66,7 @@ class Sphere(Particle):
         return "diagonal"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PECSphere(Particle):
     """Perfect-electric-conductor sphere.
 
@@ -90,7 +91,7 @@ class PECSphere(Particle):
         return "diagonal"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class LayeredSphere(Particle):
     """Concentric multilayer sphere for exact multilayer Mie kernels."""
 
@@ -119,7 +120,7 @@ class LayeredSphere(Particle):
         return "diagonal"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Spheroid(Particle):
     """Homogeneous axisymmetric particle with spherical-basis T-block support."""
 
@@ -255,6 +256,341 @@ def particle_intrinsic_t_signature(particle: Particle) -> tuple[object, ...]:
     return (type(particle), *payload)
 
 
+def _owned_read_only_array(values: np.ndarray, *, dtype: np.dtype) -> np.ndarray:
+    out = np.array(values, dtype=dtype, copy=True, order="C")
+    out.setflags(write=False)
+    return out
+
+
+class _ParticleBatch:
+    """Internal homogeneous or descriptor-backed particle segment."""
+
+    representation: ClassVar[ParticleTRepresentation | None] = None
+
+    @property
+    def positions(self) -> np.ndarray:
+        raise NotImplementedError
+
+    @property
+    def circumscribing_radii(self) -> np.ndarray:
+        raise NotImplementedError
+
+    def __len__(self) -> int:
+        raise NotImplementedError
+
+    def particle_at(self, index: int) -> Particle:
+        raise NotImplementedError
+
+    def iter_particles(self) -> Iterator[Particle]:
+        for index in range(len(self)):
+            yield self.particle_at(index)
+
+    def outer_refractive_indices(self) -> np.ndarray | None:
+        raise NotImplementedError
+
+
+@dataclass(frozen=True, slots=True)
+class _ArrayParticleBatch(_ParticleBatch):
+    _positions: np.ndarray
+    _circumscribing_radii: np.ndarray
+
+    @property
+    def positions(self) -> np.ndarray:
+        return self._positions
+
+    @property
+    def circumscribing_radii(self) -> np.ndarray:
+        return self._circumscribing_radii
+
+    def __len__(self) -> int:
+        return int(self._positions.shape[0])
+
+
+@dataclass(frozen=True, slots=True)
+class _DescriptorBatch(_ArrayParticleBatch):
+    descriptors: tuple[Particle, ...]
+
+    @classmethod
+    def from_particles(cls, particles: Sequence[Particle]) -> _DescriptorBatch:
+        descriptors = tuple(particles)
+        if not all(isinstance(particle, Particle) for particle in descriptors):
+            bad = [
+                type(particle).__name__
+                for particle in descriptors
+                if not isinstance(particle, Particle)
+            ]
+            raise TypeError(f"All entries in `particles` must be Particle instances. Got {bad}.")
+        if descriptors:
+            positions = np.asarray([particle.position for particle in descriptors], dtype=float)
+            radii = np.asarray(
+                [float(particle.circumscribing_radius()) for particle in descriptors],
+                dtype=float,
+            )
+        else:
+            positions = np.zeros((0, 3), dtype=float)
+            radii = np.zeros((0,), dtype=float)
+        return cls(
+            _positions=_owned_read_only_array(positions, dtype=np.dtype(float)),
+            _circumscribing_radii=_owned_read_only_array(radii, dtype=np.dtype(float)),
+            descriptors=descriptors,
+        )
+
+    def __len__(self) -> int:
+        return len(self.descriptors)
+
+    def particle_at(self, index: int) -> Particle:
+        return self.descriptors[int(index)]
+
+    def iter_particles(self) -> Iterator[Particle]:
+        return iter(self.descriptors)
+
+    def outer_refractive_indices(self) -> np.ndarray | None:
+        values: list[complex] = []
+        for particle in self.descriptors:
+            if isinstance(particle, Sphere):
+                values.append(complex(particle.refractive_index))
+            elif isinstance(particle, PECSphere):
+                continue
+            elif isinstance(particle, LayeredSphere):
+                values.append(complex(particle.layer_refractive_indices[-1]))
+            elif isinstance(particle, Spheroid):
+                values.append(complex(particle.refractive_index))
+            else:
+                raise TypeError(
+                    f"Unsupported particle type {type(particle).__name__!r} "
+                    "for refractive-index checks."
+                )
+        return np.asarray(values, dtype=np.complex128)
+
+
+@dataclass(frozen=True, slots=True)
+class _SphereBatch(_ArrayParticleBatch):
+    refractive_indices: np.ndarray
+    representation: ClassVar[ParticleTRepresentation] = "diagonal"
+
+    def particle_at(self, index: int) -> Particle:
+        idx = int(index)
+        position = self._positions[idx]
+        return Sphere(
+            position=(float(position[0]), float(position[1]), float(position[2])),
+            radius=float(self._circumscribing_radii[idx]),
+            refractive_index=complex(self.refractive_indices[idx]),
+        )
+
+    def outer_refractive_indices(self) -> np.ndarray:
+        return self.refractive_indices
+
+
+@dataclass(frozen=True, slots=True)
+class _PECSphereBatch(_ArrayParticleBatch):
+    representation: ClassVar[ParticleTRepresentation] = "diagonal"
+
+    def particle_at(self, index: int) -> Particle:
+        idx = int(index)
+        position = self._positions[idx]
+        return PECSphere(
+            position=(float(position[0]), float(position[1]), float(position[2])),
+            radius=float(self._circumscribing_radii[idx]),
+        )
+
+    def outer_refractive_indices(self) -> None:
+        return None
+
+
+class ParticleCollection(Sequence[Particle]):
+    """Immutable particle sequence with compact sphere-family batches.
+
+    Homogeneous and PEC sphere constructors avoid one persistent Python object
+    per particle. Explicit descriptors and metadata-rich particle families
+    share the same sequence API through a descriptor-backed fallback.
+    """
+
+    __slots__ = ("_batches", "_offsets", "_positions", "_radii")
+
+    def __init__(self, batches: Sequence[_ParticleBatch] = ()) -> None:
+        self._batches = tuple(batch for batch in batches if len(batch) > 0)
+        offsets: list[int] = []
+        count = 0
+        for batch in self._batches:
+            count += len(batch)
+            offsets.append(count)
+        self._offsets = tuple(offsets)
+
+        if not self._batches:
+            positions_owner = np.zeros((0, 3), dtype=float)
+            radii_owner = np.zeros((0,), dtype=float)
+        elif len(self._batches) == 1:
+            positions_owner = self._batches[0].positions
+            radii_owner = self._batches[0].circumscribing_radii
+        else:
+            positions_owner = np.concatenate([batch.positions for batch in self._batches], axis=0)
+            radii_owner = np.concatenate(
+                [batch.circumscribing_radii for batch in self._batches], axis=0
+            )
+        positions_owner.setflags(write=False)
+        radii_owner.setflags(write=False)
+        self._positions = positions_owner.view()
+        self._radii = radii_owner.view()
+
+    @classmethod
+    def from_particles(
+        cls, particles: Sequence[Particle] | ParticleCollection
+    ) -> ParticleCollection:
+        if isinstance(particles, cls):
+            return particles
+        batch = _DescriptorBatch.from_particles(particles)
+        return cls((batch,)) if len(batch) else cls()
+
+    @classmethod
+    def concatenate(
+        cls, *collections: Sequence[Particle] | ParticleCollection
+    ) -> ParticleCollection:
+        batches: list[_ParticleBatch] = []
+        for collection in collections:
+            normalized = cls.from_particles(collection)
+            batches.extend(normalized._batches)
+        return cls(batches)
+
+    @property
+    def positions(self) -> np.ndarray:
+        return self._positions
+
+    @property
+    def circumscribing_radii(self) -> np.ndarray:
+        return self._radii
+
+    def __len__(self) -> int:
+        return 0 if not self._offsets else int(self._offsets[-1])
+
+    @overload
+    def __getitem__(self, index: int) -> Particle: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> tuple[Particle, ...]: ...
+
+    def __getitem__(self, index: int | slice) -> Particle | tuple[Particle, ...]:
+        if isinstance(index, slice):
+            return tuple(self[position] for position in range(*index.indices(len(self))))
+        idx = int(index)
+        if idx < 0:
+            idx += len(self)
+        if idx < 0 or idx >= len(self):
+            raise IndexError("particle index out of range")
+        batch_index = bisect_right(self._offsets, idx)
+        batch_start = 0 if batch_index == 0 else self._offsets[batch_index - 1]
+        return self._batches[batch_index].particle_at(idx - batch_start)
+
+    def __iter__(self) -> Iterator[Particle]:
+        for batch in self._batches:
+            yield from batch.iter_particles()
+
+    def representation_groups(
+        self,
+    ) -> tuple[tuple[ParticleTRepresentation, np.ndarray], ...]:
+        grouped: dict[ParticleTRepresentation, list[np.ndarray]] = {}
+        order: list[ParticleTRepresentation] = []
+        start = 0
+        for batch in self._batches:
+            stop = start + len(batch)
+            segments: Iterable[tuple[ParticleTRepresentation, np.ndarray]]
+            if batch.representation is None:
+                local_groups: dict[ParticleTRepresentation, list[int]] = {}
+                local_order: list[ParticleTRepresentation] = []
+                for local, particle in enumerate(batch.iter_particles()):
+                    representation = particle.t_operator_representation
+                    if representation not in local_groups:
+                        local_groups[representation] = []
+                        local_order.append(representation)
+                    local_groups[representation].append(start + local)
+                segments = (
+                    (
+                        representation,
+                        np.asarray(local_groups[representation], dtype=np.int64),
+                    )
+                    for representation in local_order
+                )
+            else:
+                segments = (
+                    (
+                        batch.representation,
+                        np.arange(start, stop, dtype=np.int64),
+                    ),
+                )
+            for representation, indices in segments:
+                if representation not in grouped:
+                    grouped[representation] = []
+                    order.append(representation)
+                grouped[representation].append(indices)
+            start = stop
+        return tuple(
+            (
+                representation,
+                np.concatenate(grouped[representation])
+                if len(grouped[representation]) > 1
+                else grouped[representation][0],
+            )
+            for representation in order
+        )
+
+    def sphere_parameters(
+        self, particle_indices: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray] | None:
+        indices = np.asarray(particle_indices, dtype=np.int64).reshape(-1)
+        if indices.size == 0:
+            return np.zeros((0,), dtype=float), np.zeros((0,), dtype=np.complex128)
+        if int(indices.min()) < 0 or int(indices.max()) >= len(self):
+            raise IndexError("sphere-parameter particle index out of range")
+        if (
+            len(self._batches) == 1
+            and isinstance(self._batches[0], _SphereBatch)
+            and indices.size == len(self)
+            and int(indices[0]) == 0
+            and int(indices[-1]) == len(self) - 1
+            and bool(np.all(indices[1:] == indices[:-1] + 1))
+        ):
+            sphere_batch = self._batches[0]
+            return sphere_batch.circumscribing_radii, sphere_batch.refractive_indices
+
+        batch_indices = np.searchsorted(
+            np.asarray(self._offsets, dtype=np.int64),
+            indices,
+            side="right",
+        )
+        batch_starts = np.asarray((0, *self._offsets[:-1]), dtype=np.int64)
+        radii = np.empty((indices.size,), dtype=float)
+        refractive_indices = np.empty((indices.size,), dtype=np.complex128)
+        for batch_index in np.unique(batch_indices):
+            selected_batch = self._batches[int(batch_index)]
+            if not isinstance(selected_batch, _SphereBatch):
+                return None
+            selected = batch_indices == batch_index
+            local = indices[selected] - batch_starts[int(batch_index)]
+            radii[selected] = selected_batch.circumscribing_radii[local]
+            refractive_indices[selected] = selected_batch.refractive_indices[local]
+        return radii, refractive_indices
+
+    def homogeneous_sphere_arrays(
+        self,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+        """Return compact sphere arrays when the collection is one sphere batch."""
+        if len(self._batches) != 1 or not isinstance(self._batches[0], _SphereBatch):
+            return None
+        batch = self._batches[0]
+        return batch.positions, batch.circumscribing_radii, batch.refractive_indices
+
+    def homogeneous_pec_sphere_radii(self) -> np.ndarray | None:
+        """Return compact radii when the collection is one PEC-sphere batch."""
+        if len(self._batches) != 1 or not isinstance(self._batches[0], _PECSphereBatch):
+            return None
+        return self._batches[0].circumscribing_radii
+
+    def outer_refractive_index_batches(self) -> Iterator[np.ndarray]:
+        for batch in self._batches:
+            values = batch.outer_refractive_indices()
+            if values is not None and values.size:
+                yield np.asarray(values, dtype=np.complex128)
+
+
 def _as_positions_array(positions: Sequence[Sequence[float]] | np.ndarray) -> np.ndarray:
     """Normalize particle-center inputs to shape `(N, 3)` float arrays."""
     pos = np.asarray(positions, dtype=float)
@@ -293,13 +629,8 @@ def spheres_from_arrays(
     positions: Sequence[Sequence[float]] | np.ndarray,
     radii: Sequence[float] | np.ndarray,
     refractive_indices: Sequence[complex] | np.ndarray | complex,
-    into: list[Particle] | None = None,
-) -> list[Particle]:
-    """Create/extend particle lists with homogeneous spheres from dense arrays.
-
-    This helper is the canonical bridge from array-form geometry generators to
-    the explicit particle-descriptor API used by `Simulation`.
-    """
+) -> ParticleCollection:
+    """Create an array-native homogeneous-sphere collection."""
     pos = _as_positions_array(positions)
     n = int(pos.shape[0])
     rad = np.asarray(radii, dtype=float).reshape(-1)
@@ -308,26 +639,23 @@ def spheres_from_arrays(
     if np.any(~np.isfinite(rad)) or np.any(rad <= 0.0):
         raise ValueError("`radii` must be finite and strictly positive.")
     n_part = _as_complex_vector(refractive_indices, n=n, name="refractive_indices")
-
-    out = [] if into is None else into
-    out.extend(
-        Sphere(
-            position=(float(p[0]), float(p[1]), float(p[2])),
-            radius=float(r),
-            refractive_index=complex(nr),
+    return ParticleCollection(
+        (
+            _SphereBatch(
+                _positions=_owned_read_only_array(pos, dtype=np.dtype(float)),
+                _circumscribing_radii=_owned_read_only_array(rad, dtype=np.dtype(float)),
+                refractive_indices=_owned_read_only_array(n_part, dtype=np.dtype(np.complex128)),
+            ),
         )
-        for p, r, nr in zip(pos, rad, n_part, strict=True)
     )
-    return out
 
 
 def pec_spheres_from_arrays(
     *,
     positions: Sequence[Sequence[float]] | np.ndarray,
     radii: Sequence[float] | np.ndarray,
-    into: list[Particle] | None = None,
-) -> list[Particle]:
-    """Create/extend particle lists with perfect-electric-conductor spheres.
+) -> ParticleCollection:
+    """Create an array-native perfect-electric-conductor sphere collection.
 
     Unlike :func:`spheres_from_arrays`, this helper intentionally has no
     refractive-index argument: the particle response is the analytic PEC limit.
@@ -339,16 +667,14 @@ def pec_spheres_from_arrays(
         raise ValueError(f"`radii` length ({rad.shape[0]}) must match number of particles ({n}).")
     if np.any(~np.isfinite(rad)) or np.any(rad <= 0.0):
         raise ValueError("`radii` must be finite and strictly positive.")
-
-    out = [] if into is None else into
-    out.extend(
-        PECSphere(
-            position=(float(p[0]), float(p[1]), float(p[2])),
-            radius=float(r),
+    return ParticleCollection(
+        (
+            _PECSphereBatch(
+                _positions=_owned_read_only_array(pos, dtype=np.dtype(float)),
+                _circumscribing_radii=_owned_read_only_array(rad, dtype=np.dtype(float)),
+            ),
         )
-        for p, r in zip(pos, rad, strict=True)
     )
-    return out
 
 
 def _as_layer_matrix(
@@ -379,12 +705,11 @@ def layered_spheres_from_arrays(
     positions: Sequence[Sequence[float]] | np.ndarray,
     layer_radii: Sequence[Sequence[float]] | Sequence[float] | np.ndarray,
     layer_refractive_indices: Sequence[Sequence[complex]] | Sequence[complex] | np.ndarray,
-    into: list[Particle] | None = None,
-) -> list[Particle]:
-    """Create/extend particle lists with concentric layered spheres.
+) -> ParticleCollection:
+    """Create an immutable concentric layered-sphere collection.
 
-    For convenience, `(L,)` layer inputs are broadcast to all particles; use
-    repeated calls with `into=` to append families with different `L`.
+    For convenience, `(L,)` layer inputs are broadcast to all particles.
+    Combine batches with :meth:`ParticleCollection.concatenate`.
     """
     pos = _as_positions_array(positions)
     n = int(pos.shape[0])
@@ -408,16 +733,16 @@ def layered_spheres_from_arrays(
     if np.any(li.real <= 0.0):
         raise ValueError("Real part of `layer_refractive_indices` must be strictly positive.")
 
-    out = [] if into is None else into
-    out.extend(
-        LayeredSphere(
-            position=(float(p[0]), float(p[1]), float(p[2])),
-            layer_radii=tuple(float(v) for v in r_row),
-            layer_refractive_indices=tuple(complex(v) for v in n_row),
+    return ParticleCollection.from_particles(
+        tuple(
+            LayeredSphere(
+                position=(float(p[0]), float(p[1]), float(p[2])),
+                layer_radii=tuple(float(value) for value in radii_row),
+                layer_refractive_indices=tuple(complex(value) for value in index_row),
+            )
+            for p, radii_row, index_row in zip(pos, lr, li, strict=True)
         )
-        for p, r_row, n_row in zip(pos, lr, li, strict=True)
     )
-    return out
 
 
 def _as_positive_float_vector(
@@ -448,9 +773,8 @@ def spheroids_from_arrays(
     polar_radii: Sequence[float] | np.ndarray | float,
     refractive_indices: Sequence[complex] | np.ndarray | complex,
     euler_angles: Sequence[Sequence[float]] | Sequence[float] | np.ndarray = (0.0, 0.0, 0.0),
-    into: list[Particle] | None = None,
-) -> list[Particle]:
-    """Create/extend particle lists with homogeneous spheroid descriptors."""
+) -> ParticleCollection:
+    """Create an immutable homogeneous-spheroid collection."""
     pos = _as_positions_array(positions)
     n = int(pos.shape[0])
     eq = _as_positive_float_vector(equatorial_radii, n=n, name="equatorial_radii")
@@ -469,15 +793,22 @@ def spheroids_from_arrays(
         raise ValueError("`euler_angles` must contain only finite values.")
 
     n_part = _as_complex_vector(refractive_indices, n=n, name="refractive_indices")
-    out = [] if into is None else into
-    out.extend(
-        Spheroid(
-            position=(float(p[0]), float(p[1]), float(p[2])),
-            equatorial_radius=float(a_eq),
-            polar_radius=float(a_po),
-            refractive_index=complex(nr),
-            euler_angles=(float(ang[0]), float(ang[1]), float(ang[2])),
+    return ParticleCollection.from_particles(
+        tuple(
+            Spheroid(
+                position=(float(p[0]), float(p[1]), float(p[2])),
+                equatorial_radius=float(a_eq),
+                polar_radius=float(a_po),
+                refractive_index=complex(index),
+                euler_angles=(float(angles[0]), float(angles[1]), float(angles[2])),
+            )
+            for p, a_eq, a_po, index, angles in zip(
+                pos,
+                eq,
+                po,
+                n_part,
+                eul,
+                strict=True,
+            )
         )
-        for p, a_eq, a_po, nr, ang in zip(pos, eq, po, n_part, eul, strict=True)
     )
-    return out

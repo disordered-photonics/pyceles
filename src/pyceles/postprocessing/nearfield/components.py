@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import numpy as np
 import numpy.typing as npt
 
-from pyceles.core.particles import Particle
+from pyceles.core.particles import Particle, ParticleCollection
 
 from .classification import classify_internal_points
 from .initial import compute_initial_field
@@ -38,12 +38,13 @@ class NearFieldComponents:
 
 def _positions_from_particles(particles: Sequence[Particle]) -> np.ndarray:
     """Return `(Ns,3)` centers derived from canonical particle descriptors."""
-    part = tuple(particles)
-    if len(part) == 0:
+    if isinstance(particles, ParticleCollection):
+        return particles.positions
+    if len(particles) == 0:
         return np.zeros((0, 3), dtype=float)
-    return np.asarray([np.asarray(p.position, dtype=float) for p in part], dtype=float).reshape(
-        -1, 3
-    )
+    return np.asarray(
+        [np.asarray(p.position, dtype=float) for p in particles], dtype=float
+    ).reshape(-1, 3)
 
 
 def compute_total_field(

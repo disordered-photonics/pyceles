@@ -8,13 +8,13 @@ in result objects.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 import numpy as np
 import numpy.typing as npt
 
-from pyceles.core.particles import Particle
+from pyceles.core.particles import Particle, ParticleCollection
 from pyceles.core.sources import Source
 from pyceles.linear.solvers import LinearSolveResult
 from pyceles.postprocessing.farfield import FarFieldPatterns, PeriodicFarFieldPayload
@@ -51,11 +51,18 @@ class SimulationResult:
     decomposition_backward: dict[str, float] | None
     decomposition_forward_basis: dict[str, dict[str, float]] | None
     decomposition_backward_basis: dict[str, dict[str, float]] | None
-    particles: tuple[Particle, ...]
+    particles: ParticleCollection | Sequence[Particle]
     periodic: PeriodicFarFieldPayload | None = None
     polarization_jones: tuple[complex, complex] | None = None
     compute_dtype: str = "complex128"
     accum_dtype: str = "complex128"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "particles",
+            ParticleCollection.from_particles(self.particles),
+        )
 
     @property
     def n_particles(self) -> int:
@@ -63,20 +70,17 @@ class SimulationResult:
 
     @property
     def positions(self) -> np.ndarray:
-        if len(self.particles) == 0:
-            return np.zeros((0, 3), dtype=float)
-        return np.asarray(
-            [np.asarray(p.position, dtype=float) for p in self.particles], dtype=float
-        )
+        particles = self.particles
+        if not isinstance(particles, ParticleCollection):
+            raise RuntimeError("SimulationResult particles were not normalized.")
+        return particles.positions
 
     @property
     def circumscribing_radii(self) -> np.ndarray:
-        if len(self.particles) == 0:
-            return np.zeros((0,), dtype=float)
-        return np.asarray(
-            [float(p.circumscribing_radius()) for p in self.particles],
-            dtype=float,
-        ).reshape(-1)
+        particles = self.particles
+        if not isinstance(particles, ParticleCollection):
+            raise RuntimeError("SimulationResult particles were not normalized.")
+        return particles.circumscribing_radii
 
 
 @dataclass(frozen=True)

@@ -9,7 +9,7 @@ from typing import Protocol
 import numpy as np
 
 from pyceles.core.indexing import n_modes
-from pyceles.core.particles import Particle, ParticleTRepresentation
+from pyceles.core.particles import Particle, ParticleCollection, ParticleTRepresentation
 
 Array = np.ndarray
 COMPLEX128_DTYPE = np.dtype(np.complex128)
@@ -29,7 +29,7 @@ class ParticleTPreparationContext:
 
     lmax: int
     k: float
-    particles: tuple[Particle, ...]
+    particles: Sequence[Particle]
     n_medium: complex
     dtype: np.dtype
 
@@ -236,6 +236,14 @@ def plan_particle_t_groups(particles: Sequence[Particle]) -> tuple[ParticleTGrou
     """Plan particle-local `T` groups before preparing concrete operators."""
     if len(particles) == 0:
         return ()
+    if isinstance(particles, ParticleCollection):
+        return tuple(
+            ParticleTGroupPlan(
+                representation=representation,
+                particle_indices=np.asarray(indices, dtype=np.int64),
+            )
+            for representation, indices in particles.representation_groups()
+        )
 
     grouped: dict[ParticleTRepresentation, list[int]] = {}
     order: list[ParticleTRepresentation] = []

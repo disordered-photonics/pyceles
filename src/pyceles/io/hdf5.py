@@ -208,12 +208,11 @@ def save_geometry_h5(
     Parameters
     ----------
     particles:
-        Explicit particle descriptors serialized under ``<group>/particles``.
+        Particle collection serialized under ``<group>/particles``.
     """
-    part = tuple(particles)
     with h5py.File(_pathlike(path), mode) as h5:
         g = _reset_group(h5, group)
-        _write_particle_descriptors(g, part, compression=compression)
+        _write_particle_descriptors(g, particles, compression=compression)
         g.attrs["n_medium"] = complex(n_medium)
         g.attrs["wavelength"] = float(wavelength)
         g.attrs["lmax"] = int(lmax)

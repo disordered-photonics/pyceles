@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Added immutable `ParticleCollection` storage. Array-generated homogeneous
+  and PEC sphere geometries now remain compact through simulation and
+  particle-T preparation instead of expanding one Python object per sphere.
 - Added `AngularSpectrumSLMSource` for applying one scalar SLM modulation to
   the TE and TM spectra of arbitrary angular-spectrum sources, while retaining
   `SLMSource` for Jones-polarized sources.

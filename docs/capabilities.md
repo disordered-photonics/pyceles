@@ -61,8 +61,9 @@ mixed supported particle families:
 - `LayeredSphere`,
 - `Spheroid`.
 
+`Simulation` normalizes these inputs into an immutable `ParticleCollection`.
 `Simulation.n_particles` and `SimulationResult.n_particles` provide canonical
-particle counts across particle descriptors.
+particle counts across descriptor and array-generated inputs.
 
 By default, `Simulation` enforces disjoint circumscribing spheres, which is
 required by the current T-matrix superposition workflow. The check can be
@@ -74,6 +75,11 @@ Array-generated geometries should use the canonical helpers:
 - `pec_spheres_from_arrays`,
 - `layered_spheres_from_arrays`,
 - `spheroids_from_arrays`.
+
+The helpers return `ParticleCollection` objects and can be combined with
+`ParticleCollection.concatenate(...)`. Homogeneous and PEC sphere batches stay
+array-backed through particle-T preparation, avoiding one persistent Python
+descriptor per particle in large sphere ensembles.
 
 `PECSphere` uses the analytic perfect-conductor Mie limit instead of an
 artificial large complex refractive index. Near-field points inside PEC spheres
