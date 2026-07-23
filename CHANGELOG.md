@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Added an opt-in `ResultRetention` policy for omitting optional incident,
+  right-hand-side, residual-history, and polarization-basis coefficient arrays
+  from completed large-run results.
 - Added immutable `ParticleCollection` storage. Array-generated homogeneous
   and PEC sphere geometries now remain compact through simulation and
   particle-T preparation instead of expanding one Python object per sphere.

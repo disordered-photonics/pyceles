@@ -118,6 +118,26 @@ print(solved.solver_result.rhs_count)
 print(solved.solver_result.method)
 ```
 
+## Result retention
+
+Completed results retain the full solve and postprocessing payload by default.
+For large solves where only the solution and observables are needed, optional
+duplicate arrays and residual histories can be omitted:
+
+```python
+run = sim.run(
+    include_farfield=False,
+    retention=pcl.ResultRetention.minimal(),
+)
+```
+
+Solved multipole coefficients in `run.coeffs` are always retained because they
+are needed for restarts and deferred postprocessing. Minimal retention omits
+the incident coefficients, right-hand side, residual histories, and optional
+TE/TM basis coefficient maps. It does not reduce the information available
+during the solve or the requested postprocessing itself. The same policy can
+be passed to `postprocess_sources(...)`.
+
 ## Dual-basis convenience runs
 
 For mixed+basis+unpolarized outputs in one `SimulationResult`, use:

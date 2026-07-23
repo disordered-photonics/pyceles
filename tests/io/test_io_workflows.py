@@ -9,7 +9,12 @@ from pyceles.io.workflows import load_simulation_h5, save_simulation_h5
 from pyceles.linear.solvers import LinearSolveResult
 from pyceles.postprocessing.farfield import FarFieldPatterns
 from pyceles.postprocessing.nearfield import NearFieldSlice
-from pyceles.simulation import Simulation, SimulationConfig, SimulationResult
+from pyceles.simulation import (
+    ResultRetention,
+    Simulation,
+    SimulationConfig,
+    SimulationResult,
+)
 
 pytestmark = [pytest.mark.filesystem, pytest.mark.hdf5]
 
@@ -232,3 +237,60 @@ def test_save_simulation_h5_geometry_loads_particles(tmp_path):
 
     assert len(geometry_particles) == 1
     assert geometry_particles[0] == particles[0]
+
+
+def test_save_simulation_h5_accepts_minimal_result_retention(tmp_path):
+    source = PlaneWave(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        polarization="TE",
+        polar_angle=0.0,
+        azimuthal_angle=0.0,
+    )
+    sim = Simulation(
+        SimulationConfig(
+            wavelength=550.0,
+            n_medium=1.0 + 0j,
+            lmax=1,
+            source=source,
+            solver_method="direct",
+            verbose=False,
+        ),
+        particles=[
+            Sphere(
+                position=(0.0, 0.0, 0.0),
+                radius=50.0,
+                refractive_index=1.5 + 0.0j,
+            )
+        ],
+    )
+    run = sim.run(
+        include_farfield=False,
+        retention=ResultRetention.minimal(),
+    )
+    axis_0, axis_1 = np.meshgrid(
+        np.linspace(-1.0, 1.0, 2),
+        np.linspace(-1.0, 1.0, 2),
+        indexing="xy",
+    )
+    zero = np.zeros((*axis_0.shape, 3), dtype=np.complex128)
+    near = NearFieldSlice(
+        axis_0=axis_0,
+        axis_1=axis_1,
+        inside=np.zeros_like(axis_0, dtype=bool),
+        field_maps={"total": (zero, zero)},
+        plane="y",
+        plane_value=0.0,
+        axis_0_label="x",
+        axis_1_label="z",
+    )
+
+    out = save_simulation_h5(run, near, tmp_path / "minimal.h5")
+
+    import h5py
+
+    with h5py.File(out, "r") as h5:
+        assert "solution/coeffs" in h5
+        assert "solution/rhs" not in h5
+        assert "solution/initial_coeffs" not in h5
+        assert "solution/residual_history" not in h5

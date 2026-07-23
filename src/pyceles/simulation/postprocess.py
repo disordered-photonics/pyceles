@@ -33,8 +33,10 @@ from pyceles.postprocessing.farfield.periodic import periodic_plane_wave_orders
 from .config import validate_angular_grid_pair
 from .results import (
     MultiSourceSimulationResult,
+    ResultRetention,
     SimulationResult,
     SolvedSourcesResult,
+    _apply_solver_result_retention,
     avg_numeric_dict,
     empty_farfield_patterns,
     single_rhs_result_from_multi,
@@ -490,6 +492,7 @@ def _assemble_simulation_result(
     sim: Simulation,
     *,
     source: Source,
+    retention: ResultRetention,
     initial_coeffs: np.ndarray,
     rhs: np.ndarray,
     coeffs: np.ndarray,
@@ -525,18 +528,33 @@ def _assemble_simulation_result(
         else polarization_jones
     )
     config_out = cfg if cfg.source is source else replace(cfg, source=source)
+    solver_result_out = _apply_solver_result_retention(
+        solver_result,
+        retention=retention,
+    )
+    if solver_result_basis is None:
+        solver_result_basis_out = None
+    elif solver_result_basis is solver_result:
+        solver_result_basis_out = solver_result_out
+    else:
+        solver_result_basis_out = _apply_solver_result_retention(
+            solver_result_basis,
+            retention=retention,
+        )
     return SimulationResult(
         config=config_out,
         particles=sim.particles,
         k=k,
         k0=k0,
         coeffs=np.asarray(coeffs),
-        rhs=np.asarray(rhs).reshape(ns, nm),
-        initial_coeffs=np.asarray(initial_coeffs),
-        initial_coeffs_basis=initial_coeffs_basis,
-        coeffs_basis=coeffs_basis,
-        solver_result=solver_result,
-        solver_result_basis=solver_result_basis,
+        rhs=np.asarray(rhs).reshape(ns, nm) if retention.rhs else None,
+        initial_coeffs=np.asarray(initial_coeffs) if retention.initial_coeffs else None,
+        initial_coeffs_basis=(
+            initial_coeffs_basis if retention.polarization_basis_coeffs else None
+        ),
+        coeffs_basis=coeffs_basis if retention.polarization_basis_coeffs else None,
+        solver_result=solver_result_out,
+        solver_result_basis=solver_result_basis_out,
         farfield=farfield,
         farfield_basis=farfield_basis,
         power=power,
@@ -559,6 +577,7 @@ def build_single_channel_result(
     sim: Simulation,
     *,
     source: Source,
+    retention: ResultRetention,
     initial_coeffs: np.ndarray,
     rhs_flat: np.ndarray,
     coeffs: np.ndarray,
@@ -615,6 +634,7 @@ def build_single_channel_result(
     return _assemble_simulation_result(
         sim,
         source=source,
+        retention=retention,
         k=k,
         k0=k0,
         coeffs=coeffs,
@@ -639,8 +659,12 @@ def postprocess_sources_impl(
     farfield_polar_angles: np.ndarray | None = None,
     farfield_azimuthal_angles: np.ndarray | None = None,
     backend_coeffs_by_label: Mapping[str, Any] | None = None,
+    retention: ResultRetention | None = None,
 ) -> MultiSourceSimulationResult:
     """Postprocess solved channels into per-channel `SimulationResult` payloads."""
+    retained = ResultRetention() if retention is None else retention
+    if not isinstance(retained, ResultRetention):
+        raise TypeError("`retention` must be a ResultRetention instance or None.")
     cfg = sim.config
     labels = tuple(solved.labels)
     n_channels = len(labels)
@@ -703,6 +727,7 @@ def postprocess_sources_impl(
             periodic_runs[label] = _assemble_simulation_result(
                 sim,
                 source=solved.sources[label],
+                retention=retained,
                 k=float(solved.k),
                 k0=float(solved.k0),
                 coeffs=np.asarray(x_col),
@@ -725,9 +750,12 @@ def postprocess_sources_impl(
             labels=labels,
             sources=dict(solved.sources),
             runs=periodic_runs,
-            solver_result=solved.solver_result,
-            initial_coeffs=dict(solved.initial_coeffs),
-            rhs=dict(solved.rhs),
+            solver_result=_apply_solver_result_retention(
+                solved.solver_result,
+                retention=retained,
+            ),
+            initial_coeffs=(dict(solved.initial_coeffs) if retained.initial_coeffs else None),
+            rhs=dict(solved.rhs) if retained.rhs else None,
             coeffs=dict(solved.coeffs),
         )
 
@@ -777,6 +805,7 @@ def postprocess_sources_impl(
         runs[label] = build_single_channel_result(
             sim,
             source=solved.sources[label],
+            retention=retained,
             initial_coeffs=solved.initial_coeffs[label],
             rhs_flat=np.asarray(rhs_col, dtype=accum_dtype).reshape(Ns * Nm),
             coeffs=x_col,
@@ -795,15 +824,26 @@ def postprocess_sources_impl(
         labels=labels,
         sources=dict(solved.sources),
         runs=runs,
-        solver_result=solved.solver_result,
-        initial_coeffs=dict(solved.initial_coeffs),
-        rhs=dict(solved.rhs),
+        solver_result=_apply_solver_result_retention(
+            solved.solver_result,
+            retention=retained,
+        ),
+        initial_coeffs=dict(solved.initial_coeffs) if retained.initial_coeffs else None,
+        rhs=dict(solved.rhs) if retained.rhs else None,
         coeffs=dict(solved.coeffs),
     )
 
 
-def run_impl(sim: Simulation, *, include_farfield: bool = True) -> SimulationResult:
+def run_impl(
+    sim: Simulation,
+    *,
+    include_farfield: bool = True,
+    retention: ResultRetention | None = None,
+) -> SimulationResult:
     """Run one simulation for `config.source`."""
+    retained = ResultRetention() if retention is None else retention
+    if not isinstance(retained, ResultRetention):
+        raise TypeError("`retention` must be a ResultRetention instance or None.")
     cfg = sim.config
     source = sim._validate_ready_to_run()
     if cfg.periodic is not None and bool(cfg.solve_polarization_basis):
@@ -818,6 +858,7 @@ def run_impl(sim: Simulation, *, include_farfield: bool = True) -> SimulationRes
             execution.solved,
             include_farfield=include_farfield,
             backend_coeffs_by_label=execution.backend_coeffs,
+            retention=retained,
         )
         return multi["mixed"]
     if not isinstance(source, JonesPolarizedSource):
@@ -836,6 +877,7 @@ def run_impl(sim: Simulation, *, include_farfield: bool = True) -> SimulationRes
         basis_solved,
         include_farfield=include_farfield,
         backend_coeffs_by_label=basis_execution.backend_coeffs,
+        retention=retained,
     )
     run_te = basis_multi["te"]
     run_tm = basis_multi["tm"]
@@ -898,6 +940,7 @@ def run_impl(sim: Simulation, *, include_farfield: bool = True) -> SimulationRes
     return _assemble_simulation_result(
         sim,
         source=source,
+        retention=retained,
         k=run_te.k,
         k0=run_te.k0,
         coeffs=x,

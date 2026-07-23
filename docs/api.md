@@ -13,6 +13,7 @@ Most user workflows start from:
 - `pyceles.SimulationResult`
 - `pyceles.MultiSourceSimulationResult`
 - `pyceles.SolvedSourcesResult`
+- `pyceles.ResultRetention`
 
 The high-level pattern is:
 

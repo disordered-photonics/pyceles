@@ -10,6 +10,7 @@ from __future__ import annotations
 from .config import SimulationConfig
 from .results import (
     MultiSourceSimulationResult,
+    ResultRetention,
     SimulationResult,
     SolvedSourcesResult,
 )
@@ -17,6 +18,7 @@ from .workflow import Simulation
 
 __all__ = [
     "MultiSourceSimulationResult",
+    "ResultRetention",
     "Simulation",
     "SimulationConfig",
     "SimulationResult",

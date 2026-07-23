@@ -1,15 +1,16 @@
 """Simulation result containers and result-shaping helpers.
 
-These dataclasses are intentionally frozen because they represent completed
-solve/postprocess payloads that should be safe to pass around without hidden
-mutation. The mutable state lives in the `Simulation` orchestrator caches, not
-in result objects.
+Result field bindings are frozen, but numerical arrays and diagnostic mappings
+remain mutable. This avoids duplicating potentially GiB-scale payloads merely
+to claim deep immutability. In particular, ``SimulationResult.coeffs`` may
+share storage with ``solver_result.x``; callers that need an independently
+mutable snapshot should copy the array explicitly.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 import numpy.typing as npt
@@ -20,6 +21,47 @@ from pyceles.linear.solvers import LinearSolveResult
 from pyceles.postprocessing.farfield import FarFieldPatterns, PeriodicFarFieldPayload
 
 from .config import SimulationConfig
+
+
+@dataclass(frozen=True, slots=True)
+class ResultRetention:
+    """Control optional large arrays retained by completed run results.
+
+    The default preserves the full diagnostic payload. Solved coefficients
+    remain available in every mode because they are the restart and deferred
+    postprocessing state.
+    """
+
+    initial_coeffs: bool = True
+    rhs: bool = True
+    residual_history: bool = True
+    polarization_basis_coeffs: bool = True
+
+    @classmethod
+    def minimal(cls) -> ResultRetention:
+        """Retain solved coefficients and compact solver diagnostics only."""
+        return cls(
+            initial_coeffs=False,
+            rhs=False,
+            residual_history=False,
+            polarization_basis_coeffs=False,
+        )
+
+
+def _apply_solver_result_retention(
+    result: LinearSolveResult,
+    *,
+    retention: ResultRetention,
+) -> LinearSolveResult:
+    if retention.residual_history:
+        return result
+    return replace(
+        result,
+        residual_history=None,
+        preconditioned_residual_history=None,
+        true_residual_history=None,
+        block_residual_history=None,
+    )
 
 
 @dataclass(frozen=True)
@@ -34,8 +76,8 @@ class SimulationResult:
     k: float
     k0: float
     coeffs: np.ndarray
-    rhs: np.ndarray
-    initial_coeffs: np.ndarray
+    rhs: np.ndarray | None
+    initial_coeffs: np.ndarray | None
     initial_coeffs_basis: dict[str, np.ndarray] | None
     coeffs_basis: dict[str, np.ndarray] | None
     solver_result: LinearSolveResult
@@ -107,8 +149,8 @@ class MultiSourceSimulationResult:
     sources: dict[str, Source]
     runs: dict[str, SimulationResult]
     solver_result: LinearSolveResult
-    initial_coeffs: dict[str, np.ndarray]
-    rhs: dict[str, np.ndarray]
+    initial_coeffs: dict[str, np.ndarray] | None
+    rhs: dict[str, np.ndarray] | None
     coeffs: dict[str, np.ndarray]
 
     def __getitem__(self, label: str) -> SimulationResult:
@@ -190,6 +232,7 @@ def single_rhs_result_from_multi(result: LinearSolveResult, col: int) -> LinearS
 
 __all__ = [
     "MultiSourceSimulationResult",
+    "ResultRetention",
     "SimulationResult",
     "SolvedSourcesResult",
     "avg_numeric_dict",

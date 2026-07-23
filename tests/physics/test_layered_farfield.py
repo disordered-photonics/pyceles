@@ -61,6 +61,8 @@ def test_layered_single_layer_farfield_matches_homogeneous_sphere():
     run_sphere = sim_sphere.run()
     run_layered = sim_layered.run()
 
+    assert run_layered.initial_coeffs is not None
+    assert run_sphere.initial_coeffs is not None
     np.testing.assert_allclose(
         run_layered.initial_coeffs, run_sphere.initial_coeffs, rtol=0.0, atol=0.0
     )

@@ -23,7 +23,12 @@ from .helpers import (
     normalize_particle_geometry,
 )
 from .postprocess import postprocess_sources_impl, run_impl
-from .results import MultiSourceSimulationResult, SimulationResult, SolvedSourcesResult
+from .results import (
+    MultiSourceSimulationResult,
+    ResultRetention,
+    SimulationResult,
+    SolvedSourcesResult,
+)
 from .solve import (
     _solve_sources_for_immediate_postprocess_core,
     _SolvedSourcesExecution,
@@ -182,6 +187,7 @@ class Simulation:
         include_farfield: bool = True,
         farfield_polar_angles: np.ndarray | None = None,
         farfield_azimuthal_angles: np.ndarray | None = None,
+        retention: ResultRetention | None = None,
     ) -> MultiSourceSimulationResult:
         return postprocess_sources_impl(
             self,
@@ -189,10 +195,20 @@ class Simulation:
             include_farfield=include_farfield,
             farfield_polar_angles=farfield_polar_angles,
             farfield_azimuthal_angles=farfield_azimuthal_angles,
+            retention=retention,
         )
 
-    def run(self, *, include_farfield: bool = True) -> SimulationResult:
-        return run_impl(self, include_farfield=include_farfield)
+    def run(
+        self,
+        *,
+        include_farfield: bool = True,
+        retention: ResultRetention | None = None,
+    ) -> SimulationResult:
+        return run_impl(
+            self,
+            include_farfield=include_farfield,
+            retention=retention,
+        )
 
 
 __all__ = ["Simulation"]

@@ -781,6 +781,7 @@ def test_plane_wave_cross_sections_from_coefficients_match_single_sphere_mie():
     )
     run = sim.run()
     assert run.cross_sections is not None
+    assert run.initial_coeffs is not None
 
     cs = plane_wave_cross_sections(
         source,
@@ -1667,6 +1668,8 @@ def test_postprocess_sources_include_farfield_false_keeps_solve_outputs():
         run0 = multi_solve_only[label]
         run1 = multi_full[label]
         np.testing.assert_allclose(run0.coeffs, run1.coeffs, rtol=1e-7, atol=1e-9)
+        assert run0.rhs is not None
+        assert run1.rhs is not None
         np.testing.assert_allclose(run0.rhs, run1.rhs, rtol=1e-7, atol=1e-9)
         assert run0.power is None
         assert run0.cross_sections is None

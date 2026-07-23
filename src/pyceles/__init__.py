@@ -48,6 +48,7 @@ from pyceles.postprocessing.nearfield import (
 )
 from pyceles.simulation import (
     MultiSourceSimulationResult,
+    ResultRetention,
     Simulation,
     SimulationConfig,
     SimulationResult,
@@ -76,6 +77,7 @@ __all__ = [
     "PeriodicSpec",
     "PlaneWave",
     "RectangularLattice2D",
+    "ResultRetention",
     "SLMSource",
     "Simulation",
     "SimulationConfig",
