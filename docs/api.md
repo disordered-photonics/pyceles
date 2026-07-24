@@ -38,6 +38,11 @@ Particle descriptors are passed to `Simulation`:
 - `pyceles.layered_spheres_from_arrays`
 - `pyceles.spheroids_from_arrays`
 
+`ParticleCollection.from_archetypes(...)` is the generic constructor for many
+instances that reuse immutable particle metadata. See
+[particle_storage.md](particle_storage.md) for storage and preparation
+semantics.
+
 ## Sources
 
 Common source descriptors include:

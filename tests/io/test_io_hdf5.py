@@ -1,7 +1,13 @@
 import numpy as np
 import pytest
 
-from pyceles.core.particles import LayeredSphere, PECSphere, Sphere, Spheroid
+from pyceles.core.particles import (
+    LayeredSphere,
+    ParticleCollection,
+    PECSphere,
+    Sphere,
+    Spheroid,
+)
 from pyceles.io.hdf5 import (
     load_far_field_h5,
     load_geometry_h5,
@@ -94,7 +100,9 @@ def test_geometry_near_far_write(tmp_path):
         assert bool(h5["far_field"].attrs["total_omitted_as_redundant"]) is True
 
     geom_loaded = load_geometry_h5(path)
-    assert tuple(geom_loaded["particles"]) == particles
+    loaded_particles = geom_loaded["particles"]
+    assert isinstance(loaded_particles, ParticleCollection)
+    assert tuple(loaded_particles) == particles
     ff_loaded = load_far_field_h5(path)
     np.testing.assert_allclose(ff_loaded["patterns"]["initial"]["te"]["coeff"], pwp["coeff"])
 
@@ -128,9 +136,76 @@ def test_geometry_particle_descriptor_roundtrip(tmp_path):
 
     loaded = load_geometry_h5(path)
     loaded_particles = loaded["particles"]
-    assert isinstance(loaded_particles, tuple)
+    assert isinstance(loaded_particles, ParticleCollection)
     assert len(loaded_particles) == 4
-    assert loaded_particles == particles
+    assert tuple(loaded_particles) == particles
+    assert loaded_particles.n_archetypes == 4
+
+    import h5py
+
+    with h5py.File(path, "r") as h5:
+        stored = h5["geometry/particles"]
+        assert stored.attrs["schema"] == "pyceles.particles.v2"
+        assert stored["positions"].shape == (4, 3)
+        assert stored["archetype_indices"].shape == (4,)
+        assert len(stored["archetypes"]) == 4
+
+
+def test_geometry_loader_accepts_legacy_descriptor_schema(tmp_path):
+    import h5py
+
+    path = tmp_path / "legacy_particles.h5"
+    with h5py.File(path, "w") as h5:
+        geometry = h5.create_group("geometry")
+        geometry.attrs["n_medium"] = 1.0 + 0j
+        geometry.attrs["wavelength"] = 550.0
+        geometry.attrs["lmax"] = 3
+        stored = geometry.create_group("particles")
+        stored.attrs["schema"] = "pyceles.particles.v1"
+        for index, position in enumerate(((0.0, 0.0, 0.0), (100.0, 0.0, 0.0))):
+            particle = stored.create_group(str(index))
+            particle.attrs["type"] = "Sphere"
+            particle.create_dataset("position", data=np.asarray(position, dtype=float))
+            particle.create_dataset("radius", data=20.0)
+            particle.create_dataset("refractive_index", data=np.asarray(1.5 + 0.01j))
+
+    loaded = load_geometry_h5(path)["particles"]
+    assert isinstance(loaded, ParticleCollection)
+    assert loaded.n_archetypes == 1
+    assert tuple(loaded) == (
+        Sphere(position=(0.0, 0.0, 0.0), radius=20.0, refractive_index=1.5 + 0.01j),
+        Sphere(position=(100.0, 0.0, 0.0), radius=20.0, refractive_index=1.5 + 0.01j),
+    )
+
+
+def test_geometry_roundtrip_preserves_shared_archetypes(tmp_path):
+    path = tmp_path / "shared_particles.h5"
+    particles = ParticleCollection.from_particles(
+        [
+            LayeredSphere(
+                position=(float(index), 0.0, 0.0),
+                layer_radii=(40.0, 80.0),
+                layer_refractive_indices=(1.8 + 0j, 1.5 + 0.01j),
+            )
+            for index in range(3)
+        ]
+    )
+    assert particles.n_archetypes == 1
+
+    save_geometry_h5(
+        path,
+        particles=particles,
+        n_medium=1.0 + 0j,
+        wavelength=550.0,
+        lmax=3,
+        mode="w",
+    )
+    loaded = load_geometry_h5(path)["particles"]
+
+    assert isinstance(loaded, ParticleCollection)
+    assert tuple(loaded) == tuple(particles)
+    assert loaded.n_archetypes == 1
+    np.testing.assert_array_equal(loaded.archetype_indices, np.zeros(3, dtype=np.uint8))
 
 
 def test_near_field_components_write(tmp_path):

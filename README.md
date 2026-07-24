@@ -47,7 +47,7 @@ Current tested capabilities include:
 - CELES-compatible VSWF indexing, Wigner-3j tables, translation coefficients,
   and plane-wave/Gaussian incident-field machinery,
 - explicit particle descriptors for homogeneous, layered, axisymmetric, and
-  perfect-conductor particles, plus compact array-backed sphere collections,
+  perfect-conductor particles, plus uniform compact instance/archetype storage,
 - plane waves, structured beams, angular-spectrum SLM wrappers, local dipoles,
   and dipole collections,
 - direct pairwise coupling on NumPy and CuPy,

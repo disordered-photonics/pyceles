@@ -23,14 +23,51 @@ Array = np.ndarray
 DEFAULT_COMPLEX_DTYPE = np.dtype(np.complex128)
 
 
+_SHARED_DIAGONAL_APPLY_KERNEL: object | None = None
+
+
+def _shared_diagonal_apply_kernel(cupy):
+    """Return a fused gather/multiply kernel when real CuPy is available."""
+    global _SHARED_DIAGONAL_APPLY_KERNEL
+    if _SHARED_DIAGONAL_APPLY_KERNEL is None and hasattr(cupy, "ElementwiseKernel"):
+        _SHARED_DIAGONAL_APPLY_KERNEL = cupy.ElementwiseKernel(
+            "raw T diag, raw int64 operator_indices, T x, int64 nmodes, int64 nrhs",
+            "T y",
+            """
+            const long long particle = i / (nmodes * nrhs);
+            const long long mode = (i / nrhs) % nmodes;
+            y = diag[operator_indices[particle] * nmodes + mode] * x;
+            """,
+            "pyceles_shared_diagonal_t_apply",
+        )
+    return _SHARED_DIAGONAL_APPLY_KERNEL
+
+
 @dataclass
 class CuPyDiagonalTGroup:
     particle_indices: Array
     T_M: Array
     T_N: Array
     T_diag: Array
+    operator_indices: Array = field(default_factory=lambda: np.zeros((0,), dtype=np.int64))
     dtype: np.dtype = DEFAULT_COMPLEX_DTYPE
     _T_diag_gpu: object | None = field(default=None, init=False, repr=False)
+    _operator_indices_gpu: object | None = field(default=None, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self.particle_indices = np.asarray(self.particle_indices, dtype=np.int64).reshape(-1)
+        self.T_M = np.asarray(self.T_M, dtype=self.dtype)
+        self.T_N = np.asarray(self.T_N, dtype=self.dtype)
+        self.T_diag = np.asarray(self.T_diag, dtype=self.dtype)
+        if self.operator_indices.size == 0:
+            if self.T_diag.shape[0] == 1:
+                self.operator_indices = np.zeros(self.particle_indices.size, dtype=np.int64)
+            else:
+                self.operator_indices = np.arange(self.particle_indices.size, dtype=np.int64)
+        else:
+            self.operator_indices = np.asarray(self.operator_indices, dtype=np.int64).reshape(-1)
+        if self.operator_indices.size != self.particle_indices.size:
+            raise ValueError("`operator_indices` must align with `particle_indices`.")
 
     def _diag_gpu(self):
         cupy, _ = import_cupy()
@@ -38,30 +75,57 @@ class CuPyDiagonalTGroup:
             self._T_diag_gpu = cupy.asarray(self.T_diag, dtype=self.dtype)
         return self._T_diag_gpu
 
+    def _operators_gpu(self):
+        cupy, _ = import_cupy()
+        if self._operator_indices_gpu is None:
+            self._operator_indices_gpu = cupy.asarray(self.operator_indices, dtype=np.int64)
+        return self._operator_indices_gpu
+
     def apply_subset(self, x_subset: Array | object) -> object:
+        cupy, _ = import_cupy()
         arr = coerce_array(x_subset, dtype=self.dtype, prefer_cupy=True)
-        if int(arr.ndim) == 2:
-            return self._diag_gpu() * arr
-        if int(arr.ndim) == 3:
-            return self._diag_gpu()[:, :, None] * arr
-        raise ValueError(f"Diagonal T-group subset must be 2D or 3D. Got ndim={int(arr.ndim)}.")
+        if int(arr.ndim) not in {2, 3}:
+            raise ValueError(f"Diagonal T-group subset must be 2D or 3D. Got ndim={int(arr.ndim)}.")
+        if self.T_diag.shape[0] == 1:
+            diag = self._diag_gpu()[0]
+            return diag * arr if int(arr.ndim) == 2 else diag[:, None] * arr
+        identity = self.T_diag.shape[0] == self.particle_indices.size and np.array_equal(
+            self.operator_indices, np.arange(self.particle_indices.size)
+        )
+        if identity:
+            diag = self._diag_gpu()
+            return diag * arr if int(arr.ndim) == 2 else diag[:, :, None] * arr
+
+        kernel = _shared_diagonal_apply_kernel(cupy)
+        if kernel is not None:
+            nrhs = 1 if int(arr.ndim) == 2 else int(arr.shape[2])
+            return kernel(
+                self._diag_gpu(),
+                self._operators_gpu(),
+                arr,
+                np.int64(arr.shape[1]),
+                np.int64(nrhs),
+            )
+        gathered = self._diag_gpu()[self._operators_gpu()]
+        return gathered * arr if int(arr.ndim) == 2 else gathered[:, :, None] * arr
 
     def rhs_subset(self, b_subset: Array | object) -> object:
         return self.apply_subset(b_subset)
 
     def apply_local_block(self, local_particle_index: int, block: Array | object) -> object:
         cupy, _ = import_cupy()
-        local_diag = self._diag_gpu()[int(local_particle_index)]
+        operator_index = int(self.operator_indices[int(local_particle_index)])
+        local_diag = self._diag_gpu()[operator_index]
         block_arr = cupy.asarray(block, dtype=self.dtype)
         return local_diag[:, None] * block_arr
 
     def mode_diagonal(self) -> Array | None:
-        return np.asarray(self.T_diag, dtype=self.dtype)
+        return np.asarray(self.T_diag[self.operator_indices], dtype=self.dtype)
 
     def degree_diagonals(self) -> tuple[Array, Array] | None:
         return (
-            np.asarray(self.T_M, dtype=self.dtype),
-            np.asarray(self.T_N, dtype=self.dtype),
+            np.asarray(self.T_M[self.operator_indices], dtype=self.dtype),
+            np.asarray(self.T_N[self.operator_indices], dtype=self.dtype),
         )
 
 
@@ -69,9 +133,24 @@ class CuPyDiagonalTGroup:
 class CuPyDenseTGroup:
     particle_indices: Array
     T_blocks: Array
+    operator_indices: Array = field(default_factory=lambda: np.zeros((0,), dtype=np.int64))
     dtype: np.dtype = DEFAULT_COMPLEX_DTYPE
     body_metadata: object | None = None
     _T_blocks_gpu: object | None = field(default=None, init=False, repr=False)
+    _local_indices_gpu: dict[int, object] = field(default_factory=dict, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self.particle_indices = np.asarray(self.particle_indices, dtype=np.int64).reshape(-1)
+        self.T_blocks = np.asarray(self.T_blocks, dtype=self.dtype)
+        if self.operator_indices.size == 0:
+            if self.T_blocks.shape[0] == 1:
+                self.operator_indices = np.zeros(self.particle_indices.size, dtype=np.int64)
+            else:
+                self.operator_indices = np.arange(self.particle_indices.size, dtype=np.int64)
+        else:
+            self.operator_indices = np.asarray(self.operator_indices, dtype=np.int64).reshape(-1)
+        if self.operator_indices.size != self.particle_indices.size:
+            raise ValueError("`operator_indices` must align with `particle_indices`.")
 
     def _blocks_gpu(self):
         cupy, _ = import_cupy()
@@ -79,22 +158,55 @@ class CuPyDenseTGroup:
             self._T_blocks_gpu = cupy.asarray(self.T_blocks, dtype=self.dtype)
         return self._T_blocks_gpu
 
+    def _local_ids_gpu(self, operator_index: int):
+        cupy, _ = import_cupy()
+        cached = self._local_indices_gpu.get(operator_index)
+        if cached is None:
+            local = np.flatnonzero(self.operator_indices == operator_index).astype(np.int64)
+            cached = cupy.asarray(local, dtype=np.int64)
+            self._local_indices_gpu[operator_index] = cached
+        return cached
+
     def apply_subset(self, x_subset: Array | object) -> object:
         cupy, _ = import_cupy()
         arr = coerce_array(x_subset, dtype=self.dtype, prefer_cupy=True)
-        if int(arr.ndim) == 2:
-            return cupy.einsum("gij,gj->gi", self._blocks_gpu(), arr, optimize=True)
-        if int(arr.ndim) == 3:
-            return cupy.einsum("gij,gjr->gir", self._blocks_gpu(), arr, optimize=True)
-        raise ValueError(f"Dense T-group subset must be 2D or 3D. Got ndim={int(arr.ndim)}.")
+        if int(arr.ndim) not in {2, 3}:
+            raise ValueError(f"Dense T-group subset must be 2D or 3D. Got ndim={int(arr.ndim)}.")
+        blocks = self._blocks_gpu()
+        if self.T_blocks.shape[0] == 1:
+            if int(arr.ndim) == 2:
+                return cupy.einsum("ij,gj->gi", blocks[0], arr, optimize=True)
+            return cupy.einsum("ij,gjr->gir", blocks[0], arr, optimize=True)
+        identity = self.T_blocks.shape[0] == self.particle_indices.size and np.array_equal(
+            self.operator_indices, np.arange(self.particle_indices.size)
+        )
+        if identity:
+            if int(arr.ndim) == 2:
+                return cupy.einsum("gij,gj->gi", blocks, arr, optimize=True)
+            return cupy.einsum("gij,gjr->gir", blocks, arr, optimize=True)
+
+        out = cupy.empty_like(arr)
+        for operator_index in range(self.T_blocks.shape[0]):
+            local_ids = self._local_ids_gpu(operator_index)
+            subset = arr[local_ids]
+            if int(arr.ndim) == 2:
+                out[local_ids] = cupy.einsum(
+                    "ij,gj->gi", blocks[operator_index], subset, optimize=True
+                )
+            else:
+                out[local_ids] = cupy.einsum(
+                    "ij,gjr->gir", blocks[operator_index], subset, optimize=True
+                )
+        return out
 
     def rhs_subset(self, b_subset: Array | object) -> object:
         return self.apply_subset(b_subset)
 
     def apply_local_block(self, local_particle_index: int, block: Array | object) -> object:
         cupy, _ = import_cupy()
+        operator_index = int(self.operator_indices[int(local_particle_index)])
         block_arr = cupy.asarray(block, dtype=self.dtype)
-        return self._blocks_gpu()[int(local_particle_index)] @ block_arr
+        return self._blocks_gpu()[operator_index] @ block_arr
 
     def mode_diagonal(self) -> Array | None:
         return None
@@ -159,10 +271,10 @@ class CuPyCompositeParticleTOperator:
                     subset_out = cupy.asarray(group.apply_subset(subset), dtype=self.dtype)
                     out[start:stop] = subset_out
                     continue
-                subset = arr[ids]
+                ids_gpu = cupy.asarray(ids, dtype=np.int64)
+                subset = arr[ids_gpu]
                 subset_out = cupy.asarray(group.apply_subset(subset), dtype=self.dtype)
-                for local, particle_index in enumerate(ids):
-                    out[int(particle_index)] = subset_out[int(local)]
+                out[ids_gpu] = subset_out
             return out.reshape(self.n_particles * self.n_modes)
         elif int(arr_raw.ndim) == 2:
             if int(arr_raw.shape[0]) != self.n_particles * self.n_modes:
@@ -197,11 +309,9 @@ class CuPyCompositeParticleTOperator:
             # while removing the per-particle gather/scatter churn from the
             # hot iterative path.
             #
-            # Non-contiguous groups still use the older safe path below. That
-            # matters for mixed clusters where representation groups can be
-            # interleaved in particle order. If those cases become performance
-            # critical later, they likely need a dedicated grouped-index kernel
-            # rather than Python-level per-particle assembly.
+            # Non-contiguous groups use one vectorized device gather and
+            # scatter below. That keeps mixed/interleaved clusters free of the
+            # former Python-level per-particle copy storm.
             contiguous = ids.size > 0 and np.all(ids[1:] == ids[:-1] + 1)
             if contiguous:
                 start = int(ids[0])
@@ -210,10 +320,10 @@ class CuPyCompositeParticleTOperator:
                 subset_out = cupy.asarray(group.apply_subset(subset), dtype=self.dtype)
                 out[start:stop] = subset_out
                 continue
-            subset = cupy.stack([arr[int(i)] for i in ids], axis=0)
+            ids_gpu = cupy.asarray(ids, dtype=np.int64)
+            subset = arr[ids_gpu]
             subset_out = cupy.asarray(group.apply_subset(subset), dtype=self.dtype)
-            for local, particle_index in enumerate(ids):
-                out[int(particle_index)] = subset_out[int(local)]
+            out[ids_gpu] = subset_out
         out2 = out.reshape(self.n_particles * self.n_modes, int(arr.shape[2]))
         return out2
 
@@ -273,6 +383,7 @@ def wrap_particle_t_groups_cupy(
                     T_M=np.asarray(group.T_M, dtype=dtype),
                     T_N=np.asarray(group.T_N, dtype=dtype),
                     T_diag=np.asarray(group.T_diag, dtype=dtype),
+                    operator_indices=np.asarray(group.operator_indices, dtype=np.int64),
                     dtype=dtype,
                 )
             )
@@ -282,6 +393,7 @@ def wrap_particle_t_groups_cupy(
                 CuPyDenseTGroup(
                     particle_indices=np.asarray(group.particle_indices, dtype=np.int64),
                     T_blocks=np.asarray(group.T_blocks, dtype=dtype),
+                    operator_indices=np.asarray(group.operator_indices, dtype=np.int64),
                     dtype=dtype,
                 )
             )
@@ -291,6 +403,7 @@ def wrap_particle_t_groups_cupy(
                 CuPyDenseTGroup(
                     particle_indices=np.asarray(group.particle_indices, dtype=np.int64),
                     T_blocks=np.asarray(group.T_blocks, dtype=dtype),
+                    operator_indices=np.asarray(group.operator_indices, dtype=np.int64),
                     body_metadata=group.body_metadata,
                     dtype=dtype,
                 )

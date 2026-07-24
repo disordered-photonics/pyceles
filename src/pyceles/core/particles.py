@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from bisect import bisect_right
-from collections.abc import Iterable, Iterator, Sequence
-from dataclasses import dataclass, fields
-from typing import ClassVar, Literal, overload
+from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import dataclass, fields, replace
+from types import MappingProxyType
+from typing import Literal, cast, overload
 
 import numpy as np
 
@@ -211,6 +211,34 @@ def particle_contains_points(
     raise TypeError(f"Unsupported particle instance: {type(particle)!r}")
 
 
+def _freeze_signature_value(value: object) -> object:
+    """Convert descriptor metadata into a deterministic hashable cache key."""
+    if isinstance(value, np.ndarray):
+        array = np.ascontiguousarray(value)
+        return ("ndarray", array.dtype.str, array.shape, array.tobytes())
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, Mapping):
+        frozen_items = [
+            (
+                _freeze_signature_value(key),
+                _freeze_signature_value(item),
+            )
+            for key, item in value.items()
+        ]
+        return tuple(sorted(frozen_items, key=lambda item: repr(item[0])))
+    if isinstance(value, (tuple, list)):
+        return tuple(_freeze_signature_value(item) for item in value)
+    try:
+        hash(value)
+    except TypeError as exc:
+        raise TypeError(
+            f"Particle metadata value of type {type(value).__name__!r} is not hashable. "
+            "Use immutable scalars, tuples, mappings, or NumPy arrays."
+        ) from exc
+    return value
+
+
 def particle_t_signature(particle: Particle) -> tuple[object, ...]:
     """Return a position-independent cache key for solver-facing particle-T data.
 
@@ -231,7 +259,7 @@ def particle_t_signature(particle: Particle) -> tuple[object, ...]:
     for field in fields(type(particle)):
         if field.name == "position":
             continue
-        payload.append(getattr(particle, field.name))
+        payload.append(_freeze_signature_value(getattr(particle, field.name)))
     return (type(particle), *payload)
 
 
@@ -252,7 +280,7 @@ def particle_intrinsic_t_signature(particle: Particle) -> tuple[object, ...]:
     for field in fields(type(particle)):
         if field.name in {"position", "euler_angles"}:
             continue
-        payload.append(getattr(particle, field.name))
+        payload.append(_freeze_signature_value(getattr(particle, field.name)))
     return (type(particle), *payload)
 
 
@@ -262,56 +290,197 @@ def _owned_read_only_array(values: np.ndarray, *, dtype: np.dtype) -> np.ndarray
     return out
 
 
-class _ParticleBatch:
-    """Internal homogeneous or descriptor-backed particle segment."""
+def _compact_index_dtype(n_values: int) -> np.dtype:
+    """Return the smallest practical unsigned dtype for non-negative indices."""
+    maximum = max(0, int(n_values) - 1)
+    if maximum <= np.iinfo(np.uint8).max:
+        return np.dtype(np.uint8)
+    if maximum <= np.iinfo(np.uint16).max:
+        return np.dtype(np.uint16)
+    if maximum <= np.iinfo(np.uint32).max:
+        return np.dtype(np.uint32)
+    return np.dtype(np.uint64)
 
-    representation: ClassVar[ParticleTRepresentation | None] = None
 
-    @property
-    def positions(self) -> np.ndarray:
-        raise NotImplementedError
+def _stable_unique_rows(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return unique rows in first-occurrence order and a compact inverse map."""
+    rows = np.ascontiguousarray(values)
+    if rows.ndim != 2:
+        raise ValueError(f"Expected a 2D row table. Got shape {rows.shape}.")
+    if rows.shape[0] == 0:
+        return rows.copy(), np.zeros((0,), dtype=np.uint8)
+    first_row = rows[0]
+    chunk_size = 65_536
+    if all(
+        bool(np.all(rows[start : start + chunk_size] == first_row))
+        for start in range(0, rows.shape[0], chunk_size)
+    ):
+        return rows[:1].copy(), np.zeros((rows.shape[0],), dtype=np.uint8)
+    unique, first, inverse = np.unique(rows, axis=0, return_index=True, return_inverse=True)
+    order = np.argsort(first, kind="stable")
+    old_to_new = np.empty(order.size, dtype=np.int64)
+    old_to_new[order] = np.arange(order.size, dtype=np.int64)
+    mapped = old_to_new[inverse]
+    return unique[order], mapped.astype(_compact_index_dtype(order.size), copy=False)
 
-    @property
-    def circumscribing_radii(self) -> np.ndarray:
-        raise NotImplementedError
 
-    def __len__(self) -> int:
-        raise NotImplementedError
+def _owned_archetype_value(value: object) -> object:
+    """Copy mutable metadata into an immutable collection-owned form."""
+    if isinstance(value, np.ndarray):
+        array = np.array(value, copy=True, order="C")
+        array.setflags(write=False)
+        return array
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {
+                _owned_archetype_value(key): _owned_archetype_value(item)
+                for key, item in value.items()
+            }
+        )
+    if isinstance(value, (tuple, list)):
+        return tuple(_owned_archetype_value(item) for item in value)
+    if isinstance(value, (set, frozenset)):
+        return frozenset(_owned_archetype_value(item) for item in value)
+    return value
 
-    def particle_at(self, index: int) -> Particle:
-        raise NotImplementedError
 
-    def iter_particles(self) -> Iterator[Particle]:
-        for index in range(len(self)):
-            yield self.particle_at(index)
-
-    def outer_refractive_indices(self) -> np.ndarray | None:
-        raise NotImplementedError
+def _particle_at_origin(particle: Particle) -> Particle:
+    """Return a collection-owned position-independent immutable archetype."""
+    overrides = {
+        field.name: _owned_archetype_value(getattr(particle, field.name))
+        for field in fields(type(particle))
+        if field.name != "position"
+    }
+    return replace(particle, position=(0.0, 0.0, 0.0), **overrides)
 
 
 @dataclass(frozen=True, slots=True)
-class _ArrayParticleBatch(_ParticleBatch):
-    _positions: np.ndarray
-    _circumscribing_radii: np.ndarray
+class ParticleArchetypeGroup:
+    """Instances sharing one prepared single-body representation.
 
-    @property
-    def positions(self) -> np.ndarray:
-        return self._positions
+    ``archetype_indices`` addresses the collection-wide archetype table. The
+    aligned ``operator_indices`` array maps each particle in ``particle_indices``
+    to the local unique-archetype/operator row used by the prepared group.
+    """
 
-    @property
-    def circumscribing_radii(self) -> np.ndarray:
-        return self._circumscribing_radii
-
-    def __len__(self) -> int:
-        return int(self._positions.shape[0])
+    representation: ParticleTRepresentation
+    particle_indices: np.ndarray
+    archetype_indices: np.ndarray
+    operator_indices: np.ndarray
 
 
-@dataclass(frozen=True, slots=True)
-class _DescriptorBatch(_ArrayParticleBatch):
-    descriptors: tuple[Particle, ...]
+class ParticleCollection(Sequence[Particle]):
+    """Immutable columnar particle instances backed by shared archetypes.
+
+    Every particle family uses the same storage contract:
+
+    - ``positions`` stores one center per instance;
+    - ``archetype_indices`` stores one compact integer tag per instance;
+    - ``archetypes`` stores each distinct position-independent descriptor once.
+
+    Materializing ``collection[i]`` remains convenient for small heterogeneous
+    workflows, while solver preparation can consume the archetype table and the
+    instance map without allocating one descriptor or one T matrix per particle.
+    """
+
+    __slots__ = ("_archetype_indices", "_archetypes", "_positions", "_radii")
+
+    def __init__(
+        self,
+        positions: Sequence[Sequence[float]] | np.ndarray = (),
+        archetypes: Sequence[Particle] = (),
+        archetype_indices: Sequence[int] | np.ndarray = (),
+    ) -> None:
+        pos_arr = np.asarray(positions, dtype=float)
+        if pos_arr.size == 0:
+            pos_arr = np.zeros((0, 3), dtype=float)
+        if pos_arr.ndim != 2 or pos_arr.shape[1] != 3:
+            raise ValueError(f"`positions` must have shape (N, 3). Got {pos_arr.shape}.")
+        if not np.all(np.isfinite(pos_arr)):
+            raise ValueError("`positions` must contain only finite values.")
+
+        archetype_tuple = tuple(archetypes)
+        if not all(isinstance(particle, Particle) for particle in archetype_tuple):
+            raise TypeError("All archetypes must be Particle instances.")
+        raw_archetypes = tuple(_particle_at_origin(particle) for particle in archetype_tuple)
+
+        ids = np.asarray(archetype_indices)
+        if ids.size == 0:
+            ids = np.zeros((0,), dtype=np.int64)
+        if ids.ndim != 1 or ids.shape[0] != pos_arr.shape[0]:
+            raise ValueError(
+                "`archetype_indices` must be a length-N vector aligned with `positions`. "
+                f"Got {ids.shape} for N={pos_arr.shape[0]}."
+            )
+        if not np.issubdtype(ids.dtype, np.integer):
+            raise TypeError("`archetype_indices` must contain integers.")
+        ids_i64 = ids.astype(np.int64, copy=False)
+        if ids_i64.size and (int(ids_i64.min()) < 0 or int(ids_i64.max()) >= len(raw_archetypes)):
+            raise IndexError("`archetype_indices` contains an out-of-range archetype id.")
+        if pos_arr.shape[0] and not raw_archetypes:
+            raise ValueError("Non-empty particle instances require at least one archetype.")
+
+        # Canonicalize duplicate archetypes even when callers provide a redundant
+        # table. This keeps concatenation and third-party constructors on the same
+        # compact representation as the built-in array helpers.
+        canonical: list[Particle] = []
+        canonical_by_signature: dict[tuple[object, ...], int] = {}
+        old_to_new = np.empty((len(raw_archetypes),), dtype=np.int64)
+        for old_index, particle in enumerate(raw_archetypes):
+            signature = particle_t_signature(particle)
+            new_index = canonical_by_signature.get(signature)
+            if new_index is None:
+                new_index = len(canonical)
+                canonical_by_signature[signature] = new_index
+                canonical.append(particle)
+            old_to_new[old_index] = new_index
+        mapped = old_to_new[ids_i64] if ids_i64.size else ids_i64
+
+        # Retain only referenced archetypes. This prevents an externally supplied
+        # redundant table from leaking unused metadata into validation, storage,
+        # or prepared-operator planning.
+        if mapped.size:
+            used, first, inverse = np.unique(mapped, return_index=True, return_inverse=True)
+            order = np.argsort(first, kind="stable")
+            canonical = [canonical[int(used[index])] for index in order]
+            old_to_used = np.empty(order.size, dtype=np.int64)
+            old_to_used[order] = np.arange(order.size, dtype=np.int64)
+            mapped = old_to_used[inverse]
+        else:
+            canonical = []
+
+        radii_by_archetype = np.asarray(
+            [float(particle.circumscribing_radius()) for particle in canonical], dtype=float
+        )
+        radii = radii_by_archetype[mapped] if mapped.size else np.zeros((0,), dtype=float)
+        if np.any(~np.isfinite(radii)) or np.any(radii <= 0.0):
+            raise ValueError("Particle circumscribing radii must be finite and strictly positive.")
+
+        self._positions = _owned_read_only_array(pos_arr, dtype=np.dtype(float))
+        self._archetypes = tuple(canonical)
+        self._archetype_indices = _owned_read_only_array(
+            mapped, dtype=_compact_index_dtype(len(canonical))
+        )
+        self._radii = _owned_read_only_array(radii, dtype=np.dtype(float))
 
     @classmethod
-    def from_particles(cls, particles: Sequence[Particle]) -> _DescriptorBatch:
+    def from_archetypes(
+        cls,
+        *,
+        positions: Sequence[Sequence[float]] | np.ndarray,
+        archetypes: Sequence[Particle],
+        archetype_indices: Sequence[int] | np.ndarray,
+    ) -> ParticleCollection:
+        """Build a scalable collection from shared immutable archetypes."""
+        return cls(positions, archetypes, archetype_indices)
+
+    @classmethod
+    def from_particles(
+        cls, particles: Sequence[Particle] | ParticleCollection
+    ) -> ParticleCollection:
+        """Normalize explicit descriptors into the same shared-archetype model."""
+        if isinstance(particles, cls):
+            return particles
         descriptors = tuple(particles)
         if not all(isinstance(particle, Particle) for particle in descriptors):
             bad = [
@@ -320,136 +489,49 @@ class _DescriptorBatch(_ArrayParticleBatch):
                 if not isinstance(particle, Particle)
             ]
             raise TypeError(f"All entries in `particles` must be Particle instances. Got {bad}.")
-        if descriptors:
-            positions = np.asarray([particle.position for particle in descriptors], dtype=float)
-            radii = np.asarray(
-                [float(particle.circumscribing_radius()) for particle in descriptors],
-                dtype=float,
-            )
-        else:
-            positions = np.zeros((0, 3), dtype=float)
-            radii = np.zeros((0,), dtype=float)
-        return cls(
-            _positions=_owned_read_only_array(positions, dtype=np.dtype(float)),
-            _circumscribing_radii=_owned_read_only_array(radii, dtype=np.dtype(float)),
-            descriptors=descriptors,
+        if not descriptors:
+            return cls()
+
+        positions = np.asarray([particle.position for particle in descriptors], dtype=float)
+        archetypes: list[Particle] = []
+        archetype_by_signature: dict[tuple[object, ...], int] = {}
+        ids = np.empty((len(descriptors),), dtype=np.int64)
+        for index, particle in enumerate(descriptors):
+            signature = particle_t_signature(particle)
+            archetype_index = archetype_by_signature.get(signature)
+            if archetype_index is None:
+                archetype_index = len(archetypes)
+                archetype_by_signature[signature] = archetype_index
+                archetypes.append(particle)
+            ids[index] = archetype_index
+        return cls.from_archetypes(
+            positions=positions,
+            archetypes=archetypes,
+            archetype_indices=ids,
         )
-
-    def __len__(self) -> int:
-        return len(self.descriptors)
-
-    def particle_at(self, index: int) -> Particle:
-        return self.descriptors[int(index)]
-
-    def iter_particles(self) -> Iterator[Particle]:
-        return iter(self.descriptors)
-
-    def outer_refractive_indices(self) -> np.ndarray | None:
-        values: list[complex] = []
-        for particle in self.descriptors:
-            if isinstance(particle, Sphere):
-                values.append(complex(particle.refractive_index))
-            elif isinstance(particle, PECSphere):
-                continue
-            elif isinstance(particle, LayeredSphere):
-                values.append(complex(particle.layer_refractive_indices[-1]))
-            elif isinstance(particle, Spheroid):
-                values.append(complex(particle.refractive_index))
-            else:
-                raise TypeError(
-                    f"Unsupported particle type {type(particle).__name__!r} "
-                    "for refractive-index checks."
-                )
-        return np.asarray(values, dtype=np.complex128)
-
-
-@dataclass(frozen=True, slots=True)
-class _SphereBatch(_ArrayParticleBatch):
-    refractive_indices: np.ndarray
-    representation: ClassVar[ParticleTRepresentation] = "diagonal"
-
-    def particle_at(self, index: int) -> Particle:
-        idx = int(index)
-        position = self._positions[idx]
-        return Sphere(
-            position=(float(position[0]), float(position[1]), float(position[2])),
-            radius=float(self._circumscribing_radii[idx]),
-            refractive_index=complex(self.refractive_indices[idx]),
-        )
-
-    def outer_refractive_indices(self) -> np.ndarray:
-        return self.refractive_indices
-
-
-@dataclass(frozen=True, slots=True)
-class _PECSphereBatch(_ArrayParticleBatch):
-    representation: ClassVar[ParticleTRepresentation] = "diagonal"
-
-    def particle_at(self, index: int) -> Particle:
-        idx = int(index)
-        position = self._positions[idx]
-        return PECSphere(
-            position=(float(position[0]), float(position[1]), float(position[2])),
-            radius=float(self._circumscribing_radii[idx]),
-        )
-
-    def outer_refractive_indices(self) -> None:
-        return None
-
-
-class ParticleCollection(Sequence[Particle]):
-    """Immutable particle sequence with compact sphere-family batches.
-
-    Homogeneous and PEC sphere constructors avoid one persistent Python object
-    per particle. Explicit descriptors and metadata-rich particle families
-    share the same sequence API through a descriptor-backed fallback.
-    """
-
-    __slots__ = ("_batches", "_offsets", "_positions", "_radii")
-
-    def __init__(self, batches: Sequence[_ParticleBatch] = ()) -> None:
-        self._batches = tuple(batch for batch in batches if len(batch) > 0)
-        offsets: list[int] = []
-        count = 0
-        for batch in self._batches:
-            count += len(batch)
-            offsets.append(count)
-        self._offsets = tuple(offsets)
-
-        if not self._batches:
-            positions_owner = np.zeros((0, 3), dtype=float)
-            radii_owner = np.zeros((0,), dtype=float)
-        elif len(self._batches) == 1:
-            positions_owner = self._batches[0].positions
-            radii_owner = self._batches[0].circumscribing_radii
-        else:
-            positions_owner = np.concatenate([batch.positions for batch in self._batches], axis=0)
-            radii_owner = np.concatenate(
-                [batch.circumscribing_radii for batch in self._batches], axis=0
-            )
-        positions_owner.setflags(write=False)
-        radii_owner.setflags(write=False)
-        self._positions = positions_owner.view()
-        self._radii = radii_owner.view()
-
-    @classmethod
-    def from_particles(
-        cls, particles: Sequence[Particle] | ParticleCollection
-    ) -> ParticleCollection:
-        if isinstance(particles, cls):
-            return particles
-        batch = _DescriptorBatch.from_particles(particles)
-        return cls((batch,)) if len(batch) else cls()
 
     @classmethod
     def concatenate(
         cls, *collections: Sequence[Particle] | ParticleCollection
     ) -> ParticleCollection:
-        batches: list[_ParticleBatch] = []
-        for collection in collections:
-            normalized = cls.from_particles(collection)
-            batches.extend(normalized._batches)
-        return cls(batches)
+        """Concatenate collections while globally deduplicating archetypes."""
+        normalized = [cls.from_particles(collection) for collection in collections]
+        normalized = [collection for collection in normalized if len(collection)]
+        if not normalized:
+            return cls()
+        positions = np.concatenate([collection.positions for collection in normalized], axis=0)
+        archetypes: list[Particle] = []
+        ids: list[np.ndarray] = []
+        offset = 0
+        for collection in normalized:
+            archetypes.extend(collection.archetypes)
+            ids.append(collection.archetype_indices.astype(np.int64, copy=False) + offset)
+            offset += collection.n_archetypes
+        return cls.from_archetypes(
+            positions=positions,
+            archetypes=archetypes,
+            archetype_indices=np.concatenate(ids),
+        )
 
     @property
     def positions(self) -> np.ndarray:
@@ -459,8 +541,22 @@ class ParticleCollection(Sequence[Particle]):
     def circumscribing_radii(self) -> np.ndarray:
         return self._radii
 
+    @property
+    def archetypes(self) -> tuple[Particle, ...]:
+        """Distinct position-independent particle descriptors."""
+        return self._archetypes
+
+    @property
+    def archetype_indices(self) -> np.ndarray:
+        """Compact instance-to-archetype map aligned with ``positions``."""
+        return self._archetype_indices
+
+    @property
+    def n_archetypes(self) -> int:
+        return len(self._archetypes)
+
     def __len__(self) -> int:
-        return 0 if not self._offsets else int(self._offsets[-1])
+        return int(self._positions.shape[0])
 
     @overload
     def __getitem__(self, index: int) -> Particle: ...
@@ -476,123 +572,140 @@ class ParticleCollection(Sequence[Particle]):
             idx += len(self)
         if idx < 0 or idx >= len(self):
             raise IndexError("particle index out of range")
-        batch_index = bisect_right(self._offsets, idx)
-        batch_start = 0 if batch_index == 0 else self._offsets[batch_index - 1]
-        return self._batches[batch_index].particle_at(idx - batch_start)
+        position = self._positions[idx]
+        archetype = self._archetypes[int(self._archetype_indices[idx])]
+        return replace(
+            archetype,
+            position=(float(position[0]), float(position[1]), float(position[2])),
+        )
 
     def __iter__(self) -> Iterator[Particle]:
-        for batch in self._batches:
-            yield from batch.iter_particles()
+        for index in range(len(self)):
+            yield self[index]
 
-    def representation_groups(
-        self,
-    ) -> tuple[tuple[ParticleTRepresentation, np.ndarray], ...]:
-        grouped: dict[ParticleTRepresentation, list[np.ndarray]] = {}
-        order: list[ParticleTRepresentation] = []
-        start = 0
-        for batch in self._batches:
-            stop = start + len(batch)
-            segments: Iterable[tuple[ParticleTRepresentation, np.ndarray]]
-            if batch.representation is None:
-                local_groups: dict[ParticleTRepresentation, list[int]] = {}
-                local_order: list[ParticleTRepresentation] = []
-                for local, particle in enumerate(batch.iter_particles()):
-                    representation = particle.t_operator_representation
-                    if representation not in local_groups:
-                        local_groups[representation] = []
-                        local_order.append(representation)
-                    local_groups[representation].append(start + local)
-                segments = (
-                    (
-                        representation,
-                        np.asarray(local_groups[representation], dtype=np.int64),
-                    )
-                    for representation in local_order
-                )
-            else:
-                segments = (
-                    (
-                        batch.representation,
-                        np.arange(start, stop, dtype=np.int64),
+    def representation_groups(self) -> tuple[tuple[ParticleTRepresentation, np.ndarray], ...]:
+        """Return particle indices grouped by prepared T representation."""
+        return tuple(
+            (group.representation, group.particle_indices) for group in self.archetype_groups()
+        )
+
+    def archetype_groups(self) -> tuple[ParticleArchetypeGroup, ...]:
+        """Plan representation groups with local shared-archetype mappings."""
+        if not len(self):
+            return ()
+        representations = tuple(particle.t_operator_representation for particle in self._archetypes)
+        ids_i64 = self._archetype_indices.astype(np.int64, copy=False)
+        used_ids, first_positions = np.unique(ids_i64, return_index=True)
+        first_order = np.argsort(first_positions, kind="stable")
+        first_used_ids = used_ids[first_order]
+        ordered_representations: list[ParticleTRepresentation] = []
+        for archetype_id in first_used_ids:
+            representation = representations[int(archetype_id)]
+            if representation not in ordered_representations:
+                ordered_representations.append(representation)
+
+        groups: list[ParticleArchetypeGroup] = []
+        for representation in ordered_representations:
+            matching_archetypes = np.asarray(
+                [rep == representation for rep in representations], dtype=bool
+            )
+            particle_indices = np.flatnonzero(matching_archetypes[ids_i64]).astype(
+                np.int64, copy=False
+            )
+            global_ids = ids_i64[particle_indices]
+            group_archetype_mask = np.asarray(
+                [matching_archetypes[int(archetype_id)] for archetype_id in first_used_ids],
+                dtype=bool,
+            )
+            group_archetype_ids = first_used_ids[group_archetype_mask]
+            global_to_local = np.full(len(representations), -1, dtype=np.int64)
+            global_to_local[group_archetype_ids] = np.arange(group_archetype_ids.size)
+            local_ids = global_to_local[global_ids]
+            groups.append(
+                ParticleArchetypeGroup(
+                    representation=representation,
+                    particle_indices=_owned_read_only_array(
+                        particle_indices, dtype=np.dtype(np.int64)
+                    ),
+                    archetype_indices=_owned_read_only_array(
+                        group_archetype_ids, dtype=np.dtype(np.int64)
+                    ),
+                    operator_indices=_owned_read_only_array(
+                        local_ids, dtype=_compact_index_dtype(group_archetype_ids.size)
                     ),
                 )
-            for representation, indices in segments:
-                if representation not in grouped:
-                    grouped[representation] = []
-                    order.append(representation)
-                grouped[representation].append(indices)
-            start = stop
-        return tuple(
-            (
-                representation,
-                np.concatenate(grouped[representation])
-                if len(grouped[representation]) > 1
-                else grouped[representation][0],
             )
-            for representation in order
-        )
+        return tuple(groups)
 
-    def sphere_parameters(
-        self, particle_indices: np.ndarray
-    ) -> tuple[np.ndarray, np.ndarray] | None:
-        indices = np.asarray(particle_indices, dtype=np.int64).reshape(-1)
-        if indices.size == 0:
-            return np.zeros((0,), dtype=float), np.zeros((0,), dtype=np.complex128)
-        if int(indices.min()) < 0 or int(indices.max()) >= len(self):
-            raise IndexError("sphere-parameter particle index out of range")
-        if (
-            len(self._batches) == 1
-            and isinstance(self._batches[0], _SphereBatch)
-            and indices.size == len(self)
-            and int(indices[0]) == 0
-            and int(indices[-1]) == len(self) - 1
-            and bool(np.all(indices[1:] == indices[:-1] + 1))
-        ):
-            sphere_batch = self._batches[0]
-            return sphere_batch.circumscribing_radii, sphere_batch.refractive_indices
-
-        batch_indices = np.searchsorted(
-            np.asarray(self._offsets, dtype=np.int64),
-            indices,
-            side="right",
+    def indices_of_type(self, particle_type: type[Particle]) -> np.ndarray:
+        """Return instance indices whose archetype is an instance of ``particle_type``."""
+        matching = np.asarray(
+            [isinstance(archetype, particle_type) for archetype in self._archetypes],
+            dtype=bool,
         )
-        batch_starts = np.asarray((0, *self._offsets[:-1]), dtype=np.int64)
-        radii = np.empty((indices.size,), dtype=float)
-        refractive_indices = np.empty((indices.size,), dtype=np.complex128)
-        for batch_index in np.unique(batch_indices):
-            selected_batch = self._batches[int(batch_index)]
-            if not isinstance(selected_batch, _SphereBatch):
-                return None
-            selected = batch_indices == batch_index
-            local = indices[selected] - batch_starts[int(batch_index)]
-            radii[selected] = selected_batch.circumscribing_radii[local]
-            refractive_indices[selected] = selected_batch.refractive_indices[local]
-        return radii, refractive_indices
+        ids = self._archetype_indices.astype(np.int64, copy=False)
+        out = np.flatnonzero(matching[ids]).astype(np.int64, copy=False)
+        out.setflags(write=False)
+        return out
+
+    def scalar_attribute(
+        self,
+        particle_indices: Sequence[int] | np.ndarray,
+        name: str,
+        *,
+        dtype: np.dtype,
+    ) -> np.ndarray:
+        """Gather one scalar archetype attribute for selected instances."""
+        selected = np.asarray(particle_indices, dtype=np.int64).reshape(-1)
+        if selected.size and (int(selected.min()) < 0 or int(selected.max()) >= len(self)):
+            raise IndexError("particle index out of range")
+        values = np.asarray(
+            [getattr(archetype, name) for archetype in self._archetypes], dtype=dtype
+        )
+        return values[self._archetype_indices[selected].astype(np.int64, copy=False)]
 
     def homogeneous_sphere_arrays(
         self,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
-        """Return compact sphere arrays when the collection is one sphere batch."""
-        if len(self._batches) != 1 or not isinstance(self._batches[0], _SphereBatch):
+        """Expose a sphere compute view without changing the storage model."""
+        if not all(isinstance(archetype, Sphere) for archetype in self._archetypes):
             return None
-        batch = self._batches[0]
-        return batch.positions, batch.circumscribing_radii, batch.refractive_indices
-
-    def homogeneous_pec_sphere_radii(self) -> np.ndarray | None:
-        """Return compact radii when the collection is one PEC-sphere batch."""
-        if len(self._batches) != 1 or not isinstance(self._batches[0], _PECSphereBatch):
-            return None
-        return self._batches[0].circumscribing_radii
+        sphere_archetypes = cast(tuple[Sphere, ...], self._archetypes)
+        archetype_ids = self._archetype_indices.astype(np.int64, copy=False)
+        radii_by_archetype = np.asarray(
+            [float(archetype.radius) for archetype in sphere_archetypes], dtype=np.float64
+        )
+        refractive_indices_by_archetype = np.asarray(
+            [complex(archetype.refractive_index) for archetype in sphere_archetypes],
+            dtype=np.complex128,
+        )
+        radii = radii_by_archetype[archetype_ids]
+        refractive_indices = refractive_indices_by_archetype[archetype_ids]
+        return self._positions, radii, refractive_indices
 
     def outer_refractive_index_batches(self) -> Iterator[np.ndarray]:
-        for batch in self._batches:
-            values = batch.outer_refractive_indices()
-            if values is not None and values.size:
-                yield np.asarray(values, dtype=np.complex128)
+        """Yield unique outer refractive indices for validation."""
+        values: list[complex] = []
+        for particle in self._archetypes:
+            if isinstance(particle, Sphere):
+                values.append(complex(particle.refractive_index))
+            elif isinstance(particle, PECSphere):
+                continue
+            elif isinstance(particle, LayeredSphere):
+                values.append(complex(particle.layer_refractive_indices[-1]))
+            elif isinstance(particle, Spheroid):
+                values.append(complex(particle.refractive_index))
+            else:
+                raise TypeError(
+                    f"Unsupported particle type {type(particle).__name__!r} "
+                    "for refractive-index checks."
+                )
+        if values:
+            yield np.asarray(values, dtype=np.complex128)
 
 
 def _as_positions_array(positions: Sequence[Sequence[float]] | np.ndarray) -> np.ndarray:
-    """Normalize particle-center inputs to shape `(N, 3)` float arrays."""
+    """Normalize particle-center inputs to shape ``(N, 3)`` float arrays."""
     pos = np.asarray(positions, dtype=float)
     if pos.ndim != 2 or pos.shape[1] != 3:
         raise ValueError(f"`positions` must have shape (N, 3). Got {pos.shape}.")
@@ -607,7 +720,7 @@ def _as_complex_vector(
     n: int,
     name: str,
 ) -> np.ndarray:
-    """Normalize scalar-or-vector complex inputs to length `n`."""
+    """Normalize scalar-or-vector complex inputs to length ``n``."""
     arr = np.asarray(values, dtype=np.complex128)
     if arr.ndim == 0:
         out = np.full((n,), complex(arr), dtype=np.complex128)
@@ -630,7 +743,7 @@ def spheres_from_arrays(
     radii: Sequence[float] | np.ndarray,
     refractive_indices: Sequence[complex] | np.ndarray | complex,
 ) -> ParticleCollection:
-    """Create an array-native homogeneous-sphere collection."""
+    """Create homogeneous-sphere instances in the shared-archetype model."""
     pos = _as_positions_array(positions)
     n = int(pos.shape[0])
     rad = np.asarray(radii, dtype=float).reshape(-1)
@@ -639,14 +752,19 @@ def spheres_from_arrays(
     if np.any(~np.isfinite(rad)) or np.any(rad <= 0.0):
         raise ValueError("`radii` must be finite and strictly positive.")
     n_part = _as_complex_vector(refractive_indices, n=n, name="refractive_indices")
-    return ParticleCollection(
-        (
-            _SphereBatch(
-                _positions=_owned_read_only_array(pos, dtype=np.dtype(float)),
-                _circumscribing_radii=_owned_read_only_array(rad, dtype=np.dtype(float)),
-                refractive_indices=_owned_read_only_array(n_part, dtype=np.dtype(np.complex128)),
-            ),
+    rows, ids = _stable_unique_rows(np.column_stack((rad, n_part.real, n_part.imag)))
+    archetypes = tuple(
+        Sphere(
+            position=(0.0, 0.0, 0.0),
+            radius=float(radius),
+            refractive_index=complex(float(n_real), float(n_imag)),
         )
+        for radius, n_real, n_imag in rows
+    )
+    return ParticleCollection.from_archetypes(
+        positions=pos,
+        archetypes=archetypes,
+        archetype_indices=ids,
     )
 
 
@@ -655,11 +773,7 @@ def pec_spheres_from_arrays(
     positions: Sequence[Sequence[float]] | np.ndarray,
     radii: Sequence[float] | np.ndarray,
 ) -> ParticleCollection:
-    """Create an array-native perfect-electric-conductor sphere collection.
-
-    Unlike :func:`spheres_from_arrays`, this helper intentionally has no
-    refractive-index argument: the particle response is the analytic PEC limit.
-    """
+    """Create PEC-sphere instances in the shared-archetype model."""
     pos = _as_positions_array(positions)
     n = int(pos.shape[0])
     rad = np.asarray(radii, dtype=float).reshape(-1)
@@ -667,13 +781,12 @@ def pec_spheres_from_arrays(
         raise ValueError(f"`radii` length ({rad.shape[0]}) must match number of particles ({n}).")
     if np.any(~np.isfinite(rad)) or np.any(rad <= 0.0):
         raise ValueError("`radii` must be finite and strictly positive.")
-    return ParticleCollection(
-        (
-            _PECSphereBatch(
-                _positions=_owned_read_only_array(pos, dtype=np.dtype(float)),
-                _circumscribing_radii=_owned_read_only_array(rad, dtype=np.dtype(float)),
-            ),
-        )
+    rows, ids = _stable_unique_rows(rad[:, None])
+    archetypes = tuple(PECSphere(position=(0.0, 0.0, 0.0), radius=float(row[0])) for row in rows)
+    return ParticleCollection.from_archetypes(
+        positions=pos,
+        archetypes=archetypes,
+        archetype_indices=ids,
     )
 
 
@@ -683,7 +796,7 @@ def _as_layer_matrix(
     n_particles: int,
     name: str,
 ) -> np.ndarray:
-    """Normalize layer-value inputs to shape `(N, L)` with optional broadcast."""
+    """Normalize layer-value inputs to shape ``(N, L)`` with optional broadcast."""
     arr = np.asarray(values)
     if arr.ndim == 1:
         if arr.size == 0:
@@ -706,13 +819,41 @@ def layered_spheres_from_arrays(
     layer_radii: Sequence[Sequence[float]] | Sequence[float] | np.ndarray,
     layer_refractive_indices: Sequence[Sequence[complex]] | Sequence[complex] | np.ndarray,
 ) -> ParticleCollection:
-    """Create an immutable concentric layered-sphere collection.
-
-    For convenience, `(L,)` layer inputs are broadcast to all particles.
-    Combine batches with :meth:`ParticleCollection.concatenate`.
-    """
+    """Create layered-sphere instances in the shared-archetype model."""
     pos = _as_positions_array(positions)
     n = int(pos.shape[0])
+    lr_input = np.asarray(layer_radii)
+    li_input = np.asarray(layer_refractive_indices)
+    if lr_input.ndim == 1 and li_input.ndim == 1:
+        lr_single = lr_input.astype(float, copy=False).reshape(-1)
+        li_single = li_input.astype(np.complex128, copy=False).reshape(-1)
+        if lr_single.size == 0 or li_single.size == 0:
+            raise ValueError("Layer metadata must contain at least one layer.")
+        if lr_single.shape != li_single.shape:
+            raise ValueError(
+                "`layer_radii` and `layer_refractive_indices` must share shape. "
+                f"Got {lr_single.shape} vs {li_single.shape}."
+            )
+        if np.any(~np.isfinite(lr_single)) or np.any(lr_single <= 0.0):
+            raise ValueError("`layer_radii` entries must be finite and strictly positive.")
+        if np.any(np.diff(lr_single) <= 0.0):
+            raise ValueError("Each particle `layer_radii` row must be strictly increasing.")
+        if not np.all(np.isfinite(li_single.real)) or not np.all(np.isfinite(li_single.imag)):
+            raise ValueError("`layer_refractive_indices` must contain only finite values.")
+        if np.any(li_single.real <= 0.0):
+            raise ValueError("Real part of `layer_refractive_indices` must be strictly positive.")
+        return ParticleCollection.from_archetypes(
+            positions=pos,
+            archetypes=(
+                LayeredSphere(
+                    position=(0.0, 0.0, 0.0),
+                    layer_radii=tuple(float(value) for value in lr_single),
+                    layer_refractive_indices=tuple(complex(value) for value in li_single),
+                ),
+            ),
+            archetype_indices=np.zeros((n,), dtype=np.uint8),
+        )
+
     lr = _as_layer_matrix(layer_radii, n_particles=n, name="layer_radii").astype(float, copy=False)
     li = _as_layer_matrix(
         layer_refractive_indices,
@@ -733,15 +874,27 @@ def layered_spheres_from_arrays(
     if np.any(li.real <= 0.0):
         raise ValueError("Real part of `layer_refractive_indices` must be strictly positive.")
 
-    return ParticleCollection.from_particles(
-        tuple(
-            LayeredSphere(
-                position=(float(p[0]), float(p[1]), float(p[2])),
-                layer_radii=tuple(float(value) for value in radii_row),
-                layer_refractive_indices=tuple(complex(value) for value in index_row),
-            )
-            for p, radii_row, index_row in zip(pos, lr, li, strict=True)
+    n_layers = int(lr.shape[1])
+    rows, ids = _stable_unique_rows(np.concatenate((lr, li.real, li.imag), axis=1))
+    archetypes = tuple(
+        LayeredSphere(
+            position=(0.0, 0.0, 0.0),
+            layer_radii=tuple(float(value) for value in row[:n_layers]),
+            layer_refractive_indices=tuple(
+                complex(float(real), float(imag))
+                for real, imag in zip(
+                    row[n_layers : 2 * n_layers],
+                    row[2 * n_layers :],
+                    strict=True,
+                )
+            ),
         )
+        for row in rows
+    )
+    return ParticleCollection.from_archetypes(
+        positions=pos,
+        archetypes=archetypes,
+        archetype_indices=ids,
     )
 
 
@@ -751,7 +904,7 @@ def _as_positive_float_vector(
     n: int,
     name: str,
 ) -> np.ndarray:
-    """Normalize scalar-or-vector positive float inputs to length `n`."""
+    """Normalize scalar-or-vector positive float inputs to length ``n``."""
     arr = np.asarray(values, dtype=float)
     if arr.ndim == 0:
         out = np.full((n,), float(arr), dtype=float)
@@ -774,13 +927,50 @@ def spheroids_from_arrays(
     refractive_indices: Sequence[complex] | np.ndarray | complex,
     euler_angles: Sequence[Sequence[float]] | Sequence[float] | np.ndarray = (0.0, 0.0, 0.0),
 ) -> ParticleCollection:
-    """Create an immutable homogeneous-spheroid collection."""
+    """Create spheroid instances in the shared-archetype model."""
     pos = _as_positions_array(positions)
     n = int(pos.shape[0])
+    eq_input = np.asarray(equatorial_radii, dtype=float)
+    po_input = np.asarray(polar_radii, dtype=float)
+    index_input = np.asarray(refractive_indices, dtype=np.complex128)
+    eul = np.asarray(euler_angles, dtype=float)
+    if (
+        eq_input.ndim == 0
+        and po_input.ndim == 0
+        and index_input.ndim == 0
+        and eul.ndim == 1
+        and eul.shape == (3,)
+    ):
+        eq_single = float(eq_input)
+        po_single = float(po_input)
+        index_single = complex(index_input)
+        if not np.isfinite(eq_single) or eq_single <= 0.0:
+            raise ValueError("`equatorial_radii` must contain finite strictly positive values.")
+        if not np.isfinite(po_single) or po_single <= 0.0:
+            raise ValueError("`polar_radii` must contain finite strictly positive values.")
+        if not np.isfinite(index_single.real) or not np.isfinite(index_single.imag):
+            raise ValueError("`refractive_indices` must contain only finite values.")
+        if index_single.real <= 0.0:
+            raise ValueError("Real part of `refractive_indices` must be strictly positive.")
+        if np.any(~np.isfinite(eul)):
+            raise ValueError("`euler_angles` must contain only finite values.")
+        return ParticleCollection.from_archetypes(
+            positions=pos,
+            archetypes=(
+                Spheroid(
+                    position=(0.0, 0.0, 0.0),
+                    equatorial_radius=eq_single,
+                    polar_radius=po_single,
+                    refractive_index=index_single,
+                    euler_angles=(float(eul[0]), float(eul[1]), float(eul[2])),
+                ),
+            ),
+            archetype_indices=np.zeros((n,), dtype=np.uint8),
+        )
+
     eq = _as_positive_float_vector(equatorial_radii, n=n, name="equatorial_radii")
     po = _as_positive_float_vector(polar_radii, n=n, name="polar_radii")
 
-    eul = np.asarray(euler_angles, dtype=float)
     if eul.ndim == 1:
         if eul.shape[0] != 3:
             raise ValueError(f"`euler_angles` must have shape (3,) or (N,3). Got {eul.shape}.")
@@ -793,22 +983,19 @@ def spheroids_from_arrays(
         raise ValueError("`euler_angles` must contain only finite values.")
 
     n_part = _as_complex_vector(refractive_indices, n=n, name="refractive_indices")
-    return ParticleCollection.from_particles(
-        tuple(
-            Spheroid(
-                position=(float(p[0]), float(p[1]), float(p[2])),
-                equatorial_radius=float(a_eq),
-                polar_radius=float(a_po),
-                refractive_index=complex(index),
-                euler_angles=(float(angles[0]), float(angles[1]), float(angles[2])),
-            )
-            for p, a_eq, a_po, index, angles in zip(
-                pos,
-                eq,
-                po,
-                n_part,
-                eul,
-                strict=True,
-            )
+    rows, ids = _stable_unique_rows(np.column_stack((eq, po, n_part.real, n_part.imag, eul)))
+    archetypes = tuple(
+        Spheroid(
+            position=(0.0, 0.0, 0.0),
+            equatorial_radius=float(row[0]),
+            polar_radius=float(row[1]),
+            refractive_index=complex(float(row[2]), float(row[3])),
+            euler_angles=(float(row[4]), float(row[5]), float(row[6])),
         )
+        for row in rows
+    )
+    return ParticleCollection.from_archetypes(
+        positions=pos,
+        archetypes=archetypes,
+        archetype_indices=ids,
     )

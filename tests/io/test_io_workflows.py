@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from pyceles.core.fields import PlaneWave
-from pyceles.core.particles import Sphere, spheres_from_arrays
+from pyceles.core.particles import ParticleCollection, Sphere, spheres_from_arrays
 from pyceles.io.workflows import load_simulation_h5, save_simulation_h5
 from pyceles.linear.solvers import LinearSolveResult
 from pyceles.postprocessing.farfield import FarFieldPatterns
@@ -187,7 +187,9 @@ def test_no_scatterer_run_roundtrip_io_workflow(tmp_path):
     geometry = cast(dict[str, Any], loaded["geometry"])
     solution = cast(dict[str, Any], loaded["solution"])
 
-    assert geometry["particles"] == tuple()
+    geometry_particles = geometry["particles"]
+    assert isinstance(geometry_particles, ParticleCollection)
+    assert len(geometry_particles) == 0
     assert "positions" not in geometry
     assert np.asarray(solution["coeffs"]).shape[0] == 0
     assert "far_field" in loaded
@@ -233,8 +235,9 @@ def test_save_simulation_h5_geometry_loads_particles(tmp_path):
     out = save_simulation_h5(run, near, tmp_path / "particle_roundtrip.h5")
     loaded = cast(dict[str, Any], load_simulation_h5(out))
     geometry = cast(dict[str, Any], loaded["geometry"])
-    geometry_particles = cast(tuple[Sphere, ...], geometry["particles"])
+    geometry_particles = cast(ParticleCollection, geometry["particles"])
 
+    assert isinstance(geometry_particles, ParticleCollection)
     assert len(geometry_particles) == 1
     assert geometry_particles[0] == particles[0]
 

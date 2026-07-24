@@ -20,6 +20,7 @@ For the current feature inventory, start with
 - [Capabilities](capabilities.md)
 - [API map](api.md)
 - [Workflow notes](workflows.md)
+- [Particle storage](particle_storage.md)
 - [Performance notes](performance.md)
 - [Validation and reproducibility](validation.md)
 - [Current limitations](limitations.md)

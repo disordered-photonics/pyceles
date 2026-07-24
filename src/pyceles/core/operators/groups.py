@@ -1,10 +1,10 @@
-"""Prepared single-particle group types and group-factory planning."""
+"""Prepared single-particle group types and archetype-aware planning."""
 
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
-from typing import Protocol
+from dataclasses import dataclass, field
+from typing import Protocol, cast
 
 import numpy as np
 
@@ -17,10 +17,17 @@ COMPLEX128_DTYPE = np.dtype(np.complex128)
 
 @dataclass(frozen=True)
 class ParticleTGroupPlan:
-    """Planned subset of particles sharing one prepared `T` representation."""
+    """Planned instances sharing one prepared ``T`` representation.
+
+    ``archetype_indices`` identifies the unique collection archetypes that need
+    one prepared operator each. ``operator_indices`` is aligned with
+    ``particle_indices`` and maps every instance to a local prepared operator.
+    """
 
     representation: ParticleTRepresentation
     particle_indices: Array
+    archetype_indices: Array
+    operator_indices: Array
 
 
 @dataclass(frozen=True)
@@ -29,7 +36,7 @@ class ParticleTPreparationContext:
 
     lmax: int
     k: float
-    particles: Sequence[Particle]
+    particles: ParticleCollection
     n_medium: complex
     dtype: np.dtype
 
@@ -37,11 +44,24 @@ class ParticleTPreparationContext:
     def n_modes(self) -> int:
         return n_modes(self.lmax)
 
+    def archetypes_for(self, plan: ParticleTGroupPlan) -> tuple[Particle, ...]:
+        return tuple(
+            self.particles.archetypes[int(index)]
+            for index in np.asarray(plan.archetype_indices, dtype=np.int64)
+        )
+
+    def instances_for(self, plan: ParticleTGroupPlan) -> tuple[Particle, ...]:
+        return tuple(
+            self.particles[int(index)]
+            for index in np.asarray(plan.particle_indices, dtype=np.int64)
+        )
+
 
 class PreparedParticleTGroup(Protocol):
-    """Prepared subset of particles sharing one `T` representation."""
+    """Prepared subset of particles sharing one ``T`` representation."""
 
     particle_indices: Array
+    operator_indices: Array
     dtype: np.dtype
 
     def apply_subset(self, x_subset: Array) -> Array: ...
@@ -72,7 +92,7 @@ type AxisymmetricMetadataBuilder = Callable[
 
 @dataclass(frozen=True)
 class ParticleTGroupFactories:
-    """Optional representation-specific group factories for `prepare_matvec`."""
+    """Optional representation-specific group factories for ``prepare_matvec``."""
 
     diagonal: ParticleTGroupFactory | None = None
     axisymmetric: ParticleTGroupFactory | None = None
@@ -90,65 +110,164 @@ class ParticleTGroupFactories:
         raise ValueError(f"Unsupported particle-T representation {representation!r}.")
 
 
+def _normalized_operator_indices(
+    particle_indices: Array,
+    operator_indices: Array | None,
+    *,
+    n_operators: int,
+) -> tuple[Array, Array]:
+    particles = np.asarray(particle_indices, dtype=np.int64).reshape(-1)
+    if operator_indices is None:
+        if n_operators == particles.size:
+            operators = np.arange(particles.size, dtype=np.int64)
+        elif n_operators == 1:
+            operators = np.zeros(particles.size, dtype=np.int64)
+        else:
+            raise ValueError(
+                "A shared T group requires an explicit instance-to-operator map. "
+                f"Got {particles.size} particles and {n_operators} operators."
+            )
+    else:
+        operators = np.asarray(operator_indices, dtype=np.int64).reshape(-1)
+    if operators.size != particles.size:
+        raise ValueError(
+            "`operator_indices` must align with `particle_indices`. "
+            f"Got {operators.size} and {particles.size}."
+        )
+    if operators.size and (int(operators.min()) < 0 or int(operators.max()) >= int(n_operators)):
+        raise IndexError("`operator_indices` contains an out-of-range operator id.")
+    return particles, operators
+
+
+def _mapped_rows(values: Array, operator_indices: Array) -> Array:
+    """Expand mapped rows only for diagnostics that explicitly require them."""
+    rows = np.asarray(values)
+    ids = np.asarray(operator_indices, dtype=np.int64)
+    if rows.shape[0] == ids.size and np.array_equal(ids, np.arange(ids.size)):
+        return rows
+    return rows[ids]
+
+
+def _apply_shared_diagonal(values: Array, operator_indices: Array, x_subset: Array) -> Array:
+    """Apply shared diagonal rows without retaining an expanded diagonal table."""
+    rows = np.asarray(values)
+    ids = np.asarray(operator_indices, dtype=np.int64)
+    arr = np.asarray(x_subset)
+    if rows.shape[0] == 1:
+        return cast(Array, rows[0] * arr)
+    if rows.shape[0] == ids.size and np.array_equal(ids, np.arange(ids.size)):
+        return cast(Array, rows * arr)
+    out = np.empty_like(arr)
+    for operator_index in range(rows.shape[0]):
+        selected = ids == operator_index
+        out[selected] = rows[operator_index] * arr[selected]
+    return out
+
+
+def _apply_shared_dense(blocks: Array, operator_indices: Array, x_subset: Array) -> Array:
+    """Apply shared dense blocks without constructing ``blocks[operator_indices]``."""
+    block_rows = np.asarray(blocks)
+    ids = np.asarray(operator_indices, dtype=np.int64)
+    arr = np.asarray(x_subset)
+    if block_rows.shape[0] == 1:
+        return cast(Array, np.einsum("ij,gj->gi", block_rows[0], arr, optimize=True))
+    if block_rows.shape[0] == ids.size and np.array_equal(ids, np.arange(ids.size)):
+        return cast(Array, np.einsum("gij,gj->gi", block_rows, arr, optimize=True))
+    out = np.empty_like(arr)
+    for operator_index in range(block_rows.shape[0]):
+        selected = ids == operator_index
+        out[selected] = np.einsum(
+            "ij,gj->gi", block_rows[operator_index], arr[selected], optimize=True
+        )
+    return out
+
+
 @dataclass
 class DiagonalTGroup:
     particle_indices: Array
     T_M: Array
     T_N: Array
     T_diag: Array
+    operator_indices: Array = field(default_factory=lambda: np.zeros((0,), dtype=np.int64))
     dtype: np.dtype = COMPLEX128_DTYPE
 
+    def __post_init__(self) -> None:
+        self.T_M = np.asarray(self.T_M, dtype=self.dtype)
+        self.T_N = np.asarray(self.T_N, dtype=self.dtype)
+        self.T_diag = np.asarray(self.T_diag, dtype=self.dtype)
+        if self.T_M.shape[0] != self.T_N.shape[0] or self.T_M.shape[0] != self.T_diag.shape[0]:
+            raise ValueError("Diagonal T data must have one row per prepared archetype.")
+        self.particle_indices, self.operator_indices = _normalized_operator_indices(
+            self.particle_indices,
+            None if self.operator_indices.size == 0 else self.operator_indices,
+            n_operators=self.T_diag.shape[0],
+        )
+
     def apply_subset(self, x_subset: Array) -> Array:
-        arr = np.asarray(x_subset, dtype=self.dtype)
-        return np.asarray(self.T_diag * arr, dtype=self.dtype)
+        return np.asarray(
+            _apply_shared_diagonal(
+                self.T_diag,
+                self.operator_indices,
+                np.asarray(x_subset, dtype=self.dtype),
+            ),
+            dtype=self.dtype,
+        )
 
     def rhs_subset(self, b_subset: Array) -> Array:
         return self.apply_subset(b_subset)
 
     def apply_local_block(self, local_particle_index: int, block: Array) -> Array:
+        operator_index = int(self.operator_indices[int(local_particle_index)])
         return np.asarray(
-            self.T_diag[int(local_particle_index)][:, None] * np.asarray(block, dtype=self.dtype),
+            self.T_diag[operator_index][:, None] * np.asarray(block, dtype=self.dtype),
             dtype=self.dtype,
         )
 
     def mode_diagonal(self) -> Array | None:
-        return np.asarray(self.T_diag, dtype=self.dtype)
+        return np.asarray(_mapped_rows(self.T_diag, self.operator_indices), dtype=self.dtype)
 
     def degree_diagonals(self) -> tuple[Array, Array] | None:
-        return np.asarray(self.T_M, dtype=self.dtype), np.asarray(self.T_N, dtype=self.dtype)
+        return (
+            np.asarray(_mapped_rows(self.T_M, self.operator_indices), dtype=self.dtype),
+            np.asarray(_mapped_rows(self.T_N, self.operator_indices), dtype=self.dtype),
+        )
 
 
 @dataclass
 class DenseTGroup:
     particle_indices: Array
     T_blocks: Array
+    operator_indices: Array = field(default_factory=lambda: np.zeros((0,), dtype=np.int64))
     dtype: np.dtype = COMPLEX128_DTYPE
 
     def __post_init__(self) -> None:
         blocks = np.asarray(self.T_blocks, dtype=self.dtype)
         if blocks.ndim != 3 or blocks.shape[1] != blocks.shape[2]:
-            raise ValueError(f"`T_blocks` must have shape (Ng, Nm, Nm). Got {blocks.shape}.")
-        ids = np.asarray(self.particle_indices, dtype=np.int64).reshape(-1)
-        if blocks.shape[0] != ids.size:
-            raise ValueError(
-                "Dense particle-T group must have one T block per particle. "
-                f"Got {blocks.shape[0]} blocks for {ids.size} particles."
-            )
-        self.particle_indices = ids
+            raise ValueError(f"`T_blocks` must have shape (Nu, Nm, Nm). Got {blocks.shape}.")
+        self.particle_indices, self.operator_indices = _normalized_operator_indices(
+            self.particle_indices,
+            None if self.operator_indices.size == 0 else self.operator_indices,
+            n_operators=blocks.shape[0],
+        )
         self.T_blocks = blocks
 
     def apply_subset(self, x_subset: Array) -> Array:
-        arr = np.asarray(x_subset, dtype=self.dtype)
         return np.asarray(
-            np.einsum("gij,gj->gi", self.T_blocks, arr, optimize=True), dtype=self.dtype
+            _apply_shared_dense(
+                self.T_blocks,
+                self.operator_indices,
+                np.asarray(x_subset, dtype=self.dtype),
+            ),
+            dtype=self.dtype,
         )
 
     def rhs_subset(self, b_subset: Array) -> Array:
         return self.apply_subset(b_subset)
 
     def apply_local_block(self, local_particle_index: int, block: Array) -> Array:
+        operator_index = int(self.operator_indices[int(local_particle_index)])
         return np.asarray(
-            self.T_blocks[int(local_particle_index)] @ np.asarray(block, dtype=self.dtype),
+            self.T_blocks[operator_index] @ np.asarray(block, dtype=self.dtype),
             dtype=self.dtype,
         )
 
@@ -163,6 +282,7 @@ class DenseTGroup:
 class AxisymmetricTGroup:
     particle_indices: Array
     T_blocks: Array | None = None
+    operator_indices: Array = field(default_factory=lambda: np.zeros((0,), dtype=np.int64))
     apply_subset_fn: Callable[[Array], Array] | None = None
     rhs_subset_fn: Callable[[Array], Array] | None = None
     apply_local_block_fn: Callable[[int, Array], Array] | None = None
@@ -170,26 +290,31 @@ class AxisymmetricTGroup:
     dtype: np.dtype = COMPLEX128_DTYPE
 
     def __post_init__(self) -> None:
-        self.particle_indices = np.asarray(self.particle_indices, dtype=np.int64).reshape(-1)
         if self.T_blocks is not None:
             blocks = np.asarray(self.T_blocks, dtype=self.dtype)
-            ids = np.asarray(self.particle_indices, dtype=np.int64).reshape(-1)
             if blocks.ndim != 3 or blocks.shape[1] != blocks.shape[2]:
                 raise ValueError(
-                    "Axisymmetric dense fallback must provide blocks of shape (Ng, Nm, Nm)."
+                    "Axisymmetric dense fallback must provide blocks of shape (Nu, Nm, Nm)."
                 )
-            if blocks.shape[0] != ids.size:
-                raise ValueError(
-                    "Axisymmetric dense fallback must provide one T block per particle. "
-                    f"Got {blocks.shape[0]} blocks for {ids.size} particles."
-                )
+            self.particle_indices, self.operator_indices = _normalized_operator_indices(
+                self.particle_indices,
+                None if self.operator_indices.size == 0 else self.operator_indices,
+                n_operators=blocks.shape[0],
+            )
             self.T_blocks = blocks
+        else:
+            self.particle_indices = np.asarray(self.particle_indices, dtype=np.int64).reshape(-1)
+            self.operator_indices = np.arange(self.particle_indices.size, dtype=np.int64)
 
     def apply_subset(self, x_subset: Array) -> Array:
         if self.T_blocks is not None:
-            arr = np.asarray(x_subset, dtype=self.dtype)
             return np.asarray(
-                np.einsum("gij,gj->gi", self.T_blocks, arr, optimize=True), dtype=self.dtype
+                _apply_shared_dense(
+                    self.T_blocks,
+                    self.operator_indices,
+                    np.asarray(x_subset, dtype=self.dtype),
+                ),
+                dtype=self.dtype,
             )
         if self.apply_subset_fn is None:
             raise NotImplementedError(
@@ -210,8 +335,9 @@ class AxisymmetricTGroup:
 
     def apply_local_block(self, local_particle_index: int, block: Array) -> Array:
         if self.T_blocks is not None:
+            operator_index = int(self.operator_indices[int(local_particle_index)])
             return np.asarray(
-                self.T_blocks[int(local_particle_index)] @ np.asarray(block, dtype=self.dtype),
+                self.T_blocks[operator_index] @ np.asarray(block, dtype=self.dtype),
                 dtype=self.dtype,
             )
         if self.apply_local_block_fn is None:
@@ -233,47 +359,31 @@ class AxisymmetricTGroup:
 
 
 def plan_particle_t_groups(particles: Sequence[Particle]) -> tuple[ParticleTGroupPlan, ...]:
-    """Plan particle-local `T` groups before preparing concrete operators."""
-    if len(particles) == 0:
-        return ()
-    if isinstance(particles, ParticleCollection):
-        return tuple(
-            ParticleTGroupPlan(
-                representation=representation,
-                particle_indices=np.asarray(indices, dtype=np.int64),
-            )
-            for representation, indices in particles.representation_groups()
-        )
-
-    grouped: dict[ParticleTRepresentation, list[int]] = {}
-    order: list[ParticleTRepresentation] = []
-    for idx, particle in enumerate(particles):
-        rep = particle.t_operator_representation
-        if rep not in grouped:
-            grouped[rep] = []
-            order.append(rep)
-        grouped[rep].append(int(idx))
-
+    """Plan particle-local groups and retain shared-archetype mappings."""
+    collection = ParticleCollection.from_particles(particles)
     return tuple(
         ParticleTGroupPlan(
-            representation=rep,
-            particle_indices=np.asarray(grouped[rep], dtype=np.int64),
+            representation=group.representation,
+            particle_indices=np.asarray(group.particle_indices, dtype=np.int64),
+            archetype_indices=np.asarray(group.archetype_indices, dtype=np.int64),
+            operator_indices=np.asarray(group.operator_indices, dtype=np.int64),
         )
-        for rep in order
+        for group in collection.archetype_groups()
     )
 
 
 def make_dense_group_factory(block_provider: DenseBlockProvider) -> ParticleTGroupFactory:
-    """Build a dense-group factory from a particle-subset T-block provider."""
+    """Build a dense group from one block per unique particle archetype."""
 
     def factory(
         plan: ParticleTGroupPlan, context: ParticleTPreparationContext
     ) -> PreparedParticleTGroup:
         ids = np.asarray(plan.particle_indices, dtype=np.int64)
-        group_particles = tuple(context.particles[int(i)] for i in ids)
+        archetypes = context.archetypes_for(plan)
         return DenseTGroup(
             particle_indices=ids,
-            T_blocks=np.asarray(block_provider(group_particles, context), dtype=context.dtype),
+            operator_indices=np.asarray(plan.operator_indices, dtype=np.int64),
+            T_blocks=np.asarray(block_provider(archetypes, context), dtype=context.dtype),
             dtype=context.dtype,
         )
 
@@ -287,13 +397,13 @@ def make_axisymmetric_group_factory(
     rhs_subset: AxisymmetricSubsetApply | None = None,
     metadata_builder: AxisymmetricMetadataBuilder | None = None,
 ) -> ParticleTGroupFactory:
-    """Build an axisymmetric-group factory from high-level apply callbacks."""
+    """Build an axisymmetric group from high-level per-instance callbacks."""
 
     def factory(
         plan: ParticleTGroupPlan, context: ParticleTPreparationContext
     ) -> PreparedParticleTGroup:
         ids = np.asarray(plan.particle_indices, dtype=np.int64)
-        group_particles = tuple(context.particles[int(i)] for i in ids)
+        group_particles = context.instances_for(plan)
         metadata = None if metadata_builder is None else metadata_builder(group_particles, context)
 
         def apply_subset_bound(x_subset: Array) -> Array:
@@ -338,17 +448,18 @@ def make_axisymmetric_block_group_factory(
     *,
     metadata_builder: AxisymmetricMetadataBuilder | None = None,
 ) -> ParticleTGroupFactory:
-    """Build an axisymmetric group from full spherical-basis T blocks."""
+    """Build an axisymmetric group from one dense block per unique archetype."""
 
     def factory(
         plan: ParticleTGroupPlan, context: ParticleTPreparationContext
     ) -> PreparedParticleTGroup:
         ids = np.asarray(plan.particle_indices, dtype=np.int64)
-        group_particles = tuple(context.particles[int(i)] for i in ids)
-        metadata = None if metadata_builder is None else metadata_builder(group_particles, context)
+        archetypes = context.archetypes_for(plan)
+        metadata = None if metadata_builder is None else metadata_builder(archetypes, context)
         return AxisymmetricTGroup(
             particle_indices=ids,
-            T_blocks=np.asarray(block_provider(group_particles, context), dtype=context.dtype),
+            operator_indices=np.asarray(plan.operator_indices, dtype=np.int64),
+            T_blocks=np.asarray(block_provider(archetypes, context), dtype=context.dtype),
             body_metadata=metadata,
             dtype=context.dtype,
         )

@@ -9,6 +9,21 @@ This page records current limitations.
 - T-matrix superposition assumes disjoint particle circumscribing spheres. This is enforced by default through `Simulation` geometry checks.
 - At the moment, this restriction is especially limiting for close spheroids because their circumscribing spheres can in principle overlap even when physical spheroids do not.
 
+## Particle archetypes and scaling
+
+- Geometry and prepared single-body storage scale with the number of unique
+  archetypes, not only with particle count. Repeated layered spheres,
+  spheroids, and custom dense T matrices therefore share storage and prepared
+  operators just as repeated homogeneous spheres do.
+- An orientation is currently part of the solver-facing spheroid archetype
+  because the fallback stores a lab-frame dense block. A geometry with
+  effectively unique orientations can therefore have as many prepared blocks
+  as particles. A body-frame/block-sparse rotation representation is the
+  intended extension for that workload.
+- Fully unique arbitrary dense T matrices are inherently `O(N * Nm^2)` unless a
+  future backend provides additional block-sparse, low-rank, or on-the-fly
+  structure.
+
 ## Spheroids
 
 - Homogeneous axisymmetric spheroids are supported with aligned/rotated spherical-basis T-matrix blocks.

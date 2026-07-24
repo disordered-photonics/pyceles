@@ -7,7 +7,14 @@ from typing import Any
 import h5py
 import numpy as np
 
-from pyceles.core.particles import LayeredSphere, Particle, PECSphere, Sphere, Spheroid
+from pyceles.core.particles import (
+    LayeredSphere,
+    Particle,
+    ParticleCollection,
+    PECSphere,
+    Sphere,
+    Spheroid,
+)
 
 
 def _pathlike(path: str | Path) -> str:
@@ -43,152 +50,180 @@ def _write_dataset(group: h5py.Group, name: str, value: Any, *, compression: str
         group.create_dataset(name, data=arr, **kwargs)
 
 
+def _write_particle_payload(
+    pgroup: h5py.Group,
+    particle: Particle,
+    *,
+    compression: str | None,
+) -> None:
+    """Persist one position-independent particle archetype."""
+    if isinstance(particle, PECSphere):
+        pgroup.attrs["type"] = "PECSphere"
+        _write_dataset(pgroup, "radius", float(particle.radius), compression=None)
+    elif isinstance(particle, Sphere):
+        pgroup.attrs["type"] = "Sphere"
+        _write_dataset(pgroup, "radius", float(particle.radius), compression=None)
+        _write_dataset(
+            pgroup,
+            "refractive_index",
+            np.asarray(complex(particle.refractive_index), dtype=np.complex128),
+            compression=None,
+        )
+    elif isinstance(particle, LayeredSphere):
+        pgroup.attrs["type"] = "LayeredSphere"
+        _write_dataset(
+            pgroup,
+            "layer_radii",
+            np.asarray(particle.layer_radii, dtype=float),
+            compression=compression,
+        )
+        _write_dataset(
+            pgroup,
+            "layer_refractive_indices",
+            np.asarray(particle.layer_refractive_indices, dtype=np.complex128),
+            compression=compression,
+        )
+    elif isinstance(particle, Spheroid):
+        pgroup.attrs["type"] = "Spheroid"
+        _write_dataset(
+            pgroup,
+            "equatorial_radius",
+            np.asarray(float(particle.equatorial_radius), dtype=float),
+            compression=None,
+        )
+        _write_dataset(
+            pgroup,
+            "polar_radius",
+            np.asarray(float(particle.polar_radius), dtype=float),
+            compression=None,
+        )
+        _write_dataset(
+            pgroup,
+            "refractive_index",
+            np.asarray(complex(particle.refractive_index), dtype=np.complex128),
+            compression=None,
+        )
+        _write_dataset(
+            pgroup,
+            "euler_angles",
+            np.asarray(particle.euler_angles, dtype=float),
+            compression=None,
+        )
+    else:
+        raise TypeError(f"Unsupported particle type {type(particle).__name__!r}.")
+
+
 def _write_particle_descriptors(
     group: h5py.Group,
     particles: Sequence[Particle],
     *,
     compression: str | None,
 ) -> None:
-    """Persist explicit particle descriptors in canonical typed form."""
+    """Persist the canonical instance/archetype particle representation."""
+    collection = ParticleCollection.from_particles(particles)
     pg = group.create_group("particles")
-    pg.attrs["schema"] = "pyceles.particles.v1"
-    pg.attrs["count"] = len(particles)
-    for idx, particle in enumerate(particles):
-        pgroup = pg.create_group(str(idx))
-        _write_dataset(
-            pgroup, "position", np.asarray(particle.position, dtype=float), compression=None
+    pg.attrs["schema"] = "pyceles.particles.v2"
+    pg.attrs["count"] = len(collection)
+    pg.attrs["archetype_count"] = collection.n_archetypes
+    _write_dataset(pg, "positions", collection.positions, compression=compression)
+    _write_dataset(
+        pg,
+        "archetype_indices",
+        collection.archetype_indices,
+        compression=compression,
+    )
+    archetypes_group = pg.create_group("archetypes")
+    for index, particle in enumerate(collection.archetypes):
+        _write_particle_payload(
+            archetypes_group.create_group(str(index)),
+            particle,
+            compression=compression,
         )
-        if isinstance(particle, PECSphere):
-            pgroup.attrs["type"] = "PECSphere"
-            _write_dataset(pgroup, "radius", float(particle.radius), compression=None)
-        elif isinstance(particle, Sphere):
-            pgroup.attrs["type"] = "Sphere"
-            _write_dataset(pgroup, "radius", float(particle.radius), compression=None)
-            _write_dataset(
-                pgroup,
-                "refractive_index",
-                np.asarray(complex(particle.refractive_index), dtype=np.complex128),
-                compression=None,
-            )
-        elif isinstance(particle, LayeredSphere):
-            pgroup.attrs["type"] = "LayeredSphere"
-            _write_dataset(
-                pgroup,
-                "layer_radii",
-                np.asarray(particle.layer_radii, dtype=float),
-                compression=compression,
-            )
-            _write_dataset(
-                pgroup,
-                "layer_refractive_indices",
-                np.asarray(particle.layer_refractive_indices, dtype=np.complex128),
-                compression=compression,
-            )
-        elif isinstance(particle, Spheroid):
-            pgroup.attrs["type"] = "Spheroid"
-            _write_dataset(
-                pgroup,
-                "equatorial_radius",
-                np.asarray(float(particle.equatorial_radius), dtype=float),
-                compression=None,
-            )
-            _write_dataset(
-                pgroup,
-                "polar_radius",
-                np.asarray(float(particle.polar_radius), dtype=float),
-                compression=None,
-            )
-            _write_dataset(
-                pgroup,
-                "refractive_index",
-                np.asarray(complex(particle.refractive_index), dtype=np.complex128),
-                compression=None,
-            )
-            _write_dataset(
-                pgroup,
-                "euler_angles",
-                np.asarray(particle.euler_angles, dtype=float),
-                compression=None,
-            )
-        else:
-            raise TypeError(f"Unsupported particle type {type(particle).__name__!r}.")
 
 
-def _load_particle_descriptors(group: h5py.Group) -> tuple[Particle, ...]:
-    """Load typed particle descriptors written by `_write_particle_descriptors`."""
+def _load_particle_payload(pgroup: h5py.Group, *, position: tuple[float, float, float]) -> Particle:
+    """Load one typed particle payload at the requested position."""
+    kind = str(pgroup.attrs.get("type", ""))
+    if kind == "PECSphere":
+        return PECSphere(
+            position=position,
+            radius=float(np.asarray(pgroup["radius"][...]).reshape(())),
+        )
+    if kind == "Sphere":
+        return Sphere(
+            position=position,
+            radius=float(np.asarray(pgroup["radius"][...]).reshape(())),
+            refractive_index=complex(np.asarray(pgroup["refractive_index"][...]).reshape(())),
+        )
+    if kind == "LayeredSphere":
+        return LayeredSphere(
+            position=position,
+            layer_radii=tuple(
+                float(value)
+                for value in np.asarray(pgroup["layer_radii"][...], dtype=float).reshape(-1)
+            ),
+            layer_refractive_indices=tuple(
+                complex(value)
+                for value in np.asarray(
+                    pgroup["layer_refractive_indices"][...], dtype=np.complex128
+                ).reshape(-1)
+            ),
+        )
+    if kind == "Spheroid":
+        euler_arr = np.asarray(pgroup["euler_angles"][...], dtype=float).reshape(3)
+        return Spheroid(
+            position=position,
+            equatorial_radius=float(
+                np.asarray(pgroup["equatorial_radius"][...], dtype=float).reshape(())
+            ),
+            polar_radius=float(np.asarray(pgroup["polar_radius"][...], dtype=float).reshape(())),
+            refractive_index=complex(np.asarray(pgroup["refractive_index"][...]).reshape(())),
+            euler_angles=(float(euler_arr[0]), float(euler_arr[1]), float(euler_arr[2])),
+        )
+    raise ValueError(f"Unsupported or missing particle type attribute: {kind!r}.")
+
+
+def _load_particle_descriptors(group: h5py.Group) -> ParticleCollection:
+    """Load canonical particles, including legacy descriptor-per-instance files."""
     if "particles" not in group:
         raise ValueError(
             "Missing required geometry payload `particles`. "
             "This file does not follow the canonical particle-native geometry schema."
         )
     pg = group["particles"]
+    schema = str(pg.attrs.get("schema", "pyceles.particles.v1"))
+    if schema == "pyceles.particles.v2":
+        positions = np.asarray(pg["positions"][...], dtype=float).reshape(-1, 3)
+        archetype_indices = np.asarray(pg["archetype_indices"][...]).reshape(-1)
+        archetypes_group = pg["archetypes"]
+        keys = sorted(archetypes_group.keys(), key=lambda key: int(key))
+        archetypes = tuple(
+            _load_particle_payload(
+                archetypes_group[key],
+                position=(0.0, 0.0, 0.0),
+            )
+            for key in keys
+        )
+        return ParticleCollection.from_archetypes(
+            positions=positions,
+            archetypes=archetypes,
+            archetype_indices=archetype_indices,
+        )
+    if schema != "pyceles.particles.v1":
+        raise ValueError(f"Unsupported particle schema {schema!r}.")
+
     particles: list[Particle] = []
     keys = sorted(pg.keys(), key=lambda key: int(key))
     for key in keys:
         pgroup = pg[key]
-        kind = str(pgroup.attrs.get("type", ""))
         pos_arr = np.asarray(pgroup["position"][...], dtype=float).reshape(3)
-        pos = (float(pos_arr[0]), float(pos_arr[1]), float(pos_arr[2]))
-        if kind == "PECSphere":
-            particles.append(
-                PECSphere(
-                    position=pos,
-                    radius=float(np.asarray(pgroup["radius"][...]).reshape(())),
-                )
+        particles.append(
+            _load_particle_payload(
+                pgroup,
+                position=(float(pos_arr[0]), float(pos_arr[1]), float(pos_arr[2])),
             )
-            continue
-        if kind == "Sphere":
-            particles.append(
-                Sphere(
-                    position=pos,
-                    radius=float(np.asarray(pgroup["radius"][...]).reshape(())),
-                    refractive_index=complex(
-                        np.asarray(pgroup["refractive_index"][...]).reshape(())
-                    ),
-                )
-            )
-            continue
-        if kind == "LayeredSphere":
-            particles.append(
-                LayeredSphere(
-                    position=pos,
-                    layer_radii=tuple(
-                        float(v)
-                        for v in np.asarray(pgroup["layer_radii"][...], dtype=float).reshape(-1)
-                    ),
-                    layer_refractive_indices=tuple(
-                        complex(v)
-                        for v in np.asarray(
-                            pgroup["layer_refractive_indices"][...], dtype=np.complex128
-                        ).reshape(-1)
-                    ),
-                )
-            )
-            continue
-        if kind == "Spheroid":
-            euler_arr = np.asarray(pgroup["euler_angles"][...], dtype=float).reshape(3)
-            particles.append(
-                Spheroid(
-                    position=pos,
-                    equatorial_radius=float(
-                        np.asarray(pgroup["equatorial_radius"][...], dtype=float).reshape(())
-                    ),
-                    polar_radius=float(
-                        np.asarray(pgroup["polar_radius"][...], dtype=float).reshape(())
-                    ),
-                    refractive_index=complex(
-                        np.asarray(pgroup["refractive_index"][...]).reshape(())
-                    ),
-                    euler_angles=(
-                        float(euler_arr[0]),
-                        float(euler_arr[1]),
-                        float(euler_arr[2]),
-                    ),
-                )
-            )
-            continue
-        raise ValueError(f"Unsupported or missing particle type attribute: {kind!r}.")
-    return tuple(particles)
+        )
+    return ParticleCollection.from_particles(particles)
 
 
 def save_geometry_h5(
@@ -203,13 +238,7 @@ def save_geometry_h5(
     attrs: Mapping[str, Any] | None = None,
     compression: str | None = "gzip",
 ) -> None:
-    """Persist canonical particle descriptors and optical metadata.
-
-    Parameters
-    ----------
-    particles:
-        Particle collection serialized under ``<group>/particles``.
-    """
+    """Persist canonical particle instances, shared archetypes, and optical metadata."""
     with h5py.File(_pathlike(path), mode) as h5:
         g = _reset_group(h5, group)
         _write_particle_descriptors(g, particles, compression=compression)
@@ -220,7 +249,7 @@ def save_geometry_h5(
 
 
 def load_geometry_h5(path: str | Path, *, group: str = "geometry") -> dict[str, Any]:
-    """Load geometry payload from canonical particle descriptors plus metadata attrs."""
+    """Load geometry as a canonical ``ParticleCollection`` plus metadata attrs."""
     out: dict[str, Any] = {}
     with h5py.File(_pathlike(path), "r") as h5:
         g = h5[group]

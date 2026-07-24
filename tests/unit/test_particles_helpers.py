@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, cast
 
 import numpy as np
@@ -9,6 +10,7 @@ from pyceles.core.particles import (
     LayeredSphere,
     Particle,
     ParticleCollection,
+    ParticleTRepresentation,
     PECSphere,
     Sphere,
     Spheroid,
@@ -429,3 +431,100 @@ def test_particle_constructors_validate_public_array_inputs(builder, kwargs, mat
     fn = cast(Any, builder)
     with pytest.raises(ValueError, match=match):
         fn(**kwargs)
+
+
+def test_all_array_constructors_share_repeated_archetypes():
+    positions = np.array(
+        [[0.0, 0.0, 0.0], [100.0, 0.0, 0.0], [200.0, 0.0, 0.0]],
+        dtype=float,
+    )
+    collections = (
+        spheres_from_arrays(
+            positions=positions,
+            radii=np.full(3, 25.0),
+            refractive_indices=1.5 + 0.01j,
+        ),
+        pec_spheres_from_arrays(
+            positions=positions,
+            radii=np.full(3, 25.0),
+        ),
+        layered_spheres_from_arrays(
+            positions=positions,
+            layer_radii=(10.0, 25.0),
+            layer_refractive_indices=(1.8 + 0j, 1.5 + 0.01j),
+        ),
+        spheroids_from_arrays(
+            positions=positions,
+            equatorial_radii=20.0,
+            polar_radii=30.0,
+            refractive_indices=1.6 + 0.02j,
+            euler_angles=(0.1, 0.2, 0.3),
+        ),
+    )
+
+    for particles in collections:
+        assert particles.n_archetypes == 1
+        np.testing.assert_array_equal(
+            particles.archetype_indices,
+            np.zeros(3, dtype=particles.archetype_indices.dtype),
+        )
+        assert particles.archetypes[0].position == (0.0, 0.0, 0.0)
+
+
+def test_from_archetypes_canonicalizes_duplicates_and_unused_entries():
+    sphere = Sphere(position=(9.0, 8.0, 7.0), radius=10.0, refractive_index=1.5 + 0j)
+    unused = PECSphere(position=(1.0, 1.0, 1.0), radius=3.0)
+    particles = ParticleCollection.from_archetypes(
+        positions=np.array([[0.0, 0.0, 0.0], [5.0, 0.0, 0.0]], dtype=float),
+        archetypes=(sphere, unused, sphere),
+        archetype_indices=np.array([0, 2], dtype=np.int64),
+    )
+
+    assert particles.n_archetypes == 1
+    assert particles.archetypes == (
+        Sphere(position=(0.0, 0.0, 0.0), radius=10.0, refractive_index=1.5 + 0j),
+    )
+    np.testing.assert_array_equal(particles.archetype_indices, np.zeros(2, dtype=np.uint8))
+    assert tuple(particles) == (
+        Sphere(position=(0.0, 0.0, 0.0), radius=10.0, refractive_index=1.5 + 0j),
+        Sphere(position=(5.0, 0.0, 0.0), radius=10.0, refractive_index=1.5 + 0j),
+    )
+
+
+def test_array_valued_custom_archetypes_are_deduplicated():
+    @dataclass(frozen=True)
+    class ImportedDenseParticle(Particle):
+        circumscribing: float
+        t_matrix: np.ndarray
+
+        def circumscribing_radius(self) -> float:
+            return float(self.circumscribing)
+
+        @property
+        def t_operator_representation(self) -> ParticleTRepresentation:
+            return "dense"
+
+    block = np.eye(4, dtype=np.complex128)
+    particles = ParticleCollection.from_particles(
+        [
+            ImportedDenseParticle(
+                position=(0.0, 0.0, 0.0),
+                circumscribing=10.0,
+                t_matrix=block.copy(),
+            ),
+            ImportedDenseParticle(
+                position=(50.0, 0.0, 0.0),
+                circumscribing=10.0,
+                t_matrix=block.copy(),
+            ),
+        ]
+    )
+
+    block[0, 0] = 7.0
+    stored_block = cast(Any, particles.archetypes[0]).t_matrix
+
+    assert particles.n_archetypes == 1
+    np.testing.assert_array_equal(stored_block, np.eye(4, dtype=np.complex128))
+    assert stored_block.flags.writeable is False
+    with pytest.raises(ValueError, match="read-only"):
+        stored_block[0, 0] = 2.0

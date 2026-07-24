@@ -288,13 +288,18 @@ particles = pcl.spheres_from_arrays(
 sim = pcl.Simulation(cfg, particles=particles)
 ```
 
-The array helpers return immutable `ParticleCollection` objects. Combine
-separate material or particle-family batches without expanding them into a
-mutable list:
+The array helpers return immutable `ParticleCollection` objects. All helpers,
+including layered spheres and spheroids, deduplicate repeated metadata into
+shared archetypes. Combine separate material or particle-family batches without
+expanding them into a mutable list:
 
 ```python
 particles = pcl.ParticleCollection.concatenate(batch_a, batch_b)
 ```
+
+For third-party or imported particle descriptions, construct the same layout
+directly with `ParticleCollection.from_archetypes(...)`. Scaling then follows
+the number of unique archetypes/operators, not a special-case particle class.
 
 ## Periodic Rayleigh/Wood safety checks
 

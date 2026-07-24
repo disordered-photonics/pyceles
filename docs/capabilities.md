@@ -77,9 +77,11 @@ Array-generated geometries should use the canonical helpers:
 - `spheroids_from_arrays`.
 
 The helpers return `ParticleCollection` objects and can be combined with
-`ParticleCollection.concatenate(...)`. Homogeneous and PEC sphere batches stay
-array-backed through particle-T preparation, avoiding one persistent Python
-descriptor per particle in large sphere ensembles.
+`ParticleCollection.concatenate(...)`. Every particle family uses the same
+instance/archetype storage contract: one position and compact archetype tag per
+instance, plus one immutable descriptor per distinct archetype. Single-body
+preparation retains one diagonal or dense operator per unique archetype rather
+than per particle. See [particle_storage.md](particle_storage.md).
 
 `PECSphere` uses the analytic perfect-conductor Mie limit instead of an
 artificial large complex refractive index. Near-field points inside PEC spheres

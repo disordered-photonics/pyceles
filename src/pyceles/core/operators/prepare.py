@@ -11,19 +11,9 @@ import numpy.typing as npt
 from pyceles._optional import import_cupy
 from pyceles.core.geometry_bounds import conservative_set_diameter
 from pyceles.core.indexing import n_modes
-from pyceles.core.particles import (
-    Particle,
-    ParticleCollection,
-    Sphere,
-    particle_t_signature,
-)
+from pyceles.core.particles import Particle, ParticleCollection, Sphere, particle_t_signature
 from pyceles.core.periodic import PeriodicSpec
-from pyceles.core.tmatrix import (
-    particle_T_diagonal,
-    particle_T_matrix_blocks,
-    pec_sphere_T_diagonal,
-    sphere_T_diagonal,
-)
+from pyceles.core.tmatrix import particle_T_diagonal, particle_T_matrix_blocks, sphere_T_diagonal
 from pyceles.core.translation import RadialLUT, translation_ab5_table
 
 from .base import CouplingOperator, PreparedOperator
@@ -65,118 +55,27 @@ depth safety cap.
 """
 
 
-def _precompute_sphere_batch_diagonal(
-    *,
-    lmax: int,
-    k: float,
-    radii: np.ndarray,
-    refractive_indices: np.ndarray,
-    n_medium: complex,
-    dtype: np.dtype,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Prepare one Mie diagonal per unique array-native sphere signature."""
-    radius = np.asarray(radii, dtype=float).reshape(-1)
-    refractive_index = np.asarray(refractive_indices, dtype=np.complex128).reshape(-1)
-    if radius.shape != refractive_index.shape:
-        raise ValueError("Sphere radii and refractive-index arrays must share shape.")
-    parameters = np.column_stack((radius, refractive_index.real, refractive_index.imag))
-    unique_parameters, inverse = np.unique(parameters, axis=0, return_inverse=True)
-    unique_m = np.empty((unique_parameters.shape[0], int(lmax) + 1), dtype=dtype)
-    unique_n = np.empty_like(unique_m)
-    for index, (radius_value, refractive_real, refractive_imag) in enumerate(unique_parameters):
-        diagonal = sphere_T_diagonal(
-            int(lmax),
-            float(k),
-            float(radius_value),
-            complex(float(refractive_real), float(refractive_imag)),
-            n_medium,
-        )
-        unique_m[index] = np.asarray(diagonal[1], dtype=dtype)
-        unique_n[index] = np.asarray(diagonal[2], dtype=dtype)
-    return unique_m[inverse], unique_n[inverse]
-
-
-def _precompute_pec_sphere_batch_diagonal(
-    *,
-    lmax: int,
-    k: float,
-    radii: np.ndarray,
-    dtype: np.dtype,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Prepare one PEC Mie diagonal per unique array-native radius."""
-    unique_radii, inverse = np.unique(
-        np.asarray(radii, dtype=float).reshape(-1),
-        return_inverse=True,
-    )
-    unique_m = np.empty((unique_radii.size, int(lmax) + 1), dtype=dtype)
-    unique_n = np.empty_like(unique_m)
-    for index, radius in enumerate(unique_radii):
-        diagonal = pec_sphere_T_diagonal(int(lmax), float(k), float(radius))
-        unique_m[index] = np.asarray(diagonal[1], dtype=dtype)
-        unique_n[index] = np.asarray(diagonal[2], dtype=dtype)
-    return unique_m[inverse], unique_n[inverse]
-
-
 def _prepare_diagonal_group(
     *,
     plan: ParticleTGroupPlan,
-    lmax: int,
-    k: float,
-    particles: Sequence[Particle],
-    n_medium: complex,
-    dtype: np.dtype,
+    context: ParticleTPreparationContext,
 ) -> DiagonalTGroup:
-    ids = np.asarray(plan.particle_indices, dtype=np.int64)
-    sphere_parameters = (
-        particles.sphere_parameters(ids) if isinstance(particles, ParticleCollection) else None
+    """Prepare one diagonal operator per unique archetype in the group."""
+    archetypes = context.archetypes_for(plan)
+    T_M, T_N = precompute_T_diagonal(
+        lmax=context.lmax,
+        k=context.k,
+        particles=archetypes,
+        n_medium=context.n_medium,
+        dtype=context.dtype,
     )
-    pec_radii = (
-        particles.homogeneous_pec_sphere_radii()
-        if isinstance(particles, ParticleCollection)
-        else None
-    )
-    if pec_radii is not None:
-        complete_batch = ids.size == len(particles) and (
-            ids.size == 0
-            or (
-                int(ids[0]) == 0
-                and int(ids[-1]) == len(particles) - 1
-                and bool(np.all(ids[1:] == ids[:-1] + 1))
-            )
-        )
-        if not complete_batch:
-            raise ValueError("PEC sphere batch preparation requires the complete particle batch.")
-        T_M, T_N = _precompute_pec_sphere_batch_diagonal(
-            lmax=int(lmax),
-            k=float(k),
-            radii=pec_radii,
-            dtype=dtype,
-        )
-    elif sphere_parameters is None:
-        group_particles = [particles[int(i)] for i in ids]
-        T_M, T_N = precompute_T_diagonal(
-            lmax=int(lmax),
-            k=float(k),
-            particles=group_particles,
-            n_medium=n_medium,
-            dtype=dtype,
-        )
-    else:
-        radii, refractive_indices = sphere_parameters
-        T_M, T_N = _precompute_sphere_batch_diagonal(
-            lmax=int(lmax),
-            k=float(k),
-            radii=radii,
-            refractive_indices=refractive_indices,
-            n_medium=n_medium,
-            dtype=dtype,
-        )
     return DiagonalTGroup(
-        particle_indices=ids,
+        particle_indices=np.asarray(plan.particle_indices, dtype=np.int64),
+        operator_indices=np.asarray(plan.operator_indices, dtype=np.int64),
         T_M=T_M,
         T_N=T_N,
-        T_diag=build_T_mode_diagonal(int(lmax), T_M, T_N),
-        dtype=dtype,
+        T_diag=build_T_mode_diagonal(context.lmax, T_M, T_N),
+        dtype=context.dtype,
     )
 
 
@@ -186,23 +85,16 @@ def _default_group_factory(
     context: ParticleTPreparationContext,
 ) -> PreparedParticleTGroup:
     if plan.representation == "diagonal":
-        return _prepare_diagonal_group(
-            plan=plan,
-            lmax=context.lmax,
-            k=context.k,
-            particles=context.particles,
-            n_medium=context.n_medium,
-            dtype=context.dtype,
-        )
+        return _prepare_diagonal_group(plan=plan, context=context)
 
     if plan.representation == "dense":
         ids = np.asarray(plan.particle_indices, dtype=np.int64)
-        group_particles = [context.particles[int(i)] for i in ids]
+        archetypes = context.archetypes_for(plan)
         try:
             blocks = particle_T_matrix_blocks(
                 lmax=context.lmax,
                 k_medium=context.k,
-                particles=group_particles,
+                particles=archetypes,
                 n_medium=context.n_medium,
             )
         except NotImplementedError as exc:
@@ -214,18 +106,19 @@ def _default_group_factory(
             ) from exc
         return DenseTGroup(
             particle_indices=ids,
+            operator_indices=np.asarray(plan.operator_indices, dtype=np.int64),
             T_blocks=blocks.astype(context.dtype, copy=False),
             dtype=context.dtype,
         )
 
     if plan.representation == "axisymmetric":
         ids = np.asarray(plan.particle_indices, dtype=np.int64)
-        axis_particles = tuple(context.particles[int(i)] for i in ids)
+        archetypes = context.archetypes_for(plan)
         try:
             blocks = particle_T_matrix_blocks(
                 lmax=context.lmax,
                 k_medium=context.k,
-                particles=list(axis_particles),
+                particles=archetypes,
                 n_medium=context.n_medium,
             )
         except NotImplementedError as exc:
@@ -237,8 +130,12 @@ def _default_group_factory(
             ) from exc
         return AxisymmetricTGroup(
             particle_indices=ids,
+            operator_indices=np.asarray(plan.operator_indices, dtype=np.int64),
             T_blocks=blocks.astype(context.dtype, copy=False),
-            body_metadata={"storage": "spherical_basis_dense_blocks"},
+            body_metadata={
+                "storage": "shared_spherical_basis_dense_blocks",
+                "n_unique_archetypes": len(archetypes),
+            },
             dtype=context.dtype,
         )
 
@@ -263,9 +160,7 @@ def _prepare_particle_t_operator(
     group_factories: ParticleTGroupFactories | None = None,
 ) -> CompositeParticleTOperator:
     """Prepare the particle-local operator using the selected representation groups."""
-    part: Sequence[Particle] = (
-        particles if isinstance(particles, ParticleCollection) else tuple(particles)
-    )
+    part = ParticleCollection.from_particles(particles)
     context = ParticleTPreparationContext(
         lmax=int(lmax),
         k=float(k),

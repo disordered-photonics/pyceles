@@ -14,6 +14,7 @@ Start with [index.md](index.md). The current public pages are:
 - [capabilities](capabilities.md),
 - [API map](api.md),
 - [workflow notes](workflows.md),
+- [particle storage](particle_storage.md),
 - [performance notes](performance.md),
 - [validation](validation.md),
 - [limitations](limitations.md),

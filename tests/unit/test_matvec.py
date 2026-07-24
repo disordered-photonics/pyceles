@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, cast
 
 import numpy as np
 import pytest
@@ -335,9 +335,10 @@ def test_prepare_matvec_exposes_composite_particle_t_operator():
         cache_translation_blocks=False,
     )
 
-    assert isinstance(prepared.particle_t, CompositeParticleTOperator)
-    assert len(prepared.particle_t.groups) == 1
-    group = prepared.particle_t.groups[0]
+    particle_t = prepared.particle_t
+    assert isinstance(particle_t, CompositeParticleTOperator)
+    assert len(particle_t.groups) == 1
+    group = particle_t.groups[0]
     assert isinstance(group, DiagonalTGroup)
     np.testing.assert_array_equal(group.particle_indices, np.arange(len(particles), dtype=np.int64))
 
@@ -1003,3 +1004,149 @@ def test_prepare_matvec_mlfmm_direct_stage_returns_pairwise_coupling() -> None:
     )
 
     assert isinstance(prepared.coupling, PairwiseCouplingOperator)
+
+
+def test_prepare_matvec_shares_diagonal_operator_across_layered_instances():
+    particles = ParticleCollection.from_particles(
+        [
+            LayeredSphere(
+                position=(float(index) * 180.0, 0.0, 0.0),
+                layer_radii=(30.0, 60.0),
+                layer_refractive_indices=(1.8 + 0j, 1.5 + 0.01j),
+            )
+            for index in range(3)
+        ]
+    )
+    prepared = prepare_matvec(
+        lmax=1,
+        k=2.0 * np.pi / 550.0,
+        particles=particles,
+        n_medium=1.0 + 0j,
+        radial_lut_dr=1.0,
+        cache_translation_blocks=False,
+    )
+
+    particle_t = prepared.particle_t
+    assert isinstance(particle_t, CompositeParticleTOperator)
+    group = particle_t.groups[0]
+    assert isinstance(group, DiagonalTGroup)
+    assert group.T_diag.shape[0] == 1
+    np.testing.assert_array_equal(group.operator_indices, np.zeros(3, dtype=np.int64))
+
+    x = np.arange(3 * n_modes(1), dtype=float).reshape(3, n_modes(1)).astype(np.complex128)
+    expected = group.T_diag[0] * x
+    np.testing.assert_allclose(particle_t.apply(x.reshape(-1)), expected.reshape(-1))
+
+
+def test_dense_factory_receives_unique_archetypes_and_reuses_blocks():
+    particles = ParticleCollection.from_particles(
+        [
+            _DenseTestParticle(
+                position=(float(index) * 100.0, 0.0, 0.0),
+                circumscribing=20.0,
+                scale=1.3 + 0.2j,
+            )
+            for index in range(3)
+        ]
+    )
+    calls = {"count": 0}
+
+    def provide_dense_blocks(group_archetypes, context):
+        calls["count"] += 1
+        assert len(group_archetypes) == 1
+        assert group_archetypes[0].position == (0.0, 0.0, 0.0)
+        block = np.eye(context.n_modes, dtype=context.dtype) * group_archetypes[0].scale
+        block[0, 1] = 0.25 - 0.1j
+        return block[None, :, :]
+
+    prepared = prepare_matvec(
+        lmax=1,
+        k=2.0 * np.pi / 550.0,
+        particles=particles,
+        n_medium=1.0 + 0j,
+        radial_lut_dr=1.0,
+        cache_translation_blocks=False,
+        particle_t_group_factories=ParticleTGroupFactories(
+            dense=make_dense_group_factory(provide_dense_blocks)
+        ),
+    )
+
+    particle_t = cast(CompositeParticleTOperator, prepared.particle_t)
+    group = particle_t.groups[0]
+    assert isinstance(group, DenseTGroup)
+    assert calls["count"] == 1
+    assert group.T_blocks.shape[0] == 1
+    np.testing.assert_array_equal(group.operator_indices, np.zeros(3, dtype=np.int64))
+
+    x = np.arange(3 * n_modes(1), dtype=float).reshape(3, n_modes(1)).astype(np.complex128)
+    expected = np.einsum("ij,gj->gi", group.T_blocks[0], x)
+    np.testing.assert_allclose(particle_t.apply(x.reshape(-1)), expected.reshape(-1))
+
+
+def test_shared_operator_maps_handle_repeated_noncontiguous_archetypes():
+    particles = ParticleCollection.from_particles(
+        [
+            Sphere(position=(0.0, 0.0, 0.0), radius=20.0, refractive_index=1.5 + 0j),
+            Sphere(position=(100.0, 0.0, 0.0), radius=25.0, refractive_index=1.6 + 0j),
+            Sphere(position=(200.0, 0.0, 0.0), radius=20.0, refractive_index=1.5 + 0j),
+        ]
+    )
+    prepared = prepare_matvec(
+        lmax=1,
+        k=2.0 * np.pi / 550.0,
+        particles=particles,
+        n_medium=1.0 + 0j,
+        radial_lut_dr=1.0,
+        cache_translation_blocks=False,
+    )
+
+    particle_t = cast(CompositeParticleTOperator, prepared.particle_t)
+    group = particle_t.groups[0]
+    assert isinstance(group, DiagonalTGroup)
+    assert group.T_diag.shape[0] == 2
+    np.testing.assert_array_equal(group.operator_indices, np.array([0, 1, 0]))
+
+    x = np.arange(3 * n_modes(1), dtype=float).reshape(3, n_modes(1)).astype(np.complex128)
+    expected = np.empty_like(x)
+    expected[0] = group.T_diag[0] * x[0]
+    expected[1] = group.T_diag[1] * x[1]
+    expected[2] = group.T_diag[0] * x[2]
+    np.testing.assert_allclose(particle_t.apply(x.reshape(-1)), expected.reshape(-1))
+
+
+def test_cupy_group_wrappers_preserve_shared_operator_maps(monkeypatch):
+    from pyceles.core.operators import single_body_cupy
+
+    monkeypatch.setattr(single_body_cupy, "import_cupy", lambda: (np, None))
+    monkeypatch.setattr(
+        single_body_cupy,
+        "coerce_array",
+        lambda value, *, dtype, prefer_cupy: np.asarray(value, dtype=dtype),
+    )
+
+    particle_indices = np.arange(3, dtype=np.int64)
+    operator_indices = np.array([0, 1, 0], dtype=np.int64)
+    diagonal = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.complex128)
+    diagonal_group = single_body_cupy.CuPyDiagonalTGroup(
+        particle_indices=particle_indices,
+        T_M=np.ones((2, 2), dtype=np.complex128),
+        T_N=np.ones((2, 2), dtype=np.complex128),
+        T_diag=diagonal,
+        operator_indices=operator_indices,
+    )
+    x = np.arange(6, dtype=float).reshape(3, 2).astype(np.complex128)
+    np.testing.assert_allclose(
+        np.asarray(diagonal_group.apply_subset(x)),
+        diagonal[operator_indices] * x,
+    )
+
+    blocks = np.stack([np.eye(2, dtype=np.complex128), 2.0 * np.eye(2, dtype=np.complex128)])
+    dense_group = single_body_cupy.CuPyDenseTGroup(
+        particle_indices=particle_indices,
+        T_blocks=blocks,
+        operator_indices=operator_indices,
+    )
+    np.testing.assert_allclose(
+        np.asarray(dense_group.apply_subset(x)),
+        np.einsum("gij,gj->gi", blocks[operator_indices], x),
+    )

@@ -11,9 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added an opt-in `ResultRetention` policy for omitting optional incident,
   right-hand-side, residual-history, and polarization-basis coefficient arrays
   from completed large-run results.
-- Added immutable `ParticleCollection` storage. Array-generated homogeneous
-  and PEC sphere geometries now remain compact through simulation and
-  particle-T preparation instead of expanding one Python object per sphere.
+- Added a uniform immutable `ParticleCollection` instance/archetype model for
+  every particle family. Geometry, HDF5 persistence, and NumPy/CuPy single-body
+  preparation now retain one descriptor and one prepared operator per unique
+  archetype, with compact instance-to-archetype/operator maps.
 - Added `AngularSpectrumSLMSource` for applying one scalar SLM modulation to
   the TE and TM spectra of arbitrary angular-spectrum sources, while retaining
   `SLMSource` for Jones-polarized sources.
