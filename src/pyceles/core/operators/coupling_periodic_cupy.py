@@ -55,10 +55,7 @@ class CuPyPeriodicCouplingOperator:
     _coordinate_scale: float | None = field(default=None, init=False, repr=False)
     _contraction_tensor_gpu: Any | None = field(default=None, init=False, repr=False)
     _self_correction_gpu: Any | None = field(default=None, init=False, repr=False)
-    _source_block_cache: dict[int, Any] = field(default_factory=dict, init=False, repr=False)
-    _source_block_chunk_cache: dict[tuple[int, ...], Any] = field(
-        default_factory=dict, init=False, repr=False
-    )
+    _dense_w_cache_gpu: Any | None = field(default=None, init=False, repr=False)
     _source_index_gpu_cache: dict[tuple[int, ...], Any] = field(
         default_factory=dict, init=False, repr=False
     )
@@ -252,46 +249,51 @@ class CuPyPeriodicCouplingOperator:
         self._add_self_corrections(sums, source_indices=key)
         return sums
 
-    def _blocks_for_sources(self, source_indices: tuple[int, ...]) -> Any:
+    def _compute_blocks_for_sources(self, source_indices: tuple[int, ...]) -> Any:
         key = tuple(int(i) for i in source_indices)
-        if self.cache_blocks:
-            cached = self._source_block_chunk_cache.get(key)
-            if cached is not None:
-                return cached
         cp = self._cupy()
         sums = self._structural_sums_for_sources(key)
         tensor = self._contraction_tensor_device()
-        blocks = cp.einsum(
+        return cp.einsum(
             "sdpm,ijpm->sdij",
             sums.astype(self.dtype, copy=False),
             tensor,
             optimize=True,
         ).astype(self.dtype, copy=False)
-        if self.cache_blocks:
-            self._source_block_chunk_cache[key] = blocks
-            for local, source_index in enumerate(key):
-                self._source_block_cache[int(source_index)] = blocks[local]
-        return blocks
 
-    def _cached_blocks_for_sources(self, source_indices: tuple[int, ...]) -> Any:
+    def _dense_blocks_for_sources(self, source_indices: tuple[int, ...]) -> Any:
+        """Recover source-major blocks from the flattened dense cache."""
         key = tuple(int(i) for i in source_indices)
-        cached = self._source_block_chunk_cache.get(key)
-        if cached is not None:
-            return cached
-        missing = tuple(i for i in key if i not in self._source_block_cache)
-        if missing:
-            if missing == key:
-                return self._blocks_for_sources(key)
-            self._blocks_for_sources(missing)
+        matrix = self._dense_w_cache_gpu
+        if matrix is None:
+            raise RuntimeError("Periodic dense block cache has not been populated.")
         cp = self._cupy()
-        blocks = cp.stack([self._source_block_cache[i] for i in key], axis=0)
-        self._source_block_chunk_cache[key] = blocks
-        return blocks
+        nm = int(self.n_modes)
+        if len(key) == 0:
+            return cp.empty((0, self.n_particles, nm, nm), dtype=self.dtype)
+        if key == tuple(range(key[0], key[0] + len(key))):
+            columns = matrix[:, key[0] * nm : (key[-1] + 1) * nm]
+        else:
+            source_index = cp.asarray(key, dtype=cp.int64)
+            mode_index = cp.arange(nm, dtype=cp.int64)
+            columns = matrix[:, (source_index[:, None] * nm + mode_index).reshape(-1)]
+        return columns.reshape(self.n_particles, nm, len(key), nm).transpose(2, 0, 1, 3)
 
     def populate(self, *, show_progress: bool = False) -> None:
-        """Eagerly populate the optional device-side dense block cache."""
-        if not self.cache_blocks:
+        """Eagerly populate one contiguous device-side dense ``W`` cache.
+
+        Cache-on periodic solves already accept the full ``O(N^2 n_mode^2)``
+        storage cost.  Keeping that payload as source-major 4-D chunks made
+        every Krylov matvec launch one general ``einsum`` per chunk.  Flattening
+        the same blocks once into ``W[destination_mode, source_mode]`` lets the
+        hot path use a single cuBLAS matrix-vector or matrix-matrix product.
+        """
+        if not self.cache_blocks or self._dense_w_cache_gpu is not None:
             return
+        cp = self._cupy()
+        nm = int(self.n_modes)
+        n = int(self.n_particles * nm)
+        matrix = cp.empty((n, n), dtype=self.dtype, order="C")
         progress = (
             tqdm(total=self.n_particles, desc="Populate periodic W cache (CuPy)")
             if show_progress
@@ -299,18 +301,18 @@ class CuPyPeriodicCouplingOperator:
         )
         try:
             for source_indices in self._source_batches():
-                missing = tuple(
-                    int(source_index)
-                    for source_index in source_indices
-                    if int(source_index) not in self._source_block_cache
-                )
-                if missing:
-                    self._blocks_for_sources(missing)
+                key = tuple(int(i) for i in source_indices)
+                blocks = self._compute_blocks_for_sources(key)
+                columns = blocks.transpose(1, 2, 0, 3).reshape(n, len(key) * nm)
+                start = key[0] * nm
+                stop = (key[-1] + 1) * nm
+                matrix[:, start:stop] = columns
                 if progress is not None:
-                    progress.update(len(source_indices))
+                    progress.update(len(key))
         finally:
             if progress is not None:
                 progress.close()
+        self._dense_w_cache_gpu = matrix
 
     def iter_source_block_batches(
         self, *, show_progress: bool = False
@@ -327,9 +329,9 @@ class CuPyPeriodicCouplingOperator:
         for source_indices in batches:
             key = tuple(int(i) for i in source_indices)
             blocks = (
-                self._cached_blocks_for_sources(key)
-                if self.cache_blocks
-                else self._blocks_for_sources(key)
+                self._dense_blocks_for_sources(key)
+                if self._dense_w_cache_gpu is not None
+                else self._compute_blocks_for_sources(key)
             )
             yield SourceBlockBatch(source_indices=key, blocks=blocks)
 
@@ -363,29 +365,27 @@ class CuPyPeriodicCouplingOperator:
         else:
             raise ValueError(f"Input must be 1D or 2D. Got shape {tuple(arr_raw.shape)}.")
 
+        if self.cache_blocks:
+            self.populate(show_progress=False)
+            matrix = self._dense_w_cache_gpu
+            if matrix is None:
+                raise RuntimeError("Periodic dense block cache population failed.")
+            if squeezed:
+                return matrix @ arr.reshape(self.n_particles * self.n_modes)
+            return matrix @ arr.reshape(self.n_particles * self.n_modes, int(arr.shape[2]))
+
         y = cp.zeros_like(arr, dtype=self.dtype)
         tensor = self._contraction_tensor_device()
-        if self.cache_blocks:
-            for source_indices in self._source_batches():
-                source_indexer = self._source_index_device(source_indices)
-                blocks = self._cached_blocks_for_sources(source_indices)
-                y += cp.einsum(
-                    "sdij,sjr->dir",
-                    blocks,
-                    arr[source_indexer],
-                    optimize=True,
-                )
-        else:
-            for source_indices in self._source_batches():
-                source_indexer = self._source_index_device(source_indices)
-                sums = self._structural_sums_for_sources(source_indices)
-                y += cp.einsum(
-                    "sdpm,ijpm,sjr->dir",
-                    sums.astype(self.dtype, copy=False),
-                    tensor,
-                    arr[source_indexer],
-                    optimize=True,
-                )
+        for source_indices in self._source_batches():
+            source_indexer = self._source_index_device(source_indices)
+            sums = self._structural_sums_for_sources(source_indices)
+            y += cp.einsum(
+                "sdpm,ijpm,sjr->dir",
+                sums.astype(self.dtype, copy=False),
+                tensor,
+                arr[source_indexer],
+                optimize=True,
+            )
         if squeezed:
             return y.reshape(self.n_particles * self.n_modes)
         return y.reshape(self.n_particles * self.n_modes, int(arr.shape[2]))

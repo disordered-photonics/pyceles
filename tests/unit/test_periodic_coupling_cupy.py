@@ -134,8 +134,9 @@ def test_periodic_cupy_coupling_cache_apply_parity(cupy_runtime: tuple[Any, Any]
 
     uncached = uncached_gpu.apply(x_device)
     cached_first = cached_gpu.apply(x_device)
-    assert len(cached_gpu._source_block_cache) == 2
-    assert (0, 1) in cached_gpu._source_block_chunk_cache
+    dense_cache = cached_gpu._dense_w_cache_gpu
+    assert dense_cache is not None
+    assert dense_cache.shape == (12, 12)
     cached_second = cached_gpu.apply(x_device)
 
     want = uncached_cpu.apply(x.astype(np.complex128))
@@ -143,10 +144,18 @@ def test_periodic_cupy_coupling_cache_apply_parity(cupy_runtime: tuple[Any, Any]
     np.testing.assert_allclose(cp.asnumpy(cached_first), want, rtol=1e-8, atol=1e-9)
     np.testing.assert_allclose(cp.asnumpy(cached_second), want, rtol=1e-8, atol=1e-9)
 
-    # Explicit cache population should be idempotent and keep the same device-owned blocks.
+    rhs = cp.stack([x_device, 0.5j * x_device], axis=1)
+    want_rhs = np.column_stack([want, 0.5j * want])
+    np.testing.assert_allclose(
+        cp.asnumpy(cached_gpu.apply(rhs)),
+        want_rhs,
+        rtol=1e-8,
+        atol=1e-9,
+    )
+
+    # Explicit cache population is idempotent and preserves the contiguous matrix.
     cached_gpu.populate(show_progress=False)
-    assert len(cached_gpu._source_block_cache) == 2
-    assert (0, 1) in cached_gpu._source_block_chunk_cache
+    assert cached_gpu._dense_w_cache_gpu is dense_cache
     np.testing.assert_allclose(cp.asnumpy(cached_gpu.apply(x_device)), want, rtol=1e-8, atol=1e-9)
 
 
@@ -202,5 +211,4 @@ def test_periodic_cupy_dense_assembly_from_cached_blocks_matches_matvec(
 
     np.testing.assert_allclose(cp.asnumpy(dense), cp.asnumpy(expected), rtol=1e-8, atol=1e-9)
     assert prepared.coupling.cache_blocks is False
-    assert prepared.coupling._source_block_cache == {}
-    assert prepared.coupling._source_block_chunk_cache == {}
+    assert prepared.coupling._dense_w_cache_gpu is None

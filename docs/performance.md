@@ -205,9 +205,9 @@ Common benchmark parameters:
 Measured phase wall times on the same laptop/GPU:
 
 - CuPy, explicit periodic W cache:
-  - W-cache population: `11.8 s`,
-  - BiCGSTAB solve: `12.9 s` for 111 iterations,
-  - Full solve phase: `42.3 s`,
+  - W-cache population: `10.2-10.6 s`,
+  - BiCGSTAB solve: `3.5 s` for 109 iterations,
+  - Full solve phase: `25.8 s`,
   - Near field: xy `1.4 s`, xz `112 s`.
 - CuPy, no periodic W cache:
   - BiCGSTAB solve: `817 s` for 115 iterations, about `7.1 s/iteration`,
@@ -239,7 +239,12 @@ source-streamed assembler discards each periodic W-block batch after writing
 its columns into `A`, avoiding a second dense-matrix-sized temporary cache. The
 cache-off periodic path is memory-light, but it recomputes periodic Ewald work
 on every Krylov matvec. For large periodic runs, explicit W-block caching is
-currently the practical path when memory permits. Profiling shows that the
+currently the practical path when memory permits. On CuPy, the cache-on path
+now stores the accepted dense cache as one contiguous device matrix and applies
+it with a single GEMV/GEMM per matvec instead of repeating source-block
+contractions. The NumPy cache-on path retains its source-block cache because
+converting its Python block dictionary would temporarily duplicate a
+dense-matrix-sized allocation. Profiling shows that the
 cache-off cost is dominated by shifted-reciprocal Ewald arithmetic rather than
 the final tensor contraction, so direct-to-output fusion is not presently a
 compelling option.
