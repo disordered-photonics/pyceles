@@ -186,7 +186,13 @@ Homogeneous rectangular 2D periodic-cell workflows currently include:
 - periodic near-field slices:
   - exterior Rayleigh-order evaluation above/below the particle slab,
   - in-slab periodic local-SVWF evaluation outside/inside homogeneous spheres,
-- CuPy periodic Ewald coupling with optional explicit W-block caching.
+    including exact-near/Rayleigh-far acceleration when the solved periodic
+    method is `"rayleigh"`,
+- CuPy periodic Ewald coupling with optional explicit W-block caching,
+- an opt-in NumPy/CuPy hybrid repeated-apply method through
+  `PeriodicOptions(method="rayleigh")`: one shared exact periodic self block, a
+  configurable exact-Ewald vertical near band, and reciprocal Rayleigh
+  upward/downward scans for vertically separated pairs.
 
 Periodic workflows remain experimental; current limits are documented in
 [limitations.md](limitations.md), and performance/convergence knobs are discussed

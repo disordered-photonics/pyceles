@@ -27,13 +27,27 @@ class PeriodicOptions:
     that cannot adapt without host/device synchronization may resolve these
     options once to fixed shell counts using the same tolerance.
 
+    ``method="rayleigh"`` enables the hybrid repeated-apply operator: the
+    translationally invariant periodic self block and all non-self pairs with
+    ``|z_destination-z_source| <= rayleigh_z_cut`` use exact Ewald sums, while
+    vertically separated pairs use reciprocal Rayleigh orders and linear-time
+    upward/downward scans. The default half-band is one medium wavelength and
+    is enlarged to twice the largest circumscribing radius when necessary.
+    ``rayleigh_reciprocal_shells`` fixes the reciprocal square half-width; when
+    it is ``None``, an evanescent-envelope heuristic uses the same
+    ``shell_tolerance`` and ``max_shells`` controls as Ewald accumulation.
+    Reciprocal work is chunked automatically from a bounded temporary-memory
+    budget rather than exposed as a user-facing tuning knob. In-slab periodic
+    near-field evaluation reuses this exact-near/Rayleigh-far policy for
+    source-point coupling.
+
     ``output_bmax`` controls optional evanescent diffraction orders in periodic
     output bases. ``None`` means propagating orders only for far-field power
     balances; near-field exterior evaluation still requires an explicit output
     basis because evanescent content is an expert convergence knob.
     """
 
-    method: Literal["ewald", "directsum"] = "ewald"
+    method: Literal["ewald", "directsum", "rayleigh"] = "ewald"
     eta: float | None = None
     real_shells: int | None = None
     reciprocal_shells: int | None = None
@@ -41,14 +55,34 @@ class PeriodicOptions:
     shell_tolerance: float = 1.0e-10
     max_shells: int = 32
     output_bmax: float | None = None
+    rayleigh_z_cut: float | None = None
+    rayleigh_reciprocal_shells: int | None = None
 
     def __post_init__(self) -> None:
-        if self.method not in {"ewald", "directsum"}:
+        if self.method not in {"ewald", "directsum", "rayleigh"}:
             raise ValueError(
-                f"`method` must be one of {{'ewald', 'directsum'}}. Got {self.method!r}."
+                "`method` must be one of {'ewald', 'directsum', 'rayleigh'}. "
+                f"Got {self.method!r}."
             )
         if self.eta is not None and (not np.isfinite(float(self.eta)) or float(self.eta) <= 0.0):
             raise ValueError(f"`eta` must be finite and positive when set. Got {self.eta!r}.")
+        if self.rayleigh_z_cut is not None:
+            z_cut = float(self.rayleigh_z_cut)
+            if not np.isfinite(z_cut) or z_cut <= 0.0:
+                raise ValueError(
+                    "`rayleigh_z_cut` must be finite and positive when set. "
+                    f"Got {self.rayleigh_z_cut!r}."
+                )
+            object.__setattr__(self, "rayleigh_z_cut", z_cut)
+        if self.rayleigh_reciprocal_shells is not None:
+            raw = self.rayleigh_reciprocal_shells
+            value = int(raw)
+            if value != raw or value < 0:
+                raise ValueError(
+                    "`rayleigh_reciprocal_shells` must be a non-negative integer or None. "
+                    f"Got {raw!r}."
+                )
+            object.__setattr__(self, "rayleigh_reciprocal_shells", value)
         if self.output_bmax is not None:
             bmax = float(self.output_bmax)
             if not np.isfinite(bmax) or bmax <= 0.0:

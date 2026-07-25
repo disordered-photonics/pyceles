@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Added an opt-in hybrid periodic coupling method (`method="rayleigh"`) for
+  NumPy and CuPy. It evaluates a particle-safe vertical near band with exact
+  Ewald sums, reuses one exact periodic self block, and applies vertically far
+  reciprocal Rayleigh coupling with z-sorted linear-time scans. The same
+  exact-near/Rayleigh-far split now accelerates local-SVWF near-field points
+  inside the particle slab without changing solved coefficients.
 - Added an opt-in `ResultRetention` policy for omitting optional incident,
   right-hand-side, residual-history, and polarization-basis coefficient arrays
   from completed large-run results.

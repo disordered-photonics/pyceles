@@ -33,7 +33,7 @@ import re
 import subprocess
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 
@@ -86,6 +86,7 @@ class RunConfig:
     run_pyceles: bool = True
     pyceles_nearfield_bmax: float | None = None
     pyceles_field_evanescent_decay: float = 8.0
+    pyceles_periodic_method: Literal["ewald", "rayleigh"] = "ewald"
 
 
 _NUMERIC_TOKEN_RE = re.compile(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eEdD][+-]?\d+)?")
@@ -921,6 +922,7 @@ def _run_pyceles_case(
     case: PeriodicBenchmarkCase,
     outdir_case: Path,
     *,
+    cfg: RunConfig,
     nearfield_bmax: float | None,
     nearfield_bmax_policy: dict[str, Any] | None = None,
     nearfield_reference: dict[str, dict[str, Any]] | None = None,
@@ -930,7 +932,8 @@ def _run_pyceles_case(
     beta = math.radians(float(case.incidence_polar_deg))
     alpha = math.radians(float(case.incidence_azimuth_deg))
     periodic = pcl.PeriodicSpec(
-        lattice=pcl.RectangularLattice2D(ax=float(case.lattice_ax), ay=float(case.lattice_ay))
+        lattice=pcl.RectangularLattice2D(ax=float(case.lattice_ax), ay=float(case.lattice_ay)),
+        options=pcl.PeriodicOptions(method=cfg.pyceles_periodic_method),
     )
     particles = [
         pcl.Sphere(
@@ -1073,6 +1076,7 @@ def _run_pyceles_case(
         },
         "nearfield": nearfield_artifacts,
         "nearfield_bmax_policy": nearfield_bmax_policy,
+        "periodic_method": cfg.pyceles_periodic_method,
         "mapping_convention": {"parallel": "tm", "perpendicular": "te"},
     }
 
@@ -1170,6 +1174,7 @@ def run_case(case: PeriodicBenchmarkCase, cfg: RunConfig) -> dict[str, Any]:
         pyceles_output = _run_pyceles_case(
             case,
             outdir_case,
+            cfg=cfg,
             nearfield_bmax=pyceles_nearfield_bmax,
             nearfield_bmax_policy=pyceles_nearfield_bmax_policy,
             nearfield_reference=nearfield_reference,
@@ -1374,6 +1379,12 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--pyceles-periodic-method",
+        choices=("ewald", "rayleigh"),
+        default="ewald",
+        help="Periodic coupling method used by the pyceles comparison run.",
+    )
+    parser.add_argument(
         "--plot-map-panels",
         action="store_true",
         help="Generate MSTM-vs-pyceles nearfield intensity panel plots.",
@@ -1412,6 +1423,7 @@ def main() -> None:
             None if args.pyceles_nearfield_bmax is None else float(args.pyceles_nearfield_bmax)
         ),
         pyceles_field_evanescent_decay=float(args.pyceles_field_evanescent_decay),
+        pyceles_periodic_method=args.pyceles_periodic_method,
     )
     summary = run_case(case, cfg)
     map_report_path: Path | None = None

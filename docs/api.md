@@ -83,6 +83,15 @@ Experimental periodic workflows use:
 - `pyceles.RectangularLattice2D`
 - `pyceles.PeriodicSpec`
 - `pyceles.PeriodicOptions`
+  - `method="ewald"`: exact pairwise Ewald operator (default),
+  - `method="directsum"`: small-case NumPy oracle,
+  - `method="rayleigh"`: exact self/vertical-near Ewald plus far Rayleigh scans,
+  - `rayleigh_z_cut`: exact-near half-band in the simulation length unit,
+  - `rayleigh_reciprocal_shells`: fixed reciprocal square half-width or `None`
+    for automatic truncation,
+  - `shell_tolerance` and `max_shells`: shared Ewald/Rayleigh automatic
+    shell-truncation policy. Reciprocal work chunks are selected internally from
+    a bounded temporary-memory budget.
 - `pyceles.core.periodic.rayleigh_report`
 - `pyceles.core.periodic.rayleigh_threshold_scales`
 - `pyceles.core.periodic.suggest_safe_period_scales`

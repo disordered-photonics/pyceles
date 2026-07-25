@@ -233,9 +233,9 @@ class SimulationConfig:
                 )
             if coupling_backend != "pairwise":
                 raise NotImplementedError("Periodic MLFMM coupling is not implemented yet.")
-            if backend == "cupy" and self.periodic.options.method != "ewald":
+            if backend == "cupy" and self.periodic.options.method not in {"ewald", "rayleigh"}:
                 raise NotImplementedError(
-                    "CuPy periodic workflows currently support only Ewald coupling."
+                    "CuPy periodic workflows currently support Ewald or Rayleigh coupling."
                 )
         post_backend = str(self.postprocessing_backend).lower()
         if post_backend not in {"inherit", "numpy", "cupy"}:

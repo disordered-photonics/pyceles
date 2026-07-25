@@ -267,6 +267,7 @@ def prepare_matvec(
                 k_parallel=k_parallel_arr,
                 dtype=op_dtype,
                 cache_blocks=bool(cache_translation_blocks),
+                circumscribing_radii=circumscribing_radii,
             )
         elif coupling_name == "pairwise":
             lut = make_radial_lut()
@@ -347,6 +348,7 @@ def prepare_matvec(
                     k_parallel=k_parallel_arr,
                     dtype=op_dtype,
                     cache_blocks=bool(cache_translation_blocks),
+                    circumscribing_radii=circumscribing_radii,
                 ),
             )
         elif coupling_name == "pairwise":

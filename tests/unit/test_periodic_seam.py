@@ -102,6 +102,10 @@ def test_periodic_options_reject_invalid_numerical_policy() -> None:
         pcl.PeriodicOptions(max_shells=0)
     with pytest.raises(ValueError, match="output_bmax"):
         pcl.PeriodicOptions(output_bmax=0.0)
+    with pytest.raises(ValueError, match="rayleigh_z_cut"):
+        pcl.PeriodicOptions(rayleigh_z_cut=0.0)
+    with pytest.raises(ValueError, match="rayleigh_reciprocal_shells"):
+        pcl.PeriodicOptions(rayleigh_reciprocal_shells=-1)
 
 
 def test_periodic_config_accepts_cupy_operator_backend() -> None:
@@ -123,10 +127,22 @@ def test_periodic_config_rejects_cupy_directsum_method() -> None:
         lattice=pcl.RectangularLattice2D(300.0, 400.0),
         options=pcl.PeriodicOptions(method="directsum"),
     )
-    with pytest.raises(NotImplementedError, match="only Ewald"):
+    with pytest.raises(NotImplementedError, match="Ewald or Rayleigh"):
         SimulationConfig(
             source=_plane_wave(), periodic=spec, operator_backend="cupy", verbose=False
         )
+
+
+def test_periodic_config_accepts_cupy_rayleigh_method() -> None:
+    spec = pcl.PeriodicSpec(
+        lattice=pcl.RectangularLattice2D(300.0, 400.0),
+        options=pcl.PeriodicOptions(method="rayleigh"),
+    )
+    cfg = SimulationConfig(
+        source=_plane_wave(), periodic=spec, operator_backend="cupy", verbose=False
+    )
+
+    assert cfg.periodic == spec
 
 
 def test_periodic_config_rejects_unimplemented_mlfmm_combination() -> None:

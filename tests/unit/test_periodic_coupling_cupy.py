@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pytest
 
 import pyceles as pcl
+from pyceles.core.indexing import n_modes
 from pyceles.core.lattice import RectangularLattice2D
 from pyceles.core.operators import (
     CuPyPeriodicCouplingOperator,
@@ -14,6 +15,12 @@ from pyceles.core.operators import (
 )
 from pyceles.core.periodic import PeriodicOptions, PeriodicSpec
 from pyceles.core.translation import translation_ab5_table
+from pyceles.postprocessing.nearfield.periodic_interior import (
+    _periodic_local_regular_l1_coeffs,
+)
+from pyceles.postprocessing.nearfield.periodic_interior_cupy import (
+    periodic_local_regular_l1_coeffs_cupy,
+)
 from pyceles.simulation.solve import _assemble_dense_operator_for_prepared
 
 pytestmark = pytest.mark.gpu
@@ -212,3 +219,107 @@ def test_periodic_cupy_dense_assembly_from_cached_blocks_matches_matvec(
     np.testing.assert_allclose(cp.asnumpy(dense), cp.asnumpy(expected), rtol=1e-8, atol=1e-9)
     assert prepared.coupling.cache_blocks is False
     assert prepared.coupling._dense_w_cache_gpu is None
+
+
+def test_periodic_cupy_rayleigh_hybrid_matches_numpy_scan_and_near_cache(
+    cupy_runtime: tuple[Any, Any],
+) -> None:
+    cp, _ = cupy_runtime
+    k = 2.0 * np.pi / 550.0
+    positions = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [170.0, -80.0, 140.0],
+            [-90.0, 60.0, 820.0],
+        ],
+        dtype=float,
+    )
+    periodic = PeriodicSpec(
+        lattice=RectangularLattice2D(ax=900.0, ay=850.0),
+        options=PeriodicOptions(
+            method="rayleigh",
+            eta=0.002,
+            real_shells=2,
+            reciprocal_shells=2,
+            rayleigh_z_cut=300.0,
+            rayleigh_reciprocal_shells=6,
+        ),
+    )
+    ab5 = translation_ab5_table(1, dtype=np.complex128)
+    kwargs = dict(
+        lmax=1,
+        k=k,
+        positions=positions,
+        ab5=ab5,
+        periodic=periodic,
+        k_parallel=np.asarray([0.0003, -0.0002]),
+        dtype=np.dtype(np.complex128),
+        cache_blocks=False,
+        circumscribing_radii=np.full(positions.shape[0], 40.0),
+    )
+    cpu = PeriodicCouplingOperator(**cast(Any, kwargs))
+    gpu = CuPyPeriodicCouplingOperator(**cast(Any, kwargs))
+    rng = np.random.default_rng(20260725)
+    x = rng.normal(size=(18, 2)) + 1j * rng.normal(size=(18, 2))
+
+    expected = cpu.apply(x)
+    actual = gpu.apply(cp.asarray(x))
+
+    np.testing.assert_allclose(cp.asnumpy(actual), expected, rtol=2e-9, atol=2e-10)
+    assert gpu._near_structural_sums_gpu is not None
+    assert gpu._near_structural_sums_gpu.shape[1] == 9
+    assert gpu._self_block_gpu is not None
+    assert gpu._rayleigh_plan_cache is not None
+
+
+def test_periodic_cupy_rayleigh_interior_points_match_numpy(
+    cupy_runtime: tuple[Any, Any],
+) -> None:
+    cp, _ = cupy_runtime
+    lmax = 2
+    k = 2.0 * np.pi / 550.0
+    positions = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [170.0, -80.0, 140.0],
+            [-90.0, 60.0, 820.0],
+        ]
+    )
+    points = np.asarray(
+        [
+            [20.0, 10.0, 50.0],
+            [30.0, -40.0, 500.0],
+            [-20.0, 50.0, 900.0],
+        ]
+    )
+    rng = np.random.default_rng(20260728)
+    coeffs = rng.normal(size=(positions.shape[0], n_modes(lmax))) + 1j * rng.normal(
+        size=(positions.shape[0], n_modes(lmax))
+    )
+    periodic = PeriodicSpec(
+        lattice=RectangularLattice2D(ax=900.0, ay=850.0),
+        options=PeriodicOptions(
+            method="rayleigh",
+            eta=0.002,
+            real_shells=5,
+            reciprocal_shells=8,
+            rayleigh_z_cut=300.0,
+            rayleigh_reciprocal_shells=16,
+        ),
+    )
+    kwargs = dict(
+        points=points,
+        positions=positions,
+        coeffs=coeffs,
+        lmax=lmax,
+        k=k,
+        periodic=periodic,
+        k_parallel=np.asarray([0.0003, -0.0002]),
+        circumscribing_radii=np.full(positions.shape[0], 40.0),
+    )
+
+    expected = _periodic_local_regular_l1_coeffs(**cast(Any, kwargs))
+    actual = periodic_local_regular_l1_coeffs_cupy(**cast(Any, kwargs))
+    cp.cuda.Stream.null.synchronize()
+
+    np.testing.assert_allclose(actual, expected, rtol=2e-9, atol=2e-10)

@@ -468,13 +468,15 @@ def _build_config(
     periodic = pcl.PeriodicSpec(
         lattice=pcl.RectangularLattice2D(ax=float(side_nm), ay=float(side_nm)),
         options=pcl.PeriodicOptions(
-            method="ewald",
+            method=cast(Literal["ewald", "rayleigh"], args.periodic_method),
             eta=args.eta,
             real_shells=args.real_shells,
             reciprocal_shells=args.reciprocal_shells,
             shell_tolerance=float(args.shell_tolerance),
             max_shells=int(args.max_shells),
             output_bmax=args.output_bmax,
+            rayleigh_z_cut=args.rayleigh_z_cut,
+            rayleigh_reciprocal_shells=args.rayleigh_reciprocal_shells,
         ),
     )
     return pcl.SimulationConfig(
@@ -564,11 +566,19 @@ def main() -> None:
         default="off",
         help="Profile solve with periodic W-block cache off/on/both.",
     )
+    parser.add_argument(
+        "--periodic-method",
+        choices=("ewald", "rayleigh"),
+        default="ewald",
+        help="Periodic coupling apply: exact pairwise Ewald or hybrid exact-near/Rayleigh-far.",
+    )
     parser.add_argument("--eta", type=float, default=None)
     parser.add_argument("--real-shells", type=int, default=None)
     parser.add_argument("--reciprocal-shells", type=int, default=None)
     parser.add_argument("--shell-tolerance", type=float, default=1.0e-10)
     parser.add_argument("--max-shells", type=int, default=32)
+    parser.add_argument("--rayleigh-z-cut", type=float, default=None)
+    parser.add_argument("--rayleigh-reciprocal-shells", type=int, default=None)
     parser.add_argument("--output-bmax", type=float, default=None)
     parser.add_argument("--field-bmax", type=float, default=None)
     parser.add_argument("--field-evanescent-decay", type=float, default=8.0)
@@ -581,6 +591,8 @@ def main() -> None:
     parser.add_argument("--cuda-profiler-api", action="store_true")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
+    if args.periodic_method == "rayleigh" and args.cache_mode != "off":
+        parser.error("--periodic-method rayleigh requires --cache-mode off")
 
     operator_backend = cast(Literal["numpy", "cupy"], args.operator_backend)
     postprocessing_backend = cast(Literal["inherit", "numpy", "cupy"], args.postprocessing_backend)
@@ -637,7 +649,8 @@ def main() -> None:
     if not args.quiet:
         print(
             f"Preparing periodic problem: N={n_particles}, side={float(args.side_nm):g} nm, "
-            f"lmax={int(args.lmax)}, backend={operator_backend}, post={postprocessing_backend}"
+            f"lmax={int(args.lmax)}, method={args.periodic_method}, "
+            f"backend={operator_backend}, post={postprocessing_backend}"
         )
         print(
             f"Unknowns={n_particles * nmodes}; dense A raw footprint ~{dense_bytes_est / 1024**3:.2f} GiB"
@@ -809,6 +822,7 @@ def main() -> None:
             "effective_postprocessing_backend": primary_run.config.resolved_postprocessing_backend(),
             "compute_dtype": compute_dtype,
             "accum_dtype": accum_dtype,
+            "periodic_method": str(args.periodic_method),
             "cache_mode": str(args.cache_mode),
             "eta": None if args.eta is None else float(args.eta),
             "real_shells": None if args.real_shells is None else int(args.real_shells),
@@ -817,6 +831,10 @@ def main() -> None:
             else int(args.reciprocal_shells),
             "shell_tolerance": float(args.shell_tolerance),
             "max_shells": int(args.max_shells),
+            "rayleigh_z_cut": None if args.rayleigh_z_cut is None else float(args.rayleigh_z_cut),
+            "rayleigh_reciprocal_shells": None
+            if args.rayleigh_reciprocal_shells is None
+            else int(args.rayleigh_reciprocal_shells),
             "output_bmax": None if args.output_bmax is None else float(args.output_bmax),
             "field_bmax": None if args.field_bmax is None else float(args.field_bmax),
             "field_evanescent_decay": float(args.field_evanescent_decay),

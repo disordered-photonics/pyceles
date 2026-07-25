@@ -18,6 +18,11 @@ from pyceles.core.periodic.ewald import (
     ewald_structural_sums_2d_batch,
     resolve_ewald_eta,
 )
+from pyceles.core.periodic.rayleigh import (
+    apply_rayleigh_far_to_points_numpy,
+    near_point_source_csr,
+    prepare_rayleigh_plan,
+)
 
 from .classification import InternalPointClassification
 from .components import NearFieldComponents
@@ -133,13 +138,15 @@ def _periodic_local_regular_l1_coeffs(
     k: float,
     periodic: PeriodicSpec,
     k_parallel: np.ndarray,
+    circumscribing_radii: np.ndarray | None = None,
     point_batch_size: int = 128,
     show_progress: bool = False,
 ) -> np.ndarray:
     """Return point-local regular `l=1` coefficients for periodic in-slab points.
 
-    The hot path contracts periodic structural sums directly into the destination
-    `l=1` sector.
+    The Ewald path contracts every source-point structural sum directly into the
+    destination ``l=1`` sector. The hybrid Rayleigh path uses the same exact
+    contraction inside its vertical band and z-sorted reciprocal scans outside.
     """
     pts = np.asarray(points, dtype=float).reshape(-1, 3)
     pos = np.asarray(positions, dtype=float).reshape(-1, 3)
@@ -152,11 +159,27 @@ def _periodic_local_regular_l1_coeffs(
     coeff_arr = np.asarray(coeffs, dtype=np.complex128).reshape(pos.shape[0], nm)
     lmax_struct, _m_offset, kernel, _row_idx = l1_projection_data(lmax_i)
     method = str(periodic.options.method)
-    if method != "ewald":
+    if method not in {"ewald", "rayleigh"}:
         raise NotImplementedError(
-            "Periodic in-slab near-field evaluation currently requires "
-            "`periodic.options.method='ewald'`."
+            "Periodic in-slab near-field evaluation requires "
+            "`periodic.options.method` to be 'ewald' or 'rayleigh'."
         )
+
+    if method == "rayleigh":
+        plan = prepare_rayleigh_plan(
+            lmax=lmax_i,
+            k=float(k),
+            positions=pos,
+            circumscribing_radii=circumscribing_radii,
+            periodic=periodic,
+            k_parallel=k_parallel,
+            dtype=np.complex128,
+        )
+        out += np.asarray(
+            apply_rayleigh_far_to_points_numpy(plan, coeff_arr, pts),
+            dtype=np.complex128,
+        )
+        z_cut = float(plan.z_cut)
 
     batch = max(1, int(point_batch_size))
     eta = resolve_ewald_eta(
@@ -172,20 +195,60 @@ def _periodic_local_regular_l1_coeffs(
         k_parallel=np.asarray(k_parallel, dtype=float).reshape(2),
         eta=float(eta),
     )
-    batch_starts = range(0, pts.shape[0], batch)
-    n_batches = (pts.shape[0] + batch - 1) // batch
-    total_work = int(n_batches * pos.shape[0])
+    if method == "ewald":
+        n_batches = (pts.shape[0] + batch - 1) // batch
+        total_work = int(n_batches * pos.shape[0])
+        progress = (
+            tqdm(total=total_work, desc="Periodic slab field", unit="source-batch", leave=True)
+            if show_progress and total_work > 0
+            else None
+        )
+        try:
+            for start in range(0, pts.shape[0], batch):
+                stop = min(pts.shape[0], start + batch)
+                pts_batch = np.asarray(pts[start:stop], dtype=float)
+                acc = np.zeros((pts_batch.shape[0], 6), dtype=np.complex128)
+                for j in range(pos.shape[0]):
+                    sums = ewald_structural_sums_2d_batch(
+                        lmax_struct=lmax_struct,
+                        k=float(k),
+                        destinations=pts_batch,
+                        source=pos[j],
+                        lattice=periodic.lattice,
+                        k_parallel=k_parallel,
+                        eta=float(eta),
+                        real_shells=periodic.options.real_shells,
+                        reciprocal_shells=periodic.options.reciprocal_shells,
+                        shell_tolerance=float(periodic.options.shell_tolerance),
+                        max_shells=int(periodic.options.max_shells),
+                        workspace=workspace,
+                    )
+                    acc += reduce_structural_sums_to_l1(sums, coeff_arr[j], kernel=kernel)
+                    if progress is not None:
+                        progress.update(1)
+                out[start:stop] = acc
+        finally:
+            if progress is not None:
+                progress.close()
+        return out
+
+    indptr, destination_indices, _source_indices = near_point_source_csr(pts, pos, z_cut)
+    if destination_indices.size == 0:
+        return out
+    total_work = sum(
+        (int(indptr[j + 1] - indptr[j]) + batch - 1) // batch for j in range(pos.shape[0])
+    )
     progress = (
         tqdm(total=total_work, desc="Periodic slab field", unit="source-batch", leave=True)
         if show_progress and total_work > 0
         else None
     )
     try:
-        for s in batch_starts:
-            e = min(pts.shape[0], s + batch)
-            pts_batch = np.asarray(pts[s:e], dtype=float)
-            acc = np.zeros((pts_batch.shape[0], 6), dtype=np.complex128)
-            for j in range(pos.shape[0]):
+        for j in range(pos.shape[0]):
+            point_indices = destination_indices[indptr[j] : indptr[j + 1]]
+            for start in range(0, point_indices.size, batch):
+                batch_indices = point_indices[start : start + batch]
+                pts_batch = np.asarray(pts[batch_indices], dtype=float)
                 sums = ewald_structural_sums_2d_batch(
                     lmax_struct=lmax_struct,
                     k=float(k),
@@ -200,10 +263,13 @@ def _periodic_local_regular_l1_coeffs(
                     max_shells=int(periodic.options.max_shells),
                     workspace=workspace,
                 )
-                acc += reduce_structural_sums_to_l1(sums, coeff_arr[j], kernel=kernel)
+                out[batch_indices] += reduce_structural_sums_to_l1(
+                    sums,
+                    coeff_arr[j],
+                    kernel=kernel,
+                )
                 if progress is not None:
                     progress.update(1)
-            out[s:e, :] = acc
     finally:
         if progress is not None:
             progress.close()
@@ -348,6 +414,7 @@ def compute_periodic_near_field_interior(
                     k=float(run.k),
                     periodic=periodic,
                     k_parallel=k_parallel,
+                    circumscribing_radii=run.circumscribing_radii,
                     show_progress=show_progress,
                 )
             else:
@@ -359,6 +426,7 @@ def compute_periodic_near_field_interior(
                     k=float(run.k),
                     periodic=periodic,
                     k_parallel=k_parallel,
+                    circumscribing_radii=run.circumscribing_radii,
                     show_progress=show_progress,
                 )
             e_valid, h_valid = _local_regular_l1_fields_at_center(

@@ -202,6 +202,17 @@ Common benchmark parameters:
   `shell_tolerance=1e-10`,
 - precision: currently `complex128/complex128`.
 
+Additional Rayleigh cache-off smoke timings on the same 500-particle geometry
+(one BiCGSTAB iteration, final residual check and near-field maps skipped) are:
+
+- CuPy: preparation `0.03 s`, linear solve `6.18 s`, solve core `6.26 s`;
+- NumPy: preparation `0.03 s`, linear solve `46.06 s`, solve core `46.09 s`.
+
+These are one-iteration operator timings rather than converged solve times;
+they are useful for comparing the Rayleigh matvec itself with the corresponding
+Ewald cache-off smoke runs, but should not be extrapolated directly to a full
+periodic solve without measuring the iteration count.
+
 Measured phase wall times on the same laptop/GPU:
 
 - CuPy, explicit periodic W cache:
@@ -262,11 +273,57 @@ compelling option.
 - The CuPy periodic Ewald path evaluates real-space and shifted reciprocal
   structural sums with fused device kernels, handles same-plane pairs on
   device, and batches source particles by temporary-memory budget.
+- `PeriodicOptions(method="rayleigh")` is an opt-in hybrid alternative for
+  vertically extended cells. Exact Ewald work is restricted to the periodic
+  self block and non-self pairs satisfying `|delta_z| <= rayleigh_z_cut`; the
+  remaining reciprocal coupling is applied by two z-sorted semiseparable scans.
+  For `N` particles, `Q` retained reciprocal orders, and `K` directed non-self
+  near pairs, the repeated apply scales as `O(N * Q * Nm + K * Nm^2)` and the
+  exact-near cache as `O(K * (2*lmax+1)^2)`, instead of recomputing Ewald sums for all
+  `N^2` pairs or storing all dense W blocks.
+- The default Rayleigh half-band is one medium wavelength in `|delta_z|`,
+  enlarged to at least twice the largest particle circumscribing radius. This
+  is deliberately conservative: evanescent reciprocal orders have already
+  decayed substantially before a pair enters the scan. An explicit
+  `rayleigh_z_cut` may be used for convergence studies but cannot be smaller
+  than the particle-safe diameter bound.
+- `rayleigh_reciprocal_shells` fixes the square reciprocal half-width. With the
+  default `None`, pyceles selects a half-width from a conservative evanescent
+  envelope controlled by the same `shell_tolerance` and `max_shells` settings
+  used by Ewald accumulation. This is a truncation heuristic, not an error
+  proof; production studies should compare representative results against a
+  converged Ewald configuration and sweep the band/half-width.
+- Reciprocal work chunks are selected automatically from a fixed temporary-
+  memory budget. This avoids a small public chunk cap that would leave the GPU
+  under-occupied and add avoidable Python/einsum loop overhead on the CPU.
+- Preparation builds the reciprocal projection plan, the shared exact self
+  block, and the sparse exact-near cache. Time this separately from warmed
+  matvecs: the first direct `apply()` includes any preparation that has not
+  already been requested through `populate_coupling()`.
+- When measuring Rayleigh error against Ewald, pin a demonstrably converged
+  Ewald `eta` and shell configuration (or sweep them). A difference against an
+  automatically selected, insufficiently converged Ewald reference is not a
+  Rayleigh truncation estimate and can dominate the comparison in large cells.
+- The hybrid method is most useful when the vertical band is sparse. A dense
+  same-height layer still has `K = O(N^2)` and therefore receives little memory
+  or setup benefit. Exact grazing diffraction orders (Wood anomalies) are
+  rejected by the Rayleigh operator; use exact Ewald or move away from the
+  anomaly.
+- The periodic phase profiler accepts `--periodic-method rayleigh` together
+  with the `--rayleigh-*` convergence controls. Hybrid profiling requires
+  `--cache-mode off`, because its sparse near cache replaces dense W caching.
 - Explicit periodic W-block caching is an opt-in memory/runtime tradeoff.
 - Dense direct periodic solves are validation paths. For diagonal particle-local
   `T` operators, dense `A` is assembled directly from cached periodic W blocks.
 - Periodic near-field evaluation uses Rayleigh orders above/below the particle
-  slab and local periodic SVWF evaluation inside the slab.
+  slab. For in-slab points, `method="rayleigh"` applies the same vertical split
+  as the coupling operator: reciprocal z scans accumulate vertically distant
+  particle sources, while source-point pairs inside `rayleigh_z_cut` retain the
+  exact Ewald local-SVWF projection. For `P` field points and `Kp` exact-near
+  source-point pairs, this changes the dominant shape from all `P*N` Ewald
+  evaluations to approximately `O((P + N) * Q * Nm + Kp * Nm)` plus structural
+  Ewald work for the near pairs. Dense same-height field maps can therefore
+  remain expensive even when the solve itself benefits strongly from Rayleigh.
 
 ### Periodic output basis
 

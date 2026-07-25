@@ -46,7 +46,9 @@ Current tested scope:
 
 - homogeneous rectangular 2D lattices,
 - plane-wave excitation,
-- NumPy and CuPy `complex128/complex128` periodic Ewald paths,
+- NumPy and CuPy `complex64`/`complex128` periodic Ewald paths,
+- opt-in NumPy/CuPy hybrid exact-near/Rayleigh-far repeated applies for
+  vertically extended cells,
 - selected local-SVWF near-field workflows for homogeneous spheres,
 - direct dense validation paths for controlled cases.
 
@@ -55,8 +57,21 @@ Not production-ready yet:
 - non-rectangular lattices,
 - reduced-cell local sources,
 - mixed-precision periodic production runs,
-- periodic MLFMM coupling,
-- optional hybrid coupling strategies.
+- periodic MLFMM coupling.
+
+The hybrid Rayleigh method is not a general cure for dense planar cells. Its
+exact-near cache scales with the number of directed non-self pairs inside the
+vertical band, which remains quadratic when most particles share nearly the
+same height. Its automatic reciprocal truncation is conservative but heuristic;
+scientific runs should sweep `rayleigh_z_cut` or `rayleigh_reciprocal_shells`
+and compare representative cases with exact Ewald.
+
+Periodic in-slab near-field evaluation supports both `method="ewald"` and
+`method="rayleigh"`. The hybrid path retains exact Ewald local-SVWF evaluation
+for source-point pairs inside the vertical band and uses reciprocal Rayleigh
+scans only for vertically distant sources. It therefore inherits the same
+limitation as the hybrid solve: a dense same-height point/source population can
+leave the exact-near work effectively quadratic.
 
 Dense/direct periodic validation can remain memory-sensitive on small GPUs. Even when matrices are prepared in Fortran order for CuPy LU factorization, dense matrices, LU workspace, pivots, and cached W blocks can all be live at the same time.
 

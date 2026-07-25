@@ -60,7 +60,8 @@ Current tested capabilities include:
 - local absorption and dipole power/LDOS diagnostics,
 - HDF5 save/load workflows,
 - experimental rectangular 2D periodic workflows with diffraction-order
-  payloads, `R/T/A`, and periodic near-field slices.
+  payloads, `R/T/A`, periodic near-field slices, and an opt-in hybrid
+  exact-near/Rayleigh-far repeated-apply operator for vertically extended cells.
 
 See [docs/capabilities.md](docs/capabilities.md) for the full feature inventory.
 
