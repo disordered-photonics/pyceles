@@ -8,6 +8,7 @@ import pytest
 import pyceles as pcl
 from pyceles.core.indexing import index_vswf, n_modes
 from pyceles.core.operators import (
+    CuPyPeriodicCouplingOperator,
     PeriodicCouplingOperator,
     prepare_matvec,
 )
@@ -546,6 +547,36 @@ def test_vertically_sparse_hybrid_prepares_self_ewald_only_once(
     assert calls == 1
     assert hybrid._near_destinations is not None
     assert hybrid._near_destinations.size == 0
+
+
+def test_cupy_near_apply_batch_accounts_for_dense_pair_blocks() -> None:
+    positions = np.zeros((700, 3), dtype=float)
+    operator = CuPyPeriodicCouplingOperator(
+        lmax=3,
+        k=2.0 * np.pi / 550.0,
+        positions=positions,
+        ab5=translation_ab5_table(3, dtype=np.complex64),
+        periodic=PeriodicSpec(
+            lattice=pcl.RectangularLattice2D(6000.0, 6000.0),
+            options=PeriodicOptions(
+                method="rayleigh",
+                eta=0.0015,
+                real_shells=1,
+                reciprocal_shells=1,
+                rayleigh_z_cut=550.0,
+                rayleigh_reciprocal_shells=1,
+            ),
+        ),
+        k_parallel=np.zeros(2),
+        dtype=np.dtype(np.complex64),
+        circumscribing_radii=np.full(positions.shape[0], 40.0),
+    )
+
+    total = 400_000
+    batch = operator._near_apply_batch_size(total=total, n_rhs=1)
+
+    assert 1 <= batch < total
+    assert batch < 20_000
 
 
 @pytest.mark.reference

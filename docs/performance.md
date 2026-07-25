@@ -297,9 +297,18 @@ compelling option.
   memory budget. This avoids a small public chunk cap that would leave the GPU
   under-occupied and add avoidable Python/einsum loop overhead on the CPU.
 - Preparation builds the reciprocal projection plan, the shared exact self
-  block, and the sparse exact-near cache. Time this separately from warmed
-  matvecs: the first direct `apply()` includes any preparation that has not
-  already been requested through `populate_coupling()`.
+  block, and the sparse exact-near cache. `cache_translation_blocks=False`
+  disables the dense periodic W cache, but the hybrid method still retains its
+  `O(N Q)` lateral phase table and `O(K (2*lmax+1)^2)` compact exact-near
+  structural cache. These are part of the Rayleigh repeated-apply design, not a
+  leaked dense W matrix. Time preparation separately from warmed matvecs: the
+  first direct `apply()` includes any preparation that has not already been
+  requested through `populate_coupling()`.
+- CuPy contracts the compact exact-near cache in bounded pair batches. The
+  batching budget includes the possible dense `(Nm, Nm)` block intermediate
+  and its library workspace, rather than only the final `(Nm,)` contribution.
+  This keeps dense bands from creating a hidden `O(K Nm^2)` temporary spanning
+  every near pair at once.
 - When measuring Rayleigh error against Ewald, pin a demonstrably converged
   Ewald `eta` and shell configuration (or sweep them). A difference against an
   automatically selected, insufficiently converged Ewald reference is not a

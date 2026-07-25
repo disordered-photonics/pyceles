@@ -348,6 +348,30 @@ class CuPyPeriodicCouplingOperator:
             ),
         )
 
+    def _near_apply_batch_size(self, *, total: int, n_rhs: int) -> int:
+        """Bound exact-near contraction intermediates by a predictable budget.
+
+        A three-operand ``einsum`` over every near pair can legally choose the
+        contraction ``structural @ tensor`` first.  That materializes one dense
+        ``(Nm, Nm)`` block per pair, even though the final contribution has only
+        ``Nm`` entries.  Count that block (and one equally sized library
+        workspace) explicitly so dense vertical bands cannot create multi-GiB
+        temporaries before the final scatter.
+        """
+        degrees, _orders = valid_structural_indices(int(self.lmax))
+        nm = int(self.n_modes)
+        rhs = max(1, int(n_rhs))
+        itemsize = int(self.dtype.itemsize)
+        bytes_per_pair = itemsize * (
+            int(degrees.size)  # complex128 -> compute-dtype structural cast
+            + 2 * nm * nm  # dense block plus contraction workspace
+            + 3 * nm * rhs  # gathered source, contribution, and matmul workspace
+        )
+        return self._memory_bounded_batch_size(
+            total=int(total),
+            bytes_per_item=int(bytes_per_pair),
+        )
+
     def _near_structure(self) -> tuple[Array, Array, Array]:
         if (
             self._near_indptr is None
@@ -531,19 +555,22 @@ class CuPyPeriodicCouplingOperator:
             src_gpu = self._rayleigh_device_array("near_sources", sources, dtype=cp.int32)
             dst_gpu = self._rayleigh_device_array("near_destinations", destinations, dtype=cp.int32)
             tensor = self._near_contraction_tensor_device()
-            bytes_per_pair = 2 * self.n_modes * int(arr.shape[2]) * int(self.dtype.itemsize)
-            pair_batch = self._memory_bounded_batch_size(
+            pair_batch = self._near_apply_batch_size(
                 total=total,
-                bytes_per_item=bytes_per_pair,
+                n_rhs=int(arr.shape[2]),
             )
             for start in range(0, total, pair_batch):
                 stop = min(total, start + pair_batch)
-                contribution = cp.einsum(
-                    "av,ijv,ajr->air",
-                    sums[start:stop].astype(self.dtype, copy=False),
+                structural = sums[start:stop].astype(self.dtype, copy=False)
+                blocks = cp.einsum(
+                    "av,ijv->aij",
+                    structural,
                     tensor,
-                    arr[src_gpu[start:stop]],
                     optimize=True,
+                )
+                contribution = cp.matmul(
+                    blocks,
+                    arr[src_gpu[start:stop]],
                 )
                 scatter_add_complex(
                     y,
@@ -551,6 +578,7 @@ class CuPyPeriodicCouplingOperator:
                     contribution,
                     cupy=cp,
                 )
+                del structural, blocks, contribution
 
         flat = y.reshape(self.n_particles * self.n_modes, int(arr.shape[2]))
         return flat[:, 0] if squeezed else flat

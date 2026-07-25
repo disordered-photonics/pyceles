@@ -346,9 +346,7 @@ def scan_far_to_points_cupy(
         out.fill(0)
         return out
     kernel = _point_scan_kernel(np.dtype(src.dtype).name)
-    source_z_cp = cupy.ascontiguousarray(
-        cupy.asarray(source_z, dtype=cupy.float64).reshape(-1)
-    )
+    source_z_cp = cupy.ascontiguousarray(cupy.asarray(source_z, dtype=cupy.float64).reshape(-1))
     gamma_cp = cupy.ascontiguousarray(cupy.asarray(gamma, dtype=cupy.complex128).reshape(-1))
     lanes = n_q * n_pol * n_rhs
     threads = 128
@@ -432,9 +430,9 @@ def apply_rayleigh_far_to_points_cupy(
     for start in range(0, plan.n_modes_reciprocal, chunk):
         stop = min(plan.n_modes_reciprocal, start + chunk)
         source_phase = source_phase_all[:, start:stop]
-        destination_phase = cupy.exp(
-            1j * (pts_sorted[:, :2] @ reciprocal[start:stop].T)
-        ).astype(dtype, copy=False)
+        destination_phase = cupy.exp(1j * (pts_sorted[:, :2] @ reciprocal[start:stop].T)).astype(
+            dtype, copy=False
+        )
         gamma = gamma_all[start:stop]
         for direction, upward in ((0, True), (1, False)):
             source = cupy.einsum(

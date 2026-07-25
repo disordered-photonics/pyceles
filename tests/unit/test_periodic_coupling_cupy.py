@@ -223,6 +223,7 @@ def test_periodic_cupy_dense_assembly_from_cached_blocks_matches_matvec(
 
 def test_periodic_cupy_rayleigh_hybrid_matches_numpy_scan_and_near_cache(
     cupy_runtime: tuple[Any, Any],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cp, _ = cupy_runtime
     k = 2.0 * np.pi / 550.0
@@ -259,6 +260,7 @@ def test_periodic_cupy_rayleigh_hybrid_matches_numpy_scan_and_near_cache(
     )
     cpu = PeriodicCouplingOperator(**cast(Any, kwargs))
     gpu = CuPyPeriodicCouplingOperator(**cast(Any, kwargs))
+    monkeypatch.setattr(gpu, "_near_apply_batch_size", lambda **_kwargs: 1)
     rng = np.random.default_rng(20260725)
     x = rng.normal(size=(18, 2)) + 1j * rng.normal(size=(18, 2))
 
