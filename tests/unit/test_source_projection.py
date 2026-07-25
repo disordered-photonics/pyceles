@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import cast
-
 import numpy as np
 import pytest
 
@@ -283,7 +281,7 @@ def test_slm_source_phase_ramp_matches_focal_shift_in_angular_spectrum():
     dx = 120.0
 
     def modulation(alpha_grid: np.ndarray, beta_grid: np.ndarray) -> np.ndarray:
-        return cast(np.ndarray, np.exp(-1j * k * np.sin(beta_grid) * np.cos(alpha_grid) * dx))
+        return np.asarray(np.exp(-1j * k * np.sin(beta_grid) * np.cos(alpha_grid) * dx))
 
     slm = SLMSource(base_source=base, modulation=modulation)
     shifted = GaussianBeam(

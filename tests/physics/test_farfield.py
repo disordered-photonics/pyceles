@@ -1,4 +1,4 @@
-from typing import Any, cast
+from typing import Any
 
 import numpy as np
 import pytest
@@ -1290,7 +1290,7 @@ def test_simulation_dual_basis_supports_slm_wrapped_gaussian_source():
 
     def phase_ramp(alpha_grid: np.ndarray, beta_grid: np.ndarray) -> np.ndarray:
         k = 2.0 * np.pi / base.wavelength * np.real(base.medium_n)
-        return cast(np.ndarray, np.exp(-1j * k * np.sin(beta_grid) * np.cos(alpha_grid) * 50.0))
+        return np.asarray(np.exp(-1j * k * np.sin(beta_grid) * np.cos(alpha_grid) * 50.0))
 
     source = SLMSource(base_source=base, modulation=phase_ramp)
     cfg = SimulationConfig(

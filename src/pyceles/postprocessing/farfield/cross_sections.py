@@ -179,7 +179,9 @@ def local_absorption_cross_section_from_exciting(
             "`exciting_coeffs` and `scattered_coeffs` must have matching shapes. "
             f"Got {e.shape} and {x.shape}."
         )
-    return float(pref * (-np.real(np.vdot(e, x)) - np.real(np.vdot(x, x))))
+    interference = float(np.vdot(e, x).real)
+    scattered_norm = float(np.vdot(x, x).real)
+    return pref * (-interference - scattered_norm)
 
 
 def plane_wave_cross_section_components(

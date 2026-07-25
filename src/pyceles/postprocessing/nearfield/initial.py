@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from importlib import import_module
+from typing import Any
 
 import numpy as np
 import numpy.typing as npt
@@ -57,29 +58,36 @@ def _compute_initial_field_gaussian_normal_incidence_analytic(
 
     compute_dtype = np.dtype(compute_dtype)
     accum_dtype = np.dtype(accum_dtype)
-    real_compute_dtype = np.float32 if compute_dtype == np.dtype(np.complex64) else np.float64
+    real_compute_dtype: np.dtype[np.float32] | np.dtype[np.float64]
+    if compute_dtype == np.dtype(np.complex64):
+        real_compute_dtype = np.dtype(np.float32)
+    else:
+        real_compute_dtype = np.dtype(np.float64)
     n_medium_c = complex(n_medium)
 
-    x = pts[:, 0].astype(real_compute_dtype, copy=False)
-    y = pts[:, 1].astype(real_compute_dtype, copy=False)
-    z = pts[:, 2].astype(real_compute_dtype, copy=False)
-    rho = np.hypot(x, y).astype(real_compute_dtype, copy=False)
-    phi = np.arctan2(y, x)
-    sin_phi = np.sin(phi).astype(real_compute_dtype, copy=False)
-    cos_phi = np.cos(phi).astype(real_compute_dtype, copy=False)
-    sin2_phi = (2.0 * sin_phi * cos_phi).astype(real_compute_dtype, copy=False)
-    cos2_phi = (cos_phi * cos_phi - sin_phi * sin_phi).astype(real_compute_dtype, copy=False)
+    real_array = npt.NDArray[np.floating[Any]]
+    x: real_array = pts[:, 0].astype(real_compute_dtype, copy=False)
+    y: real_array = pts[:, 1].astype(real_compute_dtype, copy=False)
+    z: real_array = pts[:, 2].astype(real_compute_dtype, copy=False)
+    rho: real_array = np.hypot(x, y).astype(real_compute_dtype, copy=False)
+    phi: real_array = np.arctan2(y, x)
+    sin_phi: real_array = np.sin(phi).astype(real_compute_dtype, copy=False)
+    cos_phi: real_array = np.cos(phi).astype(real_compute_dtype, copy=False)
+    sin2_phi: real_array = (2.0 * sin_phi * cos_phi).astype(real_compute_dtype, copy=False)
+    cos2_phi: real_array = (cos_phi * cos_phi - sin_phi * sin_phi).astype(
+        real_compute_dtype, copy=False
+    )
 
-    sb = np.sin(beta).astype(real_compute_dtype, copy=False)
-    cb = np.cos(beta).astype(real_compute_dtype, copy=False)
-    beta_w = trapezoidal_weights(beta).astype(real_compute_dtype, copy=False)
+    sb: real_array = np.sin(beta).astype(real_compute_dtype, copy=False)
+    cb: real_array = np.cos(beta).astype(real_compute_dtype, copy=False)
+    beta_w: real_array = trapezoidal_weights(beta).astype(real_compute_dtype, copy=False)
 
     e0 = float(amplitude)
     w = float(beam_width)
     pref = e0 * (k**2) * (w**2) / (4.0 * np.pi)
-    envelope = pref * cb * np.exp(-(w**2) / 4.0 * (k**2) * (sb**2))
+    envelope: real_array = pref * cb * np.exp(-(w**2) / 4.0 * (k**2) * (sb**2))
     envelope *= np.sign(cb) == np.sign(float(propagation_sign))
-    beta_weighted = envelope * sb * beta_w
+    beta_weighted: real_array = envelope * sb * beta_w
 
     a_te, a_tm = polarization_to_jones(polarization)
     if not (np.isclose(abs(a_te), 0.0) or np.isclose(abs(a_tm), 0.0)):
@@ -135,17 +143,17 @@ def _compute_initial_field_gaussian_normal_incidence_analytic(
     e = np.zeros((pts.shape[0], 3), dtype=accum_dtype)
     h = np.zeros_like(e)
 
-    u1 = (c * sin2_phi - s * cos2_phi).astype(real_compute_dtype, copy=False)
-    u2 = (c * cos2_phi + s * sin2_phi).astype(real_compute_dtype, copy=False)
-    u3 = (s * cos_phi - c * sin_phi).astype(real_compute_dtype, copy=False)
-    u4 = (c * cos_phi + s * sin_phi).astype(real_compute_dtype, copy=False)
+    u1: real_array = (c * sin2_phi - s * cos2_phi).astype(real_compute_dtype, copy=False)
+    u2: real_array = (c * cos2_phi + s * sin2_phi).astype(real_compute_dtype, copy=False)
+    u3: real_array = (s * cos_phi - c * sin_phi).astype(real_compute_dtype, copy=False)
+    u4: real_array = (c * cos_phi + s * sin_phi).astype(real_compute_dtype, copy=False)
 
     pi_r = float(np.pi)
     two_i_pi = np.asarray(2j * np.pi, dtype=compute_dtype)
-    c_plus = (1.0 + propagation * cb).astype(real_compute_dtype, copy=False)
-    c_minus = (1.0 - propagation * cb).astype(real_compute_dtype, copy=False)
-    c_splus = (propagation + cb).astype(real_compute_dtype, copy=False)
-    c_sminus = (propagation - cb).astype(real_compute_dtype, copy=False)
+    c_plus: real_array = (1.0 + propagation * cb).astype(real_compute_dtype, copy=False)
+    c_minus: real_array = (1.0 - propagation * cb).astype(real_compute_dtype, copy=False)
+    c_splus: real_array = (propagation + cb).astype(real_compute_dtype, copy=False)
+    c_sminus: real_array = (propagation - cb).astype(real_compute_dtype, copy=False)
 
     if propagation >= 0.0:
         hemi_mask = cb > 0.0

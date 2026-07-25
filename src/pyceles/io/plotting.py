@@ -164,9 +164,9 @@ def near_field_component(E: np.ndarray, H: np.ndarray, component: str) -> np.nda
     if c == "real hz":
         return np.real(h[..., 2])
     if c == "abs e":
-        return cast(np.ndarray, np.sqrt(np.sum(np.abs(e) ** 2, axis=-1)))
+        return np.asarray(np.sqrt(np.sum(np.abs(e) ** 2, axis=-1)))
     if c == "abs h":
-        return cast(np.ndarray, np.sqrt(np.sum(np.abs(h) ** 2, axis=-1)))
+        return np.asarray(np.sqrt(np.sum(np.abs(h) ** 2, axis=-1)))
     raise ValueError(f"Unsupported component '{component}'.")
 
 

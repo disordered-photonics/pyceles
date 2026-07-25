@@ -14,7 +14,7 @@ The three oracle configurations below are deliberately more challenging:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 import numpy as np
 import pytest
@@ -216,9 +216,8 @@ def _unpolarized_near_erms(case: LayeredMSTMOracle) -> np.ndarray:
         compute_near_field(run_tm, points=points, channel="mixed", show_progress=False).E_total,
         dtype=np.complex128,
     )
-    return cast(
-        np.ndarray,
-        np.sqrt(0.5 * (np.sum(np.abs(e_te) ** 2, axis=-1) + np.sum(np.abs(e_tm) ** 2, axis=-1))),
+    return np.asarray(
+        np.sqrt(0.5 * (np.sum(np.abs(e_te) ** 2, axis=-1) + np.sum(np.abs(e_tm) ** 2, axis=-1)))
     )
 
 
