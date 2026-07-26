@@ -271,8 +271,10 @@ compelling option.
   explicit integers force fixed shell counts, while `max_shells` is a safety cap
   rather than an accuracy target.
 - The CuPy periodic Ewald path evaluates real-space and shifted reciprocal
-  structural sums with fused device kernels, handles same-plane pairs on
-  device, and batches source particles by temporary-memory budget.
+  structural sums with fused device kernels, classifies same-plane pairs
+  inside each device batch, and batches source particles by temporary-memory
+  budget. Same-plane pair indices are not retained across batches, so the
+  matrix-free path does not acquire a hidden quadratic index cache.
 - `PeriodicOptions(method="rayleigh")` is an opt-in hybrid alternative for
   vertically extended cells. Exact Ewald work is restricted to the periodic
   self block and non-self pairs satisfying `|delta_z| <= rayleigh_z_cut`; the
@@ -301,9 +303,20 @@ compelling option.
   disables the dense periodic W cache, but the hybrid method still retains its
   `O(N Q)` lateral phase table and `O(K (2*lmax+1)^2)` compact exact-near
   structural cache. These are part of the Rayleigh repeated-apply design, not a
-  leaked dense W matrix. Time preparation separately from warmed matvecs: the
-  first direct `apply()` includes any preparation that has not already been
-  requested through `populate_coupling()`.
+  leaked dense W matrix. Structural sums are accumulated in complex128 and then
+  stored once in the selected compute dtype; a complex64 cache therefore uses
+  half the persistent bytes of a complex128 cache without changing the current
+  complex64 matvec arithmetic. Time preparation separately from warmed
+  matvecs: the first direct `apply()` includes any preparation that has not
+  already been requested through `populate_coupling()`.
+- Before allocating a CuPy exact-near cache, pyceles estimates its compact byte
+  size together with the remaining Rayleigh tables and bounded apply workspace.
+  The automatic policy uses the same guarded CuPy pool ceiling as streamed
+  MLFMM, so Windows/WDDM shared-memory spill is not treated as available device
+  memory. Small caches stay resident on the GPU. Oversized caches remain in
+  ordinary host memory and are copied synchronously through one reusable bounded
+  device staging buffer during each matvec. This fallback trades PCIe traffic
+  for GPU residency; it does not remove the underlying `K` scaling.
 - CuPy contracts the compact exact-near cache in bounded pair batches. The
   batching budget includes the possible dense `(Nm, Nm)` block intermediate
   and its library workspace, rather than only the final `(Nm,)` contribution.

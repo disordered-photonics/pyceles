@@ -78,6 +78,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   larger multilevel runs avoid avoidable out-of-memory failures.
 
 ### Changed
+- Reduced hybrid-Rayleigh exact-near cache memory by storing converged
+  structural sums in the selected compute dtype. CuPy now estimates the full
+  compact cache before allocation, applies the same guarded device-memory
+  ceiling as MLFMM, keeps same-plane classification batch-local, uses compact
+  particle indices, and streams oversized caches from host memory through one
+  reusable bounded device buffer.
 - Raised the supported NumPy, SciPy, Matplotlib, tqdm, CuPy, and contributor
   tool baselines, with exact development pins synchronized between
   `pyproject.toml` and the isolated pre-commit mypy environment.

@@ -62,9 +62,12 @@ Not production-ready yet:
 The hybrid Rayleigh method is not a general cure for dense planar cells. Its
 exact-near cache scales with the number of directed non-self pairs inside the
 vertical band, which remains quadratic when most particles share nearly the
-same height. Its automatic reciprocal truncation is conservative but heuristic;
-scientific runs should sweep `rayleigh_z_cut` or `rayleigh_reciprocal_shells`
-and compare representative cases with exact Ewald.
+same height. CuPy can keep an oversized compact cache in host memory and stream
+it through a bounded device buffer, but this only moves the GPU-residency wall;
+it does not change the host-memory or per-matvec transfer scaling. Its automatic
+reciprocal truncation is conservative but heuristic; scientific runs should
+sweep `rayleigh_z_cut` or `rayleigh_reciprocal_shells` and compare
+representative cases with exact Ewald.
 
 Periodic in-slab near-field evaluation supports both `method="ewald"` and
 `method="rayleigh"`. The hybrid path retains exact Ewald local-SVWF evaluation

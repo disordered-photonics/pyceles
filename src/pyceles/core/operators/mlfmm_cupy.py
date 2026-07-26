@@ -16,6 +16,11 @@ from typing import Any, Literal, cast
 import numpy as np
 import numpy.typing as npt
 
+from pyceles._cupy_memory import (
+    CuPyAllocatorSnapshot,
+    cupy_allocator_memory_info,
+    cupy_allocator_snapshot,
+)
 from pyceles._optional import coerce_array, import_cupy
 from pyceles.core.indexing import index_vswf, iter_modes, n_modes
 from pyceles.core.translation import (
@@ -51,9 +56,6 @@ _MIB = 1024**2
 # transient fraction is intentionally below 1.0 because the model does not
 # include short-lived traversal temporaries such as search/filter/concatenate
 # arrays or allocator fragmentation.
-_STREAMED_FAR_DEVICE_GUARD_FRACTION = 1.0 / 16.0
-_STREAMED_FAR_POOL_LIMIT_MIN_GUARD_BYTES = 256 * _MIB
-_STREAMED_FAR_POOL_LIMIT_MAX_GUARD_BYTES = 1024 * _MIB
 _STREAMED_FAR_TRANSIENT_FRACTION_OF_ACTIVE_HEADROOM = 0.86
 _STREAMED_FAR_FRONTIER_FRACTION_OF_TRANSIENT = 0.67
 _STREAMED_FAR_MIN_SOURCE_CHUNK_BYTES = 16 * _MIB
@@ -7021,24 +7023,6 @@ def _device_array_nbytes(arr: Any) -> int:
 
 
 @dataclass(frozen=True)
-class _CuPyAllocatorSnapshot:
-    """CuPy allocator counters used by streamed MLFMM memory planning."""
-
-    raw_free_bytes: int
-    raw_total_bytes: int
-    pool_used_bytes: int
-    pool_total_bytes: int
-    pool_free_bytes: int
-    pool_limit_bytes: int
-    effective_device_limit_bytes: int
-    active_headroom_bytes: int
-    guaranteed_fresh_allocation_bytes: int
-    pool_limit_applied: bool
-    pool_trimmed_to_limit: bool
-    pool_trimmed_for_fragmentation: bool
-
-
-@dataclass(frozen=True)
 class _StreamedFarMemoryPlan:
     """Resolved transient-memory plan for one streamed multilevel apply."""
 
@@ -7059,31 +7043,6 @@ class _StreamedFarMemoryPlan:
     retry_count: int = 0
 
 
-def _cupy_allocator_memory_info(cupy: Any) -> dict[str, int]:
-    """Return raw and CuPy-pool-aware device-memory counters.
-
-    Streamed MLFMM budget selection must treat cached CuPy-pool blocks as
-    reusable. Raw `cudaMemGetInfo()` free bytes can be tiny after large prepare
-    or previous apply phases even though the memory pool can satisfy subsequent
-    CuPy allocations without asking the driver for new memory.
-    """
-
-    pool = cupy.get_default_memory_pool()
-    free_bytes, total_bytes = cupy.cuda.runtime.memGetInfo()
-    pool_used_bytes = int(pool.used_bytes())
-    pool_total_bytes = int(pool.total_bytes())
-    pool_cached_bytes = max(0, pool_total_bytes - pool_used_bytes)
-    effective_free_bytes = min(int(total_bytes), int(free_bytes) + int(pool_cached_bytes))
-    return {
-        "free_bytes": int(free_bytes),
-        "total_bytes": int(total_bytes),
-        "pool_used_bytes": int(pool_used_bytes),
-        "pool_total_bytes": int(pool_total_bytes),
-        "pool_cached_bytes": int(pool_cached_bytes),
-        "effective_free_bytes": int(effective_free_bytes),
-    }
-
-
 def _record_stream_pool_peak(cupy: Any, stream_stats: dict[str, object] | None) -> None:
     """Record per-apply CuPy pool peaks when stream diagnostics are enabled."""
 
@@ -7100,150 +7059,9 @@ def _record_stream_pool_peak(cupy: Any, stream_stats: dict[str, object] | None) 
     )
 
 
-def _cupy_pool_limit_bytes(pool: Any) -> int:
-    """Return the active CuPy pool limit, or zero when no limit is configured."""
-
-    get_limit = getattr(pool, "get_limit", None)
-    if get_limit is None:
-        return 0
-    try:
-        return int(get_limit())
-    except TypeError:
-        return int(get_limit(device_id=None))
-
-
-def _set_cupy_pool_limit(pool: Any, *, size: int) -> None:
-    """Set CuPy pool limit using the public API across supported versions."""
-
-    try:
-        pool.set_limit(size=int(size))
-    except TypeError:
-        pool.set_limit(size=int(size), device_id=None)
-
-
-def _guarded_device_limit_bytes(total_bytes: int) -> int:
-    """Return a conservative dedicated-device residency limit.
-
-    Windows/WDDM can otherwise let CuPy allocations spill into shared host
-    memory instead of failing fast. Keep the automatic MLFMM pool ceiling below
-    the physical device total so the streamed budget planner is portable to
-    Linux devices that fail with OOM rather than spill.
-    """
-
-    total = int(total_bytes)
-    device_guard = min(
-        _STREAMED_FAR_POOL_LIMIT_MAX_GUARD_BYTES,
-        max(
-            _STREAMED_FAR_POOL_LIMIT_MIN_GUARD_BYTES,
-            int(float(total) * _STREAMED_FAR_DEVICE_GUARD_FRACTION),
-        ),
-    )
-    return max(1, total - int(device_guard))
-
-
-def _guaranteed_fresh_allocation_bytes(
-    *,
-    raw_free_bytes: int,
-    pool_total_bytes: int,
-    pool_limit_bytes: int,
-) -> int:
-    """Return bytes guaranteed available without reusing a cached pool block."""
-
-    return max(
-        0,
-        min(
-            int(raw_free_bytes),
-            int(pool_limit_bytes) - int(pool_total_bytes),
-        ),
-    )
-
-
-def _cupy_allocator_snapshot(
-    cupy: Any,
-    *,
-    apply_pool_limit: bool,
-    required_fresh_allocation_bytes: int = 0,
-) -> _CuPyAllocatorSnapshot:
-    """Snapshot CuPy allocator state and enforce the streamed-memory invariant.
-
-    Aggregate cached bytes are useful for budget selection, but they do not
-    guarantee that one sufficiently large block exists. When the next planned
-    directional allocation cannot be served from fresh driver/pool headroom,
-    release cached blocks before planning the traversal. Any split blocks that
-    remain cached after the trim are treated conservatively by the caller.
-    """
-
-    pool = cupy.get_default_memory_pool()
-    raw_free, raw_total = cupy.cuda.runtime.memGetInfo()
-    raw_total = int(raw_total)
-    guarded_limit = _guarded_device_limit_bytes(raw_total)
-    existing_limit = _cupy_pool_limit_bytes(pool)
-    effective_limit = (
-        guarded_limit if existing_limit <= 0 else min(int(existing_limit), guarded_limit)
-    )
-    pool_limit_applied = False
-    if bool(apply_pool_limit) and (
-        existing_limit <= 0 or int(existing_limit) > int(effective_limit)
-    ):
-        _set_cupy_pool_limit(pool, size=int(effective_limit))
-        pool_limit_applied = True
-    pool_used = int(pool.used_bytes())
-    pool_total = int(pool.total_bytes())
-    pool_free = max(0, pool_total - pool_used)
-    pool_trimmed_to_limit = False
-    pool_trimmed_for_fragmentation = False
-    guaranteed_fresh = _guaranteed_fresh_allocation_bytes(
-        raw_free_bytes=int(raw_free),
-        pool_total_bytes=int(pool_total),
-        pool_limit_bytes=int(effective_limit),
-    )
-    trim_to_limit = pool_total > int(effective_limit)
-    trim_for_fragmentation = (
-        int(required_fresh_allocation_bytes) > int(guaranteed_fresh) and pool_free > 0
-    )
-    if (
-        bool(apply_pool_limit)
-        and pool_free > 0
-        and (bool(trim_to_limit) or bool(trim_for_fragmentation))
-    ):
-        # A previous streamed apply can leave plenty of aggregate cached bytes
-        # but no block large enough for the next directional chunk. Linux then
-        # fails at the hard pool limit while WDDM may spill. Trim only under
-        # demonstrated large-block pressure so normal repeated applies retain
-        # useful cache reuse.
-        pool.free_all_blocks()
-        pool_trimmed_to_limit = bool(trim_to_limit)
-        pool_trimmed_for_fragmentation = bool(trim_for_fragmentation)
-        raw_free, raw_total = cupy.cuda.runtime.memGetInfo()
-        raw_total = int(raw_total)
-        pool_used = int(pool.used_bytes())
-        pool_total = int(pool.total_bytes())
-        pool_free = max(0, pool_total - pool_used)
-        guaranteed_fresh = _guaranteed_fresh_allocation_bytes(
-            raw_free_bytes=int(raw_free),
-            pool_total_bytes=int(pool_total),
-            pool_limit_bytes=int(effective_limit),
-        )
-    active_headroom = max(0, int(effective_limit) - int(pool_used))
-    return _CuPyAllocatorSnapshot(
-        raw_free_bytes=int(raw_free),
-        raw_total_bytes=raw_total,
-        pool_used_bytes=pool_used,
-        pool_total_bytes=pool_total,
-        pool_free_bytes=pool_free,
-        pool_limit_bytes=int(effective_limit),
-        effective_device_limit_bytes=int(effective_limit),
-        active_headroom_bytes=int(active_headroom),
-        guaranteed_fresh_allocation_bytes=int(guaranteed_fresh),
-        pool_limit_applied=pool_limit_applied,
-        pool_trimmed_to_limit=pool_trimmed_to_limit,
-        pool_trimmed_for_fragmentation=pool_trimmed_for_fragmentation,
-    )
-
-
 def _streamed_far_memory_plan(
     *,
-    snapshot: _CuPyAllocatorSnapshot,
+    snapshot: CuPyAllocatorSnapshot,
     explicit_source_budget: int | None,
     hf_start_incoming_bytes: int,
     full_level_live_bytes: int,
@@ -7415,10 +7233,10 @@ def _resolve_streamed_far_memory_plan(
     hf_start_incoming_bytes: int,
     full_level_live_bytes: int,
     full_level_incoming_bytes: int,
-) -> tuple[_CuPyAllocatorSnapshot, _StreamedFarMemoryPlan]:
+) -> tuple[CuPyAllocatorSnapshot, _StreamedFarMemoryPlan]:
     """Resolve one allocation-shape-aware streamed-far memory plan."""
 
-    snapshot = _cupy_allocator_snapshot(cupy, apply_pool_limit=True)
+    snapshot = cupy_allocator_snapshot(cupy, apply_pool_limit=True)
     plan = _streamed_far_memory_plan(
         snapshot=snapshot,
         explicit_source_budget=explicit_source_budget,
@@ -7436,7 +7254,7 @@ def _resolve_streamed_far_memory_plan(
         and int(snapshot.pool_free_bytes) > 0
     ):
         first_snapshot = snapshot
-        snapshot = _cupy_allocator_snapshot(
+        snapshot = cupy_allocator_snapshot(
             cupy,
             apply_pool_limit=True,
             required_fresh_allocation_bytes=int(largest_allocation),
@@ -7636,7 +7454,7 @@ class CuPyMLFMMCouplingOperator:
     _last_stream_memory_plan: _StreamedFarMemoryPlan | None = field(
         default=None, init=False, repr=False
     )
-    _last_allocator_snapshot_before_stream_plan: _CuPyAllocatorSnapshot | None = field(
+    _last_allocator_snapshot_before_stream_plan: CuPyAllocatorSnapshot | None = field(
         default=None, init=False, repr=False
     )
     _last_stream_stats: dict[str, object] | None = field(default=None, init=False, repr=False)
@@ -7740,7 +7558,7 @@ class CuPyMLFMMCouplingOperator:
 
         cupy, _ = import_cupy()
         pinned_pool = cupy.get_default_pinned_memory_pool()
-        allocator_info = _cupy_allocator_memory_info(cupy)
+        allocator_info = cupy_allocator_memory_info(cupy)
 
         near_ws_total = int(
             sum(_device_array_nbytes(ws.y_states) for ws in self._near_workspace_cache.values())
@@ -8140,7 +7958,7 @@ class CuPyMLFMMCouplingOperator:
         resolved_streamed_far_chunk_bytes_budget: int | None = None
         resolved_streamed_far_frontier_bytes_budget: int | None = None
         stream_memory_plan: _StreamedFarMemoryPlan | None = None
-        allocator_snapshot_before_stream_plan: _CuPyAllocatorSnapshot | None = None
+        allocator_snapshot_before_stream_plan: CuPyAllocatorSnapshot | None = None
         stream_stats: dict[str, object] | None = None
         far_setup_elapsed = 0.0
         if stage == "single_level":
@@ -8158,7 +7976,7 @@ class CuPyMLFMMCouplingOperator:
             if single is None:
                 raise RuntimeError("Internal CuPy MLFMM error: missing single-level prepared data.")
             if str(single.leaf_apply_mode) == "on_the_fly":
-                free_bytes = _cupy_allocator_memory_info(cupy)["effective_free_bytes"]
+                free_bytes = cupy_allocator_memory_info(cupy)["effective_free_bytes"]
                 resolved_leaf_otf_bytes_budget = _resolve_stream_bytes_budget(
                     explicit_budget=self.host_cache_policy.leaf_otf_bytes_budget,
                     free_bytes=int(free_bytes),

@@ -22,7 +22,6 @@ from pyceles.core.operators import (
 )
 from pyceles.core.operators.mlfmm_cupy import (
     _box_outgoing_to_directional_cupy,
-    _cupy_allocator_snapshot,
     _directional_to_box_regular_cupy,
     _upload_directional_transforms,
     _upload_offset_batches,
@@ -736,65 +735,6 @@ def test_cupy_multilevel_stream_stats_collection_is_opt_in(collect_stream_stats:
     else:
         assert streaming.get("last_apply_stats") is None
         assert streaming.get("last_apply_timing_seconds") is None
-
-
-def test_cupy_stream_allocator_trims_fragmented_cache_for_large_fresh_block() -> None:
-    gib = 1024**3
-    mib = 1024**2
-
-    class FakeRuntime:
-        def __init__(self) -> None:
-            self.free_bytes = 200 * mib
-            self.total_bytes = 8 * gib
-
-        def memGetInfo(self) -> tuple[int, int]:
-            return self.free_bytes, self.total_bytes
-
-    runtime = FakeRuntime()
-
-    class FakePool:
-        def __init__(self) -> None:
-            self.used = 4 * gib
-            self.total = 7 * gib + 384 * mib
-            self.limit = 7 * gib + 512 * mib
-            self.trimmed = False
-
-        def used_bytes(self) -> int:
-            return self.used
-
-        def total_bytes(self) -> int:
-            return self.total
-
-        def get_limit(self) -> int:
-            return self.limit
-
-        def set_limit(self, *, size: int) -> None:
-            self.limit = int(size)
-
-        def free_all_blocks(self) -> None:
-            runtime.free_bytes += self.total - self.used
-            self.total = self.used
-            self.trimmed = True
-
-    pool = FakePool()
-
-    class FakeCuPy:
-        cuda = type("FakeCuda", (), {"runtime": runtime})()
-
-        @staticmethod
-        def get_default_memory_pool() -> FakePool:
-            return pool
-
-    snapshot = _cupy_allocator_snapshot(
-        FakeCuPy(),
-        apply_pool_limit=True,
-        required_fresh_allocation_bytes=300 * mib,
-    )
-
-    assert pool.trimmed is True
-    assert snapshot.pool_trimmed_for_fragmentation is True
-    assert snapshot.pool_trimmed_to_limit is False
-    assert snapshot.guaranteed_fresh_allocation_bytes >= 300 * mib
 
 
 @pytest.mark.parametrize(

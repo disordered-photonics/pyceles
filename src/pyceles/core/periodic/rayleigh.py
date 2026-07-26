@@ -23,6 +23,44 @@ from pyceles.core.periodic.types import PeriodicSpec
 from pyceles.core.spherical import spherical_functions_trigon
 
 Array = np.ndarray
+# Per-batch temporary budget; persistent cache residency uses the shared
+# guarded CuPy allocator policy rather than this fixed value.
+RAYLEIGH_TRANSIENT_WORKSPACE_BYTES = 256 * 1024**2
+
+
+@dataclass(frozen=True)
+class RayleighNearCacheEstimate:
+    """Compact exact-near cache shape and persistent byte estimate."""
+
+    pair_count: int
+    structural_channels: int
+    dtype: np.dtype
+    structural_bytes: int
+
+
+def rayleigh_near_cache_estimate(
+    *, pair_count: int, lmax: int, dtype: npt.DTypeLike
+) -> RayleighNearCacheEstimate:
+    """Return the compact exact-near structural-cache byte estimate."""
+    count = int(pair_count)
+    if count < 0:
+        raise ValueError(f"`pair_count` must be non-negative. Got {pair_count!r}.")
+    ctype = np.dtype(dtype)
+    if ctype not in {np.dtype(np.complex64), np.dtype(np.complex128)}:
+        raise TypeError(f"Rayleigh near caches require complex64 or complex128. Got {ctype!r}.")
+    channels = int(valid_structural_indices(int(lmax))[0].size)
+    return RayleighNearCacheEstimate(
+        pair_count=count,
+        structural_channels=channels,
+        dtype=ctype,
+        structural_bytes=count * channels * int(ctype.itemsize),
+    )
+
+
+def _compact_particle_index_dtype(*sizes: int) -> np.dtype:
+    """Return the narrowest signed dtype that can index all requested rows."""
+    maximum = max((int(size) for size in sizes), default=0)
+    return np.dtype(np.int32 if maximum <= np.iinfo(np.int32).max else np.int64)
 
 
 def resolve_rayleigh_z_cut(
@@ -166,8 +204,8 @@ def valid_structural_indices(lmax: int) -> tuple[Array, Array]:
         for azimuthal_order in range(-degree, degree + 1):
             degrees.append(degree)
             orders.append(azimuthal_order + order)
-    degree_array = np.asarray(degrees, dtype=np.int64)
-    order_array = np.asarray(orders, dtype=np.int64)
+    degree_array = np.asarray(degrees, dtype=np.int32)
+    order_array = np.asarray(orders, dtype=np.int32)
     degree_array.flags.writeable = False
     order_array.flags.writeable = False
     return degree_array, order_array
@@ -256,9 +294,10 @@ def build_rayleigh_plan(
         8.0 * np.pi / (float(lattice.area) * float(k) * gamma),
         dtype=ctype,
     )
-    sort_order = np.argsort(pos[:, 2], kind="stable").astype(np.int64, copy=False)
+    index_dtype = _compact_particle_index_dtype(pos.shape[0])
+    sort_order = np.argsort(pos[:, 2], kind="stable").astype(index_dtype, copy=False)
     inverse_order = np.empty_like(sort_order)
-    inverse_order[sort_order] = np.arange(sort_order.size, dtype=np.int64)
+    inverse_order[sort_order] = np.arange(sort_order.size, dtype=index_dtype)
     return RayleighPlan(
         lmax=lmax_i,
         gamma=np.asarray(gamma, dtype=np.complex128),
@@ -382,7 +421,7 @@ def resolve_rayleigh_mode_chunk_size(
     n_phase_rows: int = 0,
     n_rhs: int,
     dtype: npt.DTypeLike,
-    workspace_bytes: int = 256 * 1024**2,
+    workspace_bytes: int = RAYLEIGH_TRANSIENT_WORKSPACE_BYTES,
 ) -> int:
     """Bound one reciprocal chunk by the live source and destination work arrays."""
     cap = max(1, int(n_modes_reciprocal))
@@ -481,9 +520,14 @@ def apply_rayleigh_far_to_points_numpy(
         empty = np.zeros((0, 6, n_rhs), dtype=plan.source_tables.dtype)
         return empty[:, :, 0] if squeezed else empty
 
-    destination_order = np.argsort(pts[:, 2], kind="stable").astype(np.int64, copy=False)
+    destination_index_dtype = _compact_particle_index_dtype(pts.shape[0])
+    destination_order = np.argsort(pts[:, 2], kind="stable").astype(
+        destination_index_dtype, copy=False
+    )
     destination_inverse = np.empty_like(destination_order)
-    destination_inverse[destination_order] = np.arange(destination_order.size, dtype=np.int64)
+    destination_inverse[destination_order] = np.arange(
+        destination_order.size, dtype=destination_index_dtype
+    )
     pts_sorted = pts[destination_order]
     coeff_sorted = np.asarray(coeff_arr[plan.sort_order], dtype=plan.source_tables.dtype)
     y_sorted = np.zeros((pts.shape[0], 6, n_rhs), dtype=plan.source_tables.dtype)
@@ -574,15 +618,18 @@ def near_pair_csr(positions: npt.ArrayLike, z_cut: float) -> tuple[Array, Array,
 
     A pair belongs to the exact band when ``|z_dst-z_src| <= z_cut``. Self
     interactions are deliberately omitted because their periodic block is
-    translationally invariant and can be prepared once for all particles.
+    translationally invariant and can be prepared once for all particles. Pair
+    indices use int32 whenever the particle count permits; CSR offsets remain
+    int64 because the directed pair count can exceed the int32 range.
     """
     pos = np.asarray(positions, dtype=float).reshape(-1, 3)
     n = int(pos.shape[0])
+    index_dtype = _compact_particle_index_dtype(n)
     if n == 0:
-        empty = np.zeros((0,), dtype=np.int64)
+        empty = np.zeros((0,), dtype=index_dtype)
         return np.zeros((1,), dtype=np.int64), empty, empty
     z = pos[:, 2]
-    order = np.argsort(z, kind="stable")
+    order = np.argsort(z, kind="stable").astype(index_dtype, copy=False)
     sorted_z = z[order]
     lo = np.searchsorted(sorted_z, z - float(z_cut), side="left")
     hi = np.searchsorted(sorted_z, z + float(z_cut), side="right")
@@ -591,20 +638,20 @@ def near_pair_csr(positions: npt.ArrayLike, z_cut: float) -> tuple[Array, Array,
     # The vertically sparse case is the intended large-N regime. Avoid
     # materializing an N-entry temporary pair table when every band contains
     # only the source itself.
-    if np.all(counts_with_self == 1) and np.array_equal(order[lo], np.arange(n)):
-        empty = np.zeros((0,), dtype=np.int64)
+    if np.all(counts_with_self == 1) and np.array_equal(order[lo], np.arange(n, dtype=index_dtype)):
+        empty = np.zeros((0,), dtype=index_dtype)
         return np.zeros((n + 1,), dtype=np.int64), empty, empty
 
     indptr_with_self = np.empty((n + 1,), dtype=np.int64)
     indptr_with_self[0] = 0
     np.cumsum(counts_with_self, out=indptr_with_self[1:])
     total = int(indptr_with_self[-1])
-    sources = np.repeat(np.arange(n, dtype=np.int64), counts_with_self)
+    sources = np.repeat(np.arange(n, dtype=index_dtype), counts_with_self)
     offsets = np.arange(total, dtype=np.int64) - indptr_with_self[sources]
     destinations = order[lo[sources] + offsets]
     keep = destinations != sources
-    sources = sources[keep]
-    destinations = np.asarray(destinations[keep], dtype=np.int64)
+    sources = np.asarray(sources[keep], dtype=index_dtype)
+    destinations = np.asarray(destinations[keep], dtype=index_dtype)
 
     counts = np.bincount(sources, minlength=n).astype(np.int64, copy=False)
     indptr = np.empty((n + 1,), dtype=np.int64)
@@ -622,10 +669,12 @@ def near_point_source_csr(
     pts = np.asarray(points, dtype=float).reshape(-1, 3)
     sources_pos = np.asarray(source_positions, dtype=float).reshape(-1, 3)
     n_sources = int(sources_pos.shape[0])
-    if n_sources == 0 or pts.shape[0] == 0:
-        empty = np.zeros((0,), dtype=np.int64)
+    n_points = int(pts.shape[0])
+    index_dtype = _compact_particle_index_dtype(n_sources, n_points)
+    if n_sources == 0 or n_points == 0:
+        empty = np.zeros((0,), dtype=index_dtype)
         return np.zeros((n_sources + 1,), dtype=np.int64), empty, empty
-    order = np.argsort(pts[:, 2], kind="stable")
+    order = np.argsort(pts[:, 2], kind="stable").astype(index_dtype, copy=False)
     sorted_z = pts[order, 2]
     source_z = sources_pos[:, 2]
     lo = np.searchsorted(sorted_z, source_z - float(z_cut), side="left")
@@ -635,13 +684,17 @@ def near_point_source_csr(
     indptr[0] = 0
     np.cumsum(counts, out=indptr[1:])
     total = int(indptr[-1])
-    source_indices = np.repeat(np.arange(n_sources, dtype=np.int64), counts)
+    source_indices = np.repeat(np.arange(n_sources, dtype=index_dtype), counts)
     offsets = np.arange(total, dtype=np.int64) - indptr[source_indices]
-    destination_indices = np.asarray(order[lo[source_indices] + offsets], dtype=np.int64)
+    destination_indices = np.asarray(
+        order[lo[source_indices] + offsets],
+        dtype=index_dtype,
+    )
     return indptr, destination_indices, source_indices
 
 
 __all__ = [
+    "RayleighNearCacheEstimate",
     "RayleighPlan",
     "apply_rayleigh_far_numpy",
     "apply_rayleigh_far_to_points_numpy",
@@ -650,6 +703,7 @@ __all__ = [
     "near_point_source_csr",
     "prepare_rayleigh_plan",
     "rayleigh_block",
+    "rayleigh_near_cache_estimate",
     "reciprocal_modes",
     "resolve_rayleigh_half_width",
     "resolve_rayleigh_mode_chunk_size",

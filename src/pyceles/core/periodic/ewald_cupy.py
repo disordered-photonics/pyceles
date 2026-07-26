@@ -818,7 +818,6 @@ def ewald_structural_sums_2d_fixed_cupy(
     real_shell_count: int,
     reciprocal_shell_count: int,
     coordinate_scale: float = 0.0,
-    same_plane_pair_indices: Any | None = None,
 ) -> Any:
     """Evaluate scalar periodic Ewald tables for source/destination pairs.
 
@@ -857,13 +856,10 @@ def ewald_structural_sums_2d_fixed_cupy(
     same_plane_atol = same_plane_z_tolerance(float(k), coordinate_scale=float(coordinate_scale))
     cz_raw = c[:, 2]
     same_plane = cp.abs(cz_raw) <= float(same_plane_atol)
-    # Avoid a host-side `any(...).get()` in the hot structural-sum path.  Coupling
-    # callers can also provide the compact same-plane pair index list from their
-    # host-side particle metadata, avoiding a device-side nonzero scan.
-    if same_plane_pair_indices is None:
-        same_idx = cp.nonzero(same_plane)[0]
-    else:
-        same_idx = cp.asarray(same_plane_pair_indices, dtype=cp.int64).reshape(-1)
+    # Keep same-plane classification local to the structural evaluator.  The
+    # mask is needed below regardless, and retaining caller-side pair-index
+    # caches can otherwise turn matrix-free source batching into O(N^2) state.
+    same_idx = cp.nonzero(same_plane)[0].astype(cp.int32, copy=False)
     c = c.copy()
     c[:, 2] = cp.where(same_plane, 0.0, cz_raw)
 

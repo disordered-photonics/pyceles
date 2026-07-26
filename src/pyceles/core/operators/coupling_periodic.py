@@ -21,10 +21,12 @@ from pyceles.core.periodic.ewald import (
     resolve_ewald_eta,
 )
 from pyceles.core.periodic.rayleigh import (
+    RayleighNearCacheEstimate,
     RayleighPlan,
     apply_rayleigh_far_numpy,
     near_pair_csr,
     prepare_rayleigh_plan,
+    rayleigh_near_cache_estimate,
     valid_structural_indices,
 )
 from pyceles.core.periodic.scalar import structural_sum_m_normalization
@@ -58,6 +60,9 @@ class PeriodicCouplingOperator:
     _near_indptr: Array | None = field(default=None, init=False, repr=False)
     _near_destinations: Array | None = field(default=None, init=False, repr=False)
     _near_structural_sums: Array | None = field(default=None, init=False, repr=False)
+    _near_cache_estimate: RayleighNearCacheEstimate | None = field(
+        default=None, init=False, repr=False
+    )
     _self_block_cache: Array | None = field(default=None, init=False, repr=False)
     _near_contraction_tensor_cache: Array | None = field(default=None, init=False, repr=False)
 
@@ -140,6 +145,11 @@ class PeriodicCouplingOperator:
             )
             self._near_indptr = indptr
             self._near_destinations = destinations
+            self._near_cache_estimate = rayleigh_near_cache_estimate(
+                pair_count=int(destinations.size),
+                lmax=int(self.lmax),
+                dtype=self.dtype,
+            )
         return self._near_indptr, self._near_destinations
 
     def _near_contraction_tensor(self) -> Array:
@@ -195,12 +205,22 @@ class PeriodicCouplingOperator:
             return
         indptr, destinations = self._near_structure()
         degrees, orders = valid_structural_indices(int(self.lmax))
-        sums = np.empty((destinations.size, degrees.size), dtype=np.complex128)
+        sums = np.empty((destinations.size, degrees.size), dtype=self.dtype)
         options = self.periodic.options
         pos = np.asarray(self.positions, dtype=float).reshape(-1, 3)
         sources: Iterable[int] = range(self.n_particles)
         if show_progress:
-            sources = tqdm(sources, total=self.n_particles, desc="Build periodic near Ewald cache")
+            estimate = self._near_cache_estimate
+            if estimate is None:
+                raise RuntimeError("Periodic near-cache estimation failed.")
+            size_gib = float(estimate.structural_bytes) / float(1024**3)
+            sources = tqdm(
+                sources,
+                total=self.n_particles,
+                desc=(
+                    f"Build periodic near Ewald cache ({estimate.dtype.name}, {size_gib:.2f} GiB)"
+                ),
+            )
         for source in sources:
             start = int(indptr[source])
             stop = int(indptr[source + 1])
@@ -222,7 +242,7 @@ class PeriodicCouplingOperator:
                 dtype=np.complex128,
                 workspace=self._workspace(),
             )
-            sums[start:stop] = local[:, degrees, orders]
+            sums[start:stop] = local[:, degrees, orders].astype(self.dtype, copy=False)
         self._near_structural_sums = sums
 
     def _apply_rayleigh(self, x: Array) -> Array:

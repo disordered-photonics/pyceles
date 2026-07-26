@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, cast
 
 import numpy as np
@@ -221,9 +222,21 @@ def test_periodic_cupy_dense_assembly_from_cached_blocks_matches_matvec(
     assert prepared.coupling._dense_w_cache_gpu is None
 
 
+@pytest.mark.parametrize("cache_residency", ["device", "host"])
+@pytest.mark.parametrize(
+    ("dtype", "rtol", "atol"),
+    [
+        (np.complex128, 2e-9, 2e-10),
+        (np.complex64, 4e-5, 4e-6),
+    ],
+)
 def test_periodic_cupy_rayleigh_hybrid_matches_numpy_scan_and_near_cache(
     cupy_runtime: tuple[Any, Any],
     monkeypatch: pytest.MonkeyPatch,
+    dtype: Any,
+    rtol: float,
+    atol: float,
+    cache_residency: str,
 ) -> None:
     cp, _ = cupy_runtime
     k = 2.0 * np.pi / 550.0
@@ -246,7 +259,7 @@ def test_periodic_cupy_rayleigh_hybrid_matches_numpy_scan_and_near_cache(
             rayleigh_reciprocal_shells=6,
         ),
     )
-    ab5 = translation_ab5_table(1, dtype=np.complex128)
+    ab5 = translation_ab5_table(1, dtype=dtype)
     kwargs = dict(
         lmax=1,
         k=k,
@@ -254,22 +267,32 @@ def test_periodic_cupy_rayleigh_hybrid_matches_numpy_scan_and_near_cache(
         ab5=ab5,
         periodic=periodic,
         k_parallel=np.asarray([0.0003, -0.0002]),
-        dtype=np.dtype(np.complex128),
+        dtype=np.dtype(dtype),
         cache_blocks=False,
         circumscribing_radii=np.full(positions.shape[0], 40.0),
     )
     cpu = PeriodicCouplingOperator(**cast(Any, kwargs))
     gpu = CuPyPeriodicCouplingOperator(**cast(Any, kwargs))
     monkeypatch.setattr(gpu, "_near_apply_batch_size", lambda **_kwargs: 1)
+    if cache_residency == "host":
+        gpu._near_cache_memory_plan = replace(gpu._near_cache_plan(), residency="host")
     rng = np.random.default_rng(20260725)
     x = rng.normal(size=(18, 2)) + 1j * rng.normal(size=(18, 2))
 
-    expected = cpu.apply(x)
-    actual = gpu.apply(cp.asarray(x))
+    expected = cpu.apply(x.astype(dtype))
+    actual = gpu.apply(cp.asarray(x, dtype=dtype))
 
-    np.testing.assert_allclose(cp.asnumpy(actual), expected, rtol=2e-9, atol=2e-10)
-    assert gpu._near_structural_sums_gpu is not None
-    assert gpu._near_structural_sums_gpu.shape[1] == 9
+    np.testing.assert_allclose(cp.asnumpy(actual), expected, rtol=rtol, atol=atol)
+    assert gpu._near_cache_memory_plan is not None
+    assert gpu._near_cache_memory_plan.residency == cache_residency
+    cache = (
+        gpu._near_structural_sums_gpu
+        if cache_residency == "device"
+        else gpu._near_structural_sums_host
+    )
+    assert cache is not None
+    assert cache.shape[1] == 9
+    assert cache.dtype == np.dtype(dtype)
     assert gpu._self_block_gpu is not None
     assert gpu._rayleigh_plan_cache is not None
 

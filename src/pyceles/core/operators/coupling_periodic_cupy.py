@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass, field, replace
+from typing import Any, Literal
 
 import numpy as np
 from tqdm.auto import tqdm
 
+from pyceles._cupy_memory import CuPyAllocatorSnapshot, cupy_allocator_snapshot
 from pyceles._optional import asnumpy, coerce_array, import_cupy, is_cupy_array
 from pyceles.core.indexing import n_modes
 from pyceles.core.periodic import PeriodicSpec
@@ -22,30 +23,87 @@ from pyceles.core.periodic.ewald_cupy import (
     ewald_structural_sums_2d_fixed_cupy,
 )
 from pyceles.core.periodic.rayleigh import (
+    RAYLEIGH_TRANSIENT_WORKSPACE_BYTES,
+    RayleighNearCacheEstimate,
     RayleighPlan,
     near_pair_csr,
     prepare_rayleigh_plan,
+    rayleigh_near_cache_estimate,
     resolve_rayleigh_mode_chunk_size,
     valid_structural_indices,
 )
 from pyceles.core.periodic.rayleigh_cupy import scan_far_cupy, scatter_add_complex
-from pyceles.core.periodic.scalar import same_plane_z_tolerance, structural_sum_m_normalization
+from pyceles.core.periodic.scalar import structural_sum_m_normalization
 from pyceles.core.periodic.structural import translation_contraction_tensor
 
 from .base import SourceBlockBatch
 
 Array = np.ndarray
 
+RayleighNearCacheResidency = Literal["device", "host"]
+
+
+@dataclass(frozen=True)
+class RayleighNearCacheMemoryPlan:
+    """Resolved persistent-cache residency under one guarded GPU budget."""
+
+    estimate: RayleighNearCacheEstimate
+    residency: RayleighNearCacheResidency
+    device_limit_bytes: int
+    pool_used_bytes: int
+    available_device_bytes: int
+    remaining_rayleigh_device_bytes: int
+    transient_reserve_bytes: int
+    required_device_bytes: int
+
+
+def _resolve_rayleigh_near_cache_memory_plan(
+    *,
+    estimate: RayleighNearCacheEstimate,
+    snapshot: CuPyAllocatorSnapshot,
+    remaining_rayleigh_device_bytes: int,
+    transient_reserve_bytes: int = RAYLEIGH_TRANSIENT_WORKSPACE_BYTES,
+) -> RayleighNearCacheMemoryPlan:
+    """Choose device or host cache residency without relying on WDDM spill."""
+    remaining = max(0, int(remaining_rayleigh_device_bytes))
+    reserve = max(0, int(transient_reserve_bytes))
+    available = min(
+        int(snapshot.active_headroom_bytes),
+        int(snapshot.raw_free_bytes) + int(snapshot.pool_free_bytes),
+    )
+    base_required = remaining + reserve
+    if base_required > available:
+        raise MemoryError(
+            "The Rayleigh reciprocal plan and bounded apply workspace do not fit "
+            "inside the guarded CuPy device-memory budget. Reduce the reciprocal "
+            "window, free other device allocations, or use a larger GPU."
+        )
+    cache_bytes = int(estimate.structural_bytes)
+    required_device = base_required + cache_bytes
+    cache_allocation_fits = cache_bytes <= int(snapshot.guaranteed_fresh_allocation_bytes)
+    residency: RayleighNearCacheResidency = (
+        "device" if required_device <= available and cache_allocation_fits else "host"
+    )
+    return RayleighNearCacheMemoryPlan(
+        estimate=estimate,
+        residency=residency,
+        device_limit_bytes=int(snapshot.effective_device_limit_bytes),
+        pool_used_bytes=int(snapshot.pool_used_bytes),
+        available_device_bytes=int(available),
+        remaining_rayleigh_device_bytes=remaining,
+        transient_reserve_bytes=reserve,
+        required_device_bytes=required_device,
+    )
+
 
 @dataclass
 class CuPyPeriodicCouplingOperator:
     """GPU-backed Bloch-reduced periodic coupling descriptor.
 
-    The current implementation keeps the Ewald structural-sum evaluation in
-    vectorized CuPy operations with fixed shell counts resolved once from the
-    periodic options.  It supports both matrix-free source-batched matvecs and
-    optional explicit dense block caching for workflows where the memory cost is
-    acceptable.
+    Exact Ewald uses fixed shell counts resolved once from the periodic options
+    and remains source-batched when dense block caching is disabled. Hybrid
+    Rayleigh coupling keeps the reciprocal scan on device and places its compact
+    exact-near cache on device or host according to the guarded memory plan.
     """
 
     lmax: int
@@ -68,15 +126,16 @@ class CuPyPeriodicCouplingOperator:
     _source_index_gpu_cache: dict[tuple[int, ...], Any] = field(
         default_factory=dict, init=False, repr=False
     )
-    _same_plane_index_gpu_cache: dict[tuple[int, ...], Any] = field(
-        default_factory=dict, init=False, repr=False
-    )
     _rayleigh_plan_cache: RayleighPlan | None = field(default=None, init=False, repr=False)
     _rayleigh_arrays_gpu: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
-    _near_indptr: Array | None = field(default=None, init=False, repr=False)
     _near_destinations: Array | None = field(default=None, init=False, repr=False)
     _near_sources: Array | None = field(default=None, init=False, repr=False)
     _near_structural_sums_gpu: Any | None = field(default=None, init=False, repr=False)
+    _near_structural_sums_host: Array | None = field(default=None, init=False, repr=False)
+    _near_structural_staging_gpu: Any | None = field(default=None, init=False, repr=False)
+    _near_cache_memory_plan: RayleighNearCacheMemoryPlan | None = field(
+        default=None, init=False, repr=False
+    )
     _self_block_gpu: Any | None = field(default=None, init=False, repr=False)
     _near_contraction_tensor_gpu: Any | None = field(default=None, init=False, repr=False)
 
@@ -172,27 +231,6 @@ class CuPyPeriodicCouplingOperator:
             self._coordinate_scale = float(np.max(np.abs(np.asarray(self.positions, dtype=float))))
         return float(self._coordinate_scale)
 
-    def _same_plane_pair_indices_device(self, source_indices: tuple[int, ...]) -> Any:
-        """Return flat pair indices needing the exact same-plane reciprocal formula."""
-        key = tuple(int(i) for i in source_indices)
-        cached = self._same_plane_index_gpu_cache.get(key)
-        if cached is not None:
-            return cached
-        cp = self._cupy()
-        if len(key) == 0:
-            out = cp.zeros((0,), dtype=cp.int64)
-            self._same_plane_index_gpu_cache[key] = out
-            return out
-        pos = np.asarray(self.positions, dtype=float).reshape(-1, 3)
-        src_z = pos[np.asarray(key, dtype=np.int64), 2]
-        atol = same_plane_z_tolerance(
-            float(self.k), coordinate_scale=self._coordinate_scale_value()
-        )
-        mask = np.abs(src_z[:, None] - pos[None, :, 2]) <= float(atol)
-        out = cp.asarray(np.flatnonzero(mask).astype(np.int64, copy=False), dtype=cp.int64)
-        self._same_plane_index_gpu_cache[key] = out
-        return out
-
     def _self_correction_device(self) -> Any:
         cp = self._cupy()
         if self._self_correction_gpu is None:
@@ -262,7 +300,6 @@ class CuPyPeriodicCouplingOperator:
             real_shell_count=int(real_count),
             reciprocal_shell_count=int(reciprocal_count),
             coordinate_scale=self._coordinate_scale_value(),
-            same_plane_pair_indices=self._same_plane_pair_indices_device(key),
         )
         sums = cp.asarray(sums, dtype=cp.complex128).reshape(
             len(key),
@@ -337,7 +374,10 @@ class CuPyPeriodicCouplingOperator:
 
     @staticmethod
     def _memory_bounded_batch_size(
-        *, total: int, bytes_per_item: int, workspace_bytes: int = 256 * 1024**2
+        *,
+        total: int,
+        bytes_per_item: int,
+        workspace_bytes: int = RAYLEIGH_TRANSIENT_WORKSPACE_BYTES,
     ) -> int:
         """Return a nonzero batch size within one temporary-memory budget."""
         return max(
@@ -363,7 +403,7 @@ class CuPyPeriodicCouplingOperator:
         rhs = max(1, int(n_rhs))
         itemsize = int(self.dtype.itemsize)
         bytes_per_pair = itemsize * (
-            int(degrees.size)  # complex128 -> compute-dtype structural cast
+            int(degrees.size)  # compute-dtype cache view or host staging
             + 2 * nm * nm  # dense block plus contraction workspace
             + 3 * nm * rhs  # gathered source, contribution, and matmul workspace
         )
@@ -372,19 +412,31 @@ class CuPyPeriodicCouplingOperator:
             bytes_per_item=int(bytes_per_pair),
         )
 
-    def _near_structure(self) -> tuple[Array, Array, Array]:
+    def _near_host_staging_device(self, *, rows: int, width: int) -> Any:
+        """Return one reusable device buffer for host-resident near-cache slices."""
+        cp = self._cupy()
+        required_rows = max(1, int(rows))
+        required_width = int(width)
+        staging = self._near_structural_staging_gpu
         if (
-            self._near_indptr is None
-            or self._near_destinations is None
-            or self._near_sources is None
+            staging is None
+            or int(staging.shape[0]) < required_rows
+            or int(staging.shape[1]) != required_width
+            or np.dtype(staging.dtype) != self.dtype
         ):
-            indptr, destinations, sources = near_pair_csr(
+            staging = cp.empty((required_rows, required_width), dtype=self.dtype)
+            self._near_structural_staging_gpu = staging
+        return staging[:required_rows]
+
+    def _near_pairs(self) -> tuple[Array, Array]:
+        """Return flat source-major exact-near destination/source indices."""
+        if self._near_destinations is None or self._near_sources is None:
+            _indptr, destinations, sources = near_pair_csr(
                 self.positions, self._rayleigh_plan().z_cut
             )
-            self._near_indptr = indptr
             self._near_destinations = destinations
             self._near_sources = sources
-        return self._near_indptr, self._near_destinations, self._near_sources
+        return self._near_destinations, self._near_sources
 
     def _near_contraction_tensor_device(self) -> Any:
         """Return the device tensor restricted to valid structural channels."""
@@ -407,7 +459,6 @@ class CuPyPeriodicCouplingOperator:
         cp = self._cupy()
         order = 2 * int(self.lmax)
         relative = cp.zeros((1, 3), dtype=cp.float64)
-        same_plane = cp.zeros((1,), dtype=cp.int64)
         real_count, reciprocal_count = self._shell_counts()
         structural = ewald_structural_sums_2d_fixed_cupy(
             relative_source_minus_destination=relative,
@@ -416,7 +467,6 @@ class CuPyPeriodicCouplingOperator:
             real_shell_count=int(real_count),
             reciprocal_shell_count=int(reciprocal_count),
             coordinate_scale=self._coordinate_scale_value(),
-            same_plane_pair_indices=same_plane,
         )
         structural = cp.asarray(structural, dtype=cp.complex128).reshape(
             1, order + 1, 2 * order + 1
@@ -430,18 +480,109 @@ class CuPyPeriodicCouplingOperator:
         ).astype(self.dtype, copy=False)
         return self._self_block_gpu
 
+    @staticmethod
+    def _format_gib(nbytes: int) -> str:
+        return f"{float(nbytes) / float(1024**3):.2f} GiB"
+
+    def _remaining_rayleigh_device_bytes(self) -> int:
+        """Estimate persistent Rayleigh arrays not yet uploaded to the device."""
+        plan = self._rayleigh_plan()
+        total = 0
+
+        def pending(name: str, value: Any, dtype: Any) -> int:
+            if name in self._rayleigh_arrays_gpu:
+                return 0
+            return int(np.asarray(value).size) * int(np.dtype(dtype).itemsize)
+
+        total += pending("sort_order", plan.sort_order, np.int32)
+        total += pending("inverse_order", plan.inverse_order, np.int32)
+        total += pending("sorted_z", plan.sorted_z, np.float64)
+        total += pending("gamma", plan.gamma, np.complex128)
+        total += pending("sorted_xy_phase", plan.sorted_xy_phase, self.dtype)
+        total += pending("source_tables", plan.source_tables, self.dtype)
+        total += pending("destination_tables", plan.destination_tables, self.dtype)
+        total += pending("weights", plan.weights, self.dtype)
+
+        destinations, sources = self._near_pairs()
+        degrees, orders = valid_structural_indices(int(self.lmax))
+        total += pending("near_sources", sources, np.int32)
+        total += pending("near_destinations", destinations, np.int32)
+        total += pending("near_structural_degrees", degrees, np.int32)
+        total += pending("near_structural_orders", orders, np.int32)
+        if self._positions_gpu is None:
+            total += self.n_particles * 3 * int(np.dtype(np.float64).itemsize)
+        if self._near_contraction_tensor_gpu is None:
+            total += self.n_modes * self.n_modes * int(degrees.size) * int(self.dtype.itemsize)
+        return int(total)
+
+    def _near_cache_plan(self) -> RayleighNearCacheMemoryPlan:
+        plan = self._near_cache_memory_plan
+        if plan is not None:
+            return plan
+        cp = self._cupy()
+        destinations, _sources = self._near_pairs()
+        estimate = rayleigh_near_cache_estimate(
+            pair_count=int(destinations.size),
+            lmax=int(self.lmax),
+            dtype=self.dtype,
+        )
+        remaining = self._remaining_rayleigh_device_bytes()
+        snapshot = cupy_allocator_snapshot(
+            cp,
+            apply_pool_limit=True,
+        )
+        plan = _resolve_rayleigh_near_cache_memory_plan(
+            estimate=estimate,
+            snapshot=snapshot,
+            remaining_rayleigh_device_bytes=remaining,
+        )
+        if (
+            plan.residency == "host"
+            and plan.required_device_bytes <= plan.available_device_bytes
+            and int(estimate.structural_bytes) > int(snapshot.guaranteed_fresh_allocation_bytes)
+            and int(snapshot.pool_free_bytes) > 0
+        ):
+            snapshot = cupy_allocator_snapshot(
+                cp,
+                apply_pool_limit=True,
+                required_fresh_allocation_bytes=int(estimate.structural_bytes),
+            )
+            plan = _resolve_rayleigh_near_cache_memory_plan(
+                estimate=estimate,
+                snapshot=snapshot,
+                remaining_rayleigh_device_bytes=remaining,
+            )
+        self._near_cache_memory_plan = plan
+        return plan
+
     def _populate_near_structural_sums_device(self, *, show_progress: bool = False) -> None:
-        if self._near_structural_sums_gpu is not None:
+        if (
+            self._near_structural_sums_gpu is not None
+            or self._near_structural_sums_host is not None
+        ):
             return
         cp = self._cupy()
-        _indptr, destinations, sources = self._near_structure()
+        destinations, sources = self._near_pairs()
         order = 2 * int(self.lmax)
         degrees, orders = valid_structural_indices(int(self.lmax))
         total = int(destinations.size)
-        sums = cp.empty((total, degrees.size), dtype=cp.complex128)
+        memory_plan = self._near_cache_plan()
+        sums_gpu: Any | None = None
+        sums_host: Array | None = None
+        if memory_plan.residency == "device":
+            try:
+                sums_gpu = cp.empty((total, degrees.size), dtype=self.dtype)
+            except cp.cuda.memory.OutOfMemoryError:
+                memory_plan = replace(memory_plan, residency="host")
+                self._near_cache_memory_plan = memory_plan
+                sums_host = np.empty((total, degrees.size), dtype=self.dtype)
+        else:
+            sums_host = np.empty((total, degrees.size), dtype=self.dtype)
         if total == 0:
-            self._near_structural_sums_gpu = sums
+            self._near_structural_sums_gpu = sums_gpu
+            self._near_structural_sums_host = sums_host
             return
+
         src_gpu = self._rayleigh_device_array("near_sources", sources, dtype=cp.int32)
         dst_gpu = self._rayleigh_device_array("near_destinations", destinations, dtype=cp.int32)
         degree_gpu = self._rayleigh_device_array("near_structural_degrees", degrees, dtype=cp.int32)
@@ -449,27 +590,30 @@ class CuPyPeriodicCouplingOperator:
         pos = self._positions_device()
         real_count, reciprocal_count = self._shell_counts()
         structural_width = (order + 1) * (2 * order + 1)
+        bytes_per_pair = structural_width * np.dtype(np.complex128).itemsize + int(
+            degrees.size
+        ) * int(self.dtype.itemsize)
         pair_batch = self._memory_bounded_batch_size(
             total=total,
-            bytes_per_item=structural_width * np.dtype(np.complex128).itemsize,
+            bytes_per_item=bytes_per_pair,
         )
         batches: Iterable[tuple[int, int]] = (
             (start, min(total, start + pair_batch)) for start in range(0, total, pair_batch)
         )
         if show_progress:
+            location = "GPU" if memory_plan.residency == "device" else "host"
             batches = tqdm(
                 batches,
                 total=(total + pair_batch - 1) // pair_batch,
-                desc="Build periodic near Ewald cache (CuPy)",
+                desc=(
+                    "Build periodic near Ewald cache "
+                    f"({location}, {self._format_gib(memory_plan.estimate.structural_bytes)})"
+                ),
             )
-        atol = same_plane_z_tolerance(
-            float(self.k), coordinate_scale=self._coordinate_scale_value()
-        )
         for start, stop in batches:
             src = src_gpu[start:stop]
             dst = dst_gpu[start:stop]
             rel = pos[src] - pos[dst]
-            local_same = cp.flatnonzero(cp.abs(rel[:, 2]) <= float(atol)).astype(cp.int64)
             local = ewald_structural_sums_2d_fixed_cupy(
                 relative_source_minus_destination=rel,
                 lmax_struct=int(self.lmax),
@@ -477,21 +621,31 @@ class CuPyPeriodicCouplingOperator:
                 real_shell_count=int(real_count),
                 reciprocal_shell_count=int(reciprocal_count),
                 coordinate_scale=self._coordinate_scale_value(),
-                same_plane_pair_indices=local_same,
             )
             local = cp.asarray(local, dtype=cp.complex128).reshape(
                 stop - start, order + 1, 2 * order + 1
             )
-            sums[start:stop] = local[:, degree_gpu, order_gpu]
-        self._near_structural_sums_gpu = sums
+            compact = cp.ascontiguousarray(
+                local[:, degree_gpu, order_gpu],
+                dtype=self.dtype,
+            )
+            if sums_gpu is not None:
+                sums_gpu[start:stop] = compact
+            elif sums_host is not None:
+                compact.get(out=sums_host[start:stop])
+            else:
+                raise RuntimeError("Periodic near Ewald cache allocation failed.")
+            del rel, local, compact
+        self._near_structural_sums_gpu = sums_gpu
+        self._near_structural_sums_host = sums_host
 
     def _apply_rayleigh_gpu(self, x: Array | object) -> Any:
         cp = self._cupy()
         arr, squeezed = self._reshape_input_device(x)
 
         plan = self._rayleigh_plan()
-        order = self._rayleigh_device_array("sort_order", plan.sort_order, dtype=cp.int64)
-        inverse = self._rayleigh_device_array("inverse_order", plan.inverse_order, dtype=cp.int64)
+        order = self._rayleigh_device_array("sort_order", plan.sort_order, dtype=cp.int32)
+        inverse = self._rayleigh_device_array("inverse_order", plan.inverse_order, dtype=cp.int32)
         z = self._rayleigh_device_array("sorted_z", plan.sorted_z, dtype=cp.float64)
         gamma_all = self._rayleigh_device_array("gamma", plan.gamma, dtype=cp.complex128)
         phase_all = self._rayleigh_device_array(
@@ -546,10 +700,11 @@ class CuPyPeriodicCouplingOperator:
         y += cp.einsum("ij,ajr->air", self._self_block_device(), arr, optimize=True)
 
         self._populate_near_structural_sums_device(show_progress=False)
-        sums = self._near_structural_sums_gpu
-        if sums is None:
+        sums_gpu = self._near_structural_sums_gpu
+        sums_host = self._near_structural_sums_host
+        if sums_gpu is None and sums_host is None:
             raise RuntimeError("Periodic near Ewald cache population failed.")
-        _indptr, destinations, sources = self._near_structure()
+        destinations, sources = self._near_pairs()
         total = int(destinations.size)
         if total:
             src_gpu = self._rayleigh_device_array("near_sources", sources, dtype=cp.int32)
@@ -559,9 +714,23 @@ class CuPyPeriodicCouplingOperator:
                 total=total,
                 n_rhs=int(arr.shape[2]),
             )
+            structural_staging = (
+                None
+                if sums_gpu is not None
+                else self._near_host_staging_device(
+                    rows=pair_batch,
+                    width=int(tensor.shape[2]),
+                )
+            )
             for start in range(0, total, pair_batch):
                 stop = min(total, start + pair_batch)
-                structural = sums[start:stop].astype(self.dtype, copy=False)
+                if sums_gpu is not None:
+                    structural = sums_gpu[start:stop]
+                else:
+                    if sums_host is None or structural_staging is None:
+                        raise RuntimeError("Periodic host near cache is unavailable.")
+                    structural = structural_staging[: stop - start]
+                    structural.set(sums_host[start:stop])
                 blocks = cp.einsum(
                     "av,ijv->aij",
                     structural,

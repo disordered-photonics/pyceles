@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 import pyceles as pcl
+from pyceles._cupy_memory import CuPyAllocatorSnapshot
 from pyceles.core.indexing import index_vswf, n_modes
 from pyceles.core.operators import (
     CuPyPeriodicCouplingOperator,
@@ -14,6 +15,9 @@ from pyceles.core.operators import (
 )
 from pyceles.core.operators import (
     coupling_periodic as coupling_periodic_module,
+)
+from pyceles.core.operators.coupling_periodic_cupy import (
+    _resolve_rayleigh_near_cache_memory_plan,
 )
 from pyceles.core.periodic import PeriodicOptions, PeriodicSpec
 from pyceles.core.periodic.ewald import periodic_ewald_block
@@ -24,6 +28,7 @@ from pyceles.core.periodic.rayleigh import (
     near_pair_csr,
     near_point_source_csr,
     rayleigh_block,
+    rayleigh_near_cache_estimate,
     resolve_rayleigh_mode_chunk_size,
     resolve_rayleigh_z_cut,
 )
@@ -67,6 +72,9 @@ def test_near_pair_csr_and_far_scan_partition_boundary_exactly() -> None:
     np.testing.assert_array_equal(indptr, np.asarray([0, 1, 3, 4]))
     np.testing.assert_array_equal(destinations, np.asarray([1, 0, 2, 1]))
     np.testing.assert_array_equal(sources, np.asarray([0, 1, 1, 2]))
+    assert indptr.dtype == np.dtype(np.int64)
+    assert destinations.dtype == np.dtype(np.int32)
+    assert sources.dtype == np.dtype(np.int32)
 
 
 def test_near_point_source_csr_keeps_boundary_pairs_exact() -> None:
@@ -85,6 +93,9 @@ def test_near_point_source_csr_keeps_boundary_pairs_exact() -> None:
     np.testing.assert_array_equal(indptr, np.asarray([0, 3, 5]))
     np.testing.assert_array_equal(destinations, np.asarray([0, 1, 2, 2, 3]))
     np.testing.assert_array_equal(source_indices, np.asarray([0, 0, 0, 1, 1]))
+    assert indptr.dtype == np.dtype(np.int64)
+    assert destinations.dtype == np.dtype(np.int32)
+    assert source_indices.dtype == np.dtype(np.int32)
 
 
 def test_default_wavelength_band_keeps_exact_boundary_near() -> None:
@@ -186,6 +197,9 @@ def test_semiseparable_rayleigh_scan_matches_explicit_far_blocks() -> None:
         half_width=5,
         dtype=np.complex128,
     )
+    assert plan.sort_order.dtype == np.dtype(np.int32)
+    assert plan.inverse_order.dtype == np.dtype(np.int32)
+
     rng = np.random.default_rng(20260725)
     x = rng.normal(size=(positions.shape[0], 16)) + 1j * rng.normal(size=(positions.shape[0], 16))
 
@@ -454,7 +468,7 @@ def test_hybrid_operator_is_exact_when_every_pair_is_in_near_band() -> None:
     assert hybrid._self_block_cache is not None
 
 
-def test_complex64_hybrid_keeps_near_structural_sums_in_complex128() -> None:
+def test_complex64_hybrid_stores_near_structural_sums_in_compute_dtype() -> None:
     positions = np.asarray(
         [[0.0, 0.0, 0.0], [100.0, 30.0, 100.0], [40.0, -20.0, 900.0]],
         dtype=float,
@@ -485,7 +499,7 @@ def test_complex64_hybrid_keeps_near_structural_sums_in_complex128() -> None:
     hybrid.populate()
 
     assert hybrid._near_structural_sums is not None
-    assert hybrid._near_structural_sums.dtype == np.dtype(np.complex128)
+    assert hybrid._near_structural_sums.dtype == np.dtype(np.complex64)
 
 
 def test_hybrid_operator_uses_rayleigh_only_for_far_pairs() -> None:
@@ -549,6 +563,66 @@ def test_vertically_sparse_hybrid_prepares_self_ewald_only_once(
     assert hybrid._near_destinations.size == 0
 
 
+def _allocator_snapshot(*, available: int, guaranteed_fresh: int) -> CuPyAllocatorSnapshot:
+    return CuPyAllocatorSnapshot(
+        raw_free_bytes=available,
+        raw_total_bytes=8 * 1024**3,
+        pool_used_bytes=0,
+        pool_total_bytes=0,
+        pool_free_bytes=0,
+        pool_limit_bytes=available,
+        effective_device_limit_bytes=available,
+        active_headroom_bytes=available,
+        guaranteed_fresh_allocation_bytes=guaranteed_fresh,
+        pool_limit_applied=False,
+        pool_trimmed_to_limit=False,
+        pool_trimmed_for_fragmentation=False,
+    )
+
+
+def test_rayleigh_near_cache_estimate_honors_compute_dtype() -> None:
+    estimate64 = rayleigh_near_cache_estimate(pair_count=3_633_788, lmax=3, dtype=np.complex64)
+    estimate128 = rayleigh_near_cache_estimate(pair_count=3_633_788, lmax=3, dtype=np.complex128)
+
+    assert estimate64.structural_channels == 49
+    assert estimate64.structural_bytes == 3_633_788 * 49 * 8
+    assert estimate128.structural_bytes == 2 * estimate64.structural_bytes
+
+
+def test_rayleigh_near_cache_memory_plan_uses_host_before_guarded_spill() -> None:
+    estimate = rayleigh_near_cache_estimate(pair_count=4_000_000, lmax=3, dtype=np.complex64)
+    remaining = 512 * 1024**2
+    available = 2 * 1024**3
+
+    plan = _resolve_rayleigh_near_cache_memory_plan(
+        estimate=estimate,
+        snapshot=_allocator_snapshot(
+            available=available,
+            guaranteed_fresh=available,
+        ),
+        remaining_rayleigh_device_bytes=remaining,
+    )
+
+    assert plan.residency == "host"
+    assert plan.required_device_bytes > plan.available_device_bytes
+
+
+def test_rayleigh_near_cache_memory_plan_keeps_small_cache_on_device() -> None:
+    estimate = rayleigh_near_cache_estimate(pair_count=20_000, lmax=3, dtype=np.complex64)
+    available = 2 * 1024**3
+
+    plan = _resolve_rayleigh_near_cache_memory_plan(
+        estimate=estimate,
+        snapshot=_allocator_snapshot(
+            available=available,
+            guaranteed_fresh=available,
+        ),
+        remaining_rayleigh_device_bytes=128 * 1024**2,
+    )
+
+    assert plan.residency == "device"
+
+
 def test_cupy_near_apply_batch_accounts_for_dense_pair_blocks() -> None:
     positions = np.zeros((700, 3), dtype=float)
     operator = CuPyPeriodicCouplingOperator(
@@ -577,6 +651,49 @@ def test_cupy_near_apply_batch_accounts_for_dense_pair_blocks() -> None:
 
     assert 1 <= batch < total
     assert batch < 20_000
+
+
+def test_cupy_host_near_cache_staging_buffer_is_reused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeCuPy:
+        @staticmethod
+        def empty(shape: tuple[int, int], dtype: Any) -> np.ndarray:
+            return np.empty(shape, dtype=dtype)
+
+    operator = CuPyPeriodicCouplingOperator(
+        lmax=1,
+        k=2.0 * np.pi / 550.0,
+        positions=np.zeros((1, 3), dtype=float),
+        ab5=translation_ab5_table(1, dtype=np.complex64),
+        periodic=PeriodicSpec(
+            lattice=pcl.RectangularLattice2D(900.0, 850.0),
+            options=PeriodicOptions(
+                method="rayleigh",
+                eta=0.0015,
+                real_shells=1,
+                reciprocal_shells=1,
+                rayleigh_z_cut=550.0,
+                rayleigh_reciprocal_shells=1,
+            ),
+        ),
+        k_parallel=np.zeros(2),
+        dtype=np.dtype(np.complex64),
+        circumscribing_radii=np.asarray([40.0]),
+    )
+    monkeypatch.setattr(operator, "_cupy", lambda: FakeCuPy())
+
+    first = operator._near_host_staging_device(rows=8, width=9)
+    backing = operator._near_structural_staging_gpu
+    second = operator._near_host_staging_device(rows=4, width=9)
+
+    assert backing is not None
+    assert operator._near_structural_staging_gpu is backing
+    assert np.shares_memory(first, second)
+    assert second.shape == (4, 9)
+
+    operator._near_host_staging_device(rows=16, width=9)
+    assert operator._near_structural_staging_gpu is not backing
 
 
 @pytest.mark.reference
