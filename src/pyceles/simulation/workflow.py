@@ -19,7 +19,6 @@ from pyceles.linear.solvers import DenseLUFactorization
 from .config import SimulationConfig
 from .helpers import (
     first_overlapping_circumscribing_pair,
-    first_periodic_overlapping_circumscribing_pair,
     normalize_particle_geometry,
 )
 from .postprocess import postprocess_sources_impl, run_impl
@@ -108,43 +107,32 @@ class Simulation:
         self._particles = part
         self.clear_caches()
         if bool(self.config.check_circumscribing_sphere_overlap):
-            if self.config.periodic is None:
-                finite_overlap = first_overlapping_circumscribing_pair(
-                    self.positions,
-                    self.circumscribing_radii,
-                    atol=float(self.config.circumscribing_sphere_overlap_atol),
-                    show_progress=bool(self.config.verbose),
-                )
-                if finite_overlap is not None:
-                    i, j, d, rsum = finite_overlap
-                    detail = f"particle pair ({i}, {j}) with center distance {d:.6g}"
-                    raise ValueError(
-                        "Invalid geometry: circumscribing spheres overlap for "
-                        f"{detail} and required minimum {rsum:.6g}. "
-                        "The current T-matrix formulation requires disjoint circumscribing spheres. "
-                        "If this is intentional for an experimental workflow, set "
-                        "`check_circumscribing_sphere_overlap=False`."
-                    )
-            else:
-                periodic_overlap = first_periodic_overlapping_circumscribing_pair(
-                    self.positions,
-                    self.circumscribing_radii,
-                    lattice=self.config.periodic.lattice,
-                    atol=float(self.config.circumscribing_sphere_overlap_atol),
-                )
-                if periodic_overlap is not None:
-                    i, j, p, q, d, rsum = periodic_overlap
+            lattice = None if self.config.periodic is None else self.config.periodic.lattice
+            overlap = first_overlapping_circumscribing_pair(
+                self.positions,
+                self.circumscribing_radii,
+                lattice=lattice,
+                atol=float(self.config.circumscribing_sphere_overlap_atol),
+                show_progress=bool(self.config.verbose),
+            )
+            if overlap is not None:
+                i = overlap.particle_i
+                j = overlap.particle_j
+                p, q = overlap.lattice_shift
+                if lattice is None:
+                    detail = f"particle pair ({i}, {j}) with center distance {overlap.distance:.6g}"
+                else:
                     detail = (
                         f"particle pair ({i}, {j}) under lattice shift ({p}, {q}) "
-                        f"with image distance {d:.6g}"
+                        f"with image distance {overlap.distance:.6g}"
                     )
-                    raise ValueError(
-                        "Invalid geometry: circumscribing spheres overlap for "
-                        f"{detail} and required minimum {rsum:.6g}. "
-                        "The current T-matrix formulation requires disjoint circumscribing spheres. "
-                        "If this is intentional for an experimental workflow, set "
-                        "`check_circumscribing_sphere_overlap=False`."
-                    )
+                raise ValueError(
+                    "Invalid geometry: circumscribing spheres overlap for "
+                    f"{detail} and required minimum {overlap.required_minimum:.6g}. "
+                    "The current T-matrix formulation requires disjoint circumscribing spheres. "
+                    "If this is intentional for an experimental workflow, set "
+                    "`check_circumscribing_sphere_overlap=False`."
+                )
 
     def _validate_ready_to_run(self) -> Source:
         if self.config.source is None:

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import numpy.typing as npt
@@ -16,6 +18,17 @@ from pyceles.core.particles import Particle, ParticleCollection
 from pyceles.linear.solvers import LinearSolveResult
 
 _STARTUP_LOGO_PRINTED = False
+
+
+@dataclass(frozen=True)
+class _CircumsphereOverlap:
+    """First invalid pair found by the circumscribing-sphere validator."""
+
+    particle_i: int
+    particle_j: int
+    lattice_shift: tuple[int, int]
+    distance: float
+    required_minimum: float
 
 
 def print_startup_logo_once() -> None:
@@ -80,93 +93,123 @@ def make_empty_solver_result(
     )
 
 
+def _minimum_image_delta_and_shift(
+    delta: np.ndarray,
+    *,
+    lattice: RectangularLattice2D,
+) -> tuple[np.ndarray, tuple[int, int]]:
+    """Return one minimum-image displacement and its rectangular-cell shift."""
+    out = np.asarray(delta, dtype=float).copy()
+    p = int(np.rint(float(out[0]) / float(lattice.ax)))
+    q = int(np.rint(float(out[1]) / float(lattice.ay)))
+    out[0] -= p * float(lattice.ax)
+    out[1] -= q * float(lattice.ay)
+    return out, (p, q)
+
+
+def _first_periodic_self_overlap(
+    radii: np.ndarray,
+    *,
+    lattice: RectangularLattice2D,
+    atol: float,
+) -> _CircumsphereOverlap | None:
+    """Check one particle against its nearest nonzero rectangular image."""
+    if float(lattice.ax) <= float(lattice.ay):
+        nearest_distance = float(lattice.ax)
+        shift = (1, 0)
+    else:
+        nearest_distance = float(lattice.ay)
+        shift = (0, 1)
+
+    for i, radius in enumerate(radii):
+        required_minimum = 2.0 * float(radius)
+        if nearest_distance + atol < required_minimum:
+            return _CircumsphereOverlap(
+                particle_i=int(i),
+                particle_j=int(i),
+                lattice_shift=shift,
+                distance=nearest_distance,
+                required_minimum=required_minimum,
+            )
+    return None
+
+
 def first_overlapping_circumscribing_pair(
     positions: np.ndarray,
     radii: np.ndarray,
     *,
+    lattice: RectangularLattice2D | None = None,
     atol: float = 0.0,
     show_progress: bool = False,
-) -> tuple[int, int, float, float] | None:
-    """Return first overlapping circumscribing-sphere pair, if any."""
-    pos = np.asarray(positions, dtype=float)
-    rad = np.asarray(radii, dtype=float).reshape(-1)
-    n = int(rad.size)
-    if n < 2:
-        return None
+) -> _CircumsphereOverlap | None:
+    """Return the first finite or x-y-periodic circumsphere overlap.
 
-    atol_f = float(atol)
-    r_max = float(np.max(rad))
-
-    from scipy.spatial import cKDTree
-
-    tree = cKDTree(pos)
-    i_iter: Iterable[int] = range(n - 1)
-    if show_progress:
-        i_iter = tqdm(i_iter, total=n - 1, desc="Geometry check (circumspheres)")
-
-    for i in i_iter:
-        ri = float(rad[i])
-        cand = tree.query_ball_point(pos[i], ri + r_max + atol_f)
-        for j in cand:
-            j = int(j)
-            if j <= i:
-                continue
-            rsum = ri + float(rad[j])
-            d = float(np.linalg.norm(pos[i] - pos[j]))
-            if d + atol_f < rsum:
-                return i, j, d, rsum
-    return None
-
-
-def _periodic_shift_candidates_for_pair(
-    *,
-    delta_xy: np.ndarray,
-    lattice: RectangularLattice2D,
-    include_zero_cell: bool,
-) -> list[tuple[int, int]]:
-    """Return image shifts that can minimize a rectangular periodic separation."""
-    base = {(p, q) for p in (-1, 0, 1) for q in (-1, 0, 1)}
-    nearest_p = int(np.rint(float(delta_xy[0]) / float(lattice.ax)))
-    nearest_q = int(np.rint(float(delta_xy[1]) / float(lattice.ay)))
-    candidates = base | {(nearest_p + dp, nearest_q + dq) for dp in (-1, 0, 1) for dq in (-1, 0, 1)}
-    if not include_zero_cell:
-        candidates.discard((0, 0))
-    return sorted(candidates, key=lambda item: (max(abs(item[0]), abs(item[1])), item[0], item[1]))
-
-
-def first_periodic_overlapping_circumscribing_pair(
-    positions: np.ndarray,
-    radii: np.ndarray,
-    *,
-    lattice: RectangularLattice2D,
-    atol: float = 0.0,
-) -> tuple[int, int, int, int, float, float] | None:
-    """Return first circumsphere overlap across rectangular periodic images.
-
-    The search includes the nearest-image shifts implied by the actual particle
-    coordinates, not only the adjacent ``(-1, 0, 1)^2`` cells. This keeps the
-    validator robust if a caller uses a shifted unit-cell origin or temporarily
-    supplies unwrapped reference positions.
+    A cKDTree supplies a memory-bounded broad phase for both geometry kinds.
+    Periodic cells use SciPy's per-axis box lengths with a zero z box length,
+    so x and y follow the minimum-image convention while z remains finite.
+    Particle self-images are checked separately because a periodic tree stores
+    each center only once.
     """
     pos = np.asarray(positions, dtype=float).reshape(-1, 3)
     rad = np.asarray(radii, dtype=float).reshape(-1)
+    if pos.shape[0] != rad.size:
+        raise ValueError(
+            "`positions` and `radii` must describe the same number of particles. "
+            f"Got {pos.shape[0]} and {rad.size}."
+        )
     n = int(rad.size)
     if n == 0:
         return None
+
     atol_f = float(atol)
-    for i in range(n):
-        for j in range(i, n):
-            include_zero = bool(i != j)
-            for p, q in _periodic_shift_candidates_for_pair(
-                delta_xy=np.asarray(pos[i, :2] - pos[j, :2], dtype=float),
-                lattice=lattice,
-                include_zero_cell=include_zero,
-            ):
-                shift = lattice.lattice_vector(p, q)
-                rsum = float(rad[i]) + float(rad[j])
-                d = float(np.linalg.norm(pos[i] - pos[j] - shift))
-                if d + atol_f < rsum:
-                    return int(i), int(j), int(p), int(q), d, rsum
+    if not np.isfinite(atol_f) or atol_f < 0.0:
+        raise ValueError(f"`atol` must be finite and non-negative. Got {atol!r}.")
+
+    search_positions = pos
+    boxsize: tuple[float, float, float] | None = None
+    if lattice is not None:
+        self_overlap = _first_periodic_self_overlap(rad, lattice=lattice, atol=atol_f)
+        if self_overlap is not None:
+            return self_overlap
+        search_positions = pos.copy()
+        search_positions[:, 0] = np.mod(search_positions[:, 0], float(lattice.ax))
+        search_positions[:, 1] = np.mod(search_positions[:, 1], float(lattice.ay))
+        boxsize = (float(lattice.ax), float(lattice.ay), 0.0)
+
+    if n < 2:
+        return None
+
+    from scipy.spatial import cKDTree
+
+    tree: Any
+    if boxsize is None:
+        tree = cKDTree(search_positions)
+    else:
+        tree = cKDTree(search_positions, boxsize=np.asarray(boxsize, dtype=float))
+    r_max = float(np.max(rad))
+    i_iter: Iterable[int] = range(n - 1)
+    if show_progress:
+        label = "periodic circumspheres" if lattice is not None else "circumspheres"
+        i_iter = tqdm(i_iter, total=n - 1, desc=f"Geometry check ({label})")
+
+    for i in i_iter:
+        ri = float(rad[i])
+        candidates = tree.query_ball_point(search_positions[i], ri + r_max + atol_f)
+        for j in sorted(int(candidate) for candidate in candidates if int(candidate) > i):
+            delta = np.asarray(pos[i] - pos[j], dtype=float)
+            shift = (0, 0)
+            if lattice is not None:
+                delta, shift = _minimum_image_delta_and_shift(delta, lattice=lattice)
+            distance = float(np.linalg.norm(delta))
+            required_minimum = ri + float(rad[j])
+            if distance + atol_f < required_minimum:
+                return _CircumsphereOverlap(
+                    particle_i=int(i),
+                    particle_j=int(j),
+                    lattice_shift=shift,
+                    distance=distance,
+                    required_minimum=required_minimum,
+                )
     return None
 
 
@@ -197,7 +240,6 @@ def warn_local_sources_inside_circumspheres(
 
 __all__ = [
     "first_overlapping_circumscribing_pair",
-    "first_periodic_overlapping_circumscribing_pair",
     "make_empty_solver_result",
     "normalize_particle_geometry",
     "print_startup_logo_once",

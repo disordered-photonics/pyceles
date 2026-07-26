@@ -35,6 +35,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pairwise-vs-MLFMM scaling benchmark.
 
 ### Fixed
+- Replaced the quadratic Python periodic circumsphere-overlap validator with
+  the shared cKDTree broad phase used by finite geometries. Rectangular cells
+  now apply minimum-image distances only in x and y, retain finite z, and
+  validate large periodic packings without enumerating every particle pair or
+  neighboring image.
 - Bounded CuPy hybrid-Rayleigh exact-near contractions by their dense per-pair
   intermediate size, preventing dense vertical bands from materializing
   multi-gigabyte temporary block tensors during matrix-free applies.

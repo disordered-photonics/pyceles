@@ -8,12 +8,15 @@ from pyceles.core.angular import (
     uniform_periodic_azimuth_grid,
     uniform_polar_grid,
 )
+from pyceles.core.lattice import RectangularLattice2D
 from pyceles.core.particles import (
     LayeredSphere,
     Sphere,
     spheres_from_arrays,
 )
+from pyceles.core.periodic import PeriodicSpec
 from pyceles.simulation import Simulation, SimulationConfig
+from pyceles.simulation.helpers import first_overlapping_circumscribing_pair
 
 
 def test_simulation_rejects_overlapping_circumscribing_spheres_by_default() -> None:
@@ -72,6 +75,60 @@ def test_overlap_tolerance_allows_small_roundoff_level_penetration() -> None:
         ),
     )
     np.testing.assert_allclose(sim.circumscribing_radii, radii, rtol=0.0, atol=0.0)
+
+
+def test_periodic_overlap_check_uses_xy_minimum_image_but_finite_z() -> None:
+    lattice = RectangularLattice2D(100.0, 120.0)
+    positions = np.array(
+        [
+            [5.0, 10.0, 0.0],
+            [95.0, 10.0, 0.0],
+            [5.0, 10.0, 30.0],
+        ],
+        dtype=float,
+    )
+    radii = np.array([6.0, 6.0, 6.0], dtype=float)
+
+    overlap = first_overlapping_circumscribing_pair(
+        positions,
+        radii,
+        lattice=lattice,
+    )
+
+    assert overlap is not None
+    assert (overlap.particle_i, overlap.particle_j) == (0, 1)
+    assert overlap.lattice_shift == (-1, 0)
+    assert overlap.distance == pytest.approx(10.0)
+    assert overlap.required_minimum == pytest.approx(12.0)
+
+
+def test_periodic_overlap_check_keeps_z_nonperiodic() -> None:
+    overlap = first_overlapping_circumscribing_pair(
+        np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 30.0]], dtype=float),
+        np.array([10.0, 10.0], dtype=float),
+        lattice=RectangularLattice2D(100.0, 100.0),
+    )
+
+    assert overlap is None
+
+
+def test_periodic_overlap_check_scales_to_large_sparse_cells() -> None:
+    n_particles = 10_000
+    positions = np.zeros((n_particles, 3), dtype=float)
+    positions[:, 2] = 3.0 * np.arange(n_particles, dtype=float)
+    particles = spheres_from_arrays(
+        positions=positions,
+        radii=np.ones((n_particles,), dtype=float),
+        refractive_indices=1.5 + 0j,
+    )
+    config = SimulationConfig(
+        periodic=PeriodicSpec(lattice=RectangularLattice2D(100.0, 100.0)),
+        verbose=False,
+    )
+
+    sim = Simulation(config, particles=particles)
+
+    assert sim.n_particles == n_particles
 
 
 def test_simulation_accepts_empty_particle_geometry() -> None:
