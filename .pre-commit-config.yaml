@@ -1,6 +1,6 @@
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.11
+    rev: v0.16.0
     hooks:
       - id: ruff-check
         args: [--fix]
@@ -23,20 +23,21 @@ repos:
       - id: nbstripout
         files: \.ipynb$
   - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v2.1.0
+    rev: v2.3.0
     hooks:
       - id: mypy
         name: mypy (src+examples+tests)
         args: [--config-file=pyproject.toml, src, examples, tests]
         pass_filenames: false
+        # Keep these exact pins synchronized with the dev extra in pyproject.toml.
+        # Mypy diagnostics depend on the installed scientific packages and stubs,
+        # not only on the mypy executable itself.
         additional_dependencies:
-          [
-            "numpy~=2.4",
-            "scipy~=1.17",
-            "scipy-stubs",
-            "matplotlib~=3.10",
-            "h5py~=3.16",
-            "tqdm~=4.67",
-            "types-tqdm",
-            "pytest~=9.0",
-          ]
+          - numpy==2.5.1
+          - scipy==1.18.0
+          - scipy-stubs==1.18.0.1
+          - matplotlib==3.11.1
+          - h5py==3.16.0
+          - tqdm==4.69.1
+          - types-tqdm==4.69.0.20260724
+          - pytest==9.1.1

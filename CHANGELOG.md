@@ -73,6 +73,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   larger multilevel runs avoid avoidable out-of-memory failures.
 
 ### Changed
+- Raised the supported NumPy, SciPy, Matplotlib, tqdm, CuPy, and contributor
+  tool baselines, with exact development pins synchronized between
+  `pyproject.toml` and the isolated pre-commit mypy environment.
 - Parallelized CuPy MLFMM exact-near angular-table setup across each leaf-pair
   block, mirroring the direct pairwise CuPy kernel cleanup.
 - Parallelized CuPy pairwise angular-table setup across each destination block,

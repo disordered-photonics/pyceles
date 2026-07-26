@@ -24,27 +24,36 @@ classifiers = [
 ]
 
 dependencies = [
-  "numpy~=2.4",
-  "scipy~=1.17",
-  "matplotlib~=3.10",
+  "numpy~=2.5",
+  "scipy~=1.18",
+  "matplotlib~=3.11",
   "h5py~=3.16",
-  "tqdm~=4.67",
+  "tqdm~=4.69",
 ]
 
 [project.optional-dependencies]
+# Exact contributor-tool pins intentionally mirror the isolated pre-commit
+# environments. Runtime requirements above remain library-friendly ranges.
 dev = [
-  "pytest>=9",
-  "ruff>=0.15.11",
-  "pre-commit>=4.6",
-  "nbstripout>=0.9.1",
-  "mypy>=2.1.0",
+  "numpy==2.5.1",
+  "scipy==1.18.0",
+  "scipy-stubs==1.18.0.1",
+  "matplotlib==3.11.1",
+  "h5py==3.16.0",
+  "tqdm==4.69.1",
+  "types-tqdm==4.69.0.20260724",
+  "pytest==9.1.1",
+  "ruff==0.16.0",
+  "pre-commit==4.6.1",
+  "nbstripout==0.9.1",
+  "mypy==2.3.0",
 ]
 notebooks = [
   "jupyter",
   "ipykernel",
 ]
 cupy = [
-  "cupy>=14.0.1",
+  "cupy>=14.1.1",
 ]
 
 [tool.setuptools]
