@@ -91,6 +91,30 @@ Current implementation details:
   fall back to generic dense assembly through repeated matrix-free applies,
 - the octree policy is uniform-depth rather than adaptive.
 
+### Periodized MLFMM (experimental)
+
+The NumPy reference backend can periodize the MLFMM hierarchy for rectangular
+two-dimensional cells:
+
+```python
+import pyceles as pcl
+
+config = pcl.SimulationConfig(
+    source=source,
+    periodic=pcl.PeriodicSpec(
+        lattice=pcl.RectangularLattice2D(ax, ay),
+        options=pcl.PeriodicOptions(method="ewald"),
+    ),
+    coupling_backend="mlfmm",
+    operator_backend="numpy",
+)
+```
+
+Ewald prepares the lattice closure once; repeated applies reuse the ordinary
+MLFMM hierarchy and finite image corrections. The path is intended first as a
+correctness and scaling reference. Tune MLFMM accuracy and periodic Ewald
+options together when comparing it with pairwise periodic Ewald.
+
 A previous rotation-translation-rotation coupling idea was explored as an
 alternative translation backend. After matching the formulas to the shipped
 CELES-compatible conventions, the experimental implementation reproduced

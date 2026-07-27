@@ -13,6 +13,53 @@ from pyceles.core.translation import spherical_bessel_jy
 Array = np.ndarray
 
 
+def free_space_structural_sums(
+    *,
+    max_degree: int,
+    k: float,
+    displacement: Array,
+    dtype: npt.DTypeLike = np.complex128,
+) -> Array:
+    """Return scalar outgoing-wave structural constants for one displacement.
+
+    This is the nonperiodic primitive shared by direct lattice validation and
+    periodized MLFMM preparation.  The table follows the same pyceles
+    normalization and centered-order layout as the periodic Ewald routines,
+    but its maximum spherical degree is explicit rather than inferred from a
+    particle ``lmax``.
+    """
+
+    degree_max = int(max_degree)
+    if degree_max < 0:
+        raise ValueError(f"`max_degree` must be >= 0. Got {max_degree!r}.")
+    out_dtype = np.dtype(dtype)
+    rvec = np.asarray(displacement, dtype=float).reshape(3)
+    radius = float(np.linalg.norm(rvec))
+    if radius == 0.0:
+        raise ValueError("A free-space structural sum is singular at zero displacement.")
+
+    offset = degree_max
+    ct = float(rvec[2] / radius)
+    st = float(np.sqrt(max(0.0, 1.0 - ct * ct)))
+    phi = float(np.arctan2(rvec[1], rvec[0]))
+    j, y = spherical_bessel_jy(
+        degree_max,
+        np.asarray(float(k) * radius, dtype=np.complex128),
+    )
+    hankel = np.asarray(j + 1j * y, dtype=np.complex128).reshape(degree_max + 1)
+    plm = legendre_normalized_trigon_scalar(ct, st, degree_max)
+    orders = np.arange(-degree_max, degree_max + 1, dtype=np.int32)
+    azimuthal_phase = np.exp(1j * phi * orders)
+    sums = np.zeros((degree_max + 1, 2 * degree_max + 1), dtype=np.complex128)
+    for degree in range(degree_max + 1):
+        order_slice = slice(offset - degree, offset + degree + 1)
+        abs_orders = np.abs(orders[order_slice])
+        sums[degree, order_slice] = (
+            hankel[degree] * plm[degree, abs_orders] * azimuthal_phase[order_slice]
+        )
+    return np.asarray(sums, dtype=out_dtype)
+
+
 def _validated_window(window: int) -> int:
     value = int(window)
     if value < 0:
@@ -41,10 +88,7 @@ def direct_structural_sums_2d(
     """
     out_dtype = np.dtype(dtype)
     order = 2 * int(lmax)
-    m_offset = order
     sums = np.zeros((order + 1, 2 * order + 1), dtype=np.complex128)
-    m_values = np.arange(-order, order + 1, dtype=np.int32)
-
     k_f = float(k)
     dst = np.asarray(destination, dtype=float).reshape(3)
     src = np.asarray(source, dtype=float).reshape(3)
@@ -61,21 +105,13 @@ def direct_structural_sums_2d(
             if r == 0.0:
                 continue
 
-            ct = float(rvec[2] / r)
-            st = float(np.sqrt(max(0.0, 1.0 - ct * ct)))
-            phi = float(np.arctan2(rvec[1], rvec[0]))
-            j, y = spherical_bessel_jy(order, np.asarray(k_f * r, dtype=np.complex128))
-            hankel = np.asarray(j + 1j * y, dtype=np.complex128).reshape(order + 1)
-            plm = legendre_normalized_trigon_scalar(ct, st, order)
-
             bloch_phase = complex(np.exp(1j * float(np.dot(kp, shift[:2]))))
-            azimuthal_phase = np.exp(1j * phi * m_values)
-            for degree in range(order + 1):
-                m_slice = slice(m_offset - degree, m_offset + degree + 1)
-                abs_m = np.abs(m_values[m_slice])
-                sums[degree, m_slice] += (
-                    bloch_phase * hankel[degree] * plm[degree, abs_m] * azimuthal_phase[m_slice]
-                )
+            sums += bloch_phase * free_space_structural_sums(
+                max_degree=order,
+                k=k_f,
+                displacement=rvec,
+                dtype=np.complex128,
+            )
 
     return np.asarray(sums, dtype=out_dtype)
 
@@ -277,6 +313,7 @@ __all__ = [
     "block_from_structural_sums",
     "blocks_from_structural_sums",
     "direct_structural_sums_2d",
+    "free_space_structural_sums",
     "periodic_direct_structural_block",
     "translation_contraction_tensor",
 ]

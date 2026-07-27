@@ -231,8 +231,20 @@ class SimulationConfig:
                     "`periodic` must be a PeriodicSpec instance or None. "
                     f"Got {type(self.periodic).__name__}."
                 )
-            if coupling_backend != "pairwise":
-                raise NotImplementedError("Periodic MLFMM coupling is not implemented yet.")
+            if coupling_backend == "mlfmm":
+                if backend != "numpy":
+                    raise NotImplementedError(
+                        "Periodic MLFMM is currently available only with operator_backend='numpy'."
+                    )
+                if self.periodic.options.method != "ewald":
+                    raise NotImplementedError(
+                        "Periodic MLFMM currently requires "
+                        "PeriodicOptions(method='ewald') for coarse-level periodizing closure."
+                    )
+                if bool(self.cache_translation_blocks):
+                    raise NotImplementedError(
+                        "Periodic MLFMM does not cache exact lattice-image leaf blocks."
+                    )
             if backend == "cupy" and self.periodic.options.method not in {"ewald", "rayleigh"}:
                 raise NotImplementedError(
                     "CuPy periodic workflows currently support Ewald or Rayleigh coupling."

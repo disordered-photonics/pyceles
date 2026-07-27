@@ -462,6 +462,7 @@ def _build_config(
     source: pcl.PlaneWave,
     side_nm: float,
     cache_blocks: bool,
+    coupling_backend: Literal["pairwise", "mlfmm"],
     operator_backend: Literal["numpy", "cupy"],
     postprocessing_backend: Literal["inherit", "numpy", "cupy"],
 ) -> pcl.SimulationConfig:
@@ -496,7 +497,7 @@ def _build_config(
         solver_maxiter=int(args.solver_maxiter),
         solver_compute_final_residual=not bool(args.skip_final_residual_check),
         operator_backend=operator_backend,
-        coupling_backend="pairwise",
+        coupling_backend=coupling_backend,
         postprocessing_backend=postprocessing_backend,
         compute_dtype=cast(Literal["complex64", "complex128"], args.compute_dtype),
         accum_dtype=cast(Literal["complex64", "complex128"], args.accum_dtype),
@@ -544,6 +545,12 @@ def main() -> None:
     parser.add_argument("--solver-rtol", type=float, default=1.0e-4)
     parser.add_argument("--solver-restart", type=int, default=80)
     parser.add_argument("--solver-maxiter", type=int, default=800)
+    parser.add_argument(
+        "--coupling-backend",
+        choices=("pairwise", "mlfmm"),
+        default="pairwise",
+        help="Periodic coupling backend to profile.",
+    )
     parser.add_argument(
         "--operator-backend",
         choices=("numpy", "cupy"),
@@ -593,8 +600,16 @@ def main() -> None:
     args = parser.parse_args()
     if args.periodic_method == "rayleigh" and args.cache_mode != "off":
         parser.error("--periodic-method rayleigh requires --cache-mode off")
+    if args.coupling_backend == "mlfmm":
+        if args.operator_backend != "numpy":
+            parser.error("--coupling-backend mlfmm currently requires --operator-backend numpy")
+        if args.periodic_method != "ewald":
+            parser.error("--coupling-backend mlfmm currently requires --periodic-method ewald")
+        if args.cache_mode != "off":
+            parser.error("--coupling-backend mlfmm currently requires --cache-mode off")
 
     operator_backend = cast(Literal["numpy", "cupy"], args.operator_backend)
+    coupling_backend = cast(Literal["pairwise", "mlfmm"], args.coupling_backend)
     postprocessing_backend = cast(Literal["inherit", "numpy", "cupy"], args.postprocessing_backend)
     compute_dtype = cast(Literal["complex64", "complex128"], args.compute_dtype)
     accum_dtype = cast(Literal["complex64", "complex128"], args.accum_dtype)
@@ -650,7 +665,7 @@ def main() -> None:
         print(
             f"Preparing periodic problem: N={n_particles}, side={float(args.side_nm):g} nm, "
             f"lmax={int(args.lmax)}, method={args.periodic_method}, "
-            f"backend={operator_backend}, post={postprocessing_backend}"
+            f"coupling={coupling_backend}, backend={operator_backend}, post={postprocessing_backend}"
         )
         print(
             f"Unknowns={n_particles * nmodes}; dense A raw footprint ~{dense_bytes_est / 1024**3:.2f} GiB"
@@ -669,6 +684,7 @@ def main() -> None:
             source=source,
             side_nm=float(args.side_nm),
             cache_blocks=bool(cache_on),
+            coupling_backend=coupling_backend,
             operator_backend=operator_backend,
             postprocessing_backend=postprocessing_backend,
         )
@@ -689,6 +705,7 @@ def main() -> None:
         solver_runs.append(
             {
                 "operator_backend": operator_backend,
+                "coupling_backend": coupling_backend,
                 "postprocessing_backend": cfg.resolved_postprocessing_backend(),
                 "cache_translation_blocks": bool(cache_on),
                 "periodic": _periodic_summary(run.periodic),
@@ -818,6 +835,7 @@ def main() -> None:
             "solver_restart": int(args.solver_restart),
             "solver_maxiter": int(args.solver_maxiter),
             "operator_backend": operator_backend,
+            "coupling_backend": coupling_backend,
             "postprocessing_backend": postprocessing_backend,
             "effective_postprocessing_backend": primary_run.config.resolved_postprocessing_backend(),
             "compute_dtype": compute_dtype,

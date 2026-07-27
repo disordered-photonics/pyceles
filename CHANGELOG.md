@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Added an experimental NumPy periodized MLFMM reference path for rectangular
+  two-dimensional cells through `coupling_backend="mlfmm"` and
+  `PeriodicOptions(method="ewald")`. Ewald is used once to prepare sampled
+  coarse-box lattice closures; finite non-well-separated images descend through
+  the existing hierarchy, leaving repeated applies mesh-free and independent of
+  particle-pair Ewald or Rayleigh caches.
 - Added an opt-in hybrid periodic coupling method (`method="rayleigh"`) for
   NumPy and CuPy. It evaluates a particle-safe vertical near band with exact
   Ewald sums, reuses one exact periodic self block, and applies vertically far
@@ -35,6 +41,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pairwise-vs-MLFMM scaling benchmark.
 
 ### Fixed
+- Fixed high-order periodic Ewald structural batches exposed by MLFMM closure
+  preparation so large factorial values are converted with scalar square roots
+  rather than NumPy object-ufunc dispatch.
 - Replaced the quadratic Python periodic circumsphere-overlap validator with
   the shared cKDTree broad phase used by finite geometries. Rectangular cells
   now apply minimum-image distances only in x and y, retain finite z, and

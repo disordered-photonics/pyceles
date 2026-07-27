@@ -1216,8 +1216,8 @@ def ewald_structural_sums_2d_batch(
                         continue
                     root = (
                         np.sqrt(2 * degree + 1.0)
-                        * np.sqrt(factorial_int(degree - m))
-                        * np.sqrt(factorial_int(degree + m))
+                        * math.sqrt(factorial_int(degree - m))
+                        * math.sqrt(factorial_int(degree + m))
                     )
                     prefactor = (
                         (1j) ** m * root / (lattice.area * float(k) * (2.0 * float(k)) ** degree)
@@ -1251,8 +1251,8 @@ def ewald_structural_sums_2d_batch(
                 for m in range(-degree, degree + 1):
                     root = (
                         np.sqrt(2 * degree + 1.0)
-                        * np.sqrt(factorial_int(degree - m))
-                        * np.sqrt(factorial_int(degree + m))
+                        * math.sqrt(factorial_int(degree - m))
+                        * math.sqrt(factorial_int(degree + m))
                     )
                     prefactor = (
                         (-1j) ** m

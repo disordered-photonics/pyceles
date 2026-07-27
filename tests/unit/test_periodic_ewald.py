@@ -224,6 +224,26 @@ def test_batch_roundoff_same_plane_rows_use_same_plane_limit() -> None:
     np.testing.assert_allclose(near, exact, rtol=5e-12, atol=5e-12)
 
 
+def test_ewald_structural_batch_supports_high_mlfmm_closure_degree() -> None:
+    """High box orders must not route large factorials through object ufuncs."""
+
+    values = ewald_structural_sums_2d_batch(
+        lmax_struct=6,
+        k=2.0 * np.pi / 550.0,
+        destinations=np.array([[35.0, -22.0, 11.0]], dtype=float),
+        source=np.zeros((3,), dtype=float),
+        lattice=pcl.RectangularLattice2D(300.0, 320.0),
+        k_parallel=np.array([4.0e-4, -2.0e-4], dtype=float),
+        eta=2.5e-3,
+        real_shells=1,
+        reciprocal_shells=1,
+        dtype=np.complex128,
+    )
+
+    assert values.shape == (1, 13, 25)
+    assert np.all(np.isfinite(values))
+
+
 def test_shifted_delta_sequence_batched_matches_scalar_rows() -> None:
     gamma = np.asarray([0.011 - 0.0j, 0.006j, 0.003 + 0.004j], dtype=np.complex128)
     z_offsets = np.asarray([38.0, -117.0, 245.0], dtype=float)

@@ -145,11 +145,56 @@ def test_periodic_config_accepts_cupy_rayleigh_method() -> None:
     assert cfg.periodic == spec
 
 
-def test_periodic_config_rejects_unimplemented_mlfmm_combination() -> None:
+def test_periodic_config_accepts_numpy_ewald_mlfmm_combination() -> None:
     spec = pcl.PeriodicSpec(lattice=pcl.RectangularLattice2D(300.0, 400.0))
-    with pytest.raises(NotImplementedError, match="Periodic MLFMM"):
+    cfg = SimulationConfig(
+        source=_plane_wave(),
+        periodic=spec,
+        coupling_backend="mlfmm",
+        operator_backend="numpy",
+        verbose=False,
+    )
+
+    assert cfg.coupling_backend == "mlfmm"
+
+
+def test_periodic_config_rejects_cupy_mlfmm_combination() -> None:
+    spec = pcl.PeriodicSpec(lattice=pcl.RectangularLattice2D(300.0, 400.0))
+    with pytest.raises(NotImplementedError, match="operator_backend='numpy'"):
         SimulationConfig(
-            source=_plane_wave(), periodic=spec, coupling_backend="mlfmm", verbose=False
+            source=_plane_wave(),
+            periodic=spec,
+            coupling_backend="mlfmm",
+            operator_backend="cupy",
+            verbose=False,
+        )
+
+
+def test_periodic_config_rejects_rayleigh_mlfmm_combination() -> None:
+    spec = pcl.PeriodicSpec(
+        lattice=pcl.RectangularLattice2D(300.0, 400.0),
+        options=pcl.PeriodicOptions(method="rayleigh"),
+    )
+    with pytest.raises(NotImplementedError, match="method='ewald'"):
+        SimulationConfig(
+            source=_plane_wave(),
+            periodic=spec,
+            coupling_backend="mlfmm",
+            operator_backend="numpy",
+            verbose=False,
+        )
+
+
+def test_periodic_config_rejects_mlfmm_translation_block_cache() -> None:
+    spec = pcl.PeriodicSpec(lattice=pcl.RectangularLattice2D(300.0, 400.0))
+    with pytest.raises(NotImplementedError, match="does not cache"):
+        SimulationConfig(
+            source=_plane_wave(),
+            periodic=spec,
+            coupling_backend="mlfmm",
+            operator_backend="numpy",
+            cache_translation_blocks=True,
+            verbose=False,
         )
 
 

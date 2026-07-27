@@ -49,15 +49,20 @@ Current tested scope:
 - NumPy and CuPy `complex64`/`complex128` periodic Ewald paths,
 - opt-in NumPy/CuPy hybrid exact-near/Rayleigh-far repeated applies for
   vertically extended cells,
+- experimental periodized MLFMM using an Ewald-prepared coarse-box closure,
 - selected local-SVWF near-field workflows for homogeneous spheres,
 - direct dense validation paths for controlled cases.
 
-Not production-ready yet:
+Periodic MLFMM is currently a NumPy reference path with Ewald periodicity;
+CuPy support is in progress. It remains subject to the usual MLFMM
+interpolation/truncation error and can retain substantial exact boundary-image
+work for tight cells.
+
+Other periodic limitations include:
 
 - non-rectangular lattices,
 - reduced-cell local sources,
 - mixed-precision periodic production runs,
-- periodic MLFMM coupling.
 
 The hybrid Rayleigh method is not a general cure for dense planar cells. Its
 exact-near cache scales with the number of directed non-self pairs inside the
