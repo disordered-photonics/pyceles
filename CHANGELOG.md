@@ -57,6 +57,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed native CuPy BiCGSTAB device-vector lifetime so stale per-iteration
   temporaries are released before the next matrix-free operator application,
   avoiding avoidable OOMs for memory-tight streamed MLFMM solves.
+- Fixed native CuPy restarted Krylov solvers retaining completed cycle bases
+  across restart boundaries, which could create avoidable transient out-of-
+  memory failures for large periodic and matrix-free solves.
 - Fixed CuPy MLFMM streamed outgoing construction so recursive child outgoing
   chunks share the same in-flight memory budget as their live ancestor outgoing
   arrays.

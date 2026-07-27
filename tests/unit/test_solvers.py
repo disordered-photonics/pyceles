@@ -1,5 +1,6 @@
 import sys
 import types
+import weakref
 from typing import Any, Literal, cast
 
 import numpy as np
@@ -634,6 +635,43 @@ def test_gmres_cupy_native_clamps_restart_to_system_size(monkeypatch):
     # not an oversized (10, 4) allocation from restart=50/maxiter=9.
     assert (5, 4) in zero_shapes
     assert (10, 4) not in zero_shapes
+
+
+def test_gmres_cupy_releases_completed_basis_before_restart(monkeypatch):
+    cupy = _fake_cupy_numpy_backend()
+    original_zeros = cupy.zeros
+    basis_refs: list[weakref.ReferenceType[np.ndarray]] = []
+    live_basis_at_second_cycle: list[int] = []
+
+    def tracked_zeros(shape, dtype=None):
+        shape_tuple = tuple(int(value) for value in shape) if isinstance(shape, tuple) else ()
+        if shape_tuple == (2, 3):
+            if basis_refs:
+                live_basis_at_second_cycle.append(
+                    sum(reference() is not None for reference in basis_refs)
+                )
+            array = original_zeros(shape, dtype=dtype)
+            basis_refs.append(weakref.ref(array))
+            return array
+        return original_zeros(shape, dtype=dtype)
+
+    cupy.zeros = tracked_zeros
+    monkeypatch.setattr(solvers, "import_cupy", lambda: (cupy, None))
+    diagonal = np.asarray([2.0, 3.0, 4.0], dtype=np.complex128)
+
+    out = solvers.gmres_cupy(
+        lambda x: diagonal * np.asarray(x),
+        np.ones(3, dtype=np.complex128),
+        rtol=0.0,
+        atol=0.0,
+        restart=1,
+        maxiter=2,
+        show_progress=False,
+        compute_final_residual=False,
+    )
+
+    assert int(out.iterations) == 2
+    assert live_basis_at_second_cycle == [0]
 
 
 def test_gmres_cupy_native_tracks_scipy_solution_quality_on_toy_system(monkeypatch):

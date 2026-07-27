@@ -501,6 +501,10 @@ def gmres_cupy_native(
         restart_z = cupy.asarray(g[k_used], dtype=op_dtype) * cupy.asarray(
             V[k_used, :], dtype=op_dtype
         )
+        # The next restart allocates a fresh basis.  Drop the completed cycle
+        # before a true-residual matvec or the next allocation so two full
+        # Arnoldi bases cannot overlap at the restart boundary.
+        del V, H, cs, sn, g, y, z0
         should_verify_true = (tr_mode == "restart") or (
             tr_mode == "final"
             and (cycle_presid <= ptol or iterations >= maxiter_total or cycle_breakdown)
@@ -829,6 +833,7 @@ def fgmres_cupy_native(
         r_true = cupy.asarray(g[k_used], dtype=op_dtype) * cupy.asarray(
             V[k_used, :], dtype=op_dtype
         )
+        del V, Z, H, cs, sn, g, y
         should_verify_true = (tr_mode == "restart") or (
             tr_mode == "final"
             and (cycle_presid <= ptol or iterations >= maxiter_total or cycle_breakdown)
@@ -1158,6 +1163,7 @@ def lgmres_cupy_native(
         r_true = cupy.asarray(g[k_used], dtype=op_dtype) * cupy.asarray(
             V[k_used, :], dtype=op_dtype
         )
+        del V, Z, H, cs, sn, g, y, z0
         should_verify_true = (tr_mode == "restart") or (
             tr_mode == "final"
             and (cycle_presid <= ptol or iterations >= maxiter_total or cycle_breakdown)
@@ -1733,6 +1739,9 @@ def block_gmres_cupy_native(
         y_used = cupy.asarray(y_last[: k_used * p, :], dtype=op_dtype)
         dx = v_used @ y_used
         x_mat = x_mat + dx
+        # Release cycle-local Krylov storage before the residual matvec and
+        # before a subsequent cycle allocates another block basis.
+        del V, H, G, v_used, y_used, y_last, q0, r0
 
         (
             block_residual_norm,
