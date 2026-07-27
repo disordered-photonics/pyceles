@@ -497,7 +497,12 @@ def gmres_cupy_native(
             y[:k] = y[:k] - yk * h_row
         if float(cupy.abs(y[0])) > 0.0:
             y[0] = y[0] / H[0, 0].copy()
-        x_vec = x_vec + cupy.asarray(y @ V[:k_used, :], dtype=op_dtype)
+        # The projected coefficients are solved in accumulation precision, but
+        # the stored Arnoldi basis remains in operator precision. Cast the
+        # small coefficient vector first; otherwise CuPy promotes the entire
+        # ``(k_used, n)`` basis to complex128 for this product.
+        y_op = cupy.asarray(y, dtype=op_dtype)
+        x_vec = x_vec + cupy.asarray(y_op @ V[:k_used, :], dtype=op_dtype)
         restart_z = cupy.asarray(g[k_used], dtype=op_dtype) * cupy.asarray(
             V[k_used, :], dtype=op_dtype
         )
@@ -829,7 +834,8 @@ def fgmres_cupy_native(
             y[:k] = y[:k] - yk * h_row
         if float(cupy.abs(y[0])) > 0.0:
             y[0] = y[0] / H[0, 0].copy()
-        x_vec = x_vec + cupy.asarray(y @ Z[:k_used, :], dtype=op_dtype)
+        y_op = cupy.asarray(y, dtype=op_dtype)
+        x_vec = x_vec + cupy.asarray(y_op @ Z[:k_used, :], dtype=op_dtype)
         r_true = cupy.asarray(g[k_used], dtype=op_dtype) * cupy.asarray(
             V[k_used, :], dtype=op_dtype
         )
@@ -1148,7 +1154,8 @@ def lgmres_cupy_native(
             y[:k] = y[:k] - yk * h_row
         if float(cupy.abs(y[0])) > 0.0:
             y[0] = y[0] / H[0, 0].copy()
-        dx = cupy.asarray(y @ Z[:k_used, :], dtype=op_dtype)
+        y_op = cupy.asarray(y, dtype=op_dtype)
+        dx = cupy.asarray(y_op @ Z[:k_used, :], dtype=op_dtype)
         x_vec = x_vec + dx
 
         if outer_keep > 0 and iterations < maxiter_total:

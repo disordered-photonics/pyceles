@@ -60,6 +60,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed native CuPy restarted Krylov solvers retaining completed cycle bases
   across restart boundaries, which could create avoidable transient out-of-
   memory failures for large periodic and matrix-free solves.
+- Fixed native CuPy restarted Krylov update products promoting an entire
+  operator-precision basis to complex128 when only the small projected
+  coefficient vector required accumulation-precision arithmetic.
 - Fixed CuPy MLFMM streamed outgoing construction so recursive child outgoing
   chunks share the same in-flight memory budget as their live ancestor outgoing
   arrays.
