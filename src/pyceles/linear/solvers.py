@@ -902,8 +902,11 @@ def gmres_scipy(
         Optional warm-start vector.
     rtol, atol:
         GMRES tolerances (SciPy semantics).
-    restart, maxiter:
-        GMRES restart and maximum iterations.
+    restart:
+        Number of inner Arnoldi steps between restarts.
+    maxiter:
+        Maximum number of inner Arnoldi steps. This matches the native CuPy
+        restarted-GMRES contract.
     callback:
         Optional callback receiving the residual norm each iteration.
     show_progress:
@@ -931,7 +934,7 @@ def gmres_scipy(
         """GMRES callback tracking SciPy-provided preconditioned residual norm."""
         nonlocal iterations
         iterations += 1
-        # SciPy GMRES callback_type="pr_norm" reports the (possibly
+        # SciPy's legacy callback mode reports the (possibly
         # preconditioned) residual norm used internally by GMRES, which is
         # not the same quantity as the final true ||Ax-b||/||b|| diagnostics.
         progress_update(float(res_norm))
@@ -948,7 +951,9 @@ def gmres_scipy(
         restart=restart,
         maxiter=maxiter,
         callback=_cb,
-        callback_type="pr_norm",
+        # ``legacy`` preserves the pr_norm callback while making maxiter count
+        # inner Arnoldi steps, matching the native CuPy solver.
+        callback_type="legacy",
     )
 
     result = _finalize_result(

@@ -102,6 +102,30 @@ def test_gmres_result_reports_true_residual():
     assert out.method == "gmres"
 
 
+def test_gmres_scipy_uses_inner_iteration_limit(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    def fake_gmres(*args: Any, **kwargs: Any) -> tuple[np.ndarray, int]:
+        captured.update(kwargs)
+        return np.asarray(args[1]).copy(), 0
+
+    monkeypatch.setattr("scipy.sparse.linalg.gmres", fake_gmres)
+    b = np.asarray([1.0 + 0.0j, 2.0 + 0.0j])
+    out = gmres_scipy(
+        lambda x: np.asarray(x),
+        b,
+        restart=7,
+        maxiter=3,
+        show_progress=False,
+        compute_final_residual=False,
+    )
+
+    assert captured["restart"] == 7
+    assert captured["maxiter"] == 3
+    assert captured["callback_type"] == "legacy"
+    assert out.info == 0
+
+
 def test_direct_dense_solve_identity():
     n = 8
     rng = np.random.default_rng(5)
