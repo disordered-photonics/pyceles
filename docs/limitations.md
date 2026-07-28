@@ -53,10 +53,12 @@ Current tested scope:
 - selected local-SVWF near-field workflows for homogeneous spheres,
 - direct dense validation paths for controlled cases.
 
-Periodic MLFMM is currently a NumPy reference path with Ewald periodicity;
-CuPy support is in progress. It remains subject to the usual MLFMM
-interpolation/truncation error and can retain substantial exact boundary-image
-work for tight cells.
+Periodized MLFMM is available on NumPy and CuPy with Ewald periodicity. The
+canonical hierarchy and periodizing closure are still prepared on the CPU;
+CuPy uploads the sampled M2L batches and explicit boundary-image leaf schedule
+for repeated device-side application. The method remains subject to the usual
+MLFMM interpolation/truncation error and can retain substantial exact
+boundary-image work for tight cells.
 
 Other periodic limitations include:
 

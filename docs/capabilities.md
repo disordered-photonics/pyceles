@@ -116,7 +116,7 @@ Supported coupling paths include:
   `complex128`,
 - NumPy high-frequency MLFMM coupling for large sphere clusters,
 - CuPy high-frequency MLFMM repeated apply for the same hierarchy plan,
-- an experimental NumPy periodized MLFMM reference for rectangular 2D cells,
+- experimental NumPy and CuPy periodized MLFMM paths for rectangular 2D cells,
 - experimental periodic Ewald coupling for rectangular 2D lattices.
 
 ## MLFMM scope
@@ -194,10 +194,11 @@ Homogeneous rectangular 2D periodic-cell workflows currently include:
   `PeriodicOptions(method="rayleigh")`: one shared exact periodic self block, a
   configurable exact-Ewald vertical near band, and reciprocal Rayleigh
   upward/downward scans for vertically separated pairs,
-- an experimental mesh-free NumPy periodization of the existing MLFMM hierarchy
-  through `coupling_backend="mlfmm"` with `PeriodicOptions(method="ewald")`.
-  Ewald prepares coarse sampled lattice closures once; finite nearby images are
-  resolved by ordinary MLFMM descent and exact leaf interactions.
+- experimental mesh-free NumPy and CuPy periodization of the existing MLFMM
+  hierarchy through `coupling_backend="mlfmm"` with
+  `PeriodicOptions(method="ewald")`. Ewald prepares coarse sampled lattice
+  closures once on the CPU; finite nearby images are resolved by ordinary MLFMM
+  descent and exact leaf interactions on the selected repeated-apply backend.
 
 Periodic workflows remain experimental; current limits are documented in
 [limitations.md](limitations.md), and performance/convergence knobs are discussed

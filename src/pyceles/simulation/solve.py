@@ -230,7 +230,10 @@ def _solve_sources_impl(
     k0 = 2.0 * np.pi / float(cfg.wavelength)
     k = k0 * float(np.real(cfg.n_medium))
 
-    solver_name = str(cfg.solver_method).lower()
+    solver_method = cfg.solver_method
+    if solver_method is None:
+        raise RuntimeError("SimulationConfig did not resolve its default solver method.")
+    solver_name = str(solver_method).lower()
     operator_backend = cfg.operator_backend
     k_parallel = periodic_shared_k_parallel(sim, labeled_sources)
     periodic_key = (
@@ -454,7 +457,7 @@ def _solve_sources_impl(
     backend_capture: dict[str, Any] | None = None
     if unknowns == 0:
         solver_result = make_empty_solver_result(
-            dtype=compute_dtype, nrhs=n_channels, method=cfg.solver_method
+            dtype=compute_dtype, nrhs=n_channels, method=solver_method
         )
         x_matrix = np.zeros((unknowns, n_channels), dtype=compute_dtype)
     else:
@@ -467,7 +470,7 @@ def _solve_sources_impl(
                 solver_result = solve_linear_system(
                     A_mv,
                     rhs_arg,
-                    method=cfg.solver_method,
+                    method=solver_method,
                     A_dense=A_dense,
                     A_factorized=A_lu,
                     x0=warm_start,
@@ -488,7 +491,7 @@ def _solve_sources_impl(
             solver_result = solve_linear_system(
                 A_mv,
                 rhs_arg,
-                method=cfg.solver_method,
+                method=solver_method,
                 A_dense=A_dense,
                 A_factorized=A_lu,
                 x0=warm_start,

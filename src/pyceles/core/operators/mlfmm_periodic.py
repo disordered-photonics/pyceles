@@ -1,4 +1,4 @@
-"""Experimental NumPy periodization of the pyceles MLFMM hierarchy.
+"""Ewald-prepared periodization of the pyceles MLFMM hierarchy.
 
 The construction closes the infinite two-dimensional lattice at the first
 sampled MLFMM interaction level.  For every relative coarse-box offset, an
@@ -18,6 +18,7 @@ from __future__ import annotations
 import math
 from dataclasses import replace
 from time import perf_counter
+from typing import Literal
 
 import numpy as np
 from tqdm.auto import tqdm
@@ -203,6 +204,28 @@ def _boxes_well_separated(delta: Array, *, half_size: float) -> bool:
     return bool(np.any(np.abs(delta_arr) + tolerance >= threshold))
 
 
+def _translated_leaf_pair_max_distance(
+    *,
+    source_min: Array,
+    source_max: Array,
+    destination_min: Array,
+    destination_max: Array,
+    lattice_shift: Array,
+) -> float:
+    """Return an AABB bound for one directed periodic leaf-pair distance."""
+
+    shift = np.asarray(lattice_shift, dtype=float).reshape(3)
+    image_source_min = np.asarray(source_min, dtype=float).reshape(3) + shift
+    image_source_max = np.asarray(source_max, dtype=float).reshape(3) + shift
+    destination_min_arr = np.asarray(destination_min, dtype=float).reshape(3)
+    destination_max_arr = np.asarray(destination_max, dtype=float).reshape(3)
+    axis_extent = np.maximum(
+        np.abs(image_source_max - destination_min_arr),
+        np.abs(destination_max_arr - image_source_min),
+    )
+    return float(np.linalg.norm(axis_extent))
+
+
 def _near_lattice_indices_for_offset(
     *,
     base_displacement: Array,
@@ -351,6 +374,7 @@ def _periodic_nonzero_structural_sums(
 def _descend_near_image_pairs(
     *,
     k: float,
+    positions: Array,
     operators: MLFMMMultilevelOperators,
     lattice: RectangularLattice2D,
     k_parallel: Array,
@@ -362,6 +386,7 @@ def _descend_near_image_pairs(
     tuple[MLFMMPeriodicLeafBatch, ...],
     int,
     int,
+    float,
 ]:
     """Descend the finite non-well-separated image correction through the tree."""
 
@@ -372,6 +397,11 @@ def _descend_near_image_pairs(
     ] = [dict() for _ in levels]
     leaf_grouped: dict[LatticeIndex, tuple[list[int], list[int], Array, complex]] = {}
     kp = np.asarray(k_parallel, dtype=float).reshape(2)
+    half_sizes = tuple(
+        float(operators.partition.root_half_size) / float(1 << level_index)
+        for level_index in range(len(levels))
+    )
+    image_metadata: dict[LatticeIndex, tuple[Array, complex]] = {}
 
     stack: list[tuple[int, int, int, int, int]] = []
     for offset, (sources, destinations, _delta) in coarse_groups.items():
@@ -379,18 +409,25 @@ def _descend_near_image_pairs(
         for p_raw, q_raw in np.asarray(near_indices, dtype=np.int64).reshape(-1, 2):
             p = int(p_raw)
             q = int(q_raw)
+            image_key = (p, q)
+            if image_key not in image_metadata:
+                shift = np.asarray(lattice.lattice_vector(p, q), dtype=float)
+                image_metadata[image_key] = (
+                    shift,
+                    complex(np.exp(1j * float(np.dot(kp, shift[:2])))),
+                )
             for source_index, destination_index in zip(sources, destinations, strict=True):
                 stack.append((int(closure_level), int(source_index), int(destination_index), p, q))
 
     while stack:
         level_index, source_index, destination_index, p, q = stack.pop()
         level = levels[level_index]
-        shift = lattice.lattice_vector(p, q)
+        shift, phase = image_metadata[(p, q)]
         delta = np.asarray(
             level.centers[destination_index] - level.centers[source_index] - shift,
             dtype=float,
         )
-        half_size = float(operators.partition.root_half_size) / float(1 << level_index)
+        half_size = half_sizes[level_index]
         if _boxes_well_separated(delta, half_size=half_size):
             coord_delta = np.asarray(
                 level.coords[destination_index] - level.coords[source_index], dtype=np.int64
@@ -402,7 +439,6 @@ def _descend_near_image_pairs(
                 int(coord_delta[1]),
                 int(coord_delta[2]),
             )
-            phase = complex(np.exp(1j * float(np.dot(kp, shift[:2]))))
             grouped = far_grouped[level_index].get(key)
             if grouped is None:
                 far_grouped[level_index][key] = (
@@ -416,7 +452,6 @@ def _descend_near_image_pairs(
                 grouped[1].append(destination_index)
             continue
         if level_index == leaf_level:
-            phase = complex(np.exp(1j * float(np.dot(kp, shift[:2]))))
             grouped_leaf = leaf_grouped.get((p, q))
             if grouped_leaf is None:
                 leaf_grouped[(p, q)] = (
@@ -470,15 +505,45 @@ def _descend_near_image_pairs(
 
     leaf_batches: list[MLFMMPeriodicLeafBatch] = []
     exact_particle_pair_count = 0
+    exact_leaf_r_max_bound = 0.0
     leaves = operators.partition.leaves
+    positions_arr = np.asarray(positions, dtype=float).reshape(-1, 3)
+    leaf_bounds: dict[int, tuple[Array, Array]] = {}
+
+    def bounds_for_leaf(leaf_index: int) -> tuple[Array, Array]:
+        cached = leaf_bounds.get(int(leaf_index))
+        if cached is not None:
+            return cached
+        particle_positions = positions_arr[leaves[int(leaf_index)].particle_indices]
+        bounds = (
+            np.min(particle_positions, axis=0),
+            np.max(particle_positions, axis=0),
+        )
+        leaf_bounds[int(leaf_index)] = bounds
+        return bounds
+
     for leaf_key in sorted(leaf_grouped):
         source_indices, destination_indices, shift, phase = leaf_grouped[leaf_key]
         source_array = np.asarray(source_indices, dtype=np.int32)
         destination_array = np.asarray(destination_indices, dtype=np.int32)
         for source_leaf, destination_leaf in zip(source_array, destination_array, strict=True):
+            source_leaf_i = int(source_leaf)
+            destination_leaf_i = int(destination_leaf)
             exact_particle_pair_count += int(
-                leaves[int(source_leaf)].particle_indices.size
-                * leaves[int(destination_leaf)].particle_indices.size
+                leaves[source_leaf_i].particle_indices.size
+                * leaves[destination_leaf_i].particle_indices.size
+            )
+            source_min, source_max = bounds_for_leaf(source_leaf_i)
+            destination_min, destination_max = bounds_for_leaf(destination_leaf_i)
+            exact_leaf_r_max_bound = max(
+                exact_leaf_r_max_bound,
+                _translated_leaf_pair_max_distance(
+                    source_min=source_min,
+                    source_max=source_max,
+                    destination_min=destination_min,
+                    destination_max=destination_max,
+                    lattice_shift=shift,
+                ),
             )
         leaf_batches.append(
             MLFMMPeriodicLeafBatch(
@@ -493,6 +558,7 @@ def _descend_near_image_pairs(
         tuple(leaf_batches),
         int(sampled_pair_count),
         int(exact_particle_pair_count),
+        float(exact_leaf_r_max_bound),
     )
 
 
@@ -508,7 +574,7 @@ def build_periodization_plan(
 
     if periodic.options.method != "ewald":
         raise NotImplementedError(
-            "The reference periodized MLFMM uses Ewald only during coarse-level "
+            "Periodized MLFMM uses Ewald only during coarse-level "
             "closure; set PeriodicOptions(method='ewald')."
         )
     closure_level = int(operators.hf_start_level)
@@ -570,9 +636,10 @@ def build_periodization_plan(
             )
         )
 
-    far_batches, leaf_batches, descended_far_pairs, exact_particle_pairs = (
+    far_batches, leaf_batches, descended_far_pairs, exact_particle_pairs, exact_leaf_r_max_bound = (
         _descend_near_image_pairs(
             k=float(k),
+            positions=np.asarray(positions, dtype=float),
             operators=operators,
             lattice=periodic.lattice,
             k_parallel=np.asarray(k_parallel, dtype=float).reshape(2),
@@ -585,20 +652,16 @@ def build_periodization_plan(
     far_mutable[closure_level] = [*closure_batches, *far_mutable[closure_level]]
     combined_far = tuple(tuple(batches) for batches in far_mutable)
     exact_leaf_pairs = sum(int(batch.source_leaf_indices.size) for batch in leaf_batches)
-    near_indices_array = np.asarray(
-        sorted(near_union, key=lambda item: (max(abs(item[0]), abs(item[1])), item[0], item[1])),
-        dtype=np.int32,
-    ).reshape(-1, 2)
     return MLFMMPeriodizationPlan(
         closure_level=closure_level,
         far_batches_by_level=combined_far,
         leaf_batches=leaf_batches,
-        near_lattice_indices=near_indices_array,
         periodic_offset_count=len(offsets),
         near_image_count=len(near_union),
         sampled_far_box_pair_count=int(closure_pair_count + descended_far_pairs),
         exact_leaf_box_pair_count=int(exact_leaf_pairs),
         exact_particle_pair_count=int(exact_particle_pairs),
+        exact_leaf_r_max_bound=float(exact_leaf_r_max_bound),
         ewald_eta=float(eta),
     )
 
@@ -617,21 +680,22 @@ def prepare_periodized_mlfmm_coupling(
     cache_translation_blocks: bool = False,
     show_progress: bool = False,
     box_order: int | None = None,
+    leaf_map_backend: Literal["numpy", "cupy"] = "numpy",
+    build_leaf_maps: bool = True,
 ) -> MLFMMCouplingOperator:
-    """Prepare the experimental NumPy periodized MLFMM coupling operator.
+    """Prepare a periodized MLFMM coupling plan for NumPy or CuPy upload.
 
     The central cell and every finite image correction share one occupied
-    hierarchy.  Ewald is evaluated only while preparing coarse periodizing
+    hierarchy. Ewald is evaluated only while preparing coarse periodizing
     diagonals; repeated applications use exact leaf translations and ordinary
-    MLFMM sampled passes.
+    sampled MLFMM passes. ``leaf_map_backend`` and ``build_leaf_maps`` mirror
+    the finite MLFMM preparation boundary: NumPy keeps reusable leaf maps,
+    while CuPy normally requests compact on-the-fly leaf schedules only.
     """
 
     prepare_started = perf_counter()
     if cache_translation_blocks:
-        raise NotImplementedError(
-            "Periodic MLFMM does not cache exact lattice-image leaf blocks in this "
-            "reference implementation."
-        )
+        raise NotImplementedError("Periodic MLFMM does not cache exact lattice-image leaf blocks.")
     if periodic.options.method != "ewald":
         raise NotImplementedError(
             "Periodic MLFMM currently requires PeriodicOptions(method='ewald')."
@@ -680,8 +744,8 @@ def prepare_periodized_mlfmm_coupling(
         accuracy_level=int(resolved_options.accuracy_level),
         order_additive=int(resolved_options.order_additive),
         dtype=np.complex128,
-        leaf_map_backend="numpy",
-        build_leaf_maps=True,
+        leaf_map_backend=leaf_map_backend,
+        build_leaf_maps=bool(build_leaf_maps),
         show_progress=bool(show_progress),
         hf_start_level=resolved_options.hf_start_level,
         hf_wavelength_divisor=float(resolved_options.hf_wavelength_divisor),
@@ -704,6 +768,22 @@ def prepare_periodized_mlfmm_coupling(
             f"near_images={summary['near_image_count']} "
             f"elapsed_s={perf_counter() - closure_started:.2f}"
         )
+
+    # Exact residual image leaves share the canonical outgoing-wave radial
+    # table. The periodization planner already knows the actual directed leaf
+    # pairs, so size the table from their AABB distance bound instead of the
+    # much looser diameter of the complete translated supercell.
+    required_r_max = float(periodization.exact_leaf_r_max_bound)
+    covered_r_max = float(radial_lut_hf.r_grid[-1])
+    if covered_r_max < required_r_max:
+        radial_lut_hf = RadialLUT(
+            lmax=int(lmax),
+            k=float(k),
+            r_max=required_r_max,
+            dr=float(radial_lut_hf.dr),
+            dtype=np.complex128,
+        )
+
     coupling = MLFMMCouplingOperator(
         lmax=int(lmax),
         k=float(k),

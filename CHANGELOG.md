@@ -8,12 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Added an experimental NumPy periodized MLFMM reference path for rectangular
+- Added experimental NumPy and CuPy periodized MLFMM paths for rectangular
   two-dimensional cells through `coupling_backend="mlfmm"` and
-  `PeriodicOptions(method="ewald")`. Ewald is used once to prepare sampled
-  coarse-box lattice closures; finite non-well-separated images descend through
-  the existing hierarchy, leaving repeated applies mesh-free and independent of
-  particle-pair Ewald or Rayleigh caches.
+  `PeriodicOptions(method="ewald")`. Ewald is used once on the CPU to prepare
+  sampled coarse-box lattice closures; finite non-well-separated images descend
+  through the existing hierarchy, leaving repeated applies mesh-free and
+  independent of particle-pair Ewald or Rayleigh caches. The CuPy path reuses
+  the established complex128 sampled-far traversal and one shared compute-dtype
+  exact-leaf RawKernel for central-cell and boundary-image interactions. Its
+  regular-wave leaf-center LUT remains bounded to the leaf scale even when the
+  exact image-interaction Hankel LUT spans multiple cell lengths.
 - Added an opt-in hybrid periodic coupling method (`method="rayleigh"`) for
   NumPy and CuPy. It evaluates a particle-safe vertical near band with exact
   Ewald sums, reuses one exact periodic self block, and applies vertically far
@@ -40,7 +44,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added opt-in CuPy MLFMM stream diagnostics through `MLFMMOptions` and the
   pairwise-vs-MLFMM scaling benchmark.
 
+### Changed
+- Default solver selection now uses BiCGSTAB for finite clusters and restarted
+  GMRES for periodic systems, reflecting their measured convergence behavior.
+
 ### Fixed
+- Tightened periodized MLFMM ownership and memory use: residual-image Hankel
+  tables are now bounded by the leaf pairs that are actually evaluated, NumPy
+  accumulates periodic exact-leaf corrections into the existing near result,
+  and CuPy staging avoids full temporary complex LUT copies and repeated launch
+  setup across boundary-image batches.
 - Fixed high-order periodic Ewald structural batches exposed by MLFMM closure
   preparation so large factorial values are converted with scalar square roots
   rather than NumPy object-ufunc dispatch.

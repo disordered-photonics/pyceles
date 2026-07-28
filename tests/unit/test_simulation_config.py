@@ -47,6 +47,18 @@ def test_simulation_config_accepts_cupy_operator_backend() -> None:
     assert cfg.resolved_postprocessing_backend() == "cupy"
 
 
+def test_simulation_config_selects_solver_default_by_periodicity() -> None:
+    finite = SimulationConfig(verbose=False)
+    periodic = SimulationConfig(
+        source=PlaneWave(wavelength=550.0, medium_n=1.0 + 0j),
+        periodic=PeriodicSpec(lattice=RectangularLattice2D(300.0, 300.0)),
+        verbose=False,
+    )
+
+    assert finite.solver_method == "bicgstab"
+    assert periodic.solver_method == "gmres"
+
+
 def test_simulation_config_accepts_explicit_postprocessing_backend() -> None:
     cfg = SimulationConfig(
         operator_backend="cupy",

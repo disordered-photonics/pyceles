@@ -1,7 +1,8 @@
-"""CuPy-side prepared-data wrappers for the NumPy MLFMM reference plan.
+"""CuPy repeated-apply data and kernels for CPU-built MLFMM plans.
 
 CPU build/planning remains the single source of truth in `mlfmm.py`.
-This module validates and uploads repeated-apply structures to device memory.
+This module validates and uploads finite or Ewald-periodized repeated-apply
+structures to device memory.
 """
 
 from __future__ import annotations
@@ -260,6 +261,35 @@ class CuPyHostMultilevelData:
 
 
 @dataclass(frozen=True)
+class CuPyHostPeriodicFarBatchData:
+    """Compact host periodizing M2L batch for one hierarchy level."""
+
+    source_indices: np.ndarray
+    destination_indices: np.ndarray
+    diagonal: np.ndarray
+
+
+@dataclass(frozen=True)
+class CuPyHostPeriodicLeafBatchData:
+    """Compact host exact leaf schedule for one explicit lattice image."""
+
+    source_leaf_indices: np.ndarray
+    destination_leaf_indices: np.ndarray
+    lattice_shift: np.ndarray
+    bloch_phase: complex
+
+
+@dataclass(frozen=True)
+class CuPyHostPeriodizationData:
+    """Compact host payload for the Ewald-prepared periodic correction."""
+
+    closure_level: int
+    far_batches_by_level: tuple[tuple[CuPyHostPeriodicFarBatchData, ...], ...]
+    leaf_batches: tuple[CuPyHostPeriodicLeafBatchData, ...]
+    summary: dict[str, int | float]
+
+
+@dataclass(frozen=True)
 class CuPyMLFMMHostCacheData:
     """Compact host-only payload for CuPy MLFMM preparation.
 
@@ -293,6 +323,7 @@ class CuPyMLFMMHostCacheData:
     near_pair_pcount: np.ndarray | None
     single_level: CuPyHostSingleLevelData | None = None
     multilevel: CuPyHostMultilevelData | None = None
+    periodization: CuPyHostPeriodizationData | None = None
     plan_summary: dict[str, int | float | str] | None = None
 
 
@@ -476,6 +507,33 @@ class CuPyMLFMMMultilevelData:
 
 
 @dataclass(frozen=True)
+class CuPyPeriodicFarBatchData:
+    """Device periodizing M2L batch at one shared hierarchy level."""
+
+    indices: CuPyOffsetBatchData
+    diagonal: Any
+
+
+@dataclass(frozen=True)
+class CuPyPeriodicLeafBatchData:
+    """Device exact leaf schedule and host scalar metadata for one image."""
+
+    source_leaf_indices: Any
+    destination_leaf_indices: Any
+    lattice_shift: tuple[float, float, float]
+    bloch_phase: complex
+
+
+@dataclass(frozen=True)
+class CuPyMLFMMPeriodizationData:
+    """Device-ready Ewald closure and finite-image correction payload."""
+
+    far_batches_by_level: tuple[tuple[CuPyPeriodicFarBatchData, ...], ...]
+    leaf_batches: tuple[CuPyPeriodicLeafBatchData, ...]
+    summary: dict[str, int | float]
+
+
+@dataclass(frozen=True)
 class CuPyMLFMMPreparedData:
     """Top-level CuPy representation of a CPU-built MLFMM plan."""
 
@@ -484,6 +542,7 @@ class CuPyMLFMMPreparedData:
     near_pairs: CuPyMLFMMNearPairData
     single_level: CuPyMLFMMSingleLevelData | None = None
     multilevel: CuPyMLFMMMultilevelData | None = None
+    periodization: CuPyMLFMMPeriodizationData | None = None
 
 
 @dataclass
@@ -523,6 +582,17 @@ class CuPyMLFMMNearWorkspace:
 
     nrhs: int
     y_states: Any
+
+
+@dataclass(frozen=True)
+class _ExactLeafLaunchContext:
+    """Device-specific launch invariants shared by central and image batches."""
+
+    kernel: Any
+    real_scalar_type: type[np.floating[Any]]
+    threads: int
+    max_grid_y: int
+    max_grid_z: int
 
 
 @dataclass(frozen=True)
@@ -585,6 +655,20 @@ def _as_numpy_3cols(arr: np.ndarray, *, dtype: npt.DTypeLike, name: str) -> np.n
     if out.shape[1] != 3:
         raise ValueError(f"{name} must have shape (N, 3). Got {out.shape}.")
     return out
+
+
+def _split_complex_table_transposed(
+    table: np.ndarray,
+    *,
+    real_dtype: npt.DTypeLike,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return contiguous real/imaginary row-major arrays without a complex copy."""
+
+    values_t = np.asarray(table).T
+    return (
+        np.ascontiguousarray(values_t.real.reshape(-1), dtype=real_dtype),
+        np.ascontiguousarray(values_t.imag.reshape(-1), dtype=real_dtype),
+    )
 
 
 def _pack_index_lists(
@@ -1005,10 +1089,10 @@ def build_leaf_box_maps_cupy(
     )
     plm_coeffs_raw = _translation_plm_coeff_table(full_order, dtype=real_dtype).reshape(-1)
 
-    lut_j = np.asarray(radial_lut_full.j, dtype=out_dtype)[: 2 * full_order + 1, :]
-    lut_j_rows = np.ascontiguousarray(lut_j.T)
-    re_j_raw = np.ascontiguousarray(lut_j_rows.real.reshape(-1), dtype=real_dtype)
-    im_j_raw = np.ascontiguousarray(lut_j_rows.imag.reshape(-1), dtype=real_dtype)
+    re_j_raw, im_j_raw = _split_complex_table_transposed(
+        np.asarray(radial_lut_full.j)[: 2 * full_order + 1, :],
+        real_dtype=real_dtype,
+    )
     last_index = int(radial_lut_full._last_index)
     inv_dr_scalar = (
         np.float32(float(radial_lut_full._inv_dr))
@@ -1386,31 +1470,46 @@ def _upload_directional_map(
     )
 
 
+def _upload_unique_index_batch(
+    source_indices: np.ndarray,
+    destination_indices: np.ndarray,
+    *,
+    cupy: Any,
+    name: str,
+) -> CuPyOffsetBatchData:
+    """Upload one unique grouped source/destination schedule."""
+
+    src = _as_numpy_1d(source_indices, dtype=np.int32, name=f"{name}.src")
+    dst = _as_numpy_1d(destination_indices, dtype=np.int32, name=f"{name}.dst")
+    if src.size != dst.size:
+        raise ValueError(f"{name} source/target batch size mismatch: {src.size} vs {dst.size}.")
+    src_unique = bool(np.unique(src).size == src.size)
+    dst_unique = bool(np.unique(dst).size == dst.size)
+    if not src_unique or not dst_unique:
+        raise ValueError(
+            f"{name} violates grouped uniqueness contract "
+            f"(src_unique={src_unique}, dst_unique={dst_unique})."
+        )
+    return CuPyOffsetBatchData(
+        src_indices=cupy.asarray(src, dtype=cupy.int32),
+        dst_indices=cupy.asarray(dst, dtype=cupy.int32),
+    )
+
+
 def _upload_offset_batches(
     batches: dict[Offset3, tuple[np.ndarray, np.ndarray]], *, cupy: Any, name: str
 ) -> dict[Offset3, CuPyOffsetBatchData]:
     """Upload grouped source/target batches and enforce uniqueness contract."""
 
-    out: dict[Offset3, CuPyOffsetBatchData] = {}
-    for offset, (src_idx, dst_idx) in batches.items():
-        src = _as_numpy_1d(src_idx, dtype=np.int32, name=f"{name}[{offset}].src")
-        dst = _as_numpy_1d(dst_idx, dtype=np.int32, name=f"{name}[{offset}].dst")
-        if src.size != dst.size:
-            raise ValueError(
-                f"{name}[{offset}] source/target batch size mismatch: {src.size} vs {dst.size}."
-            )
-        src_unique = bool(np.unique(src).size == src.size)
-        dst_unique = bool(np.unique(dst).size == dst.size)
-        if not src_unique or not dst_unique:
-            raise ValueError(
-                f"{name}[{offset}] violates grouped uniqueness contract "
-                f"(src_unique={src_unique}, dst_unique={dst_unique})."
-            )
-        out[offset] = CuPyOffsetBatchData(
-            src_indices=cupy.asarray(src, dtype=cupy.int32),
-            dst_indices=cupy.asarray(dst, dtype=cupy.int32),
+    return {
+        offset: _upload_unique_index_batch(
+            src_idx,
+            dst_idx,
+            cupy=cupy,
+            name=f"{name}[{offset}]",
         )
-    return out
+        for offset, (src_idx, dst_idx) in batches.items()
+    }
 
 
 def _partition_from_host_cache(cache: CuPyMLFMMHostCacheData) -> CuPyMLFMMPartitionData:
@@ -1506,6 +1605,7 @@ def _build_host_leaf_otf_payload(
         grouped_ids.setdefault(occupancy, []).append(leaf_id)
 
     groups: list[CuPyHostLeafOnTheFlyGroupData] = []
+    max_pair_radius = 0.0
     for occupancy in sorted(grouped_ids):
         leaf_ids_np = np.asarray(grouped_ids[occupancy], dtype=np.int32)
         n_group = int(leaf_ids_np.size)
@@ -1524,6 +1624,11 @@ def _build_host_leaf_otf_payload(
             start = local_idx * occupancy
             stop = start + occupancy
             pair_deltas_np[start:stop, :] = leaf_center - positions_arr[particle_idx, :]
+        if pair_deltas_np.size:
+            max_pair_radius = max(
+                max_pair_radius,
+                float(np.max(np.linalg.norm(pair_deltas_np, axis=1), initial=0.0)),
+            )
         groups.append(
             CuPyHostLeafOnTheFlyGroupData(
                 occupancy=int(occupancy),
@@ -1566,18 +1671,33 @@ def _build_host_leaf_otf_payload(
     )
     plm_coeffs_raw = _translation_plm_coeff_table(full_order, dtype=np.float64).reshape(-1)
 
-    if int(radial_lut.lmax) < full_order:
+    # Leaf aggregation/receive only needs regular-wave Bessel values between a
+    # particle and its own leaf center.  Do not inherit a much longer exact-near
+    # Hankel range (periodic residual images can extend that range by multiple
+    # cell lengths), because doing so would duplicate a large, unused J table on
+    # host and device.  Keep one guard interval beyond the largest stored delta,
+    # matching RadialLUT's linear-interpolation contract.
+    required_grid_size = max(
+        2,
+        int(np.ceil(max_pair_radius / float(radial_lut.dr))) + 2,
+    )
+    if int(radial_lut.lmax) < full_order or int(radial_lut.j.shape[1]) < required_grid_size:
         radial_lut_full = RadialLUT(
             lmax=full_order,
             k=float(k),
-            r_max=float(radial_lut.r_grid[-1]),
+            r_max=float(max_pair_radius),
             dr=float(radial_lut.dr),
             dtype=out_dtype,
         )
     else:
         radial_lut_full = radial_lut
-    lut_j = np.asarray(radial_lut_full.j, dtype=out_dtype)[: 2 * full_order + 1, :]
-    lut_j_rows = np.ascontiguousarray(lut_j.T)
+    n_grid = min(int(radial_lut_full.j.shape[1]), int(required_grid_size))
+    # Leaf aggregation and receive feed the sampled hierarchy, whose precision
+    # remains complex128 even when the public/exact-near dtype is complex64.
+    re_j, im_j = _split_complex_table_transposed(
+        np.asarray(radial_lut_full.j)[: 2 * full_order + 1, :n_grid],
+        real_dtype=np.float64,
+    )
     tables = CuPyHostLeafTranslationTablesData(
         full_order=int(full_order),
         nmodes_in=int(nmodes_in),
@@ -1593,10 +1713,10 @@ def _build_host_leaf_otf_payload(
         plm_coeffs=np.ascontiguousarray(plm_coeffs_raw, dtype=np.float64),
         compact_re_ab=np.ascontiguousarray(compact_re_ab_raw, dtype=np.float64),
         compact_im_ab=np.ascontiguousarray(compact_im_ab_raw, dtype=np.float64),
-        re_j=np.ascontiguousarray(lut_j_rows.real.reshape(-1), dtype=np.float64),
-        im_j=np.ascontiguousarray(lut_j_rows.imag.reshape(-1), dtype=np.float64),
+        re_j=re_j,
+        im_j=im_j,
         inv_dr=float(radial_lut_full._inv_dr),
-        last_index=int(radial_lut_full._last_index),
+        last_index=int(n_grid - 1),
     )
     return tuple(groups), tables
 
@@ -1849,7 +1969,61 @@ def _runtime_host_cache_summary(
         "near_static_tables_cached": bool(cache.near_plm_coeffs is not None),
         "numpy_payload_bytes_estimate": int(_estimate_numpy_payload_bytes(cache)),
         "plan_summary": None if cache.plan_summary is None else dict(cache.plan_summary),
+        "periodization": (
+            None if cache.periodization is None else dict(cache.periodization.summary)
+        ),
     }
+
+
+def _build_host_periodization(
+    coupling: MLFMMCouplingOperator,
+) -> CuPyHostPeriodizationData | None:
+    """Build compact host staging for one Ewald-prepared periodization plan."""
+
+    plan = coupling.periodization
+    if plan is None:
+        return None
+    if coupling.multilevel is None:
+        raise ValueError("Periodic MLFMM CuPy staging requires multilevel operators.")
+
+    far_batches_by_level = tuple(
+        tuple(
+            CuPyHostPeriodicFarBatchData(
+                source_indices=np.ascontiguousarray(
+                    np.asarray(batch.source_indices, dtype=np.int32).reshape(-1)
+                ),
+                destination_indices=np.ascontiguousarray(
+                    np.asarray(batch.destination_indices, dtype=np.int32).reshape(-1)
+                ),
+                diagonal=np.ascontiguousarray(
+                    np.asarray(batch.diagonal, dtype=np.complex128).reshape(-1)
+                ),
+            )
+            for batch in batches
+        )
+        for batches in plan.far_batches_by_level
+    )
+    leaf_batches = tuple(
+        CuPyHostPeriodicLeafBatchData(
+            source_leaf_indices=np.ascontiguousarray(
+                np.asarray(batch.source_leaf_indices, dtype=np.int32).reshape(-1)
+            ),
+            destination_leaf_indices=np.ascontiguousarray(
+                np.asarray(batch.destination_leaf_indices, dtype=np.int32).reshape(-1)
+            ),
+            lattice_shift=np.ascontiguousarray(
+                np.asarray(batch.lattice_shift, dtype=np.float64).reshape(3)
+            ),
+            bloch_phase=complex(batch.bloch_phase),
+        )
+        for batch in plan.leaf_batches
+    )
+    return CuPyHostPeriodizationData(
+        closure_level=int(plan.closure_level),
+        far_batches_by_level=far_batches_by_level,
+        leaf_batches=leaf_batches,
+        summary=dict(plan.summary()),
+    )
 
 
 def _build_mlfmm_cupy_host_cache(
@@ -1861,20 +2035,18 @@ def _build_mlfmm_cupy_host_cache(
 
     policy = _resolve_host_cache_policy(host_cache_policy)
     near_dtype = np.dtype(coupling.near_dtype)
-    real_dtype: type[np.floating[Any]]
-    lut_dtype: type[np.complexfloating[Any, Any]]
-    if near_dtype == np.dtype(np.complex64):
-        real_dtype = np.float32
-        lut_dtype = np.complex64
-    else:
-        real_dtype = np.float64
-        lut_dtype = np.complex128
+    real_dtype: type[np.floating[Any]] = (
+        np.float32 if near_dtype == np.dtype(np.complex64) else np.float64
+    )
     partition = coupling.resolved_plan.partition
     leaf_offsets, leaf_indices = _pack_index_lists(
         [leaf.particle_indices for leaf in partition.leaves]
     )
     dst_leaf_indices, src_leaf_indices = _build_exact_near_leaf_pair_schedule(partition)
-    lut = np.asarray(coupling.radial_lut.h, dtype=np.complex128).T.astype(lut_dtype, copy=False)
+    near_lut_re, near_lut_im = _split_complex_table_transposed(
+        np.asarray(coupling.radial_lut.h),
+        real_dtype=real_dtype,
+    )
     compact_re_ab = None
     compact_im_ab = None
     plm_coeffs = None
@@ -1909,8 +2081,8 @@ def _build_mlfmm_cupy_host_cache(
         ),
         near_dst_leaf_indices=np.ascontiguousarray(dst_leaf_indices, dtype=np.int32),
         near_src_leaf_indices=np.ascontiguousarray(src_leaf_indices, dtype=np.int32),
-        near_lut_re=np.ascontiguousarray(lut.real.reshape(-1), dtype=real_dtype),
-        near_lut_im=np.ascontiguousarray(lut.imag.reshape(-1), dtype=real_dtype),
+        near_lut_re=near_lut_re,
+        near_lut_im=near_lut_im,
         near_inv_dr=float(coupling.radial_lut._inv_dr),
         near_last_index=int(coupling.radial_lut._last_index),
         near_plm_coeffs=(
@@ -1970,6 +2142,7 @@ def _build_mlfmm_cupy_host_cache(
             if coupling.multilevel is not None
             else None
         ),
+        periodization=_build_host_periodization(coupling),
         plan_summary=plan_summary,
     )
 
@@ -2423,6 +2596,91 @@ def _upload_multilevel(
     )
 
 
+def _upload_periodization(
+    periodization: CuPyHostPeriodizationData | None,
+    *,
+    levels: tuple[CuPyMLFMMLevelData, ...] | None,
+    cupy: Any,
+) -> CuPyMLFMMPeriodizationData | None:
+    """Upload one compact periodization payload after the MLFMM levels."""
+
+    if periodization is None:
+        return None
+    if levels is None:
+        raise ValueError("Periodic CuPy MLFMM requires a multilevel sampled hierarchy.")
+    if len(periodization.far_batches_by_level) != len(levels):
+        raise ValueError(
+            "Periodization level count does not match the uploaded hierarchy: "
+            f"{len(periodization.far_batches_by_level)} vs {len(levels)}."
+        )
+    if not 0 <= int(periodization.closure_level) < len(levels):
+        raise ValueError(
+            "Periodization closure level lies outside the uploaded hierarchy: "
+            f"{periodization.closure_level} vs {len(levels)} levels."
+        )
+
+    far_batches_by_level: list[tuple[CuPyPeriodicFarBatchData, ...]] = []
+    for level_idx, batches in enumerate(periodization.far_batches_by_level):
+        ndirs = int(levels[level_idx].directional.grid.n_directions)
+        uploaded: list[CuPyPeriodicFarBatchData] = []
+        for batch_idx, batch in enumerate(batches):
+            diagonal = _as_numpy_1d(
+                batch.diagonal,
+                dtype=np.complex128,
+                name=f"periodization.level[{level_idx}].batch[{batch_idx}].diagonal",
+            )
+            if diagonal.size != ndirs:
+                raise ValueError(
+                    "Periodic M2L diagonal length mismatch at level "
+                    f"{level_idx}: {diagonal.size} vs {ndirs}."
+                )
+            uploaded.append(
+                CuPyPeriodicFarBatchData(
+                    indices=_upload_unique_index_batch(
+                        batch.source_indices,
+                        batch.destination_indices,
+                        cupy=cupy,
+                        name=f"periodization.level[{level_idx}].batch[{batch_idx}]",
+                    ),
+                    diagonal=cupy.asarray(diagonal, dtype=cupy.complex128),
+                )
+            )
+        far_batches_by_level.append(tuple(uploaded))
+
+    leaf_batches: list[CuPyPeriodicLeafBatchData] = []
+    for batch_idx, leaf_batch in enumerate(periodization.leaf_batches):
+        source = _as_numpy_1d(
+            leaf_batch.source_leaf_indices,
+            dtype=np.int32,
+            name=f"periodization.leaf_batch[{batch_idx}].source",
+        )
+        destination = _as_numpy_1d(
+            leaf_batch.destination_leaf_indices,
+            dtype=np.int32,
+            name=f"periodization.leaf_batch[{batch_idx}].destination",
+        )
+        if source.size != destination.size:
+            raise ValueError(
+                "Periodic leaf batch source/destination size mismatch: "
+                f"{source.size} vs {destination.size}."
+            )
+        shift = np.asarray(leaf_batch.lattice_shift, dtype=np.float64).reshape(3)
+        leaf_batches.append(
+            CuPyPeriodicLeafBatchData(
+                source_leaf_indices=cupy.asarray(source, dtype=cupy.int32),
+                destination_leaf_indices=cupy.asarray(destination, dtype=cupy.int32),
+                lattice_shift=(float(shift[0]), float(shift[1]), float(shift[2])),
+                bloch_phase=complex(leaf_batch.bloch_phase),
+            )
+        )
+
+    return CuPyMLFMMPeriodizationData(
+        far_batches_by_level=tuple(far_batches_by_level),
+        leaf_batches=tuple(leaf_batches),
+        summary=dict(periodization.summary),
+    )
+
+
 def _build_exact_near_leaf_pair_schedule(
     partition: MLFMMPartition,
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -2645,7 +2903,7 @@ def _restore_unknown_shape(y: Any, *, squeezed: bool) -> Any:
 
 
 @cache
-def _exact_near_pairs_leafpair_raw_kernel(lmax: int, near_dtype_name: str) -> Any:
+def _exact_leaf_pairs_raw_kernel(lmax: int, near_dtype_name: str) -> Any:
     cupy, _ = import_cupy()
     lmax = int(lmax)
     near_dtype = np.dtype(near_dtype_name)
@@ -2716,11 +2974,17 @@ def _exact_near_pairs_leafpair_raw_kernel(lmax: int, near_dtype_name: str) -> An
         return (({real_t})1.0 - frac) * table[base0] + frac * table[base1];
     }}
 
-    extern "C" __global__ void mlfmm_exact_near_pairs_leafpair(
+    extern "C" __global__ void mlfmm_exact_leaf_pairs(
         const int n_leaf_pairs,
         const int nmodes,
         const int nrhs,
         const {real_t}* positions,
+        const {real_t} shift_x,
+        const {real_t} shift_y,
+        const {real_t} shift_z,
+        const {real_t} phase_re,
+        const {real_t} phase_im,
+        const int skip_identity,
         const int* dst_leaf_indices,
         const int* src_leaf_indices,
         const int* leaf_particle_offsets,
@@ -2775,7 +3039,11 @@ def _exact_near_pairs_leafpair_raw_kernel(lmax: int, near_dtype_name: str) -> An
                     const int dst_particle = leaf_particle_indices[dst_ptr];
                     for (int src_ptr = src_start; src_ptr < src_end; ++src_ptr) {{
                         const int src_particle = leaf_particle_indices[src_ptr];
-                        if (dst_leaf_shared == src_leaf_shared && dst_particle == src_particle) {{
+                        if (
+                            skip_identity != 0
+                            && dst_leaf_shared == src_leaf_shared
+                            && dst_particle == src_particle
+                        ) {{
                             continue;
                         }}
 
@@ -2783,11 +3051,11 @@ def _exact_near_pairs_leafpair_raw_kernel(lmax: int, near_dtype_name: str) -> An
                             dst_particle_shared = dst_particle;
                             src_particle_shared = src_particle;
                             const {real_t} x21 =
-                                positions[3 * dst_particle_shared] - positions[3 * src_particle_shared];
+                                positions[3 * dst_particle_shared] - positions[3 * src_particle_shared] - shift_x;
                             const {real_t} y21 =
-                                positions[3 * dst_particle_shared + 1] - positions[3 * src_particle_shared + 1];
+                                positions[3 * dst_particle_shared + 1] - positions[3 * src_particle_shared + 1] - shift_y;
                             const {real_t} z21 =
-                                positions[3 * dst_particle_shared + 2] - positions[3 * src_particle_shared + 2];
+                                positions[3 * dst_particle_shared + 2] - positions[3 * src_particle_shared + 2] - shift_z;
                             r_shared = {math["sqrt"]}(x21 * x21 + y21 * y21 + z21 * z21);
                             ct_shared = z21 / r_shared;
                             st_shared = {math["sqrt"]}(
@@ -2865,9 +3133,11 @@ def _exact_near_pairs_leafpair_raw_kernel(lmax: int, near_dtype_name: str) -> An
 
                             const long long y_idx =
                                 (((long long)dst_particle_shared * nmodes + n1) * nrhs) + rhs;
+                            const {real_t} re_phased = phase_re * re_incr - phase_im * im_incr;
+                            const {real_t} im_phased = phase_re * im_incr + phase_im * re_incr;
                             {real_t}* y_ptr = reinterpret_cast<{real_t}*>(&y[y_idx]);
-                            atomicAdd(y_ptr + 0, re_incr);
-                            atomicAdd(y_ptr + 1, im_incr);
+                            atomicAdd(y_ptr + 0, re_phased);
+                            atomicAdd(y_ptr + 1, im_phased);
                         }}
                         __syncthreads();
                     }}
@@ -2876,7 +3146,7 @@ def _exact_near_pairs_leafpair_raw_kernel(lmax: int, near_dtype_name: str) -> An
         }}
     }}
     """
-    return cupy.RawKernel(source, "mlfmm_exact_near_pairs_leafpair")
+    return cupy.RawKernel(source, "mlfmm_exact_leaf_pairs")
 
 
 @cache
@@ -5197,67 +5467,85 @@ def _ensure_exact_near_workspace(
     return ws
 
 
-def _apply_exact_near_pairs(
+def _exact_leaf_launch_context(
     prepared: CuPyMLFMMPreparedData,
-    x_states: Any,
     *,
-    workspace: CuPyMLFMMNearWorkspace | None,
     cupy: Any,
-) -> Any:
-    """Apply exact near interactions on device using the directed leaf-pair schedule."""
+) -> _ExactLeafLaunchContext:
+    """Resolve one exact-leaf kernel and launch geometry per matvec."""
 
-    near = prepared.near_pairs
-    near_dtype = np.dtype(near.near_dtype)
-    np_real_type: type[np.floating[Any]]
+    near_dtype = np.dtype(prepared.near_pairs.near_dtype)
     if near_dtype == np.dtype(np.complex64):
-        cupy_out_dtype = cupy.complex64
-        np_real_type = np.float32
+        real_scalar_type: type[np.floating[Any]] = np.float32
     elif near_dtype == np.dtype(np.complex128):
-        cupy_out_dtype = cupy.complex128
-        np_real_type = np.float64
+        real_scalar_type = np.float64
     else:
         raise ValueError(
-            "CuPy MLFMM near path supports only complex64/complex128 near dtypes. "
+            "CuPy MLFMM exact leaf path supports only complex64/complex128 near dtypes. "
             f"Got {near_dtype!r}."
         )
-    cupy_compute_dtype = cupy_out_dtype
-
-    n_particles, nm, nrhs = (int(v) for v in x_states.shape)
-    n_leaf_pairs = int(near.dst_leaf_indices.size)
-    if n_leaf_pairs == 0 or n_particles == 0:
-        if workspace is not None:
-            workspace.y_states.fill(0)
-            return workspace.y_states
-        return cupy.zeros((n_particles, nm, nrhs), dtype=cupy_out_dtype)
-    x_arr = cupy.ascontiguousarray(cupy.asarray(x_states, dtype=cupy_compute_dtype))
-    if workspace is None:
-        y_arr = cupy.zeros((n_particles, nm, nrhs), dtype=cupy_compute_dtype)
-    else:
-        y_arr = workspace.y_states
-        y_arr.fill(0)
-
     props = cupy.cuda.runtime.getDeviceProperties(cupy.cuda.runtime.getDevice())
-    max_grid_y = int(props["maxGridSize"][1])
-    max_grid_z = int(props["maxGridSize"][2])
     warp_size = int(props["warpSize"])
-    kernel = _exact_near_pairs_leafpair_raw_kernel(int(prepared.lmax), near_dtype.str)
-    threads = max(warp_size, min(int(props["maxThreadsPerBlock"]), nm))
-    grid_y = min(n_leaf_pairs, max_grid_y)
-    blocks_x = max(1, (nm + threads - 1) // threads)
-    grid_z = min(max(1, nrhs), max_grid_z)
+    max_threads = int(props["maxThreadsPerBlock"])
+    nm = int(n_modes(int(prepared.lmax)))
+    return _ExactLeafLaunchContext(
+        kernel=_exact_leaf_pairs_raw_kernel(int(prepared.lmax), near_dtype.str),
+        real_scalar_type=real_scalar_type,
+        threads=max(warp_size, min(max_threads, nm)),
+        max_grid_y=int(props["maxGridSize"][1]),
+        max_grid_z=int(props["maxGridSize"][2]),
+    )
+
+
+def _launch_exact_leaf_pairs(
+    prepared: CuPyMLFMMPreparedData,
+    x_arr: Any,
+    y_arr: Any,
+    *,
+    destination_leaf_indices: Any,
+    source_leaf_indices: Any,
+    lattice_shift: tuple[float, float, float],
+    bloch_phase: complex,
+    skip_identity: bool,
+    launch: _ExactLeafLaunchContext,
+) -> None:
+    """Launch one central or periodic-image exact leaf-pair batch."""
+
+    nm = int(x_arr.shape[1])
+    nrhs = int(x_arr.shape[2])
+    n_leaf_pairs = int(destination_leaf_indices.size)
+    if n_leaf_pairs == 0:
+        return
+
+    grid_y = min(n_leaf_pairs, int(launch.max_grid_y))
+    blocks_x = max(1, (nm + int(launch.threads) - 1) // int(launch.threads))
+    grid_z = min(max(1, nrhs), int(launch.max_grid_z))
+    # Match the CPU periodization convention exactly: each image interaction
+    # uses r_destination - r_source - lattice_shift and is then multiplied by
+    # the precomputed Bloch phase for that lattice image.
+    shift_x, shift_y, shift_z = lattice_shift
+    phase = complex(bloch_phase)
+    scalar = launch.real_scalar_type
+    near = prepared.near_pairs
 
     args = (
         np.int32(n_leaf_pairs),
         np.int32(nm),
         np.int32(nrhs),
         near.positions,
-        near.dst_leaf_indices,
-        near.src_leaf_indices,
+        scalar(float(shift_x)),
+        scalar(float(shift_y)),
+        scalar(float(shift_z)),
+        scalar(float(phase.real)),
+        scalar(float(phase.imag)),
+        np.int32(1 if skip_identity else 0),
+        destination_leaf_indices,
+        source_leaf_indices,
         near.leaf_particle_offsets,
         near.leaf_particle_indices,
         near.lut_re,
         near.lut_im,
-        np_real_type(float(near.inv_dr)),
+        scalar(float(near.inv_dr)),
         np.int32(int(near.last_index)),
         near.plm_coeffs,
         near.compact_re_ab,
@@ -5269,9 +5557,68 @@ def _apply_exact_near_pairs(
         x_arr.reshape(-1),
         y_arr.reshape(-1),
     )
+    launch.kernel(
+        (int(blocks_x), int(grid_y), int(grid_z)),
+        (int(launch.threads),),
+        args,
+    )
 
-    kernel((int(blocks_x), int(grid_y), int(grid_z)), (int(threads),), args)
-    return y_arr.astype(cupy_out_dtype, copy=False)
+
+def _apply_exact_near_pairs(
+    prepared: CuPyMLFMMPreparedData,
+    x_states: Any,
+    *,
+    workspace: CuPyMLFMMNearWorkspace | None,
+    cupy: Any,
+) -> Any:
+    """Apply central and explicit periodic-image leaf interactions on device."""
+
+    near = prepared.near_pairs
+    near_dtype = np.dtype(near.near_dtype)
+    if near_dtype == np.dtype(np.complex64):
+        cupy_out_dtype = cupy.complex64
+    elif near_dtype == np.dtype(np.complex128):
+        cupy_out_dtype = cupy.complex128
+    else:
+        raise ValueError(
+            "CuPy MLFMM near path supports only complex64/complex128 near dtypes. "
+            f"Got {near_dtype!r}."
+        )
+
+    n_particles, nm, nrhs = (int(v) for v in x_states.shape)
+    x_arr = cupy.ascontiguousarray(cupy.asarray(x_states, dtype=cupy_out_dtype))
+    if workspace is None:
+        y_arr = cupy.zeros((n_particles, nm, nrhs), dtype=cupy_out_dtype)
+    else:
+        y_arr = workspace.y_states
+        y_arr.fill(0)
+    launch = _exact_leaf_launch_context(prepared, cupy=cupy)
+    _launch_exact_leaf_pairs(
+        prepared,
+        x_arr,
+        y_arr,
+        destination_leaf_indices=near.dst_leaf_indices,
+        source_leaf_indices=near.src_leaf_indices,
+        lattice_shift=(0.0, 0.0, 0.0),
+        bloch_phase=1.0 + 0.0j,
+        skip_identity=True,
+        launch=launch,
+    )
+    periodization = prepared.periodization
+    if periodization is not None:
+        for batch in periodization.leaf_batches:
+            _launch_exact_leaf_pairs(
+                prepared,
+                x_arr,
+                y_arr,
+                destination_leaf_indices=batch.destination_leaf_indices,
+                source_leaf_indices=batch.source_leaf_indices,
+                lattice_shift=batch.lattice_shift,
+                bloch_phase=batch.bloch_phase,
+                skip_identity=False,
+                launch=launch,
+            )
+    return y_arr
 
 
 def _apply_single_level_far(
@@ -5891,6 +6238,18 @@ def _iter_zero_incoming_chunks_for_level(
         yield box_ids, incoming
 
 
+def _iter_level_far_interactions(
+    level: CuPyMLFMMLevelData,
+    periodic_batches: tuple[CuPyPeriodicFarBatchData, ...],
+) -> Iterator[tuple[CuPyOffsetBatchData, Any]]:
+    """Yield ordinary and periodizing same-level M2L batches uniformly."""
+
+    for offset, batch in level.far_offset_batches.items():
+        yield batch, level.offset_diagonals[offset]
+    for periodic_batch in periodic_batches:
+        yield periodic_batch.indices, periodic_batch.diagonal
+
+
 def _apply_same_level_far_streamed_chunk_group(
     *,
     levels: tuple[CuPyMLFMMLevelData, ...],
@@ -5902,6 +6261,7 @@ def _apply_same_level_far_streamed_chunk_group(
     streamed_far_chunk_bytes_budget: int,
     level_idx: int,
     leaf_level: int,
+    periodic_far_batches: tuple[CuPyPeriodicFarBatchData, ...],
     chunks: list[tuple[Any, Any]],
     box_nm_leaf: int,
     x_states: Any,
@@ -5958,11 +6318,11 @@ def _apply_same_level_far_streamed_chunk_group(
             )
             fast_counts[str(level_idx)] = int(fast_counts.get(str(level_idx), 0) + len(chunks))
     subset_filter_started = time.perf_counter() if stream_stats is not None else 0.0
-    filtered_by_chunk: list[list[tuple[Offset3, Any, Any]]] = []
+    filtered_by_chunk: list[list[tuple[Any, Any, Any]]] = []
     source_batches: list[Any] = []
     for box_ids, _incoming in chunks:
-        filtered_offsets: list[tuple[Offset3, Any, Any]] = []
-        for offset, batch in level.far_offset_batches.items():
+        filtered_offsets: list[tuple[Any, Any, Any]] = []
+        for batch, diagonal in _iter_level_far_interactions(level, periodic_far_batches):
             filtered = _filter_batch_for_sorted_dst_ids(
                 src_indices=batch.src_indices,
                 dst_indices=batch.dst_indices,
@@ -5972,7 +6332,7 @@ def _apply_same_level_far_streamed_chunk_group(
             if filtered is None:
                 continue
             source_ids_all, dst_local_all = filtered
-            filtered_offsets.append((offset, source_ids_all, dst_local_all))
+            filtered_offsets.append((diagonal, source_ids_all, dst_local_all))
             source_batches.append(source_ids_all)
         filtered_by_chunk.append(filtered_offsets)
     if not source_batches:
@@ -5992,7 +6352,7 @@ def _apply_same_level_far_streamed_chunk_group(
         )
         for (_box_ids, incoming), filtered_offsets in zip(chunks, filtered_by_chunk, strict=True):
             current_incoming = cupy.asarray(incoming, dtype=cupy.complex128)
-            for offset, source_ids_all, dst_local_all in filtered_offsets:
+            for diagonal, source_ids_all, dst_local_all in filtered_offsets:
                 matched = _filter_query_ids_to_sorted_chunk(
                     chunk_ids_sorted=full_source_ids,
                     query_ids=source_ids_all,
@@ -6006,7 +6366,7 @@ def _apply_same_level_far_streamed_chunk_group(
                     dst_local_all[source_query_rows],
                     full_source_outgoing,
                     source_local,
-                    level.offset_diagonals[offset],
+                    diagonal,
                     cupy=cupy,
                 )
         return
@@ -6019,13 +6379,13 @@ def _apply_same_level_far_streamed_chunk_group(
         source_ids_unique=source_ids_unique,
         cupy=cupy,
     )
-    source_matches_by_chunk: list[list[tuple[Offset3, Any, dict[int, tuple[Any, Any]]]]] = []
+    source_matches_by_chunk: list[list[tuple[Any, Any, dict[int, tuple[Any, Any]]]]] = []
     for filtered_offsets in filtered_by_chunk:
-        offset_matches: list[tuple[Offset3, Any, dict[int, tuple[Any, Any]]]] = []
-        for offset, source_ids_all, dst_local_all in filtered_offsets:
+        offset_matches: list[tuple[Any, Any, dict[int, tuple[Any, Any]]]] = []
+        for diagonal, source_ids_all, dst_local_all in filtered_offsets:
             offset_matches.append(
                 (
-                    offset,
+                    diagonal,
                     dst_local_all,
                     _partition_query_rows_by_compact_unique_chunks(
                         unique_ids_sorted=source_ids_unique,
@@ -6068,7 +6428,7 @@ def _apply_same_level_far_streamed_chunk_group(
             chunks, source_matches_by_chunk, strict=True
         ):
             current_incoming = cupy.asarray(incoming, dtype=cupy.complex128)
-            for offset, dst_local_all, source_matches in offset_matches:
+            for diagonal, dst_local_all, source_matches in offset_matches:
                 matched = source_matches.get(int(source_chunk_idx))
                 if matched is None:
                     continue
@@ -6078,7 +6438,7 @@ def _apply_same_level_far_streamed_chunk_group(
                     dst_local_all[source_query_rows],
                     source_outgoing,
                     source_local,
-                    level.offset_diagonals[offset],
+                    diagonal,
                     cupy=cupy,
                 )
         source_outgoing = None
@@ -6528,6 +6888,7 @@ def _apply_multilevel_frontier_streamed(
     *,
     levels: tuple[CuPyMLFMMLevelData, ...],
     transfer_by_parent: dict[int, CuPyMLFMMTransferData],
+    periodic_far_batches_by_level: tuple[tuple[CuPyPeriodicFarBatchData, ...], ...],
     leaf_groups: tuple[CuPyLeafApplyGroupData, ...],
     leaf_apply_mode: CuPyMLFMMLeafApplyMode,
     leaf_translation_tables: CuPyLeafTranslationTablesData | None,
@@ -6581,6 +6942,7 @@ def _apply_multilevel_frontier_streamed(
         streamed_far_chunk_bytes_budget=int(streamed_far_chunk_bytes_budget),
         level_idx=int(level_idx),
         leaf_level=int(leaf_level),
+        periodic_far_batches=periodic_far_batches_by_level[int(level_idx)],
         chunks=frontier_chunks,
         box_nm_leaf=int(box_nm_leaf),
         x_states=x_states,
@@ -6671,6 +7033,7 @@ def _apply_multilevel_frontier_streamed(
                 _apply_multilevel_frontier_streamed(
                     levels=levels,
                     transfer_by_parent=transfer_by_parent,
+                    periodic_far_batches_by_level=periodic_far_batches_by_level,
                     leaf_groups=leaf_groups,
                     leaf_apply_mode=leaf_apply_mode,
                     leaf_translation_tables=leaf_translation_tables,
@@ -6712,6 +7075,7 @@ def _apply_multilevel_frontier_streamed(
     _apply_multilevel_frontier_streamed(
         levels=levels,
         transfer_by_parent=transfer_by_parent,
+        periodic_far_batches_by_level=periodic_far_batches_by_level,
         leaf_groups=leaf_groups,
         leaf_apply_mode=leaf_apply_mode,
         leaf_translation_tables=leaf_translation_tables,
@@ -6750,6 +7114,12 @@ def _apply_multilevel_far_streamed(
     multilevel = prepared.multilevel
     if multilevel is None:
         raise RuntimeError("Internal CuPy MLFMM error: missing multilevel prepared data.")
+    periodization = prepared.periodization
+    periodic_far_batches_by_level = (
+        tuple(tuple() for _ in multilevel.levels)
+        if periodization is None
+        else periodization.far_batches_by_level
+    )
     n_particles, nm, nrhs = (int(v) for v in x_states.shape)
     y_far = (
         workspace.y_states
@@ -6801,6 +7171,7 @@ def _apply_multilevel_far_streamed(
         _apply_multilevel_frontier_streamed(
             levels=levels,
             transfer_by_parent=transfer_by_parent,
+            periodic_far_batches_by_level=periodic_far_batches_by_level,
             leaf_groups=multilevel.leaf_groups,
             leaf_apply_mode=multilevel.leaf_apply_mode,
             leaf_translation_tables=multilevel.leaf_translation_tables,
@@ -6919,13 +7290,18 @@ def _apply_multilevel_far(
             workspace=ws,
             cupy=cupy,
         )
-        for offset, batch in level.far_offset_batches.items():
+        periodic_batches = (
+            tuple()
+            if prepared.periodization is None
+            else prepared.periodization.far_batches_by_level[level_idx]
+        )
+        for batch, diagonal in _iter_level_far_interactions(level, periodic_batches):
             _weighted_gather_add_complex128(
                 current_incoming,
                 batch.dst_indices,
                 outgoing_level,
                 batch.src_indices,
-                level.offset_diagonals[offset],
+                diagonal,
                 cupy=cupy,
             )
         if level_idx >= hf_end:
@@ -7408,16 +7784,45 @@ def _multilevel_rolling_outgoing_bytes_theoretical(
     return int((max_elements_by_parity[0] + max_elements_by_parity[1]) * bytes_per_complex)
 
 
+def _periodization_device_memory_summary(
+    periodization: CuPyMLFMMPeriodizationData | None,
+) -> dict[str, int] | None:
+    """Return persistent device bytes owned by the periodic correction."""
+
+    if periodization is None:
+        return None
+    far_index_bytes = 0
+    far_diagonal_bytes = 0
+    for batches in periodization.far_batches_by_level:
+        for batch in batches:
+            far_index_bytes += _device_array_nbytes(batch.indices.src_indices)
+            far_index_bytes += _device_array_nbytes(batch.indices.dst_indices)
+            far_diagonal_bytes += _device_array_nbytes(batch.diagonal)
+    leaf_index_bytes = 0
+    for leaf_batch in periodization.leaf_batches:
+        leaf_index_bytes += _device_array_nbytes(leaf_batch.source_leaf_indices)
+        leaf_index_bytes += _device_array_nbytes(leaf_batch.destination_leaf_indices)
+    total = far_index_bytes + far_diagonal_bytes + leaf_index_bytes
+    return {
+        "far_index_bytes": int(far_index_bytes),
+        "far_diagonal_bytes": int(far_diagonal_bytes),
+        "leaf_index_bytes": int(leaf_index_bytes),
+        "total_bytes": int(total),
+    }
+
+
 @dataclass
 class CuPyMLFMMCouplingOperator:
     """CuPy-backed repeated-apply MLFMM coupling operator.
 
     The MLFMM plan and one-time operators are built on CPU (NumPy reference
     path). This class executes repeated exact-near and sampled-far applies on
-    CuPy device arrays. The intended production configuration is on-the-fly
-    leaf apply with streamed sampled-far traversal and compact host-summary
-    retention; dense leaf payloads remain available only for validation/debug
-    comparisons.
+    CuPy device arrays. For a periodized plan, the same apply pipeline also
+    consumes Ewald-prepared box-level M2L diagonals and explicit boundary-image
+    leaf schedules; Ewald itself is absent from repeated applications. The
+    intended production configuration is on-the-fly leaf apply with streamed
+    sampled-far traversal and compact host-summary retention; dense leaf
+    payloads remain available only for validation/debug comparisons.
 
     Precision policy mirrors the NumPy MLFMM reference path:
     - exact-near runs at `near_dtype` (`complex64` or `complex128`);
@@ -7546,11 +7951,19 @@ class CuPyMLFMMCouplingOperator:
                         "grid_order": int(level.grid_order),
                         "n_directions": int(level.directional.grid.n_directions),
                         "far_offset_count": len(level.far_offset_batches),
+                        "periodic_far_batch_count": (
+                            0
+                            if data.periodization is None
+                            else len(data.periodization.far_batches_by_level[level_index])
+                        ),
                         "parity_from_hf_start": int((int(level.level) - hf_start_level) % 2),
                     }
-                    for level in multilevel.levels
+                    for level_index, level in enumerate(multilevel.levels)
                 ],
             },
+            "periodization": (
+                None if data.periodization is None else dict(data.periodization.summary)
+            ),
         }
 
     def memory_diagnostics(self) -> dict[str, object]:
@@ -7886,6 +8299,7 @@ class CuPyMLFMMCouplingOperator:
                     near_ws_total + single_ws_total + multilevel_ws_total + leaf_otf_scratch_bytes
                 ),
             },
+            "periodization": _periodization_device_memory_summary(self.prepared_data.periodization),
             "multilevel_rolling": rolling_diag,
             "multilevel_streaming": streaming_diag,
         }
@@ -8243,12 +8657,19 @@ def prepare_mlfmm_cupy_data(
             host_cache.multilevel, partition_data, cupy=cupy, cupyx_sparse=cupyx_sparse
         )
 
+    periodization_data = _upload_periodization(
+        host_cache.periodization,
+        levels=(None if multilevel_data is None else multilevel_data.levels),
+        cupy=cupy,
+    )
+
     return CuPyMLFMMPreparedData(
         lmax=int(host_cache.lmax),
         stage=stage,
         near_pairs=near_pairs,
         single_level=single_level_data,
         multilevel=multilevel_data,
+        periodization=periodization_data,
     )
 
 

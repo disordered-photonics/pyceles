@@ -837,6 +837,7 @@ def test_prepare_matvec_accepts_mixed_sphere_and_layered():
     assert np.all(np.isfinite(y))
 
 
+@pytest.mark.gpu
 def test_prepare_matvec_cupy_matches_numpy_for_mixed_particle_groups():
     lmax, k, positions, radii, n_particle, _, n_medium, _, _ = _sample_problem()
     particles: list[Particle] = [
@@ -886,6 +887,7 @@ def test_prepare_matvec_cupy_matches_numpy_for_mixed_particle_groups():
     )
 
 
+@pytest.mark.gpu
 def test_prepare_matvec_cupy_rejects_translation_block_cache():
     lmax, k, _, _, _, particles, n_medium, _, _ = _sample_problem()
 

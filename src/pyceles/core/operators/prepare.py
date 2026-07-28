@@ -56,6 +56,24 @@ depth safety cap.
 """
 
 
+def _wrap_mlfmm_cupy_coupling(
+    coupling: MLFMMCouplingOperator,
+    *,
+    options: MLFMMOptions,
+) -> CouplingOperator:
+    """Upload one CPU-built finite or periodized MLFMM plan consistently."""
+
+    return cast(
+        CouplingOperator,
+        prepare_mlfmm_cupy_coupling(
+            coupling,
+            host_cache_policy=CuPyMLFMMHostCachePolicy(
+                collect_stream_stats=bool(options.collect_stream_stats)
+            ),
+        ),
+    )
+
+
 def _prepare_diagonal_group(
     *,
     plan: ParticleTGroupPlan,
@@ -220,11 +238,6 @@ def prepare_matvec(
     periodic_spec = periodic
     k_parallel_arr: np.ndarray | None = None
     if periodic_spec is not None:
-        if coupling_name == "mlfmm" and backend == "cupy":
-            raise NotImplementedError(
-                "Periodic MLFMM is currently a NumPy reference backend; "
-                "use operator_backend='numpy'."
-            )
         if coupling_name == "mlfmm" and periodic_spec.options.method != "ewald":
             raise NotImplementedError(
                 "Periodic MLFMM currently requires PeriodicOptions(method='ewald') "
@@ -361,29 +374,49 @@ def prepare_matvec(
                 dtype=op_dtype,
             ),
         )
+        cpu_mlfmm: CouplingOperator
         if periodic_spec is not None:
             if k_parallel_arr is None:
                 raise RuntimeError("Internal error: periodic k_parallel was not normalized.")
             if coupling_name == "mlfmm":
-                raise NotImplementedError(
-                    "Periodic MLFMM is currently a NumPy reference backend; "
-                    "use operator_backend='numpy'."
+                resolved_mlfmm_options = (
+                    _CUPY_MLFMM_DEFAULT_OPTIONS if mlfmm_options is None else mlfmm_options
                 )
-            ab5 = translation_ab5_table(int(lmax), dtype=op_dtype)
-            coupling = cast(
-                CouplingOperator,
-                CuPyPeriodicCouplingOperator(
+                cpu_mlfmm = prepare_periodized_mlfmm_coupling(
                     lmax=int(lmax),
                     k=k_f,
                     positions=positions,
-                    ab5=ab5,
+                    particle_circumscribing_radii=circumscribing_radii,
+                    radial_lut=make_radial_lut(np.dtype(np.complex128)),
                     periodic=periodic_spec,
                     k_parallel=k_parallel_arr,
+                    options=resolved_mlfmm_options,
                     dtype=op_dtype,
-                    cache_blocks=bool(cache_translation_blocks),
-                    circumscribing_radii=circumscribing_radii,
-                ),
-            )
+                    cache_translation_blocks=bool(cache_translation_blocks),
+                    show_progress=bool(show_progress),
+                    leaf_map_backend="cupy",
+                    build_leaf_maps=False,
+                )
+                coupling = _wrap_mlfmm_cupy_coupling(
+                    cpu_mlfmm,
+                    options=resolved_mlfmm_options,
+                )
+            else:
+                ab5 = translation_ab5_table(int(lmax), dtype=op_dtype)
+                coupling = cast(
+                    CouplingOperator,
+                    CuPyPeriodicCouplingOperator(
+                        lmax=int(lmax),
+                        k=k_f,
+                        positions=positions,
+                        ab5=ab5,
+                        periodic=periodic_spec,
+                        k_parallel=k_parallel_arr,
+                        dtype=op_dtype,
+                        cache_blocks=bool(cache_translation_blocks),
+                        circumscribing_radii=circumscribing_radii,
+                    ),
+                )
         elif coupling_name == "pairwise":
             lut = make_radial_lut()
             ab5 = translation_ab5_table(int(lmax), dtype=op_dtype)
@@ -434,15 +467,9 @@ def prepare_matvec(
                     ),
                 )
             else:
-                host_cache_policy = CuPyMLFMMHostCachePolicy(
-                    collect_stream_stats=bool(resolved_mlfmm_options.collect_stream_stats)
-                )
-                coupling = cast(
-                    CouplingOperator,
-                    prepare_mlfmm_cupy_coupling(
-                        cast(MLFMMCouplingOperator, cpu_mlfmm),
-                        host_cache_policy=host_cache_policy,
-                    ),
+                coupling = _wrap_mlfmm_cupy_coupling(
+                    cast(MLFMMCouplingOperator, cpu_mlfmm),
+                    options=resolved_mlfmm_options,
                 )
         else:
             raise ValueError(

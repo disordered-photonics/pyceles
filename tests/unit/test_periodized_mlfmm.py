@@ -1,12 +1,26 @@
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
+import numpy.typing as npt
+import pytest
 
 import pyceles as pcl
+from pyceles._optional import asnumpy
 from pyceles.core.indexing import n_modes
-from pyceles.core.operators import MLFMMCouplingOperator, prepare_matvec
+from pyceles.core.operators import (
+    CuPyMLFMMCouplingOperator,
+    MLFMMCouplingOperator,
+    build_mlfmm_cupy_host_cache,
+    prepare_matvec,
+)
 from pyceles.core.operators.coupling_periodic import PeriodicCouplingOperator
-from pyceles.core.operators.mlfmm import MLFMMOptions, _sampled_rokhlin_translator
+from pyceles.core.operators.mlfmm import (
+    MLFMMOptions,
+    _exact_periodic_leaf_near_apply,
+    _sampled_rokhlin_translator,
+)
 from pyceles.core.operators.mlfmm_directional import directional_transforms
 from pyceles.core.operators.mlfmm_periodic import (
     _periodic_nonzero_structural_sums,
@@ -275,6 +289,58 @@ def test_periodized_mlfmm_converges_to_pairwise_ewald_with_near_images() -> None
     assert periodization_memory["total_bytes"] > 0
 
 
+def test_periodic_exact_leaf_apply_accumulates_into_supplied_output() -> None:
+    positions, radii, k, k_parallel, periodic = _periodic_fixture()
+    lmax = 1
+    coupling = prepare_periodized_mlfmm_coupling(
+        lmax=lmax,
+        k=k,
+        positions=positions,
+        particle_circumscribing_radii=radii,
+        radial_lut=_radial_lut(positions=positions, lmax=lmax, k=k),
+        periodic=periodic,
+        k_parallel=k_parallel,
+        options=MLFMMOptions(
+            max_leaf_particles=1,
+            max_depth=2,
+            leaf_size_radius_factor=1.0,
+            accuracy_level=1,
+        ),
+        box_order=6,
+    )
+    assert coupling.multilevel is not None
+    assert coupling.periodization is not None
+    assert coupling.periodization.leaf_batches
+
+    nm = n_modes(lmax)
+    x = np.arange(positions.shape[0] * nm, dtype=float).astype(np.complex128)
+    expected = _exact_periodic_leaf_near_apply(
+        lmax=lmax,
+        k=k,
+        positions=positions,
+        x=x,
+        partition=coupling.multilevel.partition,
+        batches=coupling.periodization.leaf_batches,
+        radial_lut=coupling.radial_lut,
+        dtype=np.dtype(np.complex128),
+    )
+    out = np.full_like(x, 2.0 - 3.0j)
+    actual = _exact_periodic_leaf_near_apply(
+        lmax=lmax,
+        k=k,
+        positions=positions,
+        x=x,
+        partition=coupling.multilevel.partition,
+        batches=coupling.periodization.leaf_batches,
+        radial_lut=coupling.radial_lut,
+        dtype=np.dtype(np.complex128),
+        out=out,
+    )
+
+    assert np.shares_memory(actual, out)
+    np.testing.assert_allclose(actual, expected + (2.0 - 3.0j), rtol=2.0e-15, atol=2.0e-15)
+
+
 def test_prepare_matvec_accepts_numpy_periodic_mlfmm() -> None:
     positions, _radii, k, k_parallel, periodic = _periodic_fixture()
     particles = pcl.spheres_from_arrays(
@@ -306,3 +372,157 @@ def test_prepare_matvec_accepts_numpy_periodic_mlfmm() -> None:
     assert prepared.coupling.periodization is not None
     result = prepared.apply_W(np.ones((positions.shape[0] * n_modes(1),), dtype=np.complex128))
     assert result.shape == (positions.shape[0] * n_modes(1),)
+
+
+def test_periodized_mlfmm_cupy_host_staging_is_compact_and_precision_aligned() -> None:
+    positions, radii, k, k_parallel, periodic = _periodic_fixture()
+    lmax = 1
+    coupling = prepare_periodized_mlfmm_coupling(
+        lmax=lmax,
+        k=k,
+        positions=positions,
+        particle_circumscribing_radii=radii,
+        radial_lut=_radial_lut(positions=positions, lmax=lmax, k=k),
+        periodic=periodic,
+        k_parallel=k_parallel,
+        options=MLFMMOptions(
+            max_leaf_particles=1,
+            max_depth=2,
+            leaf_size_radius_factor=1.0,
+            accuracy_level=1,
+        ),
+        dtype=np.dtype(np.complex64),
+        box_order=6,
+        leaf_map_backend="cupy",
+        build_leaf_maps=False,
+    )
+    assert coupling.multilevel is not None
+    assert coupling.periodization is not None
+    assert coupling.periodization.leaf_batches
+    assert len(coupling.multilevel.aggregation) == 0
+    assert len(coupling.multilevel.receive) == 0
+
+    leaves = coupling.multilevel.partition.leaves
+    actual_r_max = 0.0
+    for batch in coupling.periodization.leaf_batches:
+        shift = np.asarray(batch.lattice_shift, dtype=float).reshape(1, 1, 3)
+        for source_leaf, destination_leaf in zip(
+            batch.source_leaf_indices, batch.destination_leaf_indices, strict=True
+        ):
+            source_particles = leaves[int(source_leaf)].particle_indices
+            destination_particles = leaves[int(destination_leaf)].particle_indices
+            displacement = (
+                positions[destination_particles, None, :]
+                - positions[None, source_particles, :]
+                - shift
+            )
+            actual_r_max = max(
+                actual_r_max,
+                float(np.max(np.linalg.norm(displacement, axis=2), initial=0.0)),
+            )
+    assert coupling.periodization.exact_leaf_r_max_bound >= actual_r_max
+    assert float(coupling.radial_lut.r_grid[-1]) >= coupling.periodization.exact_leaf_r_max_bound
+
+    host_cache = build_mlfmm_cupy_host_cache(coupling)
+    assert host_cache.near_lut_re.dtype == np.dtype(np.float32)
+    assert host_cache.near_lut_im.dtype == np.dtype(np.float32)
+    expected_h = np.asarray(coupling.radial_lut.h).T.reshape(-1)
+    np.testing.assert_array_equal(host_cache.near_lut_re, expected_h.real.astype(np.float32))
+    np.testing.assert_array_equal(host_cache.near_lut_im, expected_h.imag.astype(np.float32))
+    assert host_cache.multilevel is not None
+    assert host_cache.multilevel.aggregation is None
+    assert host_cache.multilevel.leaf_groups_otf is not None
+    assert host_cache.multilevel.leaf_translation_tables is not None
+    assert host_cache.multilevel.leaf_translation_tables.last_index < host_cache.near_last_index
+    assert host_cache.periodization is not None
+    assert host_cache.periodization.summary == coupling.periodization.summary()
+
+    far_batches = [
+        batch for batches in host_cache.periodization.far_batches_by_level for batch in batches
+    ]
+    assert far_batches
+    assert all(batch.diagonal.dtype == np.dtype(np.complex128) for batch in far_batches)
+    assert all(batch.source_indices.dtype == np.dtype(np.int32) for batch in far_batches)
+    assert all(batch.destination_indices.dtype == np.dtype(np.int32) for batch in far_batches)
+    assert all(
+        batch.source_leaf_indices.dtype == np.dtype(np.int32)
+        and batch.destination_leaf_indices.dtype == np.dtype(np.int32)
+        for batch in host_cache.periodization.leaf_batches
+    )
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize(
+    ("operator_dtype", "rtol", "atol"),
+    [
+        (np.complex64, 1.0e-4, 1.0e-5),
+        (np.complex128, 2.0e-9, 2.0e-10),
+    ],
+)
+def test_prepare_matvec_cupy_periodized_mlfmm_matches_numpy(
+    cupy_runtime: tuple[Any, Any],
+    operator_dtype: npt.DTypeLike,
+    rtol: float,
+    atol: float,
+) -> None:
+    cupy, _ = cupy_runtime
+    positions, _radii, k, k_parallel, periodic = _periodic_fixture()
+    particles = pcl.spheres_from_arrays(
+        positions=positions,
+        radii=np.full((positions.shape[0],), 5.0, dtype=float),
+        refractive_indices=1.5 + 0.0j,
+    )
+    options = MLFMMOptions(
+        max_leaf_particles=1,
+        max_depth=2,
+        leaf_size_radius_factor=1.0,
+        accuracy_level=1,
+        order_additive=0,
+    )
+    common: dict[str, Any] = dict(
+        lmax=1,
+        k=k,
+        particles=particles,
+        n_medium=1.0 + 0.0j,
+        radial_lut_dr=0.25,
+        cache_translation_blocks=False,
+        operator_dtype=operator_dtype,
+        coupling_backend="mlfmm",
+        mlfmm_options=options,
+        periodic=periodic,
+        k_parallel=k_parallel,
+    )
+    prepared_numpy = prepare_matvec(**common, backend="numpy")
+    prepared_cupy = prepare_matvec(**common, backend="cupy")
+
+    assert isinstance(prepared_numpy.coupling, MLFMMCouplingOperator)
+    assert prepared_numpy.coupling.periodization is not None
+    assert isinstance(prepared_cupy.coupling, CuPyMLFMMCouplingOperator)
+    assert prepared_cupy.coupling.prepared_data.periodization is not None
+    assert prepared_cupy.coupling.prepared_data.periodization.leaf_batches
+
+    rng = np.random.default_rng(20260728)
+    n_unknowns = positions.shape[0] * n_modes(1)
+    x = np.asarray(
+        rng.normal(size=(n_unknowns, 2)) + 1j * rng.normal(size=(n_unknowns, 2)),
+        dtype=operator_dtype,
+    )
+    # The NumPy MLFMM reference currently accepts one flat RHS at a time;
+    # retain the block-RHS CuPy coverage by assembling its reference columns.
+    expected = np.column_stack(
+        [np.asarray(prepared_numpy.apply_W(x[:, j]), dtype=operator_dtype) for j in range(2)]
+    )
+    actual = np.asarray(
+        asnumpy(prepared_cupy.apply_W(cupy.asarray(x))),
+        dtype=operator_dtype,
+    )
+    np.testing.assert_allclose(actual, expected, rtol=rtol, atol=atol)
+
+    hierarchy = prepared_cupy.coupling.hierarchy_diagnostics()
+    periodization = hierarchy.get("periodization")
+    assert isinstance(periodization, dict)
+    assert int(periodization["sampled_far_box_pair_count"]) > 0
+    memory = prepared_cupy.coupling.memory_diagnostics()
+    periodization_memory = memory.get("periodization")
+    assert isinstance(periodization_memory, dict)
+    assert int(periodization_memory["total_bytes"]) > 0

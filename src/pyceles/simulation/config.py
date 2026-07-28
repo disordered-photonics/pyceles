@@ -102,6 +102,10 @@ class SimulationConfig:
 
     Backend policy:
     - `operator_backend` controls the many-body solve backend.
+    - `solver_method=None` selects BiCGSTAB for finite clusters and GMRES for
+      periodic systems. The defaults reflect the observed convergence policy:
+      BiCGSTAB is the efficient finite-cluster workhorse, while periodic
+      systems are generally more robust with restarted GMRES.
     - `postprocessing_backend` defaults to `"inherit"`, which reuses the
       chosen operator backend so a CuPy solve naturally prefers CuPy
       postprocessing where accelerated kernels exist.
@@ -135,9 +139,9 @@ class SimulationConfig:
     farfield_azimuthal_angles: np.ndarray | None = None
     radial_lut_dr: float = 0.0
     force_general_initial_field: bool = False
-    solver_method: Literal["auto", "gmres", "fgmres", "bicgstab", "lgmres", "gcrotmk", "direct"] = (
-        "direct"
-    )
+    solver_method: (
+        Literal["auto", "gmres", "fgmres", "bicgstab", "lgmres", "gcrotmk", "direct"] | None
+    ) = None
     solver_direct_max_n: int = 15_000
     solver_rtol: float = 1e-5
     solver_compute_final_residual: bool = True
@@ -159,6 +163,10 @@ class SimulationConfig:
     verbose: bool = True
 
     def __post_init__(self) -> None:
+        if self.solver_method is None:
+            object.__setattr__(
+                self, "solver_method", "gmres" if self.periodic is not None else "bicgstab"
+            )
         if not (float(self.wavelength) > 0.0):
             raise ValueError(f"`wavelength` must be > 0. Got {self.wavelength!r}.")
         if int(self.lmax) < 1:
@@ -232,10 +240,6 @@ class SimulationConfig:
                     f"Got {type(self.periodic).__name__}."
                 )
             if coupling_backend == "mlfmm":
-                if backend != "numpy":
-                    raise NotImplementedError(
-                        "Periodic MLFMM is currently available only with operator_backend='numpy'."
-                    )
                 if self.periodic.options.method != "ewald":
                     raise NotImplementedError(
                         "Periodic MLFMM currently requires "

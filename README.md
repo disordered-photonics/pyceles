@@ -62,7 +62,7 @@ Current tested capabilities include:
 - experimental rectangular 2D periodic workflows with diffraction-order
   payloads, `R/T/A`, periodic near-field slices, and an opt-in hybrid
   exact-near/Rayleigh-far repeated-apply operator for vertically extended cells,
-  plus a NumPy periodized MLFMM reference path.
+  plus NumPy and CuPy periodized MLFMM paths.
 
 See [docs/capabilities.md](docs/capabilities.md) for the full feature inventory.
 
@@ -159,7 +159,7 @@ config = pcl.SimulationConfig(
     n_medium=1.0 + 0j,
     lmax=3,
     source=source,
-    solver_method="gmres",
+    solver_method="bicgstab",
     solver_rtol=1e-6,
 )
 

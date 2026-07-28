@@ -133,7 +133,7 @@ def main() -> None:
     parser.add_argument("--azimuthal-angle", type=float, default=0.0)
     parser.add_argument("--beam-width", type=float, default=2000.0)
     parser.add_argument("--amplitude", type=float, default=1.0)
-    parser.add_argument("--solver", type=str, default="gmres")
+    parser.add_argument("--solver", type=str, default="bicgstab")
     parser.add_argument(
         "--operator-backend",
         choices=("numpy", "cupy"),

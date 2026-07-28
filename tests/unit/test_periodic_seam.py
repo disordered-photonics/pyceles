@@ -158,19 +158,24 @@ def test_periodic_config_accepts_numpy_ewald_mlfmm_combination() -> None:
     assert cfg.coupling_backend == "mlfmm"
 
 
-def test_periodic_config_rejects_cupy_mlfmm_combination() -> None:
+def test_periodic_config_accepts_cupy_ewald_mlfmm_combination() -> None:
     spec = pcl.PeriodicSpec(lattice=pcl.RectangularLattice2D(300.0, 400.0))
-    with pytest.raises(NotImplementedError, match="operator_backend='numpy'"):
-        SimulationConfig(
-            source=_plane_wave(),
-            periodic=spec,
-            coupling_backend="mlfmm",
-            operator_backend="cupy",
-            verbose=False,
-        )
+    cfg = SimulationConfig(
+        source=_plane_wave(),
+        periodic=spec,
+        coupling_backend="mlfmm",
+        operator_backend="cupy",
+        verbose=False,
+    )
+
+    assert cfg.coupling_backend == "mlfmm"
+    assert cfg.operator_backend == "cupy"
 
 
-def test_periodic_config_rejects_rayleigh_mlfmm_combination() -> None:
+@pytest.mark.parametrize("backend", ["numpy", "cupy"])
+def test_periodic_config_rejects_rayleigh_mlfmm_combination(
+    backend: Literal["numpy", "cupy"],
+) -> None:
     spec = pcl.PeriodicSpec(
         lattice=pcl.RectangularLattice2D(300.0, 400.0),
         options=pcl.PeriodicOptions(method="rayleigh"),
@@ -180,19 +185,22 @@ def test_periodic_config_rejects_rayleigh_mlfmm_combination() -> None:
             source=_plane_wave(),
             periodic=spec,
             coupling_backend="mlfmm",
-            operator_backend="numpy",
+            operator_backend=backend,
             verbose=False,
         )
 
 
-def test_periodic_config_rejects_mlfmm_translation_block_cache() -> None:
+@pytest.mark.parametrize("backend", ["numpy", "cupy"])
+def test_periodic_config_rejects_mlfmm_translation_block_cache(
+    backend: Literal["numpy", "cupy"],
+) -> None:
     spec = pcl.PeriodicSpec(lattice=pcl.RectangularLattice2D(300.0, 400.0))
     with pytest.raises(NotImplementedError, match="does not cache"):
         SimulationConfig(
             source=_plane_wave(),
             periodic=spec,
             coupling_backend="mlfmm",
-            operator_backend="numpy",
+            operator_backend=backend,
             cache_translation_blocks=True,
             verbose=False,
         )

@@ -215,12 +215,12 @@ class MLFMMPeriodizationPlan:
     closure_level: int
     far_batches_by_level: tuple[tuple[MLFMMPeriodicFarBatch, ...], ...]
     leaf_batches: tuple[MLFMMPeriodicLeafBatch, ...]
-    near_lattice_indices: np.ndarray
     periodic_offset_count: int
     near_image_count: int
     sampled_far_box_pair_count: int
     exact_leaf_box_pair_count: int
     exact_particle_pair_count: int
+    exact_leaf_r_max_bound: float
     ewald_eta: float
 
     def summary(self) -> dict[str, int | float]:
@@ -233,6 +233,7 @@ class MLFMMPeriodizationPlan:
             "sampled_far_box_pair_count": int(self.sampled_far_box_pair_count),
             "exact_leaf_box_pair_count": int(self.exact_leaf_box_pair_count),
             "exact_particle_pair_count": int(self.exact_particle_pair_count),
+            "exact_leaf_r_max_bound": float(self.exact_leaf_r_max_bound),
             "ewald_eta": float(self.ewald_eta),
         }
 
@@ -254,20 +255,12 @@ class MLFMMPeriodizationPlan:
                 leaf_batch.source_leaf_indices.nbytes + leaf_batch.destination_leaf_indices.nbytes
             )
             leaf_shift_bytes += int(leaf_batch.lattice_shift.nbytes)
-        topology_bytes = int(self.near_lattice_indices.nbytes)
-        total = int(
-            far_index_bytes
-            + far_diagonal_bytes
-            + leaf_index_bytes
-            + leaf_shift_bytes
-            + topology_bytes
-        )
+        total = int(far_index_bytes + far_diagonal_bytes + leaf_index_bytes + leaf_shift_bytes)
         return {
             "far_batch_index_bytes": int(far_index_bytes),
             "far_diagonal_bytes": int(far_diagonal_bytes),
             "leaf_batch_index_bytes": int(leaf_index_bytes),
             "leaf_shift_bytes": int(leaf_shift_bytes),
-            "near_lattice_index_bytes": int(topology_bytes),
             "total_bytes": total,
         }
 
@@ -1657,21 +1650,39 @@ def _exact_periodic_leaf_near_apply(
     x: np.ndarray,
     partition: MLFMMPartition,
     batches: tuple[MLFMMPeriodicLeafBatch, ...],
+    radial_lut: RadialLUT | None,
     dtype: np.dtype,
+    out: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Apply directed exact leaf interactions from explicit lattice images."""
+    """Accumulate directed exact leaf interactions from explicit lattice images."""
 
     nm = int(n_modes(int(lmax)))
     pos = np.asarray(positions, dtype=float).reshape(-1, 3)
     arr = np.asarray(x, dtype=dtype).reshape(pos.shape[0], nm)
-    y = np.zeros_like(arr, dtype=dtype)
+    if out is None:
+        y = np.zeros_like(arr, dtype=dtype)
+    else:
+        y = np.asarray(out)
+        if np.dtype(y.dtype) != np.dtype(dtype):
+            raise ValueError(
+                "Periodic exact-leaf output dtype must match the near-field compute dtype: "
+                f"{np.dtype(y.dtype)!r} vs {np.dtype(dtype)!r}."
+            )
+        if y.size != arr.size:
+            raise ValueError(
+                "Periodic exact-leaf output must match the particle-mode state size: "
+                f"{y.size} vs {arr.size}."
+            )
+        if not bool(y.flags.writeable):
+            raise ValueError("Periodic exact-leaf output must be writable.")
+        y = y.reshape(arr.shape)
     if not batches:
         return y.reshape(-1)
     ab5 = translation_ab5_table(int(lmax), dtype=np.complex128)
     leaves = partition.leaves
     for batch in batches:
         shift = np.asarray(batch.lattice_shift, dtype=float).reshape(3)
-        phase = complex(batch.bloch_phase)
+        phase = np.asarray(batch.bloch_phase, dtype=dtype).item()
         source_leaf_indices = np.asarray(batch.source_leaf_indices).reshape(-1)
         destination_leaf_indices = np.asarray(batch.destination_leaf_indices).reshape(-1)
         if source_leaf_indices.size != destination_leaf_indices.size:
@@ -1690,7 +1701,7 @@ def _exact_periodic_leaf_near_apply(
                         float(k),
                         np.asarray(pos[destination_i] - pos[source_i] - shift, dtype=float),
                         ab5=ab5,
-                        radial_lut=None,
+                        radial_lut=radial_lut,
                     )
                     y[destination_i] += phase * np.asarray(block, dtype=dtype) @ arr[source_i]
     return y.reshape(-1)
@@ -2265,14 +2276,16 @@ def apply_multilevel_mlfmm(
         block_cache=block_cache,
     )
     if periodization is not None:
-        y_near = np.asarray(y_near, dtype=near_out_dtype) + _exact_periodic_leaf_near_apply(
+        y_near = _exact_periodic_leaf_near_apply(
             lmax=int(lmax),
             k=float(k),
             positions=np.asarray(positions, dtype=float),
             x=np.asarray(x, dtype=near_out_dtype),
             partition=operators.partition,
             batches=periodization.leaf_batches,
+            radial_lut=radial_lut,
             dtype=near_out_dtype,
+            out=y_near,
         )
     outgoing = [
         np.zeros(

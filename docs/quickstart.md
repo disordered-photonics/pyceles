@@ -40,7 +40,7 @@ config = pcl.SimulationConfig(
     n_medium=1.0 + 0.0j,
     lmax=3,
     source=source,
-    solver_method="gmres",
+    solver_method="bicgstab",
     solver_rtol=1e-6,
     verbose=True,
 )
@@ -65,7 +65,7 @@ config_gpu = pcl.SimulationConfig(
     source=source,
     operator_backend="cupy",
     coupling_backend="pairwise",
-    solver_method="gmres",
+    solver_method="bicgstab",
     compute_dtype="complex64",
     accum_dtype="complex128",
     verbose=True,

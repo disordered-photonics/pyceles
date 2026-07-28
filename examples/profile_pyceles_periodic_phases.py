@@ -507,12 +507,34 @@ def _build_config(
 
 
 def _simulation_run_callable(
-    cfg: pcl.SimulationConfig, particles: Any
+    cfg: pcl.SimulationConfig,
+    particles: Any,
+    state: dict[str, Any],
 ) -> Callable[[], pcl.SimulationResult]:
     def _run() -> pcl.SimulationResult:
-        return pcl.Simulation(cfg, particles=particles).run(include_farfield=False)
+        simulation = pcl.Simulation(cfg, particles=particles)
+        state["simulation"] = simulation
+        return simulation.run(include_farfield=False)
 
     return _run
+
+
+def _prepared_operator_diagnostics(state: dict[str, Any]) -> dict[str, Any] | None:
+    """Return optional hierarchy/memory diagnostics from the completed solve."""
+
+    simulation = state.get("simulation")
+    prepared = None if simulation is None else getattr(simulation, "_prepared_operator_cache", None)
+    coupling = None if prepared is None else getattr(prepared, "coupling", None)
+    if coupling is None:
+        return None
+    diagnostics: dict[str, Any] = {}
+    for name in ("hierarchy_diagnostics", "memory_diagnostics"):
+        method = getattr(coupling, name, None)
+        if callable(method):
+            value = method()
+            if isinstance(value, dict):
+                diagnostics[name] = value
+    return diagnostics or None
 
 
 def main() -> None:
@@ -601,8 +623,6 @@ def main() -> None:
     if args.periodic_method == "rayleigh" and args.cache_mode != "off":
         parser.error("--periodic-method rayleigh requires --cache-mode off")
     if args.coupling_backend == "mlfmm":
-        if args.operator_backend != "numpy":
-            parser.error("--coupling-backend mlfmm currently requires --operator-backend numpy")
         if args.periodic_method != "ewald":
             parser.error("--coupling-backend mlfmm currently requires --periodic-method ewald")
         if args.cache_mode != "off":
@@ -691,11 +711,12 @@ def main() -> None:
         phase_name = f"solve_cache_{'on' if cache_on else 'off'}"
         if not args.quiet:
             print(f"Profiling phase: {phase_name}")
+        simulation_state: dict[str, Any] = {}
         run, phase_summary = _profile_phase(
             phase=phase_name,
             out_dir=out_dir,
             top_n=int(args.top_n),
-            fn=_simulation_run_callable(cfg, particles),
+            fn=_simulation_run_callable(cfg, particles, simulation_state),
             synchronize_gpu=operator_backend == "cupy",
             cuda_profiler_api=bool(args.cuda_profiler_api and operator_backend == "cupy"),
         )
@@ -710,6 +731,7 @@ def main() -> None:
                 "cache_translation_blocks": bool(cache_on),
                 "periodic": _periodic_summary(run.periodic),
                 "simulation_phase_timings_s": solver_phase_timings,
+                "prepared_operator_diagnostics": _prepared_operator_diagnostics(simulation_state),
                 "solver_result": {
                     "method": str(solver.method),
                     "iterations": int(np.asarray(solver.iterations)),
