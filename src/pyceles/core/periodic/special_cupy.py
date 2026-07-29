@@ -16,6 +16,13 @@ from typing import Any
 import numpy as np
 
 from pyceles._optional import import_cupy
+from pyceles.core.periodic.special import (
+    _SHIFTED_DELTA_SERIES_ETA_Z_LIMIT,
+    _SHIFTED_DELTA_SERIES_SCALED_LIMIT,
+    _SHIFTED_DELTA_SERIES_TERMS,
+    _SHIFTED_DELTA_SERIES_X_MIN,
+    upper_gamma_sequence,
+)
 
 _SMALL_COMPLEX = 1.0e-14
 _DEFAULT_WOFZ_TERMS = 11
@@ -209,6 +216,89 @@ def wofz_cupy(z: Any, *, terms: int = _DEFAULT_WOFZ_TERMS, cupy: Any | None = No
     return out_flat.reshape(z_arr.shape)
 
 
+def _shifted_delta_sequence_series_cupy(
+    max_order: int,
+    gamma: Any,
+    z_offset: Any,
+    eta: float,
+    *,
+    upper_gamma: Any | None = None,
+    cupy: Any,
+) -> Any:
+    """Evaluate the exact near-plane generalized-gamma power series on device."""
+    cp = cupy
+    n_max = int(max_order)
+    gamma_arr = cp.asarray(gamma, dtype=cp.complex128).reshape(-1)
+    z_arr = cp.asarray(z_offset, dtype=cp.float64).reshape(-1)
+    x = -(gamma_arr * gamma_arr) / (4.0 * float(eta) * float(eta))
+    if upper_gamma is None:
+        # This standalone helper is a parity/reference API. The production
+        # Ewald kernel receives its exact host-built table through the cached
+        # reciprocal workspace and never takes this host route per matvec.
+        gamma_table = cp.asarray(
+            upper_gamma_sequence(
+                n_max + _SHIFTED_DELTA_SERIES_TERMS,
+                cp.asnumpy(x),
+            ),
+            dtype=cp.complex128,
+        )
+    else:
+        gamma_table = cp.asarray(upper_gamma, dtype=cp.complex128)
+    q = 0.25 * (z_arr[:, None] * gamma_arr[None, :]) ** 2
+    out = cp.broadcast_to(
+        gamma_table[None, :, _SHIFTED_DELTA_SERIES_TERMS:],
+        (int(z_arr.size), int(gamma_arr.size), n_max + 1),
+    ).copy()
+    for term in range(_SHIFTED_DELTA_SERIES_TERMS - 1, -1, -1):
+        out *= q[:, :, None] / float(term + 1)
+        out += gamma_table[None, :, term : term + n_max + 1]
+    return out
+
+
+def _shifted_delta_sequence_cupy_raw(
+    max_order: int,
+    gamma: Any,
+    z_offset: Any,
+    eta: float,
+    *,
+    terms: int,
+    cupy: Any,
+) -> Any:
+    """Evaluate the established Faddeeva recurrence on device."""
+    cp = cupy
+    n_max = int(max_order)
+    gamma_arr = cp.asarray(gamma, dtype=cp.complex128).reshape(-1)
+    z_arr = cp.asarray(z_offset, dtype=cp.float64).reshape(-1)
+    x = -(gamma_arr * gamma_arr) / (4.0 * float(eta) * float(eta))
+    root_x = cp.where(x.real < 0.0, -1j * cp.sqrt(cp.abs(x)), cp.sqrt(x))
+    scaled = z_arr[:, None] * gamma_arr[None, :]
+    z_arg = cp.where(x.real[None, :] < 0.0, scaled, 1j * cp.abs(scaled))
+    z_sq = scaled * scaled
+    x_b = x[None, :]
+    root_b = root_x[None, :]
+    exp_term = cp.exp(-x_b + z_sq / (4.0 * x_b))
+    out = cp.zeros((int(z_arr.size), int(gamma_arr.size), n_max + 1), dtype=cp.complex128)
+    w_minus = wofz_cupy(-z_arg / (2.0 * root_b) + 1j * root_b, terms=int(terms), cupy=cp)
+    w_plus = wofz_cupy(z_arg / (2.0 * root_b) + 1j * root_b, terms=int(terms), cupy=cp)
+    out[:, :, 0] = 0.5 * math.sqrt(math.pi) * exp_term * (w_minus + w_plus)
+    if n_max == 0:
+        return out
+    out[:, :, 1] = 1j * math.sqrt(math.pi) / z_arg * exp_term * (w_minus - w_plus)
+    x_power = 1.0 / x_b
+    for index in range(2, n_max + 1):
+        out[:, :, index] = (
+            4.0
+            / z_sq
+            * (
+                (1.5 - float(index)) * out[:, :, index - 1]
+                - out[:, :, index - 2]
+                + root_b * x_power * exp_term
+            )
+        )
+        x_power /= x_b
+    return out
+
+
 def shifted_delta_sequence_cupy(
     max_order: int,
     gamma: Any,
@@ -219,60 +309,32 @@ def shifted_delta_sequence_cupy(
     terms: int = _DEFAULT_WOFZ_TERMS,
     cupy: Any | None = None,
 ) -> Any:
-    """CuPy version of ``periodic.special.shifted_delta_sequence``.
-
-    The formula and recurrence mirror the NumPy/SciPy reference implementation;
-    only the Faddeeva evaluation is supplied by :func:`wofz_cupy`.
-    """
+    """CuPy version of the stable shifted reciprocal sequence."""
     cp = cupy
     if cp is None:
         cp, _ = import_cupy()
-    n_max = int(max_order)
-    if n_max < 0:
-        raise ValueError(f"`max_order` must be >= 0. Got {max_order!r}.")
-    eta_f = float(eta)
-    if not np.isfinite(eta_f) or eta_f <= 0.0:
-        raise ValueError(f"`eta` must be finite and positive. Got {eta!r}.")
     cz = float(z_offset)
-    if abs(cz) <= 0.0:
+    if cz == 0.0:
         raise ValueError(
             "shifted reciprocal integrals require a nonzero scaled height offset; "
             "use the same-plane reciprocal formula for this pair."
         )
-    gamma_arr = cp.asarray(gamma, dtype=cp.complex128)
+    gamma_arr = cp.asarray(gamma, dtype=cp.complex128).reshape(-1)
     scaled = gamma_arr * cz
     if bool(cp.any(cp.abs(scaled) <= float(singular_atol)).get()):
         raise ValueError(
             "shifted reciprocal integrals are singular in the Rayleigh-threshold limit; "
-            "use the exact same-plane formula when applicable, otherwise avoid evaluating "
-            "exactly at gamma*z_offset == 0 until a limiting formula is implemented."
+            "use the exact same-plane formula when applicable."
         )
-    x = -(gamma_arr * gamma_arr) / (4.0 * eta_f * eta_f)
-    if bool(cp.any(cp.abs(x) <= float(singular_atol)).get()):
-        raise ValueError("shifted reciprocal integrals are singular at gamma=0.")
-    root_x = cp.where(x.real < 0.0, -1j * cp.sqrt(cp.abs(x)), cp.sqrt(x))
-    z_arg = cp.where(x.real < 0.0, scaled, 1j * cp.abs(scaled))
-    z_sq = scaled * scaled
-    exp_term = cp.exp(-x + z_sq / (4.0 * x))
-
-    out = cp.zeros((*gamma_arr.shape, n_max + 1), dtype=cp.complex128)
-    w_minus = wofz_cupy(-z_arg / (2.0 * root_x) + 1j * root_x, terms=int(terms), cupy=cp)
-    w_plus = wofz_cupy(z_arg / (2.0 * root_x) + 1j * root_x, terms=int(terms), cupy=cp)
-    out[..., 0] = 0.5 * math.sqrt(math.pi) * exp_term * (w_minus + w_plus)
-    if n_max == 0:
-        return out
-    out[..., 1] = 1j * math.sqrt(math.pi) / z_arg * exp_term * (w_minus - w_plus)
-    for idx in range(2, n_max + 1):
-        out[..., idx] = (
-            4.0
-            / z_sq
-            * (
-                (1.5 - float(idx)) * out[..., idx - 1]
-                - out[..., idx - 2]
-                + root_x * x ** (1 - idx) * exp_term
-            )
-        )
-    return out
+    result = shifted_delta_sequence_cupy_batched(
+        int(max_order),
+        gamma_arr,
+        cp.asarray([cz], dtype=cp.float64),
+        float(eta),
+        terms=int(terms),
+        cupy=cp,
+    )
+    return result[0]
 
 
 def real_integral_sequence_cupy(
@@ -323,17 +385,11 @@ def shifted_delta_sequence_cupy_batched(
     z_offset: Any,
     eta: float,
     *,
+    singular_atol: float = _SMALL_COMPLEX,
     terms: int = _DEFAULT_WOFZ_TERMS,
     cupy: Any | None = None,
 ) -> Any:
-    """Evaluate shifted reciprocal delta sequences for many heights at once.
-
-    ``gamma`` is flattened to ``(n_gamma,)`` and ``z_offset`` to
-    ``(n_offsets,)``. The result has shape
-    ``(n_offsets, n_gamma, max_order + 1)``. This batched helper performs no
-    device-to-host singularity checks; callers must route exact same-plane or
-    Rayleigh-threshold cases to the same-plane formulas before calling it.
-    """
+    """Evaluate stable shifted reciprocal sequences for many heights on device."""
     cp = cupy
     if cp is None:
         cp, _ = import_cupy()
@@ -345,36 +401,56 @@ def shifted_delta_sequence_cupy_batched(
         raise ValueError(f"`eta` must be finite and positive. Got {eta!r}.")
     gamma_arr = cp.asarray(gamma, dtype=cp.complex128).reshape(-1)
     z_arr = cp.asarray(z_offset, dtype=cp.float64).reshape(-1)
+    if int(z_arr.size) == 0 or int(gamma_arr.size) == 0:
+        return cp.zeros((int(z_arr.size), int(gamma_arr.size), n_max + 1), dtype=cp.complex128)
 
-    x = -(gamma_arr * gamma_arr) / (4.0 * eta_f * eta_f)
-    root_x = cp.where(x.real < 0.0, -1j * cp.sqrt(cp.abs(x)), cp.sqrt(x))
     scaled = z_arr[:, None] * gamma_arr[None, :]
-    z_arg = cp.where(x.real[None, :] < 0.0, scaled, 1j * cp.abs(scaled))
-    z_sq = scaled * scaled
-    x_b = x[None, :]
-    root_b = root_x[None, :]
-    exp_term = cp.exp(-x_b + z_sq / (4.0 * x_b))
-
-    out = cp.zeros((z_arr.size, gamma_arr.size, n_max + 1), dtype=cp.complex128)
-    w_minus = wofz_cupy(-z_arg / (2.0 * root_b) + 1j * root_b, terms=int(terms), cupy=cp)
-    w_plus = wofz_cupy(z_arg / (2.0 * root_b) + 1j * root_b, terms=int(terms), cupy=cp)
-    out[:, :, 0] = 0.5 * math.sqrt(math.pi) * exp_term * (w_minus + w_plus)
-    if n_max == 0:
-        return out
-
-    z_safe = cp.where(cp.abs(z_arg) < _SMALL_COMPLEX, _SMALL_COMPLEX + 0.0j, z_arg)
-    out[:, :, 1] = 1j * math.sqrt(math.pi) / z_safe * exp_term * (w_minus - w_plus)
-    z_sq_safe = cp.where(cp.abs(z_sq) < _SMALL_COMPLEX, _SMALL_COMPLEX + 0.0j, z_sq)
-    for idx in range(2, n_max + 1):
-        out[:, :, idx] = (
-            4.0
-            / z_sq_safe
-            * (
-                (1.5 - float(idx)) * out[:, :, idx - 1]
-                - out[:, :, idx - 2]
-                + root_b * x_b ** (1 - idx) * exp_term
-            )
+    if bool(cp.any(cp.abs(scaled) <= float(singular_atol)).get()):
+        raise ValueError(
+            "shifted reciprocal integrals are singular in the same-plane or "
+            "Rayleigh-threshold limit; route those points to the same-plane "
+            "formula or avoid gamma*z_offset == 0."
         )
+    x = -(gamma_arr * gamma_arr) / (4.0 * eta_f * eta_f)
+    if bool(cp.any(cp.abs(x) <= float(singular_atol)).get()):
+        raise ValueError("shifted reciprocal integrals are singular at gamma=0.")
+    series_mask = (
+        (cp.abs(scaled) <= _SHIFTED_DELTA_SERIES_SCALED_LIMIT)
+        & (cp.abs(eta_f * z_arr[:, None]) <= _SHIFTED_DELTA_SERIES_ETA_Z_LIMIT)
+        & (cp.abs(x)[None, :] > _SHIFTED_DELTA_SERIES_X_MIN)
+    )
+    all_series = bool(cp.all(series_mask).get())
+    if all_series:
+        return _shifted_delta_sequence_series_cupy(n_max, gamma_arr, z_arr, eta_f, cupy=cp)
+
+    series_rows = cp.nonzero(cp.any(series_mask, axis=1))[0]
+    raw_rows = cp.nonzero(cp.any(~series_mask, axis=1))[0]
+    out = cp.zeros((int(z_arr.size), int(gamma_arr.size), n_max + 1), dtype=cp.complex128)
+    if int(series_rows.size):
+        series = _shifted_delta_sequence_series_cupy(
+            n_max,
+            gamma_arr,
+            z_arr[series_rows],
+            eta_f,
+            cupy=cp,
+        )
+        row_mask = series_mask[series_rows]
+        row_values = out[series_rows]
+        row_values[row_mask] = series[row_mask]
+        out[series_rows] = row_values
+    if int(raw_rows.size):
+        raw = _shifted_delta_sequence_cupy_raw(
+            n_max,
+            gamma_arr,
+            z_arr[raw_rows],
+            eta_f,
+            terms=int(terms),
+            cupy=cp,
+        )
+        row_mask = ~series_mask[raw_rows]
+        row_values = out[raw_rows]
+        row_values[row_mask] = raw[row_mask]
+        out[raw_rows] = row_values
     return out
 
 

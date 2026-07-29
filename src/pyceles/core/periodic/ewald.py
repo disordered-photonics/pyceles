@@ -23,7 +23,6 @@ from .scalar import (
     reciprocal_gamma,
     same_plane_z_tolerance,
     structural_sum_m_normalization,
-    upper_gamma_sequence,
 )
 from .shells import (
     PeriodicEwaldConvergenceError,
@@ -33,6 +32,9 @@ from .shells import (
 from .special import (
     shifted_delta_sequence,
     shifted_delta_sequence_batched,
+    shifted_delta_series_max_index,
+    shifted_delta_series_required,
+    upper_gamma_sequence,
     upper_incomplete_gamma_int_or_halfint,
 )
 from .structural import (
@@ -127,13 +129,20 @@ class EwaldShellWorkspace:
         return data
 
     def upper_gamma(self, shell: int, max_index: int) -> Array:
-        key = (int(shell), int(max_index))
+        shell_i = int(shell)
+        max_i = int(max_index)
+        key = (shell_i, max_i)
         cached = self._upper_gamma_cache.get(key)
         if cached is not None:
             return cached
-        data = self.reciprocal_shell(int(shell))
-        gamma_fun = upper_gamma_sequence(int(max_index), data.xarg)
-        out = np.asarray(gamma_fun, dtype=np.complex128)
+        for (cached_shell, cached_max), values in self._upper_gamma_cache.items():
+            if cached_shell == shell_i and cached_max > max_i:
+                return values[:, : max_i + 1]
+        data = self.reciprocal_shell(shell_i)
+        out = np.asarray(upper_gamma_sequence(max_i, data.xarg), dtype=np.complex128)
+        for old_key in tuple(self._upper_gamma_cache):
+            if old_key[0] == shell_i and old_key[1] < max_i:
+                del self._upper_gamma_cache[old_key]
         self._upper_gamma_cache[key] = out
         return out
 
@@ -879,7 +888,19 @@ def _shifted_reciprocal_sum(
                     / denom
                 )
             inner[:, int(n)] = terms
-        delta = shifted_delta_sequence(int(n_values[-1]), gamma, float(c[2]), float(eta))
+        delta_order = int(n_values[-1])
+        needs_series = shifted_delta_series_required(gamma, [float(c[2])], float(eta))
+        delta = shifted_delta_sequence(
+            delta_order,
+            gamma,
+            float(c[2]),
+            float(eta),
+            upper_gamma=(
+                ws.upper_gamma(shell, shifted_delta_series_max_index(delta_order))
+                if needs_series
+                else None
+            ),
+        )
         return complex(
             np.sum(
                 np.exp(-1j * (kgt @ c[:2]))
@@ -1204,12 +1225,12 @@ def ewald_structural_sums_2d_batch(
         gamma = shell_data.gamma
         phase_all = np.exp(-1j * (cxy @ kgt.T))
         exp_m_phi = {m: np.exp(1j * m * phi) for m in range(-order, order + 1)}
-        gamma_fun = ws.upper_gamma(shell, max_same_n)
         inc = np.zeros_like(sums)
 
         same_mask = same_plane_points
         if np.any(same_mask):
             phase = phase_all[same_mask]
+            gamma_fun = ws.upper_gamma(shell, max_same_n)
             for degree in range(order + 1):
                 for m in range(-degree, degree + 1):
                     if (degree - abs(m)) % 2:
@@ -1245,7 +1266,21 @@ def ewald_structural_sums_2d_batch(
         if np.any(shifted_mask):
             phase = phase_all[shifted_mask]
             cz_shifted = np.asarray(cz[shifted_mask], dtype=float)
-            delta_full = shifted_delta_sequence_batched(order, gamma, cz_shifted, float(eta))
+            needs_series = shifted_delta_series_required(gamma, cz_shifted, float(eta))
+            delta_full = shifted_delta_sequence_batched(
+                order,
+                gamma,
+                cz_shifted,
+                float(eta),
+                upper_gamma=(
+                    ws.upper_gamma(
+                        shell,
+                        max(max_same_n, shifted_delta_series_max_index(order)),
+                    )
+                    if needs_series
+                    else None
+                ),
+            )
             gamma_over_k = gamma / float(k)
             for degree in range(order + 1):
                 for m in range(-degree, degree + 1):

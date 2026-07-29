@@ -13,6 +13,10 @@ Array = np.ndarray
 
 _KAMBE_SERIES_TERMS = 32
 _SMALL_COMPLEX = 1e-14
+_SHIFTED_DELTA_SERIES_TERMS = 16
+_SHIFTED_DELTA_SERIES_SCALED_LIMIT = 8.0
+_SHIFTED_DELTA_SERIES_ETA_Z_LIMIT = 0.5
+_SHIFTED_DELTA_SERIES_X_MIN = _SMALL_COMPLEX
 ShiftedReciprocalRegime = Literal["same_plane", "rayleigh_limit", "shifted"]
 
 
@@ -57,6 +61,34 @@ def upper_incomplete_gamma_int_or_halfint(order: float, z: complex) -> complex:
             + zc ** (a - 1.0) * np.exp(-zc)
         )
     return complex((upper_incomplete_gamma_int_or_halfint(a + 1.0, zc) - zc**a * np.exp(-zc)) / a)
+
+
+def upper_gamma_sequence(max_index: int, z: npt.ArrayLike) -> Array:
+    """Return ``Gamma(1/2-n, z)`` for ``n=0..max_index``.
+
+    The negative-real-axis branch is the same one used by the Ewald formulas.
+    Building the sequence once by downward recurrence is substantially cheaper
+    than recursively evaluating every order independently, and the resulting
+    table is also the natural coefficient table for the near-plane shifted
+    reciprocal expansion.
+    """
+    n_max = int(max_index)
+    if n_max < 0:
+        raise ValueError(f"`max_index` must be >= 0. Got {max_index!r}.")
+    z_arr = np.asarray(z, dtype=np.complex128).reshape(-1)
+    out = np.zeros((z_arr.size, n_max + 1), dtype=np.complex128)
+    for row, value in enumerate(z_arr):
+        zc = _branch_complex(complex(value))
+        if zc == 0.0:
+            raise ValueError("The shifted reciprocal upper-gamma sequence is singular at z=0.")
+        out[row, 0] = upper_incomplete_gamma_int_or_halfint(0.5, zc)
+        exp_term = complex(np.exp(-zc))
+        power = zc**-0.5
+        for index in range(n_max):
+            order = -0.5 - float(index)
+            out[row, index + 1] = (out[row, index] - power * exp_term) / order
+            power /= zc
+    return out
 
 
 def reduced_incomplete_gamma_int_or_halfint(order: float, z: complex) -> complex:
@@ -206,6 +238,152 @@ def shifted_reciprocal_regime(
     return "shifted"
 
 
+def shifted_delta_series_max_index(max_order: int) -> int:
+    """Return the upper-gamma order required by the stable shifted series."""
+    order = int(max_order)
+    if order < 0:
+        raise ValueError(f"`max_order` must be >= 0. Got {max_order!r}.")
+    return order + _SHIFTED_DELTA_SERIES_TERMS
+
+
+def _shifted_delta_series_mask(
+    gamma: Array,
+    z_offset: Array,
+    eta: float,
+) -> Array:
+    """Return entries where the generalized-gamma series is preferred.
+
+    The forward recurrence loses roughly two powers of ``gamma*z`` at every
+    order.  The exact power series converges in the complementary small-height
+    region.  The two bounds keep both its scaled argument and its underlying
+    ``eta*z`` expansion comfortably inside the machine-precision regime.
+    """
+    scaled = z_offset[:, None] * gamma[None, :]
+    x = -(gamma * gamma) / (4.0 * float(eta) * float(eta))
+    return np.asarray(
+        (np.abs(scaled) <= _SHIFTED_DELTA_SERIES_SCALED_LIMIT)
+        & (np.abs(float(eta) * z_offset[:, None]) <= _SHIFTED_DELTA_SERIES_ETA_Z_LIMIT)
+        & (np.abs(x)[None, :] > _SHIFTED_DELTA_SERIES_X_MIN),
+        dtype=bool,
+    )
+
+
+def shifted_delta_series_required(
+    gamma: npt.ArrayLike,
+    z_offset: npt.ArrayLike,
+    eta: float,
+) -> bool:
+    """Return whether any shifted entry needs the stable near-plane series."""
+    gamma_arr = np.asarray(gamma, dtype=np.complex128).reshape(-1)
+    z_arr = np.asarray(z_offset, dtype=float).reshape(-1)
+    if gamma_arr.size == 0 or z_arr.size == 0:
+        return False
+    return bool(np.any(_shifted_delta_series_mask(gamma_arr, z_arr, float(eta))))
+
+
+def _shifted_delta_sequence_series(
+    max_order: int,
+    gamma: Array,
+    z_offset: Array,
+    eta: float,
+    *,
+    upper_gamma: Array | None = None,
+) -> Array:
+    r"""Evaluate the exact near-plane generalized-incomplete-gamma series.
+
+    For ``x=-gamma**2/(4*eta**2)`` and ``q=(gamma*z)**2/4``,
+
+    ``Delta_n = sum_j q**j/j! * Gamma(1/2-n-j, x)``.
+
+    This is obtained by expanding the generalized incomplete-gamma integral
+    before applying the ill-conditioned order recurrence.  Horner evaluation
+    needs only one upper-gamma table and remains valid for arbitrary requested
+    order; there is no low-``lmax`` special case.
+    """
+    n_max = int(max_order)
+    gamma_arr = np.asarray(gamma, dtype=np.complex128).reshape(-1)
+    z_arr = np.asarray(z_offset, dtype=float).reshape(-1)
+    required = shifted_delta_series_max_index(n_max)
+    if upper_gamma is None:
+        x = -(gamma_arr * gamma_arr) / (4.0 * float(eta) * float(eta))
+        gamma_table = upper_gamma_sequence(required, x)
+    else:
+        gamma_table = np.asarray(upper_gamma, dtype=np.complex128)
+        expected_rows = int(gamma_arr.size)
+        if gamma_table.ndim != 2 or gamma_table.shape[0] != expected_rows:
+            raise ValueError(
+                f"`upper_gamma` must have shape (n_gamma, n_orders); got {gamma_table.shape!r}."
+            )
+        if gamma_table.shape[1] <= required:
+            raise ValueError(
+                "`upper_gamma` does not contain enough orders for the shifted series: "
+                f"need at least {required + 1}, got {gamma_table.shape[1]}."
+            )
+
+    q = 0.25 * (z_arr[:, None] * gamma_arr[None, :]) ** 2
+    out = np.broadcast_to(
+        gamma_table[None, :, _SHIFTED_DELTA_SERIES_TERMS : required + 1],
+        (z_arr.size, gamma_arr.size, n_max + 1),
+    ).copy()
+    for term in range(_SHIFTED_DELTA_SERIES_TERMS - 1, -1, -1):
+        out *= q[:, :, None] / float(term + 1)
+        out += gamma_table[None, :, term : term + n_max + 1]
+    return out
+
+
+def _shifted_delta_sequence_batched_raw(
+    max_order: int,
+    gamma: npt.ArrayLike,
+    z_offset: npt.ArrayLike,
+    eta: float,
+    *,
+    singular_atol: float = _SMALL_COMPLEX,
+) -> Array:
+    """Evaluate the established shifted recurrence away from its removable limit."""
+    n_max = int(max_order)
+    gamma_arr = np.asarray(gamma, dtype=np.complex128).reshape(-1)
+    z_arr = np.asarray(z_offset, dtype=float).reshape(-1)
+    out = np.zeros((z_arr.size, gamma_arr.size, n_max + 1), dtype=np.complex128)
+    if z_arr.size == 0 or gamma_arr.size == 0:
+        return out
+    scaled = z_arr[:, None] * gamma_arr[None, :]
+    if np.any(np.abs(scaled) <= float(singular_atol)):
+        raise ValueError(
+            "shifted reciprocal integrals are singular in the same-plane or "
+            "Rayleigh-threshold limit; route those points to the same-plane "
+            "formula or avoid gamma*z_offset == 0."
+        )
+    x = -(gamma_arr * gamma_arr) / (4.0 * float(eta) * float(eta))
+    if np.any(np.abs(x) <= float(singular_atol)):
+        raise ValueError("shifted reciprocal integrals are singular at gamma=0.")
+    root_x = np.where(x.real < 0.0, -1j * np.sqrt(np.abs(x)), np.sqrt(x))
+    z_arg = np.where(x.real[None, :] < 0.0, scaled, 1j * np.abs(scaled))
+    z_sq = scaled * scaled
+    x_b = x[None, :]
+    root_b = root_x[None, :]
+    exp_term = np.exp(-x_b + z_sq / (4.0 * x_b))
+
+    w_minus = special.wofz(-z_arg / (2.0 * root_b) + 1j * root_b)
+    w_plus = special.wofz(z_arg / (2.0 * root_b) + 1j * root_b)
+    out[:, :, 0] = 0.5 * math.sqrt(math.pi) * exp_term * (w_minus + w_plus)
+    if n_max == 0:
+        return out
+    out[:, :, 1] = 1j * math.sqrt(math.pi) / z_arg * exp_term * (w_minus - w_plus)
+    x_power = 1.0 / x_b
+    for index in range(2, n_max + 1):
+        out[:, :, index] = (
+            4.0
+            / z_sq
+            * (
+                (1.5 - float(index)) * out[:, :, index - 1]
+                - out[:, :, index - 2]
+                + root_b * x_power * exp_term
+            )
+        )
+        x_power /= x_b
+    return out
+
+
 def shifted_delta_sequence(
     max_order: int,
     gamma: npt.ArrayLike,
@@ -213,66 +391,23 @@ def shifted_delta_sequence(
     eta: float,
     *,
     singular_atol: float = _SMALL_COMPLEX,
+    upper_gamma: npt.ArrayLike | None = None,
 ) -> Array:
-    """Evaluate shifted reciprocal-space Ewald integrals for nonzero height offsets.
-
-    This is the Kambe shifted reciprocal integral sequence used by the 2D
-    periodic spherical-wave Ewald sums. Exact same-plane pairs must use the
-    lower-dimensional same-plane formula. Near ``gamma * z_offset == 0`` the
-    shifted recurrence is singular and needs a separate limiting prescription,
-    so this helper rejects that Rayleigh-threshold limit explicitly.
-    """
-    n_max = int(max_order)
-    if n_max < 0:
-        raise ValueError(f"`max_order` must be >= 0. Got {max_order!r}.")
-    eta_f = float(eta)
-    if not np.isfinite(eta_f) or eta_f <= 0.0:
-        raise ValueError(f"`eta` must be finite and positive. Got {eta!r}.")
-    cz = float(z_offset)
-    gamma_arr = np.asarray(gamma, dtype=np.complex128)
-    regime = shifted_reciprocal_regime(
-        gamma_arr,
-        cz,
-        rayleigh_atol=float(singular_atol),
-    )
-    if regime == "same_plane":
+    """Evaluate shifted reciprocal-space Ewald integrals for one height."""
+    if float(z_offset) == 0.0:
         raise ValueError(
-            "shifted reciprocal integrals require a nonzero scaled height offset; "
+            "shifted reciprocal integrals require a nonzero height offset; "
             "use the same-plane reciprocal formula for this pair."
         )
-    scaled = gamma_arr * cz
-    if regime == "rayleigh_limit":
-        raise ValueError(
-            "shifted reciprocal integrals are singular in the Rayleigh-threshold limit; "
-            "use the exact same-plane formula when applicable, otherwise avoid evaluating "
-            "exactly at gamma*z_offset == 0 until a limiting formula is implemented."
-        )
-    x = -(gamma_arr * gamma_arr) / (4.0 * eta_f * eta_f)
-    if np.any(np.abs(x) <= float(singular_atol)):
-        raise ValueError("shifted reciprocal integrals are singular at gamma=0.")
-    root_x = np.where(x.real < 0.0, -1j * np.sqrt(np.abs(x)), np.sqrt(x))
-    z_arg = np.where(x.real < 0.0, scaled, 1j * np.abs(scaled))
-    z_sq = scaled * scaled
-    exp_term = np.exp(-x + z_sq / (4.0 * x))
-
-    out = np.zeros((*gamma_arr.shape, n_max + 1), dtype=np.complex128)
-    w_minus = special.wofz(-z_arg / (2.0 * root_x) + 1j * root_x)
-    w_plus = special.wofz(z_arg / (2.0 * root_x) + 1j * root_x)
-    out[..., 0] = 0.5 * math.sqrt(math.pi) * exp_term * (w_minus + w_plus)
-    if n_max == 0:
-        return out
-    out[..., 1] = 1j * math.sqrt(math.pi) / z_arg * exp_term * (w_minus - w_plus)
-    for idx in range(2, n_max + 1):
-        out[..., idx] = (
-            4.0
-            / z_sq
-            * (
-                (1.5 - float(idx)) * out[..., idx - 1]
-                - out[..., idx - 2]
-                + root_x * x ** (1 - idx) * exp_term
-            )
-        )
-    return out
+    result = shifted_delta_sequence_batched(
+        int(max_order),
+        gamma,
+        np.asarray([float(z_offset)]),
+        float(eta),
+        singular_atol=singular_atol,
+        upper_gamma=upper_gamma,
+    )
+    return np.asarray(result[0], dtype=np.complex128)
 
 
 def shifted_delta_sequence_batched(
@@ -282,14 +417,13 @@ def shifted_delta_sequence_batched(
     eta: float,
     *,
     singular_atol: float = _SMALL_COMPLEX,
+    upper_gamma: npt.ArrayLike | None = None,
 ) -> Array:
     """Evaluate shifted reciprocal Ewald integrals for many height offsets.
 
-    ``gamma`` is flattened to ``(n_gamma,)`` and ``z_offset`` to
-    ``(n_offsets,)``. The result has shape
-    ``(n_offsets, n_gamma, max_order + 1)``. Callers should route exact
-    same-plane points to the same-plane reciprocal formula before using this
-    helper.
+    The ordinary Faddeeva recurrence is retained where it is well conditioned.
+    Near a plane, the exact generalized-incomplete-gamma power series removes
+    the repeated ``(gamma*z)**-2`` cancellation without extra Ewald evaluations.
     """
     n_max = int(max_order)
     if n_max < 0:
@@ -309,34 +443,43 @@ def shifted_delta_sequence_batched(
             "Rayleigh-threshold limit; route those points to the same-plane "
             "formula or avoid gamma*z_offset == 0."
         )
-
     x = -(gamma_arr * gamma_arr) / (4.0 * eta_f * eta_f)
     if np.any(np.abs(x) <= float(singular_atol)):
         raise ValueError("shifted reciprocal integrals are singular at gamma=0.")
-    root_x = np.where(x.real < 0.0, -1j * np.sqrt(np.abs(x)), np.sqrt(x))
-    z_arg = np.where(x.real[None, :] < 0.0, scaled, 1j * np.abs(scaled))
-    z_sq = scaled * scaled
-    x_b = x[None, :]
-    root_b = root_x[None, :]
-    exp_term = np.exp(-x_b + z_sq / (4.0 * x_b))
 
-    w_minus = special.wofz(-z_arg / (2.0 * root_b) + 1j * root_b)
-    w_plus = special.wofz(z_arg / (2.0 * root_b) + 1j * root_b)
-    out[:, :, 0] = 0.5 * math.sqrt(math.pi) * exp_term * (w_minus + w_plus)
-    if n_max == 0:
+    series_mask = _shifted_delta_series_mask(gamma_arr, z_arr, eta_f)
+    series_rows = np.flatnonzero(np.any(series_mask, axis=1))
+    if series_rows.size:
+        series = _shifted_delta_sequence_series(
+            n_max,
+            gamma_arr,
+            z_arr[series_rows],
+            eta_f,
+            upper_gamma=None if upper_gamma is None else np.asarray(upper_gamma),
+        )
+        row_values = out[series_rows]
+        row_mask = series_mask[series_rows]
+        row_values[row_mask] = series[row_mask]
+        out[series_rows] = row_values
+    if np.all(series_mask):
         return out
 
-    out[:, :, 1] = 1j * math.sqrt(math.pi) / z_arg * exp_term * (w_minus - w_plus)
-    for idx in range(2, n_max + 1):
-        out[:, :, idx] = (
-            4.0
-            / z_sq
-            * (
-                (1.5 - float(idx)) * out[:, :, idx - 1]
-                - out[:, :, idx - 2]
-                + root_b * x_b ** (1 - idx) * exp_term
-            )
+    # A near-coplanar row usually needs the series for every reciprocal term.
+    # Restrict each vectorized evaluator to rows that use it so one exceptional
+    # pair does not double the work for an otherwise ordinary particle batch.
+    raw_rows = np.flatnonzero(np.any(~series_mask, axis=1))
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        raw = _shifted_delta_sequence_batched_raw(
+            n_max,
+            gamma_arr,
+            z_arr[raw_rows],
+            eta_f,
+            singular_atol=singular_atol,
         )
+    row_values = out[raw_rows]
+    row_mask = ~series_mask[raw_rows]
+    row_values[row_mask] = raw[row_mask]
+    out[raw_rows] = row_values
     return out
 
 
@@ -345,6 +488,9 @@ __all__ = [
     "reduced_incomplete_gamma_int_or_halfint",
     "shifted_delta_sequence",
     "shifted_delta_sequence_batched",
+    "shifted_delta_series_max_index",
+    "shifted_delta_series_required",
     "shifted_reciprocal_regime",
+    "upper_gamma_sequence",
     "upper_incomplete_gamma_int_or_halfint",
 ]

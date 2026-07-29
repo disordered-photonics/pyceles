@@ -12,6 +12,7 @@ from pyceles.core.periodic.special import (
     reduced_incomplete_gamma_int_or_halfint,
     shifted_delta_sequence,
     shifted_reciprocal_regime,
+    upper_gamma_sequence,
     upper_incomplete_gamma_int_or_halfint,
 )
 
@@ -104,3 +105,38 @@ def test_shifted_reciprocal_regime_classifies_scaled_offsets() -> None:
     assert shifted_reciprocal_regime(np.array([1.0 + 0.0j]), 0.0) == "same_plane"
     assert shifted_reciprocal_regime(np.array([1.0e-16 + 0.0j]), 0.5) == "rayleigh_limit"
     assert shifted_reciprocal_regime(np.array([0.7 + 0.1j]), 0.6) == "shifted"
+
+
+def test_upper_gamma_sequence_matches_individual_branch_values() -> None:
+    arguments = np.asarray([-6.7 + 0.0j, 74.0 + 0.0j, 1.3 - 4.4j], dtype=np.complex128)
+    got = upper_gamma_sequence(12, arguments)
+    expected = np.asarray(
+        [
+            [upper_incomplete_gamma_int_or_halfint(0.5 - n, value) for n in range(13)]
+            for value in arguments
+        ],
+        dtype=np.complex128,
+    )
+    np.testing.assert_allclose(got, expected, rtol=3e-14, atol=3e-14)
+
+
+def test_shifted_delta_sequence_uses_exact_near_plane_series_at_high_order() -> None:
+    eta = 1.1588807813266307e-3
+    gamma = np.asarray([0.006 + 0.0j, 0.02j], dtype=np.complex128)
+    z_offset = 2.9574860172942863e-4
+    max_order = 12
+
+    got = shifted_delta_sequence(max_order, gamma, z_offset=z_offset, eta=eta)
+
+    x = -(gamma * gamma) / (4.0 * eta * eta)
+    q = 0.25 * (gamma * z_offset) ** 2
+    gamma_table = upper_gamma_sequence(max_order + 30, x)
+    expected = np.zeros_like(got)
+    term = np.ones_like(gamma)
+    for power in range(31):
+        if power:
+            term *= q / float(power)
+        expected += term[:, None] * gamma_table[:, power : power + max_order + 1]
+
+    np.testing.assert_allclose(got, expected, rtol=2e-13, atol=2e-13)
+    assert np.max(np.abs(got)) < 1.0e4

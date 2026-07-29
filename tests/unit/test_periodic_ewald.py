@@ -493,3 +493,41 @@ def test_resolve_ewald_shell_counts_returns_bounded_probe_counts():
     assert 0 <= counts.real_shells <= 8
     assert 0 <= counts.reciprocal_shells <= 8
     assert counts.selected_by in {"probe", "fallback", "max_shells_reference_failed"}
+
+
+def test_near_coplanar_structural_sum_has_smooth_same_plane_limit() -> None:
+    source = np.asarray([-1257.03296776, 2173.52998709, 3841.006126], dtype=float)
+    dz = 2.9574860172942863e-4
+    destination = np.asarray([-7.63834228, 2721.94247985, source[2] + dz], dtype=float)
+    mirrored = destination.copy()
+    mirrored[2] = source[2] - dz
+    same_plane = destination.copy()
+    same_plane[2] = source[2]
+    k = 2.0 * np.pi / 632.8
+    lattice = pcl.RectangularLattice2D(6117.812563520112, 6117.812563520112)
+    eta = 1.1588807813266307e-3
+
+    values = ewald_structural_sums_2d_batch(
+        lmax_struct=3,
+        k=k,
+        destinations=np.stack([destination, mirrored, same_plane]),
+        source=source,
+        lattice=lattice,
+        k_parallel=np.zeros(2),
+        eta=eta,
+        real_shells=12,
+        reciprocal_shells=12,
+        max_shells=12,
+    )
+
+    assert np.linalg.norm(values[0]) < 1.0
+    np.testing.assert_allclose(values[0], values[2], rtol=2e-5, atol=3e-7)
+    for degree in range(7):
+        for order in range(-degree, degree + 1):
+            parity = -1.0 if (degree - abs(order)) % 2 else 1.0
+            np.testing.assert_allclose(
+                values[1, degree, order + 6],
+                parity * values[0, degree, order + 6],
+                rtol=2e-11,
+                atol=2e-11,
+            )

@@ -7,8 +7,6 @@ import math
 import numpy as np
 from scipy import special
 
-from .special import upper_incomplete_gamma_int_or_halfint
-
 Array = np.ndarray
 
 
@@ -85,17 +83,6 @@ def reciprocal_gamma(k: float, rho: Array) -> Array:
     gamma = np.sqrt((float(k) * float(k) - np.asarray(rho, dtype=float) ** 2) + 0.0j)
     gamma[np.where(gamma == 0.0)[0]] += 1.0e-10j
     return np.asarray(gamma, dtype=np.complex128)
-
-
-def upper_gamma_sequence(max_index: int, z: Array) -> Array:
-    """Return `Gamma(1/2-n, z)` for `n = 0..max_index` and vectorized `z`."""
-    n_max = int(max_index)
-    z_arr = np.asarray(z, dtype=np.complex128).reshape(-1)
-    out = np.zeros((z_arr.size, n_max + 1), dtype=np.complex128)
-    for idx, zc in enumerate(z_arr):
-        for n in range(n_max + 1):
-            out[idx, n] = upper_incomplete_gamma_int_or_halfint(0.5 - float(n), zc)
-    return out
 
 
 def real_integral_sequence(degree: int, eta: float, k: float, radii: Array) -> Array:

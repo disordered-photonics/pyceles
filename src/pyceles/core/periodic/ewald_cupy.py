@@ -23,6 +23,12 @@ from pyceles.core.periodic.scalar import (
     factorial_int,
     same_plane_z_tolerance,
     structural_sum_m_normalization,
+)
+from pyceles.core.periodic.special import (
+    _SHIFTED_DELTA_SERIES_ETA_Z_LIMIT,
+    _SHIFTED_DELTA_SERIES_SCALED_LIMIT,
+    _SHIFTED_DELTA_SERIES_TERMS,
+    _SHIFTED_DELTA_SERIES_X_MIN,
     upper_gamma_sequence,
 )
 from pyceles.core.periodic.special_cupy import (
@@ -61,7 +67,9 @@ class CupyShiftedReciprocalTables:
     Term tables use shape ``(n_terms, order + 1)`` except ``azimuth``, whose
     second axis spans ``m=-order..order``.  ``prefactor`` is indexed by the
     flattened structural entry, while ``inverse_denominator`` appends the
-    recurrence ``(n, s)`` axes.  None of these arrays scale with particle count.
+    recurrence ``(n, s)`` axes. ``upper_gamma`` stores the pair-invariant
+    near-plane Horner coefficients. None of these arrays scale with particle
+    count.
     """
 
     azimuth: Any
@@ -70,6 +78,7 @@ class CupyShiftedReciprocalTables:
     root_x: Any
     prefactor: Any
     inverse_denominator: Any
+    upper_gamma: Any
 
 
 @dataclass
@@ -135,17 +144,25 @@ class CupyEwaldShellWorkspace:
 
     def upper_gamma(self, shell: int, max_index: int) -> Any:
         """Return the same-plane upper-gamma sequence on the active device."""
-        key = (int(shell), int(max_index))
+        shell_i = int(shell)
+        max_i = int(max_index)
+        key = (shell_i, max_i)
         cached = self.upper_gamma_cache.get(key)
         if cached is not None:
             return cached
+        for (cached_shell, cached_max), values in self.upper_gamma_cache.items():
+            if cached_shell == shell_i and cached_max > max_i:
+                return values[:, : max_i + 1]
         cp = self.cupy
-        shell_data = self.reciprocal_shell(int(shell))
+        shell_data = self.reciprocal_shell(shell_i)
         # The half-integer/integer upper-gamma branch helper remains the NumPy
-        # reference implementation.  It depends only on reciprocal shell and eta,
+        # reference implementation. It depends only on reciprocal shell and eta,
         # so stage it once instead of invoking the host in the hot pair loop.
-        out_np = upper_gamma_sequence(int(max_index), cp.asnumpy(shell_data.xarg))
+        out_np = upper_gamma_sequence(max_i, cp.asnumpy(shell_data.xarg))
         out = cp.asarray(out_np, dtype=cp.complex128)
+        for old_key in tuple(self.upper_gamma_cache):
+            if old_key[0] == shell_i and old_key[1] < max_i:
+                del self.upper_gamma_cache[old_key]
         self.upper_gamma_cache[key] = out
         return out
 
@@ -243,6 +260,15 @@ class CupyEwaldShellWorkspace:
                         )
                         inverse_denominator[entry, n, s_val] = 1.0 / float(denominator)
 
+        # The near-plane delta sequence is an exact power series whose
+        # coefficients are the same upper incomplete gamma values used by the
+        # same-plane formula.  Stage them once per reciprocal term; the hot
+        # kernel then needs only a short Horner recurrence and no additional
+        # Faddeeva evaluations.
+        upper_gamma_np = upper_gamma_sequence(
+            order_i + _SHIFTED_DELTA_SERIES_TERMS,
+            cp.asnumpy(terms.xarg),
+        )
         out = CupyShiftedReciprocalTables(
             azimuth=azimuth,
             rho_powers=cp.ascontiguousarray(rho_powers),
@@ -250,6 +276,7 @@ class CupyEwaldShellWorkspace:
             root_x=cp.ascontiguousarray(root_x),
             prefactor=cp.asarray(prefactor, dtype=cp.complex128),
             inverse_denominator=cp.asarray(inverse_denominator, dtype=cp.float64),
+            upper_gamma=cp.asarray(upper_gamma_np, dtype=cp.complex128),
         )
         self.shifted_reciprocal_cache[key] = out
         return out
@@ -567,6 +594,8 @@ __device__ void _pyceles_shifted_delta_sequence(
     const complex<double> x,
     const complex<double> root_x,
     const double z_offset,
+    const bool series_height_eligible,
+    const complex<double>* upper_gamma,
     const double* quadrature,
     const int terms,
     const double h,
@@ -574,9 +603,33 @@ __device__ void _pyceles_shifted_delta_sequence(
     complex<double>* delta
 ) {
     const complex<double> scaled = gamma * z_offset;
+    const complex<double> z_sq = scaled * scaled;
+    const double scaled_abs_sq =
+        scaled.real() * scaled.real() + scaled.imag() * scaled.imag();
+    const bool use_series =
+        series_height_eligible
+        && abs(x) > PYCELES_SHIFTED_SERIES_X_MIN
+        && scaled_abs_sq <= (PYCELES_SHIFTED_SERIES_SCALED_LIMIT
+            * PYCELES_SHIFTED_SERIES_SCALED_LIMIT);
+
+    if (use_series) {
+        // Exact generalized-incomplete-gamma expansion:
+        // Delta_n = sum_j ((gamma*z)^2/4)^j / j! * Gamma(1/2-n-j, x).
+        // Horner evaluation avoids the removable (gamma*z)^-2 recurrence and
+        // uses only pair-invariant coefficients staged during preparation.
+        const complex<double> q = 0.25 * z_sq;
+        for (int n = 0; n <= order; ++n) {
+            complex<double> value = upper_gamma[PYCELES_SHIFTED_SERIES_TERMS + n];
+            for (int j = PYCELES_SHIFTED_SERIES_TERMS - 1; j >= 0; --j) {
+                value = upper_gamma[j + n] + q * value / (double)(j + 1);
+            }
+            delta[n] = value;
+        }
+        return;
+    }
+
     const complex<double> z_arg =
         x.real() < 0.0 ? scaled : complex<double>(0.0, abs(scaled));
-    const complex<double> z_sq = scaled * scaled;
     const complex<double> exp_term = exp(-x + z_sq / (4.0 * x));
     const complex<double> w_minus = _wtrap_wofz_one(
         -z_arg / (2.0 * root_x) + complex<double>(0.0, 1.0) * root_x,
@@ -623,15 +676,19 @@ extern "C" __global__ void pyceles_ewald_shifted_reciprocal_structural_c128(
     const complex<double>* gamma_powers,
     const complex<double>* prefactor,
     const double* inverse_denominator,
+    const complex<double>* upper_gamma,
+    const int upper_gamma_stride,
     complex<double>* sums,
     const double k,
+    const double eta,
     const double* quadrature,
     const int terms,
     const double h,
     const double H
 ) {
     const long long pair = (long long)blockIdx.x;
-    if (pair >= n_pairs || same_plane[pair] != 0 || order < 0 || order > PYCELES_SHIFTED_MAX_ORDER) {
+    if (pair >= n_pairs || same_plane[pair] != 0
+        || order < 0 || order > PYCELES_SHIFTED_MAX_ORDER) {
         return;
     }
     const int tid = (int)threadIdx.x;
@@ -655,6 +712,8 @@ extern "C" __global__ void pyceles_ewald_shifted_reciprocal_structural_c128(
     const double cx = c[3 * pair + 0];
     const double cy = c[3 * pair + 1];
     const double cz = c[3 * pair + 2];
+    const bool series_height_eligible =
+        fabs(eta * cz) <= PYCELES_SHIFTED_SERIES_ETA_Z_LIMIT;
     const int lane = tid & 31;
 
     // The 128-thread launch consists of complete warps.  Each lane retains one
@@ -681,6 +740,8 @@ extern "C" __global__ void pyceles_ewald_shifted_reciprocal_structural_c128(
                 xarg[term_idx],
                 root_x[term_idx],
                 cz,
+                series_height_eligible,
+                upper_gamma + term_idx * (long long)upper_gamma_stride,
                 quadrature,
                 terms,
                 h,
@@ -750,6 +811,13 @@ def _shifted_reciprocal_structural_raw_kernel(max_order: int) -> Any:
         _WTRAP_DEVICE_CUDA_SOURCE
         + _EWALD_DEVICE_CONSTANTS
         + f"\n#define PYCELES_SHIFTED_MAX_ORDER {order}\n"
+        + f"#define PYCELES_SHIFTED_SERIES_TERMS {_SHIFTED_DELTA_SERIES_TERMS}\n"
+        + (
+            "#define PYCELES_SHIFTED_SERIES_SCALED_LIMIT "
+            f"{_SHIFTED_DELTA_SERIES_SCALED_LIMIT:.17g}\n"
+        )
+        + (f"#define PYCELES_SHIFTED_SERIES_ETA_Z_LIMIT {_SHIFTED_DELTA_SERIES_ETA_Z_LIMIT:.17g}\n")
+        + (f"#define PYCELES_SHIFTED_SERIES_X_MIN {_SHIFTED_DELTA_SERIES_X_MIN:.17g}\n")
         + _SHIFTED_RECIPROCAL_STRUCTURAL_CUDA_SOURCE
     )
     return cp.RawKernel(source, "pyceles_ewald_shifted_reciprocal_structural_c128")
@@ -799,8 +867,11 @@ def _add_shifted_reciprocal_structural_sums_cupy(
             shifted_tables.gamma_powers,
             shifted_tables.prefactor,
             shifted_tables.inverse_denominator,
+            shifted_tables.upper_gamma,
+            np.int32(int(order) + _SHIFTED_DELTA_SERIES_TERMS + 1),
             sums,
             np.float64(float(k)),
+            np.float64(float(workspace.eta)),
             quadrature,
             np.int32(terms),
             np.float64(h),

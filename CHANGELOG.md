@@ -49,6 +49,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   GMRES for periodic systems, reflecting their measured convergence behavior.
 
 ### Fixed
+- Stabilized near-coplanar shifted reciprocal Ewald sums with an exact
+  generalized-incomplete-gamma series. NumPy reuses cached upper-gamma shell
+  coefficients, while the fused CuPy kernel evaluates the same short Horner
+  expansion in-place without extra Ewald passes or host fallback.
 - Tightened periodized MLFMM ownership and memory use: residual-image Hankel
   tables are now bounded by the leaf pairs that are actually evaluated, NumPy
   accumulates periodic exact-leaf corrections into the existing near result,
