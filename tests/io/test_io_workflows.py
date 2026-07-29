@@ -7,7 +7,7 @@ from pyceles.core.fields import PlaneWave
 from pyceles.core.particles import ParticleCollection, Sphere, spheres_from_arrays
 from pyceles.io.workflows import load_simulation_h5, save_simulation_h5
 from pyceles.linear.solvers import LinearSolveResult
-from pyceles.postprocessing.farfield import FarFieldPatterns
+from pyceles.postprocessing.farfield import FarFieldPatterns, PowerBalance
 from pyceles.postprocessing.nearfield import NearFieldSlice
 from pyceles.simulation import (
     ResultRetention,
@@ -93,12 +93,32 @@ def test_save_simulation_h5_writes_basis_and_diagnostics(tmp_path):
             method="gmres",
             residual_history=[np.array([1.0, 0.5], dtype=float), np.array([1.0, 0.5], dtype=float)],
             rhs_count=2,
+            converged_reason=np.asarray(["converged", "converged"], dtype=object),
         ),
         solver_result_basis=None,
         farfield=ff,
         farfield_basis=ff_basis,
-        power={"T": 1.0, "R": 0.0},
-        power_basis={"te": {"T": 1.0}, "tm": {"T": 1.0}},
+        power=PowerBalance(
+            incident_power=1.0,
+            reflected_power=0.0,
+            transmitted_power=1.0,
+            local_absorbed_power=0.0,
+            local_absorbed_power_per_particle=np.zeros((1,), dtype=float),
+        ),
+        power_basis={
+            "te": PowerBalance(
+                incident_power=1.0,
+                reflected_power=0.0,
+                transmitted_power=1.0,
+                local_absorbed_power=0.0,
+            ),
+            "tm": PowerBalance(
+                incident_power=1.0,
+                reflected_power=0.0,
+                transmitted_power=1.0,
+                local_absorbed_power=0.0,
+            ),
+        },
         cross_sections={"C_sca": 1.0, "C_ext": 2.0, "C_abs": 1.0},
         cross_sections_basis={"te": {"C_sca": 1.0}, "tm": {"C_sca": 1.0}},
         unpolarized={"cross_sections": {"C_sca": 1.0}},
@@ -137,6 +157,10 @@ def test_save_simulation_h5_writes_basis_and_diagnostics(tmp_path):
         assert "cross_sections" in h5["diagnostics"]
         assert "power_basis" in h5["diagnostics"]
         assert "unpolarized" in h5["diagnostics"]
+        np.testing.assert_array_equal(
+            h5["solution"].attrs["converged_reason"],
+            np.asarray([b"converged", b"converged"]),
+        )
 
     loaded = load_simulation_h5(out)
     assert "geometry" in loaded

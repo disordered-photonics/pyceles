@@ -33,7 +33,7 @@ import re
 import subprocess
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import numpy as np
 
@@ -824,12 +824,16 @@ def _build_summary(
                 d_par = {
                     "R": float(tm["R"] - float(mstm_rta["parallel"]["reflectance"])),
                     "T": float(tm["T"] - float(mstm_rta["parallel"]["transmittance"])),
-                    "A": float(tm["A"] - float(mstm_rta["parallel"]["absorptance"])),
+                    "A": float(
+                        tm["flux_defect_fraction"] - float(mstm_rta["parallel"]["absorptance"])
+                    ),
                 }
                 d_perp = {
                     "R": float(te["R"] - float(mstm_rta["perpendicular"]["reflectance"])),
                     "T": float(te["T"] - float(mstm_rta["perpendicular"]["transmittance"])),
-                    "A": float(te["A"] - float(mstm_rta["perpendicular"]["absorptance"])),
+                    "A": float(
+                        te["flux_defect_fraction"] - float(mstm_rta["perpendicular"]["absorptance"])
+                    ),
                 }
                 summary["comparison"] = {
                     "mapping_convention": {
@@ -848,7 +852,7 @@ def _build_summary(
                             - float(mstm_rta["unpolarized"]["transmittance"])
                         ),
                         "A": float(
-                            pyceles_output["unpolarized"]["A"]
+                            pyceles_output["unpolarized"]["flux_defect_fraction"]
                             - float(mstm_rta["unpolarized"]["absorptance"])
                         ),
                     },
@@ -859,6 +863,11 @@ def _build_summary(
 
 
 def _save_pyceles_periodic_npz(path: Path, periodic: Any) -> None:
+    power_mapping = {
+        key: np.asarray(value)
+        for key, value in periodic.power.to_mapping().items()
+        if value is not None
+    }
     np.savez_compressed(
         path,
         lattice_a1=np.asarray(periodic.lattice_a1, dtype=float),
@@ -871,12 +880,10 @@ def _save_pyceles_periodic_npz(path: Path, periodic: Any) -> None:
         order_propagating=np.asarray(periodic.order_propagating, dtype=bool),
         reflected_amplitudes=np.asarray(periodic.reflected_amplitudes, dtype=np.complex128),
         transmitted_amplitudes=np.asarray(periodic.transmitted_amplitudes, dtype=np.complex128),
-        reflected_power_per_order=np.asarray(periodic.reflected_power_per_order, dtype=float),
-        transmitted_power_per_order=np.asarray(periodic.transmitted_power_per_order, dtype=float),
-        incident_power_per_area=np.asarray(float(periodic.incident_power_per_area), dtype=float),
-        reflectance=np.asarray(float(periodic.reflectance), dtype=float),
-        transmittance=np.asarray(float(periodic.transmittance), dtype=float),
-        absorptance=np.asarray(float(periodic.absorptance), dtype=float),
+        reflected_flux_per_order=np.asarray(periodic.reflected_flux_per_order, dtype=float),
+        transmitted_flux_per_order=np.asarray(periodic.transmitted_flux_per_order, dtype=float),
+        incident_flux=np.asarray(float(periodic.incident_flux), dtype=float),
+        **cast(Any, power_mapping),
     )
 
 
@@ -970,12 +977,21 @@ def _run_pyceles_case(
         periodic_payload = run.periodic
         npz_path = outdir_case / f"pyceles_orders_{pol.lower()}.npz"
         _save_pyceles_periodic_npz(npz_path, periodic_payload)
+        power = periodic_payload.power
+        if (
+            power.reflectance is None
+            or power.transmittance is None
+            or power.flux_defect_fraction is None
+        ):
+            raise RuntimeError("Periodic power balance is missing normalized flux diagnostics.")
         key = pol.lower()
         channels[key] = {
             "npz": str(npz_path),
-            "R": float(periodic_payload.reflectance),
-            "T": float(periodic_payload.transmittance),
-            "A": float(periodic_payload.absorptance),
+            "R": float(power.reflectance),
+            "T": float(power.transmittance),
+            "flux_defect_fraction": float(power.flux_defect_fraction),
+            "local_absorptance": power.local_absorptance,
+            "closure_error_fraction": power.closure_error_fraction,
             "order_count": int(np.asarray(periodic_payload.order_mn).shape[0]),
             "propagating_count": int(
                 np.count_nonzero(np.asarray(periodic_payload.order_propagating))
@@ -1072,7 +1088,10 @@ def _run_pyceles_case(
         "unpolarized": {
             "R": float(0.5 * (channels["te"]["R"] + channels["tm"]["R"])),
             "T": float(0.5 * (channels["te"]["T"] + channels["tm"]["T"])),
-            "A": float(0.5 * (channels["te"]["A"] + channels["tm"]["A"])),
+            "flux_defect_fraction": float(
+                0.5
+                * (channels["te"]["flux_defect_fraction"] + channels["tm"]["flux_defect_fraction"])
+            ),
         },
         "nearfield": nearfield_artifacts,
         "nearfield_bmax_policy": nearfield_bmax_policy,

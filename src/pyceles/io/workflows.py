@@ -57,6 +57,18 @@ def save_simulation_h5(
         lmax=run.config.lmax,
         mode="w",
     )
+    solver_attrs: dict[str, object] = {
+        "solver": run.solver_result.method,
+        "relative_residual": run.solver_result.relative_residual,
+        "iterations": run.solver_result.iterations,
+    }
+    if run.solver_result.converged_reason is not None:
+        reason = np.asarray(run.solver_result.converged_reason, dtype=object)
+        solver_attrs["converged_reason"] = (
+            str(reason.item()) if reason.ndim == 0 else np.asarray(reason, dtype="S")
+        )
+    if run.solver_result.stopping_rule is not None:
+        solver_attrs["stopping_rule"] = run.solver_result.stopping_rule
     save_solution_h5(
         out_h5,
         coeffs=run.coeffs,
@@ -68,11 +80,7 @@ def save_simulation_h5(
             else None
         ),
         info=run.solver_result.info,
-        attrs={
-            "solver": run.solver_result.method,
-            "relative_residual": run.solver_result.relative_residual,
-            "iterations": run.solver_result.iterations,
-        },
+        attrs=solver_attrs,
     )
     if run.coeffs_basis is not None and run.initial_coeffs_basis is not None:
         for pol in ("te", "tm"):
@@ -175,23 +183,19 @@ def save_simulation_h5(
     else:
         # Periodic runs store order-resolved observables under `periodic`.
         # `run.farfield` intentionally stays empty in this workflow.
-        save_periodic_h5(out_h5, periodic=run.periodic, group="periodic", mode="a")
+        save_periodic_h5(
+            out_h5,
+            periodic=run.periodic,
+            group="periodic",
+            mode="a",
+            include_power=False,
+        )
         diagnostics["periodic"] = {
             "order_count": int(np.asarray(run.periodic.order_mn).shape[0]),
-            "reflectance": float(run.periodic.reflectance),
-            "transmittance": float(run.periodic.transmittance),
-            "absorptance": float(run.periodic.absorptance),
-            "absorptance_raw_diff": float(run.periodic.absorptance_raw_diff),
-            "local_absorptance": (
-                None
-                if run.periodic.local_absorptance is None
-                else float(run.periodic.local_absorptance)
+            "propagating_order_count": int(
+                np.count_nonzero(np.asarray(run.periodic.order_propagating, dtype=bool))
             ),
-            "power_closure_error": (
-                None
-                if run.periodic.power_closure_error is None
-                else float(run.periodic.power_closure_error)
-            ),
+            "incident_flux": float(run.periodic.incident_flux),
         }
     if run.polarization_jones is not None:
         diagnostics["polarization_jones"] = {
@@ -201,7 +205,7 @@ def save_simulation_h5(
             "a_tm_imag": float(np.imag(run.polarization_jones[1])),
         }
     if run.power is not None:
-        diagnostics["power"] = run.power
+        diagnostics["power"] = run.power.to_mapping()
     if run.cross_sections is not None:
         diagnostics["cross_sections"] = run.cross_sections
     if run.decomposition_forward is not None:
@@ -209,7 +213,9 @@ def save_simulation_h5(
     if run.decomposition_backward is not None:
         diagnostics["decomposition_backward"] = run.decomposition_backward
     if run.power_basis is not None:
-        diagnostics["power_basis"] = run.power_basis
+        diagnostics["power_basis"] = {
+            label: power.to_mapping() for label, power in run.power_basis.items()
+        }
     if run.cross_sections_basis is not None:
         diagnostics["cross_sections_basis"] = run.cross_sections_basis
     if run.decomposition_forward_basis is not None:
@@ -217,7 +223,10 @@ def save_simulation_h5(
     if run.decomposition_backward_basis is not None:
         diagnostics["decomposition_backward_basis"] = run.decomposition_backward_basis
     if run.unpolarized is not None:
-        diagnostics["unpolarized"] = run.unpolarized
+        diagnostics["unpolarized"] = {
+            key: value.to_mapping() if hasattr(value, "to_mapping") else value
+            for key, value in run.unpolarized.items()
+        }
     save_mapping_h5(out_h5, mapping=diagnostics, group="diagnostics", mode="a")
     return out_h5
 

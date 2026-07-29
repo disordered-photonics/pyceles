@@ -10,6 +10,11 @@ from pyceles.core.periodic import plane_wave_k_parallel
 from pyceles.postprocessing.nearfield import compute_near_field_components
 
 
+def _required_float(value: float | None) -> float:
+    assert value is not None
+    return value
+
+
 def test_compute_near_field_components_without_internal_returns_consistent_total():
     pts = np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]], dtype=float)
     particles = [Sphere(position=(0.0, 0.0, 100.0), radius=50.0, refractive_index=1.4 + 0.0j)]
@@ -620,17 +625,21 @@ def test_periodic_supercell_replication_matches_fundamental_cell_observables():
 
     if run_fund.periodic is None or run_super.periodic is None:
         raise RuntimeError("Periodic runs must populate SimulationResult.periodic.")
+    super_power = run_super.periodic.power
+    fund_power = run_fund.periodic.power
+    super_values = [
+        _required_float(super_power.reflectance),
+        _required_float(super_power.transmittance),
+        _required_float(super_power.flux_defect_fraction),
+    ]
+    fund_values = [
+        _required_float(fund_power.reflectance),
+        _required_float(fund_power.transmittance),
+        _required_float(fund_power.flux_defect_fraction),
+    ]
     np.testing.assert_allclose(
-        [
-            float(run_super.periodic.reflectance),
-            float(run_super.periodic.transmittance),
-            float(run_super.periodic.absorptance),
-        ],
-        [
-            float(run_fund.periodic.reflectance),
-            float(run_fund.periodic.transmittance),
-            float(run_fund.periodic.absorptance),
-        ],
+        super_values,
+        fund_values,
         rtol=1e-10,
         atol=1e-10,
     )

@@ -254,23 +254,20 @@ def _save_geometry(out_dir: Path, geom: GeneratedGeometry) -> dict[str, str]:
 def _periodic_summary(payload: Any) -> dict[str, Any]:
     if payload is None:
         return {"available": False}
+    power = payload.power
     return {
         "available": True,
-        "reflectance": float(payload.reflectance),
-        "transmittance": float(payload.transmittance),
-        "absorptance": float(payload.absorptance),
-        "absorptance_raw_diff": float(payload.absorptance_raw_diff),
-        "local_absorptance": (
-            None if payload.local_absorptance is None else float(payload.local_absorptance)
-        ),
-        "power_closure_error": (
-            None if payload.power_closure_error is None else float(payload.power_closure_error)
-        ),
         "order_count": int(np.asarray(payload.order_mn).shape[0]),
         "propagating_count": int(
             np.count_nonzero(np.asarray(payload.order_propagating, dtype=bool))
         ),
-        "incident_power_per_area": float(payload.incident_power_per_area),
+        "incident_flux": float(payload.incident_flux),
+        **{
+            key: value
+            for key, value in power.to_mapping().items()
+            if key != "local_absorbed_power_per_particle"
+            and key != "local_absorptance_per_particle"
+        },
     }
 
 
@@ -291,6 +288,11 @@ def _solver_phase_timings(solver_result: Any) -> dict[str, float]:
 def _save_periodic_payload(path: Path, payload: Any) -> None:
     if payload is None:
         return
+    power_mapping = {
+        key: np.asarray(value)
+        for key, value in payload.power.to_mapping().items()
+        if value is not None
+    }
     np.savez_compressed(
         path,
         lattice_a1=np.asarray(payload.lattice_a1, dtype=float),
@@ -306,18 +308,10 @@ def _save_periodic_payload(path: Path, payload: Any) -> None:
         order_propagating=np.asarray(payload.order_propagating, dtype=bool),
         reflected_amplitudes=np.asarray(payload.reflected_amplitudes, dtype=np.complex128),
         transmitted_amplitudes=np.asarray(payload.transmitted_amplitudes, dtype=np.complex128),
-        reflected_power_per_order=np.asarray(payload.reflected_power_per_order, dtype=float),
-        transmitted_power_per_order=np.asarray(payload.transmitted_power_per_order, dtype=float),
-        incident_power_per_area=np.asarray(float(payload.incident_power_per_area), dtype=float),
-        reflectance=np.asarray(float(payload.reflectance), dtype=float),
-        transmittance=np.asarray(float(payload.transmittance), dtype=float),
-        absorptance_raw_diff=np.asarray(float(payload.absorptance_raw_diff), dtype=float),
-        local_absorptance=np.asarray(
-            np.nan if payload.local_absorptance is None else float(payload.local_absorptance)
-        ),
-        power_closure_error=np.asarray(
-            np.nan if payload.power_closure_error is None else float(payload.power_closure_error)
-        ),
+        reflected_flux_per_order=np.asarray(payload.reflected_flux_per_order, dtype=float),
+        transmitted_flux_per_order=np.asarray(payload.transmitted_flux_per_order, dtype=float),
+        incident_flux=np.asarray(float(payload.incident_flux), dtype=float),
+        **cast(Any, power_mapping),
     )
 
 

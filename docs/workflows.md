@@ -12,9 +12,9 @@ New source classes should satisfy the internal `Source` protocol in
 - `with_polarization(...)` and `jones_coefficients()` for TE/TM propagating sources,
 - `has_finite_incident_power()` for finite-power diagnostics policy.
 
-Finite-beam-only diagnostics, including `finite_beam_power_fractions`,
-source-aware `pwp_power_decomposition`, and solver-side transmission/reflection
-reporting, are enabled only when `has_finite_incident_power()` returns `True`.
+Finite-beam-only diagnostics, including `finite_beam_power_balance`,
+source-aware `pwp_power_decomposition`, and the common `SimulationResult.power`
+report, are enabled only when `has_finite_incident_power()` returns `True`.
 This keeps policy centralized and avoids class-name-specific special cases as
 new source wrappers/classes are added.
 

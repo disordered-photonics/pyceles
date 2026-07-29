@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -9,6 +9,156 @@ from pyceles.core.sources import Source, ensure_finite_power_diagnostics_support
 
 from .common import integrate_periodic_alpha
 from .patterns import total_field_plane_wave_pattern
+
+
+@dataclass(frozen=True, slots=True)
+class PowerBalance:
+    """Common power accounting for finite-beam and periodic simulations.
+
+    ``flux_defect`` is the raw flux balance
+    ``incident - reflected - transmitted``. ``closure_error`` subtracts the
+    local exciting/scattered-coefficient absorption estimate. It is therefore
+    the residual between two independent power identities and can expose
+    coupling-operator approximation, far-field/quadrature, basis-truncation,
+    or normalization inconsistency. For an inexact solve,
+    ``local_absorbed_power`` also contains the solve-equation defect; this is
+    intentional because it makes convergence failures visible instead of
+    silently forcing nominally lossless materials to zero absorption.
+
+    Dipole workflows may provide only ``local_absorbed_power`` and its
+    per-particle decomposition. Flux-derived properties then return ``None``.
+    """
+
+    incident_power: float | None = None
+    reflected_power: float | None = None
+    transmitted_power: float | None = None
+    local_absorbed_power: float | None = None
+    local_absorbed_power_per_particle: np.ndarray | None = None
+
+    def __post_init__(self) -> None:
+        for name in (
+            "incident_power",
+            "reflected_power",
+            "transmitted_power",
+            "local_absorbed_power",
+        ):
+            value = getattr(self, name)
+            if value is None:
+                continue
+            scalar = float(value)
+            if not np.isfinite(scalar):
+                raise ValueError(f"`{name}` must be finite when provided. Got {value!r}.")
+            object.__setattr__(self, name, scalar)
+        if self.incident_power is not None and float(self.incident_power) <= 0.0:
+            raise ValueError("`incident_power` must be positive when provided.")
+        if (self.reflected_power is None) != (self.transmitted_power is None):
+            raise ValueError("`reflected_power` and `transmitted_power` must be provided together.")
+        if self.reflected_power is not None and self.incident_power is None:
+            raise ValueError(
+                "`incident_power` is required when reflected/transmitted powers are provided."
+            )
+        if self.local_absorbed_power_per_particle is not None:
+            if self.local_absorbed_power is None:
+                raise ValueError(
+                    "`local_absorbed_power` is required with a per-particle decomposition."
+                )
+            values = np.array(
+                self.local_absorbed_power_per_particle,
+                dtype=np.float64,
+                copy=True,
+            ).reshape(-1)
+            if not bool(np.all(np.isfinite(values))):
+                raise ValueError("Per-particle local absorbed powers must be finite.")
+            values.setflags(write=False)
+            object.__setattr__(self, "local_absorbed_power_per_particle", values)
+
+    @property
+    def has_flux_balance(self) -> bool:
+        """Return whether incident/reflected/transmitted powers are available."""
+        return self.incident_power is not None and self.reflected_power is not None
+
+    @property
+    def flux_defect(self) -> float | None:
+        """Return ``incident - reflected - transmitted`` in power units."""
+        if not self.has_flux_balance:
+            return None
+        assert self.incident_power is not None
+        assert self.reflected_power is not None
+        assert self.transmitted_power is not None
+        return float(self.incident_power - self.reflected_power - self.transmitted_power)
+
+    @property
+    def closure_error(self) -> float | None:
+        """Return ``flux_defect - local_absorbed_power`` in power units."""
+        defect = self.flux_defect
+        if defect is None or self.local_absorbed_power is None:
+            return None
+        return float(defect - self.local_absorbed_power)
+
+    @property
+    def reflectance(self) -> float | None:
+        """Return reflected/incident power when flux data are available."""
+        if self.reflected_power is None or self.incident_power is None:
+            return None
+        return float(self.reflected_power / self.incident_power)
+
+    @property
+    def transmittance(self) -> float | None:
+        """Return transmitted/incident power when flux data are available."""
+        if self.transmitted_power is None or self.incident_power is None:
+            return None
+        return float(self.transmitted_power / self.incident_power)
+
+    @property
+    def local_absorptance(self) -> float | None:
+        """Return local absorbed/incident power when both are available."""
+        if self.local_absorbed_power is None or self.incident_power is None:
+            return None
+        return float(self.local_absorbed_power / self.incident_power)
+
+    @property
+    def flux_defect_fraction(self) -> float | None:
+        """Return the raw flux defect normalized by incident power."""
+        defect = self.flux_defect
+        if defect is None or self.incident_power is None:
+            return None
+        return float(defect / self.incident_power)
+
+    @property
+    def closure_error_fraction(self) -> float | None:
+        """Return the power-closure error normalized by incident power."""
+        closure = self.closure_error
+        if closure is None or self.incident_power is None:
+            return None
+        return float(closure / self.incident_power)
+
+    @property
+    def local_absorptance_per_particle(self) -> np.ndarray | None:
+        """Return per-particle local absorbed-power fractions when available."""
+        if self.local_absorbed_power_per_particle is None or self.incident_power is None:
+            return None
+        return np.asarray(
+            self.local_absorbed_power_per_particle / self.incident_power,
+            dtype=np.float64,
+        )
+
+    def to_mapping(self) -> dict[str, float | np.ndarray | None]:
+        """Return an explicit serialization mapping without legacy aliases."""
+        return {
+            "incident_power": self.incident_power,
+            "reflected_power": self.reflected_power,
+            "transmitted_power": self.transmitted_power,
+            "local_absorbed_power": self.local_absorbed_power,
+            "local_absorbed_power_per_particle": self.local_absorbed_power_per_particle,
+            "flux_defect": self.flux_defect,
+            "closure_error": self.closure_error,
+            "reflectance": self.reflectance,
+            "transmittance": self.transmittance,
+            "local_absorptance": self.local_absorptance,
+            "flux_defect_fraction": self.flux_defect_fraction,
+            "closure_error_fraction": self.closure_error_fraction,
+            "local_absorptance_per_particle": self.local_absorptance_per_particle,
+        }
 
 
 def _validate_power_normalization_inputs(*, k0: float, n_medium: complex) -> tuple[float, float]:
@@ -38,16 +188,17 @@ def local_absorbed_power_from_exciting(
     where `e` are local exciting coefficients and `x` are solved scattered
     coefficients in the same flattened mode ordering.
     """
-    components = local_absorbed_power_components_from_exciting(
+    power = local_power_balance_from_exciting(
         exciting_coeffs,
         scattered_coeffs,
         k0=k0,
         n_medium=n_medium,
     )
-    return float(components["P_abs_local"])
+    assert power.local_absorbed_power is not None
+    return float(power.local_absorbed_power)
 
 
-def local_absorbed_power_components_from_exciting(
+def local_power_balance_from_exciting(
     exciting_coeffs: np.ndarray,
     scattered_coeffs: np.ndarray,
     *,
@@ -55,10 +206,22 @@ def local_absorbed_power_components_from_exciting(
     n_medium: complex,
     n_particles: int | None = None,
     nmodes_per_particle: int | None = None,
-) -> dict[str, Any]:
-    """Return local absorbed power plus optional per-particle contributions."""
+) -> PowerBalance:
+    """Return a local-only power balance with optional particle decomposition."""
+    if (n_particles is None) != (nmodes_per_particle is None):
+        raise ValueError(
+            "`n_particles` and `nmodes_per_particle` must be provided together "
+            "for per-particle diagnostics."
+        )
+    ns = None if n_particles is None else int(n_particles)
+    nm = None if nmodes_per_particle is None else int(nmodes_per_particle)
+    if ns is not None and nm is not None and (ns < 0 or nm < 0):
+        raise ValueError("`n_particles` and `nmodes_per_particle` must be nonnegative.")
+
     k_medium, n_real = _validate_power_normalization_inputs(k0=k0, n_medium=n_medium)
     pref = (np.pi * n_real) / (2.0 * (k_medium**2))
+    particle_power: np.ndarray | None = None
+
     if is_cupy_array(exciting_coeffs) or is_cupy_array(scattered_coeffs):
         cupy, _ = import_cupy()
         e_gpu = cupy.asarray(exciting_coeffs, dtype=cupy.complex128).reshape(-1)
@@ -70,23 +233,14 @@ def local_absorbed_power_components_from_exciting(
             )
         term_ex = cupy.real(cupy.vdot(e_gpu, x_gpu))
         term_xx = cupy.real(cupy.vdot(x_gpu, x_gpu))
-        out: dict[str, Any] = {
-            "P_abs_local": float(cupy.asnumpy(pref * (-term_ex - term_xx))),
-        }
-        if (n_particles is None) != (nmodes_per_particle is None):
-            raise ValueError(
-                "`n_particles` and `nmodes_per_particle` must be provided together for per-particle diagnostics."
-            )
-        if n_particles is not None and nmodes_per_particle is not None:
-            ns = int(n_particles)
-            nm = int(nmodes_per_particle)
-            if ns < 0 or nm < 0:
-                raise ValueError("`n_particles` and `nmodes_per_particle` must be nonnegative.")
+        total_power = float(cupy.asnumpy(pref * (-term_ex - term_xx)))
+        if ns is not None and nm is not None:
             if ns == 0:
-                out["P_abs_local_particles"] = np.zeros((0,), dtype=np.float64)
+                particle_power = np.zeros((0,), dtype=np.float64)
             elif int(e_gpu.size) != ns * nm:
                 raise ValueError(
-                    "Flattened coefficient size does not match requested `(n_particles, nmodes_per_particle)` shape. "
+                    "Flattened coefficient size does not match requested "
+                    "`(n_particles, nmodes_per_particle)` shape. "
                     f"Got size {int(e_gpu.size)} vs {ns * nm}."
                 )
             else:
@@ -94,11 +248,14 @@ def local_absorbed_power_components_from_exciting(
                 x_mat = x_gpu.reshape(ns, nm)
                 ex = cupy.real(cupy.sum(cupy.conj(e_mat) * x_mat, axis=1))
                 xx = cupy.real(cupy.sum(cupy.conj(x_mat) * x_mat, axis=1))
-                out["P_abs_local_particles"] = np.asarray(
+                particle_power = np.asarray(
                     cupy.asnumpy(pref * (-ex - xx)),
                     dtype=np.float64,
                 )
-        return out
+        return PowerBalance(
+            local_absorbed_power=total_power,
+            local_absorbed_power_per_particle=particle_power,
+        )
 
     e = np.asarray(exciting_coeffs, dtype=np.complex128).reshape(-1)
     x = np.asarray(scattered_coeffs, dtype=np.complex128).reshape(-1)
@@ -109,21 +266,14 @@ def local_absorbed_power_components_from_exciting(
         )
     term_ex = float(np.real(np.vdot(e, x)))
     term_xx = float(np.real(np.vdot(x, x)))
-    out = {"P_abs_local": float(pref * (-term_ex - term_xx))}
-    if (n_particles is None) != (nmodes_per_particle is None):
-        raise ValueError(
-            "`n_particles` and `nmodes_per_particle` must be provided together for per-particle diagnostics."
-        )
-    if n_particles is not None and nmodes_per_particle is not None:
-        ns = int(n_particles)
-        nm = int(nmodes_per_particle)
-        if ns < 0 or nm < 0:
-            raise ValueError("`n_particles` and `nmodes_per_particle` must be nonnegative.")
+    total_power = float(pref * (-term_ex - term_xx))
+    if ns is not None and nm is not None:
         if ns == 0:
-            out["P_abs_local_particles"] = np.zeros((0,), dtype=np.float64)
+            particle_power = np.zeros((0,), dtype=np.float64)
         elif int(e.size) != ns * nm:
             raise ValueError(
-                "Flattened coefficient size does not match requested `(n_particles, nmodes_per_particle)` shape. "
+                "Flattened coefficient size does not match requested "
+                "`(n_particles, nmodes_per_particle)` shape. "
                 f"Got size {int(e.size)} vs {ns * nm}."
             )
         else:
@@ -131,8 +281,11 @@ def local_absorbed_power_components_from_exciting(
             x_mat = x.reshape(ns, nm)
             ex = np.real(np.sum(np.conj(e_mat) * x_mat, axis=1))
             xx = np.real(np.sum(np.conj(x_mat) * x_mat, axis=1))
-            out["P_abs_local_particles"] = np.asarray(pref * (-ex - xx), dtype=np.float64)
-    return out
+            particle_power = np.asarray(pref * (-ex - xx), dtype=np.float64)
+    return PowerBalance(
+        local_absorbed_power=total_power,
+        local_absorbed_power_per_particle=particle_power,
+    )
 
 
 def pwp_power_decomposition(
@@ -228,7 +381,7 @@ def incident_power_from_pwp(
     return float(p_initial)
 
 
-def finite_beam_power_fractions(
+def finite_beam_power_balance(
     source: Source,
     initial_pwp_te: dict,
     initial_pwp_tm: dict,
@@ -238,11 +391,12 @@ def finite_beam_power_fractions(
     k0: float,
     k_medium: float,
     local_absorbed_power: float | None = None,
-) -> dict[str, float]:
-    """Compute transmitted/reflected powers and fractions for finite-power beams."""
+    local_absorbed_power_per_particle: np.ndarray | None = None,
+) -> PowerBalance:
+    """Compute common power accounting for a finite-power beam."""
     ensure_finite_power_diagnostics_supported(
         source,
-        diagnostic="Finite-beam power fractions",
+        diagnostic="Finite-beam power balance",
     )
 
     total_te, total_tm = total_field_plane_wave_pattern(
@@ -270,29 +424,23 @@ def finite_beam_power_fractions(
         k_medium=k_medium,
     )
 
-    p_abs_raw_diff = float(p_initial - p_transmitted - p_reflected)
-    out = {
-        "P_initial": float(p_initial),
-        "P_transmitted": float(p_transmitted),
-        "P_reflected": float(p_reflected),
-        "T": float(p_transmitted / p_initial),
-        "R": float(p_reflected / p_initial),
-        "P_abs_raw_diff": p_abs_raw_diff,
-        "A_raw_diff": float(p_abs_raw_diff / p_initial),
-    }
-    if local_absorbed_power is not None:
-        p_abs_local = float(local_absorbed_power)
-        out["P_abs_local"] = p_abs_local
-        out["A_local"] = float(p_abs_local / p_initial)
-        out["Delta_power_closure"] = float(p_abs_raw_diff - p_abs_local)
-    return out
+    return PowerBalance(
+        incident_power=float(p_initial),
+        transmitted_power=float(p_transmitted),
+        reflected_power=float(p_reflected),
+        local_absorbed_power=(
+            None if local_absorbed_power is None else float(local_absorbed_power)
+        ),
+        local_absorbed_power_per_particle=local_absorbed_power_per_particle,
+    )
 
 
 __all__ = [
-    "finite_beam_power_fractions",
+    "PowerBalance",
+    "finite_beam_power_balance",
     "incident_power_from_pwp",
-    "local_absorbed_power_components_from_exciting",
     "local_absorbed_power_from_exciting",
+    "local_power_balance_from_exciting",
     "pwp_power_decomposition",
     "pwp_power_flux",
 ]

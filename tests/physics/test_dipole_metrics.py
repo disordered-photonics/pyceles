@@ -100,10 +100,9 @@ def test_dipole_run_reports_local_absorbed_power_no_scatterers():
     )
     run = _run_no_scatterers(cfg)
     assert run.power is not None
-    assert "P_abs_local" in run.power
-    assert "P_abs_local_particles" in run.power
-    np.testing.assert_allclose(float(run.power["P_abs_local"]), 0.0, rtol=0.0, atol=0.0)
-    pvec = np.asarray(run.power["P_abs_local_particles"], dtype=float)
+    assert run.power.local_absorbed_power is not None
+    np.testing.assert_allclose(float(run.power.local_absorbed_power), 0.0, rtol=0.0, atol=0.0)
+    pvec = np.asarray(run.power.local_absorbed_power_per_particle, dtype=float)
     assert pvec.shape == (0,)
 
 
@@ -124,12 +123,13 @@ def test_dipole_run_lossless_sphere_local_absorption_is_nearly_zero():
     )
     run = pcl.Simulation(cfg, particles=_single_sphere(80.0, 1.5 + 0.0j)).run()
     assert run.power is not None
-    np.testing.assert_allclose(float(run.power["P_abs_local"]), 0.0, rtol=0.0, atol=0.0)
+    assert run.power.local_absorbed_power is not None
+    np.testing.assert_allclose(float(run.power.local_absorbed_power), 0.0, rtol=0.0, atol=1e-10)
     np.testing.assert_allclose(
-        np.asarray(run.power["P_abs_local_particles"], dtype=float),
+        np.asarray(run.power.local_absorbed_power_per_particle, dtype=float),
         np.zeros((1,), dtype=float),
         rtol=0.0,
-        atol=0.0,
+        atol=1e-10,
     )
 
 
@@ -150,8 +150,9 @@ def test_dipole_run_absorbing_sphere_reports_positive_local_absorption():
     )
     run = pcl.Simulation(cfg, particles=_single_sphere(80.0, 1.5 + 0.01j)).run()
     assert run.power is not None
-    p_abs = float(run.power["P_abs_local"])
-    pvec = np.asarray(run.power["P_abs_local_particles"], dtype=float)
+    assert run.power.local_absorbed_power is not None
+    p_abs = float(run.power.local_absorbed_power)
+    pvec = np.asarray(run.power.local_absorbed_power_per_particle, dtype=float)
     assert p_abs > 0.0
     assert pvec.shape == (1,)
     np.testing.assert_allclose(np.sum(pvec), p_abs, rtol=1e-13, atol=1e-13)

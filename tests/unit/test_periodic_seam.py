@@ -19,6 +19,11 @@ from pyceles.simulation.solve import (
 )
 
 
+def _required_float(value: float | None) -> float:
+    assert value is not None
+    return value
+
+
 def _plane_wave(
     *,
     polar_angle: float = 0.0,
@@ -682,17 +687,19 @@ def test_periodic_postprocess_populates_periodic_result_payload() -> None:
     assert np.any((periodic.order_mn[:, 0] == 0) & (periodic.order_mn[:, 1] == 0))
     assert bool(np.all(periodic.order_propagating))
     assert periodic.output_bmax is None
-    assert np.isfinite(periodic.reflectance)
-    assert np.isfinite(periodic.transmittance)
-    assert np.isfinite(periodic.absorptance)
-    assert periodic.absorptance_raw_diff == periodic.absorptance
-    assert periodic.local_absorptance is not None
-    assert periodic.power_closure_error is not None
-    assert np.isfinite(periodic.local_absorptance)
-    assert np.isfinite(periodic.power_closure_error)
+    assert run.power is periodic.power
+    reflectance = _required_float(periodic.power.reflectance)
+    transmittance = _required_float(periodic.power.transmittance)
+    local_absorptance = _required_float(periodic.power.local_absorptance)
+    closure_error_fraction = _required_float(periodic.power.closure_error_fraction)
+    flux_defect_fraction = _required_float(periodic.power.flux_defect_fraction)
+    assert np.isfinite(reflectance)
+    assert np.isfinite(transmittance)
+    assert np.isfinite(local_absorptance)
+    assert np.isfinite(closure_error_fraction)
     np.testing.assert_allclose(
-        periodic.absorptance_raw_diff,
-        periodic.local_absorptance + periodic.power_closure_error,
+        flux_defect_fraction,
+        local_absorptance + closure_error_fraction,
         rtol=0.0,
         atol=2.0e-15,
     )
@@ -763,8 +770,24 @@ def test_periodic_hdf5_roundtrip(tmp_path) -> None:
     loaded = load_periodic_h5(path, group="periodic")
 
     assert "order_mn" in loaded
-    assert "reflectance" in loaded
-    assert "absorptance_raw_diff" in loaded
-    assert "local_absorptance" in loaded
-    assert "power_closure_error" in loaded
+    assert "incident_flux" in loaded
+    assert "reflected_flux_per_order" in loaded
+    assert "transmitted_flux_per_order" in loaded
+    assert "power" in loaded
+    assert "reflectance" in loaded["power"]
+    assert "transmittance" in loaded["power"]
+    assert "flux_defect_fraction" in loaded["power"]
+    assert "local_absorptance" in loaded["power"]
+    assert "closure_error_fraction" in loaded["power"]
     assert int(np.asarray(loaded["order_mn"]).shape[1]) == 2
+
+    orders_only_path = tmp_path / "periodic_orders_only.h5"
+    save_periodic_h5(
+        orders_only_path,
+        periodic=run.periodic,
+        group="periodic",
+        mode="w",
+        include_power=False,
+    )
+    orders_only = load_periodic_h5(orders_only_path, group="periodic")
+    assert "power" not in orders_only

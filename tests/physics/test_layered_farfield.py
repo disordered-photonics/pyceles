@@ -135,7 +135,19 @@ def test_layered_single_layer_finite_beam_power_matches_homogeneous_sphere():
 
     assert run_sphere.power is not None
     assert run_layered.power is not None
-    for key in ("P_initial", "P_transmitted", "P_reflected", "T", "R"):
+    for attribute in (
+        "incident_power",
+        "transmitted_power",
+        "reflected_power",
+        "transmittance",
+        "reflectance",
+        "local_absorbed_power",
+        "flux_defect",
+        "closure_error",
+    ):
         np.testing.assert_allclose(
-            run_layered.power[key], run_sphere.power[key], rtol=1e-11, atol=1e-11
+            getattr(run_layered.power, attribute),
+            getattr(run_sphere.power, attribute),
+            rtol=1e-11,
+            atol=1e-11,
         )

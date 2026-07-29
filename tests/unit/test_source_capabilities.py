@@ -25,7 +25,7 @@ from pyceles.core.sources import (
     SLMSource,
     Source,
 )
-from pyceles.postprocessing.farfield import finite_beam_power_fractions
+from pyceles.postprocessing.farfield import finite_beam_power_balance
 
 pytestmark = pytest.mark.api_contract
 
@@ -288,7 +288,7 @@ def test_finite_power_policy_honors_explicit_source_capability_contract():
 
     assert source.has_finite_incident_power() is False
     with pytest.raises(ValueError, match="infinite-power sources"):
-        finite_beam_power_fractions(
+        finite_beam_power_balance(
             cast(Source, source),
             pwp,
             pwp,

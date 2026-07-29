@@ -18,7 +18,11 @@ import numpy.typing as npt
 from pyceles.core.particles import Particle, ParticleCollection
 from pyceles.core.sources import Source
 from pyceles.linear.solvers import LinearSolveResult
-from pyceles.postprocessing.farfield import FarFieldPatterns, PeriodicFarFieldPayload
+from pyceles.postprocessing.farfield import (
+    FarFieldPatterns,
+    PeriodicFarFieldPayload,
+    PowerBalance,
+)
 
 from .config import SimulationConfig
 
@@ -84,11 +88,11 @@ class SimulationResult:
     solver_result_basis: LinearSolveResult | None
     farfield: FarFieldPatterns
     farfield_basis: dict[str, FarFieldPatterns] | None
-    power: dict[str, float | np.ndarray] | None
-    power_basis: dict[str, dict[str, float | np.ndarray]] | None
+    power: PowerBalance | None
+    power_basis: dict[str, PowerBalance] | None
     cross_sections: dict[str, float] | None
     cross_sections_basis: dict[str, dict[str, float]] | None
-    unpolarized: dict[str, dict[str, float]] | None
+    unpolarized: dict[str, PowerBalance | dict[str, float]] | None
     decomposition_forward: dict[str, float] | None
     decomposition_backward: dict[str, float] | None
     decomposition_forward_basis: dict[str, dict[str, float]] | None
@@ -168,6 +172,39 @@ def avg_numeric_dict(d1: Mapping[str, object], d2: Mapping[str, object]) -> dict
     return out
 
 
+def average_power_balances(first: PowerBalance, second: PowerBalance) -> PowerBalance:
+    """Return the incoherent arithmetic average of two power balances."""
+
+    def avg_optional(a: float | None, b: float | None) -> float | None:
+        if a is None or b is None:
+            return None
+        return float(0.5 * (float(a) + float(b)))
+
+    particles = None
+    if (
+        first.local_absorbed_power_per_particle is not None
+        and second.local_absorbed_power_per_particle is not None
+    ):
+        a = np.asarray(first.local_absorbed_power_per_particle, dtype=np.float64)
+        b = np.asarray(second.local_absorbed_power_per_particle, dtype=np.float64)
+        if a.shape != b.shape:
+            raise ValueError(
+                "Cannot average power balances with different per-particle shapes: "
+                f"{a.shape} and {b.shape}."
+            )
+        particles = np.asarray(0.5 * (a + b), dtype=np.float64)
+    return PowerBalance(
+        incident_power=avg_optional(first.incident_power, second.incident_power),
+        reflected_power=avg_optional(first.reflected_power, second.reflected_power),
+        transmitted_power=avg_optional(first.transmitted_power, second.transmitted_power),
+        local_absorbed_power=avg_optional(
+            first.local_absorbed_power,
+            second.local_absorbed_power,
+        ),
+        local_absorbed_power_per_particle=particles,
+    )
+
+
 def empty_pwp(dtype: npt.DTypeLike) -> dict[str, np.ndarray]:
     """Return an empty PWP payload used when far-field postprocessing is disabled."""
     return {
@@ -207,9 +244,15 @@ def single_rhs_result_from_multi(result: LinearSolveResult, col: int) -> LinearS
 
     def _pick_scalar(value: int | float | np.ndarray, index: int) -> int | float:
         arr = np.asarray(value)
-        if arr.ndim == 0:
-            return float(arr) if arr.dtype.kind == "f" else int(arr)
-        return float(arr[index]) if arr.dtype.kind == "f" else int(arr[index])
+        selected = arr.item() if arr.ndim == 0 else arr.reshape(-1)[index]
+        return float(selected) if arr.dtype.kind == "f" else int(selected)
+
+    def _pick_optional_text(value: str | np.ndarray | None, index: int) -> str | None:
+        if value is None:
+            return None
+        arr = np.asarray(value, dtype=object)
+        selected = arr.item() if arr.ndim == 0 else arr.reshape(-1)[index]
+        return str(selected)
 
     residual_history = None
     if isinstance(result.residual_history, list):
@@ -227,6 +270,12 @@ def single_rhs_result_from_multi(result: LinearSolveResult, col: int) -> LinearS
         method=str(result.method),
         residual_history=residual_history,
         rhs_count=1,
+        preconditioned_residual_history=result.preconditioned_residual_history,
+        true_residual_history=result.true_residual_history,
+        converged_reason=_pick_optional_text(result.converged_reason, col),
+        block_residual_history=result.block_residual_history,
+        stopping_rule=result.stopping_rule,
+        block_metadata=result.block_metadata,
     )
 
 
@@ -235,6 +284,7 @@ __all__ = [
     "ResultRetention",
     "SimulationResult",
     "SolvedSourcesResult",
+    "average_power_balances",
     "avg_numeric_dict",
     "empty_farfield_patterns",
     "empty_pwp",

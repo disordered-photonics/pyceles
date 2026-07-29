@@ -40,16 +40,22 @@ Physical source checks are capability based:
 - finite-beam power fractions are normalized by integrating the initial TE/TM
   plane-wave spectrum.
 
-Finite-power diagnostics expose both raw missing-energy and local dissipation
-terms:
+Finite-beam and periodic diagnostics share the immutable
+`SimulationResult.power: PowerBalance` contract:
 
-- `P_abs_raw_diff = P_initial - P_transmitted - P_reflected`,
-- `P_abs_local` from the generic local exciting-field route `e = b + W x`,
-- per-particle local diagnostics `P_abs_local_particles` and
-  `A_local_particles`,
-- `A_raw_diff = P_abs_raw_diff / P_initial`,
-- `A_local = P_abs_local / P_initial`,
-- `Delta_power_closure = P_abs_raw_diff - P_abs_local`.
+- `incident_power`, `reflected_power`, and `transmitted_power`,
+- `local_absorbed_power` from the generic local exciting-field route
+  `e = b + W x`, plus its per-particle decomposition,
+- `flux_defect = incident_power - reflected_power - transmitted_power`,
+- `closure_error = flux_defect - local_absorbed_power`,
+- normalized `reflectance`, `transmittance`, `local_absorptance`,
+  `flux_defect_fraction`, and `closure_error_fraction`.
+
+The flux defect is not labeled absorption. For an inexact solve, the local
+estimate includes the equation defect; a nonzero closure error then exposes
+residual inconsistency between the local and far-field identities, including
+operator approximation, quadrature, or
+basis-truncation effects.
 
 ## Particles and geometry
 

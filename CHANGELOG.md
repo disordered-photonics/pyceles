@@ -45,10 +45,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pairwise-vs-MLFMM scaling benchmark.
 
 ### Changed
-- Periodic plane-wave results now report the raw flux deficit, local
-  exciting-field absorptance, and their power-closure difference separately.
-  This distinguishes iterative-solve/material loss from periodic coupling or
-  far-field closure error without changing the historical `absorptance` field.
+- Breaking: finite-beam, periodic, and dipole power accounting now uses the
+  common immutable `PowerBalance` exposed on `SimulationResult.power`. Periodic
+  payloads retain only order-resolved amplitudes/fluxes plus the same `power`
+  object. Ambiguous `absorptance`, `A_raw`, `P_abs_raw_diff`, and dictionary-key
+  aliases were removed; raw missing flux is explicitly `flux_defect`, local
+  coefficient loss is `local_absorbed_power`, and their difference is
+  `closure_error`. HDF5, console summaries, and examples use the same names.
+  The low-level `local_power_balance_from_exciting` helper now returns the same
+  type; the dictionary-returning `local_absorbed_power_components_from_exciting`
+  entry point was removed.
 - Default solver selection now uses BiCGSTAB for finite clusters and restarted
   GMRES for periodic systems, reflecting their measured convergence behavior.
 

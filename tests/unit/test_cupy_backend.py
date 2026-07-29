@@ -35,12 +35,17 @@ from pyceles.core.particles import Particle, ParticleCollection, spheres_from_ar
 from pyceles.core.translation import RadialLUT
 from pyceles.io import far_field_intensity
 from pyceles.postprocessing.farfield import (
-    local_absorbed_power_components_from_exciting,
     local_absorbed_power_from_exciting,
     local_absorption_cross_section_from_exciting,
+    local_power_balance_from_exciting,
 )
 
 pytestmark = pytest.mark.gpu
+
+
+def _required_float(value: float | None) -> float:
+    assert value is not None
+    return value
 
 
 def _small_cluster_particles() -> ParticleCollection:
@@ -240,7 +245,7 @@ def test_local_absorbed_power_from_exciting_accepts_cupy_arrays() -> None:
     np.testing.assert_allclose(got, ref, rtol=1e-13, atol=1e-13)
 
 
-def test_local_absorbed_power_components_from_exciting_accepts_cupy_arrays() -> None:
+def test_local_power_balance_from_exciting_accepts_cupy_arrays() -> None:
     cupy, _ = import_cupy()
     rng = np.random.default_rng(20260413)
     n_particles = 4
@@ -255,7 +260,7 @@ def test_local_absorbed_power_components_from_exciting_accepts_cupy_arrays() -> 
         + 1j * rng.standard_normal((n_particles, nmodes)),
         dtype=np.complex128,
     )
-    ref = local_absorbed_power_components_from_exciting(
+    ref = local_power_balance_from_exciting(
         e_np,
         x_np,
         k0=2.0 * np.pi / 550.0,
@@ -263,7 +268,7 @@ def test_local_absorbed_power_components_from_exciting_accepts_cupy_arrays() -> 
         n_particles=n_particles,
         nmodes_per_particle=nmodes,
     )
-    got = local_absorbed_power_components_from_exciting(
+    got = local_power_balance_from_exciting(
         cupy.asarray(e_np),
         cupy.asarray(x_np),
         k0=2.0 * np.pi / 550.0,
@@ -272,11 +277,14 @@ def test_local_absorbed_power_components_from_exciting_accepts_cupy_arrays() -> 
         nmodes_per_particle=nmodes,
     )
     np.testing.assert_allclose(
-        float(got["P_abs_local"]), float(ref["P_abs_local"]), rtol=1e-13, atol=1e-13
+        _required_float(got.local_absorbed_power),
+        _required_float(ref.local_absorbed_power),
+        rtol=1e-13,
+        atol=1e-13,
     )
     np.testing.assert_allclose(
-        np.asarray(got["P_abs_local_particles"], dtype=float),
-        np.asarray(ref["P_abs_local_particles"], dtype=float),
+        np.asarray(got.local_absorbed_power_per_particle, dtype=float),
+        np.asarray(ref.local_absorbed_power_per_particle, dtype=float),
         rtol=1e-13,
         atol=1e-13,
     )

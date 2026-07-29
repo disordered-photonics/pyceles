@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -21,10 +21,11 @@ from pyceles.core.sources import (
 from pyceles.postprocessing.farfield import (
     FarFieldPatterns,
     PeriodicFarFieldPayload,
+    PowerBalance,
     compute_far_field_patterns,
-    finite_beam_power_fractions,
-    local_absorbed_power_components_from_exciting,
+    finite_beam_power_balance,
     local_absorption_cross_section_from_exciting,
+    local_power_balance_from_exciting,
     plane_wave_cross_sections,
     pwp_power_decomposition,
 )
@@ -37,6 +38,7 @@ from .results import (
     SimulationResult,
     SolvedSourcesResult,
     _apply_solver_result_retention,
+    average_power_balances,
     avg_numeric_dict,
     empty_farfield_patterns,
     single_rhs_result_from_multi,
@@ -49,7 +51,7 @@ if TYPE_CHECKING:
 def _is_numerically_lossless_cluster(
     particles: Sequence[Particle], *, imag_tol: float = 0.0
 ) -> bool:
-    """Return True when all particle materials are numerically lossless."""
+    """Return whether every known particle material is numerically lossless."""
     tol = float(imag_tol)
     for particle in particles:
         if isinstance(particle, PECSphere):
@@ -62,8 +64,6 @@ def _is_numerically_lossless_cluster(
             if any(abs(complex(n).imag) > tol for n in particle.layer_refractive_indices):
                 return False
             continue
-        # Unknown particle families default to "possibly lossy" so we do not
-        # skip local-absorption evaluation incorrectly.
         return False
     return True
 
@@ -111,46 +111,6 @@ def _build_exciting_scattered_flat_generic_route(
     return e_flat, x_flat
 
 
-def _periodic_local_absorptance_generic_route(
-    sim: Simulation,
-    *,
-    initial_coeffs: Any,
-    coeffs: Any,
-    k0: float,
-    incident_power_per_area: float,
-    unit_cell_area: float,
-    accum_dtype: np.dtype,
-) -> float | None:
-    """Return the local periodic power defect normalized by incident cell power.
-
-    For a converged solve this is the material absorptance obtained from the
-    local exciting/scattered SVWF coefficients.  For a nominally lossless
-    system, a nonzero value instead measures the solve-equation defect.  Its
-    difference from ``1 - R - T`` isolates coupling/far-field closure error.
-    """
-    payload = _build_exciting_scattered_flat_generic_route(
-        sim,
-        initial_coeffs=initial_coeffs,
-        coeffs=coeffs,
-        accum_dtype=accum_dtype,
-    )
-    if payload is None:
-        return None
-    e_flat, x_flat = payload
-    components = local_absorbed_power_components_from_exciting(
-        e_flat,
-        x_flat,
-        k0=float(k0),
-        n_medium=sim.config.n_medium,
-    )
-    incident_cell_power = float(incident_power_per_area) * float(unit_cell_area)
-    if incident_cell_power <= 0.0 or not np.isfinite(incident_cell_power):
-        raise ValueError(
-            "Periodic incident cell power must be finite and positive for local power diagnostics."
-        )
-    return float(components["P_abs_local"]) / incident_cell_power
-
-
 def _plane_wave_local_absorption_generic_route(
     sim: Simulation,
     *,
@@ -189,15 +149,15 @@ def _plane_wave_local_absorption_generic_route(
     )
 
 
-def _local_absorbed_power_components_generic_route(
+def _local_power_balance_generic_route(
     sim: Simulation,
     *,
     initial_coeffs: Any,
     coeffs: Any,
     k0: float,
     accum_dtype: np.dtype,
-) -> dict[str, float | np.ndarray] | None:
-    """Compute local absorbed-power diagnostics via the generic `e=b+W x` route."""
+) -> PowerBalance | None:
+    """Compute local absorbed power via the generic `e=b+W x` route."""
     payload = _build_exciting_scattered_flat_generic_route(
         sim,
         initial_coeffs=initial_coeffs,
@@ -207,7 +167,7 @@ def _local_absorbed_power_components_generic_route(
     if payload is None:
         return None
     e_flat, x_flat = payload
-    return local_absorbed_power_components_from_exciting(
+    return local_power_balance_from_exciting(
         e_flat,
         x_flat,
         k0=float(k0),
@@ -217,10 +177,19 @@ def _local_absorbed_power_components_generic_route(
     )
 
 
-def _as_float_scalar(value: float | np.ndarray) -> float:
-    """Convert a scalar-like numeric payload to Python float."""
-    arr = np.asarray(value, dtype=np.float64).reshape(())
-    return float(arr)
+def _print_power_balance(power: PowerBalance, *, label: str | None = None) -> None:
+    """Print one concise backend-independent power-balance summary."""
+    prefix = "Power balance" if label is None else f"Power balance [{label}]"
+
+    def fmt(value: float | None) -> str:
+        return "n/a" if value is None else f"{float(value):.6g}"
+
+    print(
+        f"{prefix}: R={fmt(power.reflectance)} T={fmt(power.transmittance)} "
+        f"local_absorptance={fmt(power.local_absorptance)} "
+        f"flux_defect={fmt(power.flux_defect_fraction)} "
+        f"closure={fmt(power.closure_error_fraction)}"
+    )
 
 
 def _build_periodic_result(
@@ -352,7 +321,7 @@ def _build_channel_diagnostics(
     k0: float,
     accum_dtype: np.dtype,
 ) -> tuple[
-    dict[str, float | np.ndarray] | None,
+    PowerBalance | None,
     dict[str, float] | None,
     dict[str, float] | None,
     dict[str, float] | None,
@@ -364,16 +333,20 @@ def _build_channel_diagnostics(
     diagnostics in the future.
     """
     cfg = sim.config
-    ns = int(sim.positions.shape[0])
     local_b = initial_coeffs if local_initial_coeffs is None else local_initial_coeffs
     local_x = coeffs if local_coeffs is None else local_coeffs
 
-    power: dict[str, float | np.ndarray] | None = None
+    power: PowerBalance | None = None
     cross_sections: dict[str, float] | None = None
     decomposition_forward: dict[str, float] | None = None
     decomposition_backward: dict[str, float] | None = None
 
     if isinstance(source, PlaneWave):
+        # Plane-wave cross sections are physical observables rather than raw
+        # solver diagnostics. Preserve the exact zero for known lossless
+        # materials and avoid an additional W @ x operator application. Finite
+        # beams and periodic runs expose the un-clipped local power estimator
+        # through PowerBalance, where it is useful as a closure diagnostic.
         c_abs_local = (
             0.0
             if _is_numerically_lossless_cluster(sim.particles)
@@ -403,21 +376,17 @@ def _build_channel_diagnostics(
         and farfield.initial_tm is not None
         and source.has_finite_incident_power()
     ):
-        p_abs_diag: dict[str, float | np.ndarray] | None
-        if _is_numerically_lossless_cluster(sim.particles):
-            p_abs_diag = {
-                "P_abs_local": 0.0,
-                "P_abs_local_particles": np.zeros((ns,), dtype=np.float64),
-            }
-        else:
-            p_abs_diag = _local_absorbed_power_components_generic_route(
-                sim,
-                initial_coeffs=local_b,
-                coeffs=local_x,
-                k0=float(k0),
-                accum_dtype=accum_dtype,
-            )
-        power_base = finite_beam_power_fractions(
+        p_abs_diag = _local_power_balance_generic_route(
+            sim,
+            initial_coeffs=local_b,
+            coeffs=local_x,
+            k0=float(k0),
+            accum_dtype=accum_dtype,
+        )
+        p_abs_local_particles = (
+            None if p_abs_diag is None else p_abs_diag.local_absorbed_power_per_particle
+        )
+        power = finite_beam_power_balance(
             source,
             farfield.initial_te,
             farfield.initial_tm,
@@ -425,18 +394,9 @@ def _build_channel_diagnostics(
             farfield.scattered_tm,
             k0=k0,
             k_medium=k,
-            local_absorbed_power=(
-                None if p_abs_diag is None else _as_float_scalar(p_abs_diag["P_abs_local"])
-            ),
+            local_absorbed_power=(None if p_abs_diag is None else p_abs_diag.local_absorbed_power),
+            local_absorbed_power_per_particle=p_abs_local_particles,
         )
-        power = cast(dict[str, float | np.ndarray], dict(power_base))
-        if p_abs_diag is not None:
-            p_abs_local_particles = np.asarray(
-                p_abs_diag.get("P_abs_local_particles", np.zeros((ns,), dtype=np.float64)),
-                dtype=np.float64,
-            ).reshape(ns)
-            power["P_abs_local_particles"] = p_abs_local_particles
-            power["A_local_particles"] = p_abs_local_particles / float(power["P_initial"])
         decomposition_forward = pwp_power_decomposition(
             direction="forward",
             initial_pwp_te=farfield.initial_te,
@@ -460,30 +420,15 @@ def _build_channel_diagnostics(
         return power, cross_sections, decomposition_forward, decomposition_backward
 
     if isinstance(source, (DipoleSource, DipoleCollection)):
-        if _is_numerically_lossless_cluster(sim.particles):
-            power = {
-                "P_abs_local": 0.0,
-                "P_abs_local_particles": np.zeros((ns,), dtype=np.float64),
-            }
-        else:
-            p_abs_diag = _local_absorbed_power_components_generic_route(
-                sim,
-                initial_coeffs=local_b,
-                coeffs=local_x,
-                k0=float(k0),
-                accum_dtype=accum_dtype,
-            )
-            if p_abs_diag is not None:
-                power = {
-                    "P_abs_local": _as_float_scalar(p_abs_diag["P_abs_local"]),
-                    "P_abs_local_particles": np.asarray(
-                        p_abs_diag.get(
-                            "P_abs_local_particles",
-                            np.zeros((ns,), dtype=np.float64),
-                        ),
-                        dtype=np.float64,
-                    ).reshape(ns),
-                }
+        p_abs_diag = _local_power_balance_generic_route(
+            sim,
+            initial_coeffs=local_b,
+            coeffs=local_x,
+            k0=float(k0),
+            accum_dtype=accum_dtype,
+        )
+        if p_abs_diag is not None:
+            power = p_abs_diag
     return power, cross_sections, decomposition_forward, decomposition_backward
 
 
@@ -491,23 +436,23 @@ def _basis_channel_payloads(
     run_te: SimulationResult,
     run_tm: SimulationResult,
 ) -> tuple[
-    dict[str, dict[str, float | np.ndarray]] | None,
+    dict[str, PowerBalance] | None,
     dict[str, dict[str, float]] | None,
-    dict[str, dict[str, float]] | None,
+    dict[str, PowerBalance | dict[str, float]] | None,
     dict[str, dict[str, float]] | None,
     dict[str, dict[str, float]] | None,
 ]:
     """Collect basis-channel diagnostics and incoherent unpolarized averages."""
-    power_basis = None
-    cross_sections_basis = None
-    decomposition_forward_basis = None
-    decomposition_backward_basis = None
-    unpolarized = None
+    power_basis: dict[str, PowerBalance] | None = None
+    cross_sections_basis: dict[str, dict[str, float]] | None = None
+    decomposition_forward_basis: dict[str, dict[str, float]] | None = None
+    decomposition_backward_basis: dict[str, dict[str, float]] | None = None
+    unpolarized: dict[str, PowerBalance | dict[str, float]] | None = None
 
     if run_te.power is not None and run_tm.power is not None:
         power_basis = {"te": run_te.power, "tm": run_tm.power}
         unpolarized = dict(unpolarized or {})
-        unpolarized["power"] = avg_numeric_dict(run_te.power, run_tm.power)
+        unpolarized["power"] = average_power_balances(run_te.power, run_tm.power)
     if run_te.cross_sections is not None and run_tm.cross_sections is not None:
         cross_sections_basis = {"te": run_te.cross_sections, "tm": run_tm.cross_sections}
         unpolarized = dict(unpolarized or {})
@@ -547,7 +492,7 @@ def _assemble_simulation_result(
     compute_dtype: np.dtype,
     accum_dtype: np.dtype,
     farfield: FarFieldPatterns,
-    power: dict[str, float | np.ndarray] | None,
+    power: PowerBalance | None,
     cross_sections: dict[str, float] | None,
     decomposition_forward: dict[str, float] | None,
     decomposition_backward: dict[str, float] | None,
@@ -555,9 +500,9 @@ def _assemble_simulation_result(
     coeffs_basis: dict[str, np.ndarray] | None = None,
     solver_result_basis=None,
     farfield_basis: dict[str, FarFieldPatterns] | None = None,
-    power_basis: dict[str, dict[str, float | np.ndarray]] | None = None,
+    power_basis: dict[str, PowerBalance] | None = None,
     cross_sections_basis: dict[str, dict[str, float]] | None = None,
-    unpolarized: dict[str, dict[str, float]] | None = None,
+    unpolarized: dict[str, PowerBalance | dict[str, float]] | None = None,
     decomposition_forward_basis: dict[str, dict[str, float]] | None = None,
     decomposition_backward_basis: dict[str, dict[str, float]] | None = None,
     polarization_jones: tuple[complex, complex] | None = None,
@@ -642,7 +587,7 @@ def build_single_channel_result(
     Ns = positions.shape[0]
     Nm = n_modes(cfg.lmax)
 
-    power: dict[str, float | np.ndarray] | None = None
+    power: PowerBalance | None = None
     cross_sections = None
     decomposition_forward = None
     decomposition_backward = None
@@ -758,21 +703,22 @@ def postprocess_sources_impl(
             backend_coeffs = (
                 None if backend_coeffs_by_label is None else backend_coeffs_by_label[label]
             )
-            local_absorptance = _periodic_local_absorptance_generic_route(
+            local_components = _local_power_balance_generic_route(
                 sim,
                 initial_coeffs=solved.initial_coeffs[label],
                 coeffs=x_col if backend_coeffs is None else backend_coeffs,
                 k0=float(solved.k0),
-                incident_power_per_area=float(periodic_payload.incident_power_per_area),
-                unit_cell_area=float(periodic_payload.unit_cell_area),
                 accum_dtype=accum_dtype,
             )
-            if local_absorptance is not None:
+            if local_components is not None:
                 periodic_payload = replace(
                     periodic_payload,
-                    local_absorptance=float(local_absorptance),
-                    power_closure_error=float(
-                        periodic_payload.absorptance_raw_diff - local_absorptance
+                    power=replace(
+                        periodic_payload.power,
+                        local_absorbed_power=local_components.local_absorbed_power,
+                        local_absorbed_power_per_particle=(
+                            local_components.local_absorbed_power_per_particle
+                        ),
                     ),
                 )
             if cfg.verbose:
@@ -783,22 +729,10 @@ def postprocess_sources_impl(
                 prefix = "Periodic orders"
                 if n_channels > 1:
                     prefix = f"{prefix} [{label}]"
-                local_text = (
-                    "n/a"
-                    if periodic_payload.local_absorptance is None
-                    else f"{periodic_payload.local_absorptance:.6g}"
-                )
-                closure_text = (
-                    "n/a"
-                    if periodic_payload.power_closure_error is None
-                    else f"{periodic_payload.power_closure_error:.6g}"
-                )
-                print(
-                    f"{prefix}: total={order_count} propagating={propagating_count} "
-                    f"R={float(periodic_payload.reflectance):.6g} "
-                    f"T={float(periodic_payload.transmittance):.6g} "
-                    f"A_raw={float(periodic_payload.absorptance_raw_diff):.6g} "
-                    f"A_local={local_text} closure={closure_text}"
+                print(f"{prefix}: total={order_count} propagating={propagating_count}")
+                _print_power_balance(
+                    periodic_payload.power,
+                    label=label if n_channels > 1 else None,
                 )
             periodic_runs[label] = _assemble_simulation_result(
                 sim,
@@ -816,7 +750,7 @@ def postprocess_sources_impl(
                 # `SimulationResult.periodic`; keep finite-cluster PWP families
                 # as intentional empty placeholders.
                 farfield=empty_farfield_patterns(compute_dtype),
-                power=None,
+                power=periodic_payload.power,
                 cross_sections=None,
                 decomposition_forward=None,
                 decomposition_backward=None,
@@ -878,7 +812,7 @@ def postprocess_sources_impl(
             else single_rhs_result_from_multi(solved.solver_result, j)
         )
         backend_coeffs = None if backend_coeffs_by_label is None else backend_coeffs_by_label[label]
-        runs[label] = build_single_channel_result(
+        run = build_single_channel_result(
             sim,
             source=solved.sources[label],
             retention=retained,
@@ -895,6 +829,9 @@ def postprocess_sources_impl(
             farfield_azimuthal_angles=ff_azimuth,
             include_farfield=include_farfield,
         )
+        runs[label] = run
+        if cfg.verbose and run.power is not None:
+            _print_power_balance(run.power, label=label if n_channels > 1 else None)
 
     return MultiSourceSimulationResult(
         labels=labels,
@@ -985,7 +922,7 @@ def run_impl(
         else empty_farfield_patterns(compute_dtype)
     )
 
-    power: dict[str, float | np.ndarray] | None = None
+    power: PowerBalance | None = None
     cross_sections = None
     decomposition_forward = None
     decomposition_backward = None

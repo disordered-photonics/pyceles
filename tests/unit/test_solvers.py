@@ -201,6 +201,41 @@ def test_lgmres_and_gcrotmk_identity():
     assert out_gcrotmk.iterations >= 1
 
 
+def test_final_residual_progress_update_does_not_advance_iteration_count(monkeypatch):
+    bars: list[Any] = []
+
+    class FakeProgressBar:
+        def __init__(self, *args, **kwargs):
+            del args, kwargs
+            self.n = 0
+            self.total = None
+            self.postfix = ""
+            bars.append(self)
+
+        def update(self, amount):
+            self.n += int(amount)
+
+        def set_postfix_str(self, value, *, refresh):
+            del refresh
+            self.postfix = str(value)
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(solvers, "tqdm", FakeProgressBar)
+    update, close, history = solvers._make_progress_tracker(
+        "gmres", show_progress=True, target_rel=1e-6, max_iters=10
+    )
+    update(1e-2)
+    update(1e-4)
+    update(1e-7, residual_label_override="true_final_rel_res", advance=False)
+    close()
+
+    assert bars[0].n == 2
+    assert history == [1e-2, 1e-4]
+    assert bars[0].postfix == "true_final_rel_res=1.000e-07"
+
+
 def test_bicgstab_progress_callback_does_not_add_residual_matvec(monkeypatch):
     A = np.array(
         [

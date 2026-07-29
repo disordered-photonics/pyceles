@@ -342,7 +342,13 @@ def _make_progress_tracker(
     history: list[float] = []
     if not show_progress:
 
-        def _noop_update(_: float | None, *, residual_label_override: str | None = None) -> None:
+        def _noop_update(
+            _: float | None,
+            *,
+            residual_label_override: str | None = None,
+            advance: bool = True,
+        ) -> None:
+            del residual_label_override, advance
             return
 
         def _noop_close() -> None:
@@ -356,12 +362,22 @@ def _make_progress_tracker(
     # available we switch to dynamic total = done + estimated_left.
     pbar = tqdm(total=None, desc=f"{method.upper():8s}", leave=True)
 
-    def update(residual: float | None, *, residual_label_override: str | None = None) -> None:
-        """Record one progress sample and refresh tqdm output."""
+    def update(
+        residual: float | None,
+        *,
+        residual_label_override: str | None = None,
+        advance: bool = True,
+    ) -> None:
+        """Record a residual sample and refresh tqdm output.
+
+        Set ``advance=False`` for a final diagnostic that should replace the
+        displayed residual without being counted as another Krylov iteration.
+        """
         nonlocal n_updates
-        n_updates += 1
+        if advance:
+            n_updates += 1
         r = None if residual is None else float(residual)
-        if r is not None and np.isfinite(r):
+        if advance and r is not None and np.isfinite(r):
             history.append(r)
         elapsed = time.perf_counter() - start
         eta = (
@@ -817,6 +833,7 @@ def gmres_cupy_block(
             progress_update(
                 float(block_relative),
                 residual_label_override="true_final_block_rel_res",
+                advance=False,
             )
     else:
         residual_norm = np.full((nrhs,), np.nan, dtype=float)
@@ -970,6 +987,7 @@ def gmres_scipy(
         progress_update(
             float(result.relative_residual),
             residual_label_override="true_final_rel_res",
+            advance=False,
         )
     progress_close()
     return result
@@ -1054,6 +1072,7 @@ def gmres_cupy(
         progress_update(
             float(native.relative_residual),
             residual_label_override="true_final_rel_res",
+            advance=False,
         )
     progress_close()
 
@@ -1145,6 +1164,7 @@ def fgmres_cupy(
         progress_update(
             float(native.relative_residual),
             residual_label_override="true_final_rel_res",
+            advance=False,
         )
     progress_close()
 
@@ -1241,6 +1261,7 @@ def lgmres_cupy(
         progress_update(
             float(native.relative_residual),
             residual_label_override="true_final_rel_res",
+            advance=False,
         )
     progress_close()
 
@@ -1323,6 +1344,7 @@ def bicgstab_cupy(
         progress_update(
             float(relative_residual),
             residual_label_override="true_final_rel_res",
+            advance=False,
         )
     progress_close()
 
@@ -1397,6 +1419,7 @@ def bicgstab_scipy(
         progress_update(
             float(result.relative_residual),
             residual_label_override="true_final_rel_res",
+            advance=False,
         )
     progress_close()
     return result
@@ -1464,6 +1487,7 @@ def lgmres_scipy(
         progress_update(
             float(result.relative_residual),
             residual_label_override="true_final_rel_res",
+            advance=False,
         )
     progress_close()
     return result
@@ -1531,6 +1555,7 @@ def gcrotmk_scipy(
         progress_update(
             float(result.relative_residual),
             residual_label_override="true_final_rel_res",
+            advance=False,
         )
     progress_close()
     return result

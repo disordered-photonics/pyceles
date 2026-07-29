@@ -466,6 +466,9 @@ def _write_mapping_recursive(
         if value is None:
             continue
         name = str(key)
+        to_mapping = getattr(value, "to_mapping", None)
+        if callable(to_mapping):
+            value = to_mapping()
         if isinstance(value, Mapping):
             sub = group.create_group(name)
             _write_mapping_recursive(sub, value, compression=compression)
@@ -519,11 +522,14 @@ def load_mapping_h5(path: str | Path, *, group: str = "diagnostics") -> dict[str
         return _read_mapping_recursive(h5[group])
 
 
-def _periodic_to_mapping(periodic: Any) -> dict[str, Any]:
+def _periodic_to_mapping(periodic: Any, *, include_power: bool = True) -> dict[str, Any]:
     """Normalize periodic payload objects to a mapping for HDF5 serialization."""
     if isinstance(periodic, Mapping):
-        return dict(periodic)
-    keys = (
+        out = dict(periodic)
+        if not include_power:
+            out.pop("power", None)
+        return out
+    keys: tuple[str, ...] = (
         "lattice_a1",
         "lattice_a2",
         "unit_cell_area",
@@ -535,25 +541,21 @@ def _periodic_to_mapping(periodic: Any) -> dict[str, Any]:
         "order_propagating",
         "reflected_amplitudes",
         "transmitted_amplitudes",
-        "reflected_power_per_order",
-        "transmitted_power_per_order",
-        "incident_power_per_area",
-        "reflectance",
-        "transmittance",
-        "absorptance",
-        "absorptance_raw_diff",
-        "local_absorptance",
-        "power_closure_error",
+        "reflected_flux_per_order",
+        "transmitted_flux_per_order",
+        "incident_flux",
     )
-    out: dict[str, Any] = {}
+    if include_power:
+        keys = (*keys, "power")
+    payload: dict[str, Any] = {}
     for key in keys:
         if hasattr(periodic, key):
-            out[key] = getattr(periodic, key)
-    if not out:
+            payload[key] = getattr(periodic, key)
+    if not payload:
         raise TypeError(
             "Unsupported periodic payload. Expected mapping or object with periodic fields."
         )
-    return out
+    return payload
 
 
 def save_periodic_h5(
@@ -564,11 +566,12 @@ def save_periodic_h5(
     mode: str = "a",
     attrs: Mapping[str, Any] | None = None,
     compression: str | None = "gzip",
+    include_power: bool = True,
 ) -> None:
-    """Save periodic diffraction-order payload in a dedicated HDF5 group."""
+    """Save periodic orders and optionally the nested common power balance."""
     save_mapping_h5(
         path,
-        mapping=_periodic_to_mapping(periodic),
+        mapping=_periodic_to_mapping(periodic, include_power=include_power),
         group=group,
         mode=mode,
         attrs=attrs,

@@ -72,16 +72,31 @@ Dipole diagnostics:
 - `pyceles.compute_dipole_power_ldos`
 - `pyceles.compute_dipole_ldos_enhancement`
 
-Periodic far-field results are exposed through:
+Power accounting is exposed uniformly through `SimulationResult.power`, an
+immutable `pyceles.PowerBalance` for finite beams, periodic plane waves, and
+local-source workflows where the corresponding quantities exist:
 
-- `pyceles.PeriodicFarFieldPayload`
-  - `reflectance` and `transmittance` are propagating-order flux fractions,
-  - `absorptance_raw_diff` is the raw balance residual `1 - R - T`, with
-    `absorptance` retained as its historical alias,
-  - `local_absorptance` evaluates the local exciting/scattered coefficient
-    identity, and
-  - `power_closure_error = absorptance_raw_diff - local_absorptance` separates
-    coupling/far-field closure error from solve-equation or material loss.
+- absolute fields: `incident_power`, `reflected_power`, `transmitted_power`,
+  `local_absorbed_power`, and `local_absorbed_power_per_particle`,
+- derived flux diagnostics: `flux_defect = incident - reflected - transmitted`
+  and `closure_error = flux_defect - local_absorbed_power`,
+- normalized fields: `reflectance`, `transmittance`, `local_absorptance`,
+  `flux_defect_fraction`, `closure_error_fraction`, and
+  `local_absorptance_per_particle`.
+
+`flux_defect_fraction` is deliberately not named absorptance: it is only a
+physical absorption estimate when the local coefficient identity and the
+far-field flux evaluation close. For an inexact solve, the local estimate also
+contains the equation residual; this makes inadequate solver accuracy visible.
+
+Periodic order-resolved results remain on `pyceles.PeriodicFarFieldPayload`:
+
+- `reflected_amplitudes` and `transmitted_amplitudes`,
+- `reflected_flux_per_order` and `transmitted_flux_per_order`,
+- `incident_flux`, order indices/wavevectors, and propagation masks,
+- `power`, which is the same common balance exposed as `SimulationResult.power`.
+
+There are no `absorptance`, `A_raw`, or historical power-key aliases.
 
 ## Periodic descriptors
 

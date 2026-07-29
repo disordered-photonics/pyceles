@@ -14,11 +14,12 @@ from pyceles.core.sources import PlaneWave
 from pyceles.core.spherical import spherical_functions_trigon
 
 from .orders import enumerate_diffraction_orders_rectangular
+from .power import PowerBalance
 
 
 @dataclass(frozen=True)
 class PeriodicFarFieldPayload:
-    """Discrete periodic-order amplitudes and power diagnostics."""
+    """Discrete periodic-order amplitudes plus cell-normalized power balance."""
 
     lattice_a1: np.ndarray
     lattice_a2: np.ndarray
@@ -31,26 +32,10 @@ class PeriodicFarFieldPayload:
     order_propagating: np.ndarray
     reflected_amplitudes: np.ndarray
     transmitted_amplitudes: np.ndarray
-    reflected_power_per_order: np.ndarray
-    transmitted_power_per_order: np.ndarray
-    incident_power_per_area: float
-    reflectance: float
-    transmittance: float
-    absorptance_raw_diff: float
-    local_absorptance: float | None = None
-    power_closure_error: float | None = None
-
-    @property
-    def absorptance(self) -> float:
-        """Return the historical alias for ``absorptance_raw_diff``.
-
-        The canonical field is named ``absorptance_raw_diff`` because it is the
-        flux deficit ``1 - R - T``. It is only a physical absorption estimate
-        when the solved coefficients and periodic coupling satisfy the same
-        power identity; ``local_absorptance`` and ``power_closure_error``
-        separate those effects when available.
-        """
-        return float(self.absorptance_raw_diff)
+    reflected_flux_per_order: np.ndarray
+    transmitted_flux_per_order: np.ndarray
+    incident_flux: float
+    power: PowerBalance
 
 
 @dataclass(frozen=True)
@@ -263,27 +248,30 @@ def periodic_plane_wave_orders(
         n_real * kz_abs / (2.0 * k_f),
         0.0,
     )
-    reflected_power = np.asarray(
+    reflected_flux = np.asarray(
         flux_prefactor * np.sum(np.abs(reflected) ** 2, axis=1),
         dtype=np.float64,
     )
-    transmitted_power = np.asarray(
+    transmitted_flux = np.asarray(
         flux_prefactor * np.sum(np.abs(transmitted) ** 2, axis=1),
         dtype=np.float64,
     )
 
     incident_norm = float(np.sum(np.abs(orders_payload.incident_polarization) ** 2))
-    incident_power = n_real * abs(float(np.cos(float(source.polar_angle)))) * incident_norm / 2.0
-    if incident_power <= 0.0 or not np.isfinite(incident_power):
+    incident_flux = n_real * abs(float(np.cos(float(source.polar_angle)))) * incident_norm / 2.0
+    if incident_flux <= 0.0 or not np.isfinite(incident_flux):
         raise ValueError("Incident periodic power normalization is non-finite or non-positive.")
 
-    r_tot = float(np.sum(reflected_power) / incident_power)
-    t_tot = float(np.sum(transmitted_power) / incident_power)
-    a_tot = float(1.0 - r_tot - t_tot)
+    unit_cell_area = float(orders_payload.unit_cell_area)
+    power = PowerBalance(
+        incident_power=float(incident_flux * unit_cell_area),
+        reflected_power=float(np.sum(reflected_flux) * unit_cell_area),
+        transmitted_power=float(np.sum(transmitted_flux) * unit_cell_area),
+    )
     return PeriodicFarFieldPayload(
         lattice_a1=np.asarray(lattice.a1, dtype=float),
         lattice_a2=np.asarray(lattice.a2, dtype=float),
-        unit_cell_area=float(orders_payload.unit_cell_area),
+        unit_cell_area=unit_cell_area,
         incident_k_parallel=np.asarray(orders_payload.incident_k_parallel, dtype=float).reshape(2),
         output_bmax=orders_payload.output_bmax,
         order_mn=np.asarray(orders_payload.order_mn, dtype=np.int32).reshape(n_orders, 2),
@@ -296,12 +284,10 @@ def periodic_plane_wave_orders(
         ),
         reflected_amplitudes=np.asarray(reflected, dtype=np.complex128),
         transmitted_amplitudes=np.asarray(transmitted, dtype=np.complex128),
-        reflected_power_per_order=np.asarray(reflected_power, dtype=np.float64),
-        transmitted_power_per_order=np.asarray(transmitted_power, dtype=np.float64),
-        incident_power_per_area=float(incident_power),
-        reflectance=float(r_tot),
-        transmittance=float(t_tot),
-        absorptance_raw_diff=float(a_tot),
+        reflected_flux_per_order=np.asarray(reflected_flux, dtype=np.float64),
+        transmitted_flux_per_order=np.asarray(transmitted_flux, dtype=np.float64),
+        incident_flux=float(incident_flux),
+        power=power,
     )
 
 

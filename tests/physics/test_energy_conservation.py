@@ -157,11 +157,13 @@ def test_periodic_raw_flux_defect_matches_local_power_defect_for_exact_ewald():
         k=float(solved.k),
         n_medium=cfg.n_medium,
     )
-    local_absorptance = local_power / (payload.incident_power_per_area * payload.unit_cell_area)
+    assert payload.power.incident_power is not None
+    local_absorptance = local_power / payload.power.incident_power
 
-    assert abs(payload.absorptance_raw_diff) > 1.0e-8
+    assert payload.power.flux_defect_fraction is not None
+    assert abs(payload.power.flux_defect_fraction) > 1.0e-8
     np.testing.assert_allclose(
-        payload.absorptance_raw_diff,
+        payload.power.flux_defect_fraction,
         local_absorptance,
         rtol=2.0e-10,
         atol=2.0e-13,

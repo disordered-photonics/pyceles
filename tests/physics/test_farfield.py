@@ -15,10 +15,10 @@ from pyceles.core.tmatrix import mie_cross_sections
 from pyceles.postprocessing.farfield import (
     absorption_cross_section,
     extinction_cross_section,
-    finite_beam_power_fractions,
+    finite_beam_power_balance,
     incident_power_from_pwp,
-    local_absorbed_power_components_from_exciting,
     local_absorbed_power_from_exciting,
+    local_power_balance_from_exciting,
     plane_wave_cross_section_components,
     plane_wave_cross_sections,
     pwp_power_decomposition,
@@ -28,6 +28,11 @@ from pyceles.postprocessing.farfield import (
     total_scattering_cross_section,
 )
 from pyceles.simulation import Simulation, SimulationConfig
+
+
+def _required_float(value: float | None) -> float:
+    assert value is not None
+    return value
 
 
 def _single_sphere_particles(
@@ -159,7 +164,7 @@ def test_power_decomposition_rejects_plane_wave_source():
         )
 
 
-def test_finite_beam_power_fractions_rejects_plane_wave_source():
+def test_finite_beam_power_balance_rejects_plane_wave_source():
     alpha = np.linspace(0.0, 2 * np.pi, 9)
     beta = np.linspace(0.0, np.pi, 17)
     coeff = np.zeros((alpha.size, beta.size), dtype=np.complex128)
@@ -175,7 +180,7 @@ def test_finite_beam_power_fractions_rejects_plane_wave_source():
     )
 
     with pytest.raises(ValueError, match="undefined"):
-        finite_beam_power_fractions(
+        finite_beam_power_balance(
             source,
             p,
             p,
@@ -186,7 +191,7 @@ def test_finite_beam_power_fractions_rejects_plane_wave_source():
         )
 
 
-def test_finite_beam_power_fractions_finite_beam_returns_finite_fraction():
+def test_finite_beam_power_balance_returns_finite_diagnostics():
     alpha = np.linspace(0.0, 2 * np.pi, 9)
     beta = np.linspace(0.0, np.pi, 17)
     coeff_initial = np.ones((alpha.size, beta.size), dtype=np.complex128)
@@ -204,7 +209,7 @@ def test_finite_beam_power_fractions_finite_beam_returns_finite_fraction():
         amplitude=1.0,
     )
 
-    out = finite_beam_power_fractions(
+    out = finite_beam_power_balance(
         source,
         p_initial,
         p_scattered,
@@ -213,11 +218,16 @@ def test_finite_beam_power_fractions_finite_beam_returns_finite_fraction():
         k0=2.0 * np.pi / 550.0,
         k_medium=2.0 * np.pi / 550.0,
     )
-    assert np.isfinite(out["P_initial"])
-    assert np.isfinite(out["T"])
-    assert np.isfinite(out["R"])
-    assert np.isfinite(out["P_abs_raw_diff"])
-    assert np.isfinite(out["A_raw_diff"])
+    incident = _required_float(out.incident_power)
+    transmittance = _required_float(out.transmittance)
+    reflectance = _required_float(out.reflectance)
+    flux_defect = _required_float(out.flux_defect)
+    flux_defect_fraction = _required_float(out.flux_defect_fraction)
+    assert np.isfinite(incident)
+    assert np.isfinite(transmittance)
+    assert np.isfinite(reflectance)
+    assert np.isfinite(flux_defect)
+    assert np.isfinite(flux_defect_fraction)
 
 
 def test_local_absorbed_power_from_exciting_matches_manual_prefactor():
@@ -261,13 +271,13 @@ def test_local_absorbed_power_from_exciting_scales_inverse_with_n_medium():
     np.testing.assert_allclose(p_n12 / p_n1, 1.0 / 1.2, rtol=1e-13, atol=1e-13)
 
 
-def test_local_absorbed_power_components_include_per_particle_contributions():
+def test_local_power_balance_includes_per_particle_contributions():
     rng = np.random.default_rng(20260413)
     n_particles = 3
     nmodes = 7
     e = rng.standard_normal((n_particles, nmodes)) + 1j * rng.standard_normal((n_particles, nmodes))
     x = rng.standard_normal((n_particles, nmodes)) + 1j * rng.standard_normal((n_particles, nmodes))
-    out = local_absorbed_power_components_from_exciting(
+    out = local_power_balance_from_exciting(
         e,
         x,
         k0=2.0 * np.pi / 550.0,
@@ -275,14 +285,14 @@ def test_local_absorbed_power_components_include_per_particle_contributions():
         n_particles=n_particles,
         nmodes_per_particle=nmodes,
     )
-    assert "P_abs_local" in out
-    assert "P_abs_local_particles" in out
-    pvec = np.asarray(out["P_abs_local_particles"], dtype=float)
+    assert out.local_absorbed_power is not None
+    assert out.local_absorbed_power_per_particle is not None
+    pvec = np.asarray(out.local_absorbed_power_per_particle, dtype=float)
     assert pvec.shape == (n_particles,)
-    np.testing.assert_allclose(np.sum(pvec), float(out["P_abs_local"]), rtol=1e-13, atol=1e-13)
+    np.testing.assert_allclose(np.sum(pvec), out.local_absorbed_power, rtol=1e-13, atol=1e-13)
 
 
-def test_finite_beam_power_fractions_expose_local_and_closure_terms():
+def test_finite_beam_power_balance_exposes_local_and_closure_terms():
     alpha = np.linspace(0.0, 2 * np.pi, 13, endpoint=False)
     beta = np.linspace(0.0, np.pi, 17)
     initial_coeff = np.ones((alpha.size, beta.size), dtype=np.complex128)
@@ -301,7 +311,7 @@ def test_finite_beam_power_fractions_expose_local_and_closure_terms():
         focal_point=(0.0, 0.0, 0.0),
         amplitude=1.0,
     )
-    out = finite_beam_power_fractions(
+    out = finite_beam_power_balance(
         source,
         p_i_te,
         p_i_tm,
@@ -311,31 +321,44 @@ def test_finite_beam_power_fractions_expose_local_and_closure_terms():
         k_medium=2.0 * np.pi / 550.0,
         local_absorbed_power=0.123,
     )
-    for key in ("P_abs_raw_diff", "A_raw_diff", "P_abs_local", "A_local", "Delta_power_closure"):
-        assert key in out
+    flux_defect = _required_float(out.flux_defect)
+    incident = _required_float(out.incident_power)
+    transmitted = _required_float(out.transmitted_power)
+    reflected = _required_float(out.reflected_power)
+    flux_fraction = _required_float(out.flux_defect_fraction)
+    transmittance = _required_float(out.transmittance)
+    reflectance = _required_float(out.reflectance)
+    closure_error = _required_float(out.closure_error)
+    local_power = _required_float(out.local_absorbed_power)
+    local_fraction = _required_float(out.local_absorptance)
     np.testing.assert_allclose(
-        out["P_abs_raw_diff"],
-        out["P_initial"] - out["P_transmitted"] - out["P_reflected"],
+        flux_defect,
+        incident - transmitted - reflected,
         rtol=1e-13,
         atol=1e-13,
     )
-    np.testing.assert_allclose(out["A_raw_diff"], 1.0 - out["T"] - out["R"], rtol=1e-13, atol=1e-13)
     np.testing.assert_allclose(
-        out["Delta_power_closure"],
-        out["P_abs_raw_diff"] - out["P_abs_local"],
+        flux_fraction,
+        1.0 - transmittance - reflectance,
         rtol=1e-13,
         atol=1e-13,
     )
     np.testing.assert_allclose(
-        out["A_local"],
-        out["P_abs_local"] / out["P_initial"],
+        closure_error,
+        flux_defect - local_power,
+        rtol=1e-13,
+        atol=1e-13,
+    )
+    np.testing.assert_allclose(
+        local_fraction,
+        local_power / incident,
         rtol=1e-13,
         atol=1e-13,
     )
 
 
 @pytest.mark.reference
-def test_finite_beam_power_fractions_uses_initial_pwp_for_tilted_sources():
+def test_finite_beam_power_balance_uses_initial_pwp_for_tilted_sources():
     alpha = np.linspace(0.0, 2 * np.pi, 25, endpoint=False)
     beta = np.linspace(0.0, np.pi, 37)
     k0 = 2.0 * np.pi / 550.0
@@ -360,7 +383,7 @@ def test_finite_beam_power_fractions_uses_initial_pwp_for_tilted_sources():
         focal_point=(0.0, 0.0, 0.0),
         amplitude=1.0,
     )
-    out = finite_beam_power_fractions(
+    out = finite_beam_power_balance(
         source,
         p_i_te,
         p_i_tm,
@@ -371,14 +394,20 @@ def test_finite_beam_power_fractions_uses_initial_pwp_for_tilted_sources():
     )
     p_forward = pwp_power_flux(p_i_te, k0=k0, k_medium=k_medium, direction="forward")
     p_initial = incident_power_from_pwp(p_i_te, p_i_tm, k0=k0, k_medium=k_medium)
-    np.testing.assert_allclose(out["P_initial"], p_initial, rtol=1e-13, atol=1e-13)
-    np.testing.assert_allclose(out["P_transmitted"], p_forward, rtol=1e-13, atol=1e-13)
-    np.testing.assert_allclose(out["P_reflected"], 0.0, rtol=0.0, atol=0.0)
-    np.testing.assert_allclose(out["T"], p_forward / p_initial, rtol=1e-13, atol=1e-13)
-    np.testing.assert_allclose(out["R"], 0.0, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(
+        _required_float(out.incident_power), p_initial, rtol=1e-13, atol=1e-13
+    )
+    np.testing.assert_allclose(
+        _required_float(out.transmitted_power), p_forward, rtol=1e-13, atol=1e-13
+    )
+    np.testing.assert_allclose(_required_float(out.reflected_power), 0.0, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(
+        _required_float(out.transmittance), p_forward / p_initial, rtol=1e-13, atol=1e-13
+    )
+    np.testing.assert_allclose(_required_float(out.reflectance), 0.0, rtol=0.0, atol=0.0)
 
 
-def test_finite_beam_power_fractions_rejects_plane_wave_limit_gaussian():
+def test_finite_beam_power_balance_rejects_plane_wave_limit_gaussian():
     alpha = np.linspace(0.0, 2 * np.pi, 9, endpoint=False)
     beta = np.linspace(0.0, np.pi, 17)
     coeff = np.zeros((alpha.size, beta.size), dtype=np.complex128)
@@ -395,7 +424,7 @@ def test_finite_beam_power_fractions_rejects_plane_wave_limit_gaussian():
     )
 
     with pytest.raises(ValueError, match="plane-wave limit"):
-        finite_beam_power_fractions(
+        finite_beam_power_balance(
             source,
             p,
             p,
@@ -432,38 +461,35 @@ def test_finite_beam_simulation_reports_local_absorption_and_closure():
         particles=_single_sphere_particles(radius=60.0, n_particle=1.5 + 0.02j),
     ).run()
     assert run.power is not None
-    for key in (
-        "P_abs_raw_diff",
-        "A_raw_diff",
-        "P_abs_local",
-        "A_local",
-        "Delta_power_closure",
-        "P_abs_local_particles",
-        "A_local_particles",
-    ):
-        assert key in run.power
+    flux_defect = _required_float(run.power.flux_defect)
+    incident = _required_float(run.power.incident_power)
+    transmitted = _required_float(run.power.transmitted_power)
+    reflected = _required_float(run.power.reflected_power)
+    closure_error = _required_float(run.power.closure_error)
+    local_power = _required_float(run.power.local_absorbed_power)
+    local_fraction = _required_float(run.power.local_absorptance)
     np.testing.assert_allclose(
-        run.power["P_abs_raw_diff"],
-        run.power["P_initial"] - run.power["P_transmitted"] - run.power["P_reflected"],
+        flux_defect,
+        incident - transmitted - reflected,
+        rtol=1e-12,
+        atol=1e-10,
+    )
+    np.testing.assert_allclose(
+        closure_error,
+        flux_defect - local_power,
         rtol=1e-13,
         atol=1e-13,
     )
-    np.testing.assert_allclose(
-        run.power["Delta_power_closure"],
-        run.power["P_abs_raw_diff"] - run.power["P_abs_local"],
-        rtol=1e-13,
-        atol=1e-13,
-    )
-    pvec = np.asarray(run.power["P_abs_local_particles"], dtype=float)
-    avec = np.asarray(run.power["A_local_particles"], dtype=float)
+    pvec = np.asarray(run.power.local_absorbed_power_per_particle, dtype=float)
+    avec = np.asarray(run.power.local_absorptance_per_particle, dtype=float)
     assert pvec.shape == (1,)
     assert avec.shape == (1,)
-    np.testing.assert_allclose(np.sum(pvec), run.power["P_abs_local"], rtol=1e-13, atol=1e-13)
-    np.testing.assert_allclose(np.sum(avec), run.power["A_local"], rtol=1e-13, atol=1e-13)
-    assert float(run.power["P_abs_local"]) > 0.0
+    np.testing.assert_allclose(np.sum(pvec), local_power, rtol=1e-13, atol=1e-13)
+    np.testing.assert_allclose(np.sum(avec), local_fraction, rtol=1e-13, atol=1e-13)
+    assert local_power > 0.0
 
 
-def test_finite_beam_lossless_cluster_shortcuts_local_absorption_to_zero():
+def test_finite_beam_lossless_cluster_reports_numerical_local_defect():
     source = GaussianBeam(
         wavelength=550.0,
         medium_n=1.0 + 0j,
@@ -489,14 +515,21 @@ def test_finite_beam_lossless_cluster_shortcuts_local_absorption_to_zero():
         particles=_single_sphere_particles(radius=60.0, n_particle=1.5 + 0.0j),
     ).run()
     assert run.power is not None
-    np.testing.assert_allclose(run.power["P_abs_local"], 0.0, rtol=0.0, atol=0.0)
+    assert run.power.local_absorbed_power is not None
+    assert run.power.local_absorbed_power_per_particle is not None
+    assert run.power.local_absorptance_per_particle is not None
     np.testing.assert_allclose(
-        run.power["P_abs_local_particles"], np.zeros((1,)), rtol=0.0, atol=0.0
+        np.sum(run.power.local_absorbed_power_per_particle),
+        run.power.local_absorbed_power,
+        rtol=1e-12,
+        atol=1e-12,
     )
-    np.testing.assert_allclose(run.power["A_local_particles"], np.zeros((1,)), rtol=0.0, atol=0.0)
+    flux_defect = _required_float(run.power.flux_defect)
+    closure_error = _required_float(run.power.closure_error)
+    local_power = _required_float(run.power.local_absorbed_power)
     np.testing.assert_allclose(
-        run.power["Delta_power_closure"],
-        run.power["P_abs_raw_diff"],
+        closure_error,
+        flux_defect - local_power,
         rtol=1e-13,
         atol=1e-13,
     )
