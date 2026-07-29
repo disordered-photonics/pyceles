@@ -20,7 +20,7 @@ from .scalar import (
     chebyshev_shell_indices,
     factorial_int,
     real_integral_sequence,
-    reciprocal_gamma,
+    reciprocal_gamma_with_zero_mask,
     same_plane_z_tolerance,
     structural_sum_m_normalization,
 )
@@ -32,8 +32,6 @@ from .shells import (
 from .special import (
     shifted_delta_sequence,
     shifted_delta_sequence_batched,
-    shifted_delta_series_max_index,
-    shifted_delta_series_required,
     upper_gamma_sequence,
     upper_incomplete_gamma_int_or_halfint,
 )
@@ -53,6 +51,7 @@ class _ReciprocalShellData:
     phi: Array
     gamma: Array
     xarg: Array
+    rayleigh_zero: Array
 
 
 @dataclass(frozen=True)
@@ -74,7 +73,7 @@ class EwaldShellWorkspace:
     eta: float
     _reciprocal_shell_cache: dict[int, _ReciprocalShellData] = field(default_factory=dict)
     _real_shell_cache: dict[int, _RealShellData] = field(default_factory=dict)
-    _upper_gamma_cache: dict[tuple[int, int], Array] = field(default_factory=dict)
+    _upper_gamma_cache: dict[int, tuple[int, Array]] = field(default_factory=dict)
     _propagating_min_shell_cache: dict[float, int] = field(default_factory=dict)
 
     def reciprocal_shell(self, shell: int) -> _ReciprocalShellData:
@@ -91,7 +90,7 @@ class EwaldShellWorkspace:
         kgt = np.asarray(self.k_parallel, dtype=float).reshape(2)[None, :] + reciprocal
         rho = np.linalg.norm(kgt, axis=1)
         phi = np.arctan2(kgt[:, 1], kgt[:, 0])
-        gamma = reciprocal_gamma(float(self.k), rho)
+        gamma, rayleigh_zero = reciprocal_gamma_with_zero_mask(float(self.k), rho)
         xarg = -(gamma * gamma) / (4.0 * float(self.eta) * float(self.eta))
         data = _ReciprocalShellData(
             kgt=np.asarray(kgt, dtype=float),
@@ -99,6 +98,7 @@ class EwaldShellWorkspace:
             phi=np.asarray(phi, dtype=float),
             gamma=np.asarray(gamma, dtype=np.complex128),
             xarg=np.asarray(xarg, dtype=np.complex128),
+            rayleigh_zero=np.asarray(rayleigh_zero, dtype=bool),
         )
         self._reciprocal_shell_cache[int(shell)] = data
         return data
@@ -131,19 +131,12 @@ class EwaldShellWorkspace:
     def upper_gamma(self, shell: int, max_index: int) -> Array:
         shell_i = int(shell)
         max_i = int(max_index)
-        key = (shell_i, max_i)
-        cached = self._upper_gamma_cache.get(key)
-        if cached is not None:
-            return cached
-        for (cached_shell, cached_max), values in self._upper_gamma_cache.items():
-            if cached_shell == shell_i and cached_max > max_i:
-                return values[:, : max_i + 1]
+        cached = self._upper_gamma_cache.get(shell_i)
+        if cached is not None and cached[0] >= max_i:
+            return cached[1][:, : max_i + 1]
         data = self.reciprocal_shell(shell_i)
         out = np.asarray(upper_gamma_sequence(max_i, data.xarg), dtype=np.complex128)
-        for old_key in tuple(self._upper_gamma_cache):
-            if old_key[0] == shell_i and old_key[1] < max_i:
-                del self._upper_gamma_cache[old_key]
-        self._upper_gamma_cache[key] = out
+        self._upper_gamma_cache[shell_i] = (max_i, out)
         return out
 
     def minimum_reciprocal_shell_for_propagating_orders(self, *, rayleigh_margin: float) -> int:
@@ -889,17 +882,13 @@ def _shifted_reciprocal_sum(
                 )
             inner[:, int(n)] = terms
         delta_order = int(n_values[-1])
-        needs_series = shifted_delta_series_required(gamma, [float(c[2])], float(eta))
         delta = shifted_delta_sequence(
             delta_order,
             gamma,
             float(c[2]),
             float(eta),
-            upper_gamma=(
-                ws.upper_gamma(shell, shifted_delta_series_max_index(delta_order))
-                if needs_series
-                else None
-            ),
+            upper_gamma_provider=lambda max_index: ws.upper_gamma(shell, max_index),
+            series_exclusion=shell_data.rayleigh_zero,
         )
         return complex(
             np.sum(
@@ -1266,20 +1255,16 @@ def ewald_structural_sums_2d_batch(
         if np.any(shifted_mask):
             phase = phase_all[shifted_mask]
             cz_shifted = np.asarray(cz[shifted_mask], dtype=float)
-            needs_series = shifted_delta_series_required(gamma, cz_shifted, float(eta))
             delta_full = shifted_delta_sequence_batched(
                 order,
                 gamma,
                 cz_shifted,
                 float(eta),
-                upper_gamma=(
-                    ws.upper_gamma(
-                        shell,
-                        max(max_same_n, shifted_delta_series_max_index(order)),
-                    )
-                    if needs_series
-                    else None
+                upper_gamma_provider=lambda max_index: ws.upper_gamma(
+                    shell,
+                    max(max_same_n, max_index),
                 ),
+                series_exclusion=shell_data.rayleigh_zero,
             )
             gamma_over_k = gamma / float(k)
             for degree in range(order + 1):

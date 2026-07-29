@@ -162,6 +162,16 @@ class PeriodicCouplingOperator:
         self._near_contraction_tensor_cache = tensor
         return tensor
 
+    def _release_rayleigh_preparation_state(self) -> None:
+        """Drop Ewald-only preparation state once Rayleigh caches are complete."""
+        if self._self_block_cache is None or self._near_structural_sums is None:
+            return
+        # Materialize the compact contraction view before releasing the full
+        # structural tensor that was needed to build the exact self block.
+        self._near_contraction_tensor()
+        self._ewald_shell_workspace = None
+        self._structural_contraction_tensor = None
+
     def _self_block(self) -> Array:
         """Return the exact periodic self block shared by every particle."""
         block = self._self_block_cache
@@ -267,6 +277,7 @@ class PeriodicCouplingOperator:
         y = apply_rayleigh_far_numpy(self._rayleigh_plan(), arr)
         y += np.einsum("ij,ajr->air", self._self_block(), arr, optimize=True)
         self._populate_near_structural_sums(show_progress=False)
+        self._release_rayleigh_preparation_state()
         indptr, destinations = self._near_structure()
         sums = self._near_structural_sums
         if sums is None:
@@ -331,9 +342,16 @@ class PeriodicCouplingOperator:
     def populate(self, *, show_progress: bool = False) -> None:
         """Eagerly populate reusable periodic coupling data."""
         if self.periodic.options.method == "rayleigh":
-            self._rayleigh_plan()
+            plan = self._rayleigh_plan()
+            if show_progress:
+                tqdm.write(
+                    "[Rayleigh] plan "
+                    f"reciprocal_orders={plan.n_modes_reciprocal} "
+                    f"z_cut={plan.z_cut:.6g}"
+                )
             self._self_block()
             self._populate_near_structural_sums(show_progress=show_progress)
+            self._release_rayleigh_preparation_state()
             return
         if self.periodic.options.method != "ewald" or not self.cache_blocks:
             return

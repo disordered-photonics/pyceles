@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 from scipy import integrate, special
 
+from pyceles.core.periodic.scalar import reciprocal_gamma_with_zero_mask
 from pyceles.core.periodic.special import (
     kambe_integral,
     reduced_incomplete_gamma_int_or_halfint,
@@ -140,3 +141,83 @@ def test_shifted_delta_sequence_uses_exact_near_plane_series_at_high_order() -> 
 
     np.testing.assert_allclose(got, expected, rtol=2e-13, atol=2e-13)
     assert np.max(np.abs(got)) < 1.0e4
+
+
+def test_shifted_delta_sequence_requests_cached_series_table_lazily() -> None:
+    eta = 1.1588807813266307e-3
+    gamma = np.asarray([0.006 + 0.0j, 0.02j], dtype=np.complex128)
+    calls: list[int] = []
+
+    def provider(max_index: int) -> np.ndarray:
+        calls.append(int(max_index))
+        x = -(gamma * gamma) / (4.0 * eta * eta)
+        return upper_gamma_sequence(max_index, x)
+
+    near = shifted_delta_sequence(
+        6,
+        gamma,
+        z_offset=2.9574860172942863e-4,
+        eta=eta,
+        upper_gamma_provider=provider,
+    )
+    assert calls == [22]
+    assert np.all(np.isfinite(near))
+
+    calls.clear()
+    shifted_delta_sequence(
+        3,
+        np.asarray([0.7 + 0.1j], dtype=np.complex128),
+        z_offset=0.6,
+        eta=1.2,
+        upper_gamma_provider=provider,
+    )
+    assert calls == []
+
+
+def test_shifted_delta_series_is_accurate_at_its_dimensionless_boundary() -> None:
+    eta = 1.0
+    z_offset = 0.5
+    gamma = np.asarray([16.0 + 0.0j, 16.0j], dtype=np.complex128)
+    max_order = 20
+
+    got = shifted_delta_sequence(max_order, gamma, z_offset=z_offset, eta=eta)
+
+    x = -(gamma * gamma) / (4.0 * eta * eta)
+    q = 0.25 * (gamma * z_offset) ** 2
+    gamma_table = upper_gamma_sequence(max_order + 40, x)
+    expected = np.zeros_like(got)
+    term = np.ones_like(gamma)
+    for power in range(41):
+        if power:
+            term *= q / float(power)
+        expected += term[:, None] * gamma_table[:, power : power + max_order + 1]
+
+    np.testing.assert_allclose(got, expected, rtol=5e-13, atol=5e-13)
+
+
+def test_reciprocal_gamma_marks_exact_rayleigh_zero_before_regularization() -> None:
+    gamma, zero = reciprocal_gamma_with_zero_mask(2.0, np.asarray([1.0, 2.0, 3.0]))
+
+    np.testing.assert_array_equal(zero, np.asarray([False, True, False]))
+    assert gamma[1] == pytest.approx(1.0e-10j)
+
+
+def test_shifted_delta_series_exclusion_preserves_rayleigh_zero_policy() -> None:
+    gamma = np.asarray([1.0e-10j], dtype=np.complex128)
+    provider_calls: list[int] = []
+
+    def provider(max_index: int) -> np.ndarray:
+        provider_calls.append(int(max_index))
+        raise AssertionError("the near-plane series must not own a Rayleigh-zero term")
+
+    got = shifted_delta_sequence(
+        0,
+        gamma,
+        z_offset=1.0e-3,
+        eta=1.0e-4,
+        upper_gamma_provider=provider,
+        series_exclusion=np.asarray([True]),
+    )
+
+    assert provider_calls == []
+    assert np.all(np.isfinite(got))

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from typing import Literal
 
 import numpy as np
@@ -16,8 +17,8 @@ _SMALL_COMPLEX = 1e-14
 _SHIFTED_DELTA_SERIES_TERMS = 16
 _SHIFTED_DELTA_SERIES_SCALED_LIMIT = 8.0
 _SHIFTED_DELTA_SERIES_ETA_Z_LIMIT = 0.5
-_SHIFTED_DELTA_SERIES_X_MIN = _SMALL_COMPLEX
 ShiftedReciprocalRegime = Literal["same_plane", "rayleigh_limit", "shifted"]
+type UpperGammaProvider = Callable[[int], npt.ArrayLike]
 
 
 def _integer_or_half_integer_twice(value: float) -> int:
@@ -75,19 +76,20 @@ def upper_gamma_sequence(max_index: int, z: npt.ArrayLike) -> Array:
     n_max = int(max_index)
     if n_max < 0:
         raise ValueError(f"`max_index` must be >= 0. Got {max_index!r}.")
-    z_arr = np.asarray(z, dtype=np.complex128).reshape(-1)
-    out = np.zeros((z_arr.size, n_max + 1), dtype=np.complex128)
-    for row, value in enumerate(z_arr):
-        zc = _branch_complex(complex(value))
-        if zc == 0.0:
-            raise ValueError("The shifted reciprocal upper-gamma sequence is singular at z=0.")
-        out[row, 0] = upper_incomplete_gamma_int_or_halfint(0.5, zc)
-        exp_term = complex(np.exp(-zc))
-        power = zc**-0.5
-        for index in range(n_max):
-            order = -0.5 - float(index)
-            out[row, index + 1] = (out[row, index] - power * exp_term) / order
-            power /= zc
+    z_arr = np.array(z, dtype=np.complex128, copy=True).reshape(-1)
+    if np.any(z_arr == 0.0):
+        raise ValueError("The shifted reciprocal upper-gamma sequence is singular at z=0.")
+    negative_real = (z_arr.real < 0.0) & (z_arr.imag == 0.0)
+    z_arr.imag[negative_real] = -0.0
+
+    out = np.empty((z_arr.size, n_max + 1), dtype=np.complex128)
+    out[:, 0] = math.sqrt(math.pi) * special.erfc(np.sqrt(z_arr))
+    exp_term = np.exp(-z_arr)
+    power = z_arr**-0.5
+    for index in range(n_max):
+        order = -0.5 - float(index)
+        out[:, index + 1] = (out[:, index] - power * exp_term) / order
+        power /= z_arr
     return out
 
 
@@ -250,6 +252,9 @@ def _shifted_delta_series_mask(
     gamma: Array,
     z_offset: Array,
     eta: float,
+    *,
+    singular_atol: float,
+    series_exclusion: Array | None = None,
 ) -> Array:
     """Return entries where the generalized-gamma series is preferred.
 
@@ -260,25 +265,20 @@ def _shifted_delta_series_mask(
     """
     scaled = z_offset[:, None] * gamma[None, :]
     x = -(gamma * gamma) / (4.0 * float(eta) * float(eta))
-    return np.asarray(
+    mask = np.asarray(
         (np.abs(scaled) <= _SHIFTED_DELTA_SERIES_SCALED_LIMIT)
         & (np.abs(float(eta) * z_offset[:, None]) <= _SHIFTED_DELTA_SERIES_ETA_Z_LIMIT)
-        & (np.abs(x)[None, :] > _SHIFTED_DELTA_SERIES_X_MIN),
+        & (np.abs(x)[None, :] > float(singular_atol)),
         dtype=bool,
     )
-
-
-def shifted_delta_series_required(
-    gamma: npt.ArrayLike,
-    z_offset: npt.ArrayLike,
-    eta: float,
-) -> bool:
-    """Return whether any shifted entry needs the stable near-plane series."""
-    gamma_arr = np.asarray(gamma, dtype=np.complex128).reshape(-1)
-    z_arr = np.asarray(z_offset, dtype=float).reshape(-1)
-    if gamma_arr.size == 0 or z_arr.size == 0:
-        return False
-    return bool(np.any(_shifted_delta_series_mask(gamma_arr, z_arr, float(eta))))
+    if series_exclusion is not None:
+        excluded = np.asarray(series_exclusion, dtype=bool).reshape(-1)
+        if excluded.size != gamma.size:
+            raise ValueError(
+                f"`series_exclusion` must align with `gamma`; got {excluded.size} and {gamma.size}."
+            )
+        mask[:, excluded] = False
+    return mask
 
 
 def _shifted_delta_sequence_series(
@@ -392,6 +392,8 @@ def shifted_delta_sequence(
     *,
     singular_atol: float = _SMALL_COMPLEX,
     upper_gamma: npt.ArrayLike | None = None,
+    upper_gamma_provider: UpperGammaProvider | None = None,
+    series_exclusion: npt.ArrayLike | None = None,
 ) -> Array:
     """Evaluate shifted reciprocal-space Ewald integrals for one height."""
     if float(z_offset) == 0.0:
@@ -406,6 +408,8 @@ def shifted_delta_sequence(
         float(eta),
         singular_atol=singular_atol,
         upper_gamma=upper_gamma,
+        upper_gamma_provider=upper_gamma_provider,
+        series_exclusion=series_exclusion,
     )
     return np.asarray(result[0], dtype=np.complex128)
 
@@ -418,6 +422,8 @@ def shifted_delta_sequence_batched(
     *,
     singular_atol: float = _SMALL_COMPLEX,
     upper_gamma: npt.ArrayLike | None = None,
+    upper_gamma_provider: UpperGammaProvider | None = None,
+    series_exclusion: npt.ArrayLike | None = None,
 ) -> Array:
     """Evaluate shifted reciprocal Ewald integrals for many height offsets.
 
@@ -431,6 +437,8 @@ def shifted_delta_sequence_batched(
     eta_f = float(eta)
     if not np.isfinite(eta_f) or eta_f <= 0.0:
         raise ValueError(f"`eta` must be finite and positive. Got {eta!r}.")
+    if upper_gamma is not None and upper_gamma_provider is not None:
+        raise ValueError("Pass either `upper_gamma` or `upper_gamma_provider`, not both.")
     gamma_arr = np.asarray(gamma, dtype=np.complex128).reshape(-1)
     z_arr = np.asarray(z_offset, dtype=float).reshape(-1)
     out = np.zeros((z_arr.size, gamma_arr.size, n_max + 1), dtype=np.complex128)
@@ -447,15 +455,26 @@ def shifted_delta_sequence_batched(
     if np.any(np.abs(x) <= float(singular_atol)):
         raise ValueError("shifted reciprocal integrals are singular at gamma=0.")
 
-    series_mask = _shifted_delta_series_mask(gamma_arr, z_arr, eta_f)
+    series_mask = _shifted_delta_series_mask(
+        gamma_arr,
+        z_arr,
+        eta_f,
+        singular_atol=float(singular_atol),
+        series_exclusion=(
+            None if series_exclusion is None else np.asarray(series_exclusion, dtype=bool)
+        ),
+    )
     series_rows = np.flatnonzero(np.any(series_mask, axis=1))
     if series_rows.size:
+        gamma_table = upper_gamma
+        if gamma_table is None and upper_gamma_provider is not None:
+            gamma_table = upper_gamma_provider(shifted_delta_series_max_index(n_max))
         series = _shifted_delta_sequence_series(
             n_max,
             gamma_arr,
             z_arr[series_rows],
             eta_f,
-            upper_gamma=None if upper_gamma is None else np.asarray(upper_gamma),
+            upper_gamma=None if gamma_table is None else np.asarray(gamma_table),
         )
         row_values = out[series_rows]
         row_mask = series_mask[series_rows]
@@ -489,7 +508,6 @@ __all__ = [
     "shifted_delta_sequence",
     "shifted_delta_sequence_batched",
     "shifted_delta_series_max_index",
-    "shifted_delta_series_required",
     "shifted_reciprocal_regime",
     "upper_gamma_sequence",
     "upper_incomplete_gamma_int_or_halfint",

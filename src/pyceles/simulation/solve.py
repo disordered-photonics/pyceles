@@ -336,10 +336,17 @@ def _solve_sources_impl(
         for label in labels:
             rhs_flat[label] = prepared.rhs_Tb(initial_coeffs[label].reshape(Ns * Nm))
         phase_timings["rhs_Tb_s"] = time.perf_counter() - rhs_t0
-        if bool(cfg.cache_translation_blocks) and not will_use_direct:
+        rayleigh_preparation = (
+            cfg.periodic is not None and cfg.periodic.options.method == "rayleigh"
+        )
+        if (bool(cfg.cache_translation_blocks) and not will_use_direct) or rayleigh_preparation:
             populate_t0 = time.perf_counter()
             prepared.populate_coupling(show_progress=bool(cfg.verbose))
-            phase_timings["periodic_w_block_generation_s"] = time.perf_counter() - populate_t0
+            populate_elapsed = time.perf_counter() - populate_t0
+            if rayleigh_preparation:
+                phase_timings["periodic_rayleigh_preparation_s"] = populate_elapsed
+            elif bool(cfg.cache_translation_blocks) and not will_use_direct:
+                phase_timings["periodic_w_block_generation_s"] = populate_elapsed
         if will_use_direct:
             need_dense_lu = (
                 sim._dense_lu_cache is None

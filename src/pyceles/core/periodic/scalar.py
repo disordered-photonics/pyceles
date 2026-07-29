@@ -78,11 +78,22 @@ def structural_sum_m_normalization(order: int) -> float:
     return math.sqrt(2.0 * math.pi)
 
 
-def reciprocal_gamma(k: float, rho: Array) -> Array:
-    """Return reciprocal `gamma = sqrt(k^2 - rho^2)` with zero-guard branch."""
+def reciprocal_gamma_with_zero_mask(k: float, rho: Array) -> tuple[Array, Array]:
+    """Return guarded reciprocal ``gamma`` and its exact Rayleigh-zero mask.
+
+    The mask is captured before applying the established small imaginary guard.
+    Near-plane stabilization must not mistake that guarded value for an ordinary
+    nonzero reciprocal order and thereby hide the Rayleigh singular policy.
+    """
     gamma = np.sqrt((float(k) * float(k) - np.asarray(rho, dtype=float) ** 2) + 0.0j)
-    gamma[np.where(gamma == 0.0)[0]] += 1.0e-10j
-    return np.asarray(gamma, dtype=np.complex128)
+    zero = np.asarray(gamma == 0.0, dtype=bool)
+    gamma[zero] += 1.0e-10j
+    return np.asarray(gamma, dtype=np.complex128), zero
+
+
+def reciprocal_gamma(k: float, rho: Array) -> Array:
+    """Return reciprocal ``gamma = sqrt(k^2-rho^2)`` with the Ewald zero guard."""
+    return reciprocal_gamma_with_zero_mask(k, rho)[0]
 
 
 def real_integral_sequence(degree: int, eta: float, k: float, radii: Array) -> Array:

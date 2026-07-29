@@ -500,6 +500,9 @@ def test_complex64_hybrid_stores_near_structural_sums_in_compute_dtype() -> None
 
     assert hybrid._near_structural_sums is not None
     assert hybrid._near_structural_sums.dtype == np.dtype(np.complex64)
+    assert hybrid._near_contraction_tensor_cache is not None
+    assert hybrid._ewald_shell_workspace is None
+    assert hybrid._structural_contraction_tensor is None
 
 
 def test_hybrid_operator_uses_rayleigh_only_for_far_pairs() -> None:
@@ -605,6 +608,46 @@ def test_rayleigh_near_cache_memory_plan_uses_host_before_guarded_spill() -> Non
 
     assert plan.residency == "host"
     assert plan.required_device_bytes > plan.available_device_bytes
+
+
+def test_cupy_rayleigh_release_drops_only_ewald_preparation_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    operator = CuPyPeriodicCouplingOperator(
+        lmax=1,
+        k=2.0 * np.pi / 550.0,
+        positions=np.zeros((1, 3), dtype=float),
+        ab5=translation_ab5_table(1, dtype=np.complex64),
+        periodic=PeriodicSpec(
+            lattice=pcl.RectangularLattice2D(900.0, 850.0),
+            options=PeriodicOptions(
+                method="rayleigh",
+                eta=0.0015,
+                real_shells=1,
+                reciprocal_shells=1,
+                rayleigh_z_cut=550.0,
+                rayleigh_reciprocal_shells=1,
+            ),
+        ),
+        k_parallel=np.zeros(2),
+        dtype=np.dtype(np.complex64),
+        circumscribing_radii=np.asarray([40.0]),
+    )
+    compact_tensor = np.ones((1, 1, 1), dtype=np.complex64)
+    monkeypatch.setattr(operator, "_near_contraction_tensor_device", lambda: compact_tensor)
+    operator._workspace = cast(Any, object())
+    operator._contraction_tensor_gpu = cast(Any, object())
+    operator._self_correction_gpu = cast(Any, object())
+    operator._self_block_gpu = np.ones((1, 1), dtype=np.complex64)
+    operator._near_structural_sums_host = np.ones((1, 1), dtype=np.complex64)
+
+    operator._release_rayleigh_preparation_state()
+
+    assert operator._workspace is None
+    assert operator._contraction_tensor_gpu is None
+    assert operator._self_correction_gpu is None
+    assert operator._self_block_gpu is not None
+    assert operator._near_structural_sums_host is not None
 
 
 def test_rayleigh_near_cache_memory_plan_keeps_small_cache_on_device() -> None:

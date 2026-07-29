@@ -719,9 +719,17 @@ def prepare_periodized_mlfmm_coupling(
             "sampled level 2; leave mlfmm_options.hf_start_level unset or set it to 2."
         )
     if show_progress:
+        occupancies = np.asarray(
+            [leaf.particle_indices.size for leaf in resolved.partition.leaves],
+            dtype=np.int64,
+        )
+        occ_min = int(np.min(occupancies)) if occupancies.size else 0
+        occ_med = int(np.median(occupancies)) if occupancies.size else 0
+        occ_max = int(np.max(occupancies)) if occupancies.size else 0
         tqdm.write(
-            "[MLFMM] periodic plan "
-            f"depth={resolved.selected_depth} leaves={resolved.occupied_leaf_count}"
+            "[MLFMM] plan stage=multilevel "
+            f"depth={resolved.selected_depth} leaves={resolved.occupied_leaf_count} "
+            f"leaf_occ_min/med/max={occ_min}/{occ_med}/{occ_max} periodic=true"
         )
 
     radial_lut_hf = radial_lut

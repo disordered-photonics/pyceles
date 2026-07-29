@@ -452,6 +452,19 @@ class CuPyPeriodicCouplingOperator:
         self._near_contraction_tensor_gpu = cp.asarray(tensor_np, dtype=self.dtype)
         return self._near_contraction_tensor_gpu
 
+    def _release_rayleigh_preparation_state(self) -> None:
+        """Release Ewald-only device tables after Rayleigh cache preparation."""
+        if self._self_block_gpu is None:
+            return
+        if self._near_structural_sums_gpu is None and self._near_structural_sums_host is None:
+            return
+        # Preserve the compact tensor used by repeated near contractions, then
+        # release the full structural tensor and reciprocal/real Ewald tables.
+        self._near_contraction_tensor_device()
+        self._workspace = None
+        self._contraction_tensor_gpu = None
+        self._self_correction_gpu = None
+
     def _self_block_device(self) -> Any:
         """Return the exact periodic self block shared by every particle."""
         if self._self_block_gpu is not None:
@@ -700,6 +713,7 @@ class CuPyPeriodicCouplingOperator:
         y += cp.einsum("ij,ajr->air", self._self_block_device(), arr, optimize=True)
 
         self._populate_near_structural_sums_device(show_progress=False)
+        self._release_rayleigh_preparation_state()
         sums_gpu = self._near_structural_sums_gpu
         sums_host = self._near_structural_sums_host
         if sums_gpu is None and sums_host is None:
@@ -784,9 +798,16 @@ class CuPyPeriodicCouplingOperator:
         hot path use a single cuBLAS matrix-vector or matrix-matrix product.
         """
         if self.periodic.options.method == "rayleigh":
-            self._rayleigh_plan()
+            plan = self._rayleigh_plan()
+            if show_progress:
+                tqdm.write(
+                    "[Rayleigh] plan "
+                    f"reciprocal_orders={plan.n_modes_reciprocal} "
+                    f"z_cut={plan.z_cut:.6g}"
+                )
             self._self_block_device()
             self._populate_near_structural_sums_device(show_progress=show_progress)
+            self._release_rayleigh_preparation_state()
             return
         if not self.cache_blocks or self._dense_w_cache_gpu is not None:
             return

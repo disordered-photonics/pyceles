@@ -20,7 +20,6 @@ from pyceles.core.periodic.special import (
     _SHIFTED_DELTA_SERIES_ETA_Z_LIMIT,
     _SHIFTED_DELTA_SERIES_SCALED_LIMIT,
     _SHIFTED_DELTA_SERIES_TERMS,
-    _SHIFTED_DELTA_SERIES_X_MIN,
     upper_gamma_sequence,
 )
 
@@ -307,6 +306,7 @@ def shifted_delta_sequence_cupy(
     *,
     singular_atol: float = _SMALL_COMPLEX,
     terms: int = _DEFAULT_WOFZ_TERMS,
+    series_exclusion: Any | None = None,
     cupy: Any | None = None,
 ) -> Any:
     """CuPy version of the stable shifted reciprocal sequence."""
@@ -320,18 +320,14 @@ def shifted_delta_sequence_cupy(
             "use the same-plane reciprocal formula for this pair."
         )
     gamma_arr = cp.asarray(gamma, dtype=cp.complex128).reshape(-1)
-    scaled = gamma_arr * cz
-    if bool(cp.any(cp.abs(scaled) <= float(singular_atol)).get()):
-        raise ValueError(
-            "shifted reciprocal integrals are singular in the Rayleigh-threshold limit; "
-            "use the exact same-plane formula when applicable."
-        )
     result = shifted_delta_sequence_cupy_batched(
         int(max_order),
         gamma_arr,
         cp.asarray([cz], dtype=cp.float64),
         float(eta),
+        singular_atol=float(singular_atol),
         terms=int(terms),
+        series_exclusion=series_exclusion,
         cupy=cp,
     )
     return result[0]
@@ -387,6 +383,7 @@ def shifted_delta_sequence_cupy_batched(
     *,
     singular_atol: float = _SMALL_COMPLEX,
     terms: int = _DEFAULT_WOFZ_TERMS,
+    series_exclusion: Any | None = None,
     cupy: Any | None = None,
 ) -> Any:
     """Evaluate stable shifted reciprocal sequences for many heights on device."""
@@ -417,8 +414,16 @@ def shifted_delta_sequence_cupy_batched(
     series_mask = (
         (cp.abs(scaled) <= _SHIFTED_DELTA_SERIES_SCALED_LIMIT)
         & (cp.abs(eta_f * z_arr[:, None]) <= _SHIFTED_DELTA_SERIES_ETA_Z_LIMIT)
-        & (cp.abs(x)[None, :] > _SHIFTED_DELTA_SERIES_X_MIN)
+        & (cp.abs(x)[None, :] > float(singular_atol))
     )
+    if series_exclusion is not None:
+        excluded = cp.asarray(series_exclusion, dtype=cp.bool_).reshape(-1)
+        if int(excluded.size) != int(gamma_arr.size):
+            raise ValueError(
+                "`series_exclusion` must align with `gamma`; "
+                f"got {int(excluded.size)} and {int(gamma_arr.size)}."
+            )
+        series_mask &= ~excluded[None, :]
     all_series = bool(cp.all(series_mask).get())
     if all_series:
         return _shifted_delta_sequence_series_cupy(n_max, gamma_arr, z_arr, eta_f, cupy=cp)

@@ -21,6 +21,7 @@ from pyceles.core.lattice import RectangularLattice2D
 from pyceles.core.periodic.scalar import (
     chebyshev_shell_indices,
     factorial_int,
+    reciprocal_gamma_with_zero_mask,
     same_plane_z_tolerance,
     structural_sum_m_normalization,
 )
@@ -28,7 +29,6 @@ from pyceles.core.periodic.special import (
     _SHIFTED_DELTA_SERIES_ETA_Z_LIMIT,
     _SHIFTED_DELTA_SERIES_SCALED_LIMIT,
     _SHIFTED_DELTA_SERIES_TERMS,
-    _SHIFTED_DELTA_SERIES_X_MIN,
     upper_gamma_sequence,
 )
 from pyceles.core.periodic.special_cupy import (
@@ -36,17 +36,6 @@ from pyceles.core.periodic.special_cupy import (
     _WTRAP_DEVICE_CUDA_SOURCE,
     _wtrap_quadrature_table_cupy,
 )
-
-
-@dataclass
-class CupyReciprocalShell:
-    """Device-side reciprocal-shell data for one Chebyshev-index shell."""
-
-    kgt: Any
-    rho: Any
-    phi: Any
-    gamma: Any
-    xarg: Any
 
 
 @dataclass
@@ -58,6 +47,10 @@ class CupyReciprocalTerms:
     phi: Any
     gamma: Any
     xarg: Any
+    xarg_host: np.ndarray
+    rayleigh_zero: Any
+    has_rayleigh_zero: bool
+    shell_offsets: tuple[int, ...]
 
 
 @dataclass
@@ -67,9 +60,7 @@ class CupyShiftedReciprocalTables:
     Term tables use shape ``(n_terms, order + 1)`` except ``azimuth``, whose
     second axis spans ``m=-order..order``.  ``prefactor`` is indexed by the
     flattened structural entry, while ``inverse_denominator`` appends the
-    recurrence ``(n, s)`` axes. ``upper_gamma`` stores the pair-invariant
-    near-plane Horner coefficients. None of these arrays scale with particle
-    count.
+    recurrence ``(n, s)`` axes. None of these arrays scale with particle count.
     """
 
     azimuth: Any
@@ -78,15 +69,6 @@ class CupyShiftedReciprocalTables:
     root_x: Any
     prefactor: Any
     inverse_denominator: Any
-    upper_gamma: Any
-
-
-@dataclass
-class CupyRealShell:
-    """Device-side real-lattice shell data for one Chebyshev-index shell."""
-
-    shifts: Any
-    phase_xy: Any
 
 
 @dataclass
@@ -106,65 +88,12 @@ class CupyEwaldShellWorkspace:
     k: float
     k_parallel: np.ndarray
     eta: float
-    reciprocal_cache: dict[int, CupyReciprocalShell] = field(default_factory=dict)
     reciprocal_terms_cache: dict[int, CupyReciprocalTerms] = field(default_factory=dict)
     shifted_reciprocal_cache: dict[tuple[int, int], CupyShiftedReciprocalTables] = field(
         default_factory=dict
     )
-    real_cache: dict[int, CupyRealShell] = field(default_factory=dict)
     real_terms_cache: dict[int, CupyRealTerms] = field(default_factory=dict)
-    upper_gamma_cache: dict[tuple[int, int], Any] = field(default_factory=dict)
-
-    def reciprocal_shell(self, shell: int) -> CupyReciprocalShell:
-        idx = int(shell)
-        cached = self.reciprocal_cache.get(idx)
-        if cached is not None:
-            return cached
-        cp = self.cupy
-        reciprocal = np.asarray(
-            [p * self.lattice.b1 + q * self.lattice.b2 for p, q in chebyshev_shell_indices(idx)],
-            dtype=np.float64,
-        )
-        kgt_np = np.asarray(self.k_parallel, dtype=np.float64).reshape(2)[None, :] + reciprocal
-        kgt = cp.asarray(kgt_np, dtype=cp.float64)
-        rho = cp.linalg.norm(kgt, axis=1)
-        phi = cp.arctan2(kgt[:, 1], kgt[:, 0])
-        gamma = cp.sqrt((float(self.k) * float(self.k) - rho * rho) + 0.0j)
-        gamma = cp.where(gamma == 0.0, gamma + 1.0e-10j, gamma).astype(cp.complex128)
-        xarg = -(gamma * gamma) / (4.0 * float(self.eta) * float(self.eta))
-        out = CupyReciprocalShell(
-            kgt=kgt,
-            rho=rho,
-            phi=phi,
-            gamma=gamma,
-            xarg=xarg.astype(cp.complex128),
-        )
-        self.reciprocal_cache[idx] = out
-        return out
-
-    def upper_gamma(self, shell: int, max_index: int) -> Any:
-        """Return the same-plane upper-gamma sequence on the active device."""
-        shell_i = int(shell)
-        max_i = int(max_index)
-        key = (shell_i, max_i)
-        cached = self.upper_gamma_cache.get(key)
-        if cached is not None:
-            return cached
-        for (cached_shell, cached_max), values in self.upper_gamma_cache.items():
-            if cached_shell == shell_i and cached_max > max_i:
-                return values[:, : max_i + 1]
-        cp = self.cupy
-        shell_data = self.reciprocal_shell(shell_i)
-        # The half-integer/integer upper-gamma branch helper remains the NumPy
-        # reference implementation. It depends only on reciprocal shell and eta,
-        # so stage it once instead of invoking the host in the hot pair loop.
-        out_np = upper_gamma_sequence(max_i, cp.asnumpy(shell_data.xarg))
-        out = cp.asarray(out_np, dtype=cp.complex128)
-        for old_key in tuple(self.upper_gamma_cache):
-            if old_key[0] == shell_i and old_key[1] < max_i:
-                del self.upper_gamma_cache[old_key]
-        self.upper_gamma_cache[key] = out
-        return out
+    upper_gamma_terms_cache: dict[int, tuple[int, Any]] = field(default_factory=dict)
 
     def reciprocal_terms(self, shell_count: int) -> CupyReciprocalTerms:
         """Return contiguous reciprocal vectors through one fixed shell count."""
@@ -174,27 +103,47 @@ class CupyEwaldShellWorkspace:
             return cached
         cp = self.cupy
         reciprocal_indices: list[tuple[int, int]] = []
+        shell_offsets = [0]
         for shell in range(count + 1):
             reciprocal_indices.extend(chebyshev_shell_indices(shell))
+            shell_offsets.append(len(reciprocal_indices))
         reciprocal = np.asarray(
             [p * self.lattice.b1 + q * self.lattice.b2 for p, q in reciprocal_indices],
             dtype=np.float64,
         )
         kgt_np = np.asarray(self.k_parallel, dtype=np.float64).reshape(2)[None, :] + reciprocal
-        kgt = cp.asarray(kgt_np, dtype=cp.float64)
-        rho = cp.linalg.norm(kgt, axis=1)
-        phi = cp.arctan2(kgt[:, 1], kgt[:, 0])
-        gamma = cp.sqrt((float(self.k) * float(self.k) - rho * rho) + 0.0j)
-        gamma = cp.where(gamma == 0.0, gamma + 1.0e-10j, gamma).astype(cp.complex128)
-        xarg = -(gamma * gamma) / (4.0 * float(self.eta) * float(self.eta))
+        rho_np = np.linalg.norm(kgt_np, axis=1)
+        phi_np = np.arctan2(kgt_np[:, 1], kgt_np[:, 0])
+        gamma_np, rayleigh_zero_np = reciprocal_gamma_with_zero_mask(float(self.k), rho_np)
+        xarg_np = -(gamma_np * gamma_np) / (4.0 * float(self.eta) * float(self.eta))
         out = CupyReciprocalTerms(
-            kgt=kgt,
-            rho=rho,
-            phi=phi,
-            gamma=gamma,
-            xarg=xarg.astype(cp.complex128),
+            kgt=cp.asarray(kgt_np, dtype=cp.float64),
+            rho=cp.asarray(rho_np, dtype=cp.float64),
+            phi=cp.asarray(phi_np, dtype=cp.float64),
+            gamma=cp.asarray(gamma_np, dtype=cp.complex128),
+            xarg=cp.asarray(xarg_np, dtype=cp.complex128),
+            xarg_host=np.asarray(xarg_np, dtype=np.complex128),
+            rayleigh_zero=cp.asarray(rayleigh_zero_np, dtype=cp.uint8),
+            has_rayleigh_zero=bool(np.any(rayleigh_zero_np)),
+            shell_offsets=tuple(int(value) for value in shell_offsets),
         )
         self.reciprocal_terms_cache[count] = out
+        return out
+
+    def upper_gamma_terms(self, shell_count: int, max_index: int) -> Any:
+        """Return one growable upper-gamma table aligned with fixed reciprocal terms."""
+        count = int(shell_count)
+        max_i = int(max_index)
+        cached = self.upper_gamma_terms_cache.get(count)
+        if cached is not None and cached[0] >= max_i:
+            return cached[1][:, : max_i + 1]
+        cp = self.cupy
+        terms = self.reciprocal_terms(count)
+        out = cp.asarray(
+            upper_gamma_sequence(max_i, terms.xarg_host),
+            dtype=cp.complex128,
+        )
+        self.upper_gamma_terms_cache[count] = (max_i, out)
         return out
 
     def shifted_reciprocal_tables(
@@ -260,15 +209,6 @@ class CupyEwaldShellWorkspace:
                         )
                         inverse_denominator[entry, n, s_val] = 1.0 / float(denominator)
 
-        # The near-plane delta sequence is an exact power series whose
-        # coefficients are the same upper incomplete gamma values used by the
-        # same-plane formula.  Stage them once per reciprocal term; the hot
-        # kernel then needs only a short Horner recurrence and no additional
-        # Faddeeva evaluations.
-        upper_gamma_np = upper_gamma_sequence(
-            order_i + _SHIFTED_DELTA_SERIES_TERMS,
-            cp.asnumpy(terms.xarg),
-        )
         out = CupyShiftedReciprocalTables(
             azimuth=azimuth,
             rho_powers=cp.ascontiguousarray(rho_powers),
@@ -276,26 +216,8 @@ class CupyEwaldShellWorkspace:
             root_x=cp.ascontiguousarray(root_x),
             prefactor=cp.asarray(prefactor, dtype=cp.complex128),
             inverse_denominator=cp.asarray(inverse_denominator, dtype=cp.float64),
-            upper_gamma=cp.asarray(upper_gamma_np, dtype=cp.complex128),
         )
         self.shifted_reciprocal_cache[key] = out
-        return out
-
-    def real_shell(self, shell: int) -> CupyRealShell:
-        idx = int(shell)
-        cached = self.real_cache.get(idx)
-        if cached is not None:
-            return cached
-        cp = self.cupy
-        shifts_np = np.asarray(
-            [p * self.lattice.a1 + q * self.lattice.a2 for p, q in chebyshev_shell_indices(idx)],
-            dtype=np.float64,
-        )
-        shifts = cp.asarray(shifts_np, dtype=cp.float64)
-        kp = cp.asarray(np.asarray(self.k_parallel, dtype=np.float64).reshape(2), dtype=cp.float64)
-        phase_xy = cp.exp(1j * (shifts[:, :2] @ kp)).astype(cp.complex128)
-        out = CupyRealShell(shifts=shifts, phase_xy=phase_xy)
-        self.real_cache[idx] = out
         return out
 
     def real_terms(self, shell_count: int) -> CupyRealTerms:
@@ -312,10 +234,12 @@ class CupyEwaldShellWorkspace:
             [p * self.lattice.a1 + q * self.lattice.a2 for p, q in indices],
             dtype=np.float64,
         )
-        shifts = cp.asarray(shifts_np, dtype=cp.float64)
-        kp = cp.asarray(np.asarray(self.k_parallel, dtype=np.float64).reshape(2), dtype=cp.float64)
-        phase_xy = cp.exp(1j * (shifts[:, :2] @ kp)).astype(cp.complex128)
-        out = CupyRealTerms(shifts=shifts, phase_xy=phase_xy)
+        k_parallel = np.asarray(self.k_parallel, dtype=np.float64).reshape(2)
+        phase_xy_np = np.exp(1j * (shifts_np[:, :2] @ k_parallel))
+        out = CupyRealTerms(
+            shifts=cp.asarray(shifts_np, dtype=cp.float64),
+            phase_xy=cp.asarray(phase_xy_np, dtype=cp.complex128),
+        )
         self.real_terms_cache[count] = out
         return out
 
@@ -595,6 +519,7 @@ __device__ void _pyceles_shifted_delta_sequence(
     const complex<double> root_x,
     const double z_offset,
     const bool series_height_eligible,
+    const bool rayleigh_zero,
     const complex<double>* upper_gamma,
     const double* quadrature,
     const int terms,
@@ -608,7 +533,7 @@ __device__ void _pyceles_shifted_delta_sequence(
         scaled.real() * scaled.real() + scaled.imag() * scaled.imag();
     const bool use_series =
         series_height_eligible
-        && abs(x) > PYCELES_SHIFTED_SERIES_X_MIN
+        && !rayleigh_zero
         && scaled_abs_sq <= (PYCELES_SHIFTED_SERIES_SCALED_LIMIT
             * PYCELES_SHIFTED_SERIES_SCALED_LIMIT);
 
@@ -671,6 +596,7 @@ extern "C" __global__ void pyceles_ewald_shifted_reciprocal_structural_c128(
     const complex<double>* azimuth,
     const complex<double>* gamma,
     const complex<double>* xarg,
+    const unsigned char* rayleigh_zero,
     const complex<double>* root_x,
     const double* rho_powers,
     const complex<double>* gamma_powers,
@@ -741,6 +667,7 @@ extern "C" __global__ void pyceles_ewald_shifted_reciprocal_structural_c128(
                 root_x[term_idx],
                 cz,
                 series_height_eligible,
+                rayleigh_zero[term_idx] != 0,
                 upper_gamma + term_idx * (long long)upper_gamma_stride,
                 quadrature,
                 terms,
@@ -817,7 +744,6 @@ def _shifted_reciprocal_structural_raw_kernel(max_order: int) -> Any:
             f"{_SHIFTED_DELTA_SERIES_SCALED_LIMIT:.17g}\n"
         )
         + (f"#define PYCELES_SHIFTED_SERIES_ETA_Z_LIMIT {_SHIFTED_DELTA_SERIES_ETA_Z_LIMIT:.17g}\n")
-        + (f"#define PYCELES_SHIFTED_SERIES_X_MIN {_SHIFTED_DELTA_SERIES_X_MIN:.17g}\n")
         + _SHIFTED_RECIPROCAL_STRUCTURAL_CUDA_SOURCE
     )
     return cp.RawKernel(source, "pyceles_ewald_shifted_reciprocal_structural_c128")
@@ -839,7 +765,16 @@ def _add_shifted_reciprocal_structural_sums_cupy(
     if n_pairs == 0:
         return
     reciprocal_terms = workspace.reciprocal_terms(int(reciprocal_shell_count))
+    if reciprocal_terms.has_rayleigh_zero:
+        raise ValueError(
+            "shifted reciprocal integrals are singular at a Rayleigh/Wood anomaly; "
+            "move away from the anomaly or use the same-plane formula."
+        )
     shifted_tables = workspace.shifted_reciprocal_tables(int(reciprocal_shell_count), int(order))
+    upper_gamma = workspace.upper_gamma_terms(
+        int(reciprocal_shell_count),
+        int(order) + _SHIFTED_DELTA_SERIES_TERMS,
+    )
     n_terms = int(reciprocal_terms.rho.shape[0])
     if n_terms == 0:
         return
@@ -862,12 +797,13 @@ def _add_shifted_reciprocal_structural_sums_cupy(
             shifted_tables.azimuth,
             reciprocal_terms.gamma,
             reciprocal_terms.xarg,
+            reciprocal_terms.rayleigh_zero,
             shifted_tables.root_x,
             shifted_tables.rho_powers,
             shifted_tables.gamma_powers,
             shifted_tables.prefactor,
             shifted_tables.inverse_denominator,
-            shifted_tables.upper_gamma,
+            upper_gamma,
             np.int32(int(order) + _SHIFTED_DELTA_SERIES_TERMS + 1),
             sums,
             np.float64(float(k)),
@@ -934,58 +870,70 @@ def ewald_structural_sums_2d_fixed_cupy(
     c = c.copy()
     c[:, 2] = cp.where(same_plane, 0.0, cz_raw)
 
-    max_same_n = max(0, order // 2)
-    for shell in range(int(reciprocal_shell_count) + 1):
-        shell_data = workspace.reciprocal_shell(shell)
-        kgt = shell_data.kgt
-        rho = shell_data.rho
-        phi = shell_data.phi
-        gamma = shell_data.gamma
+    n_same = int(same_idx.size)
+    if n_same:
+        max_same_n = max(0, order // 2)
+        max_gamma_index = max_same_n
+        if n_same < n_pairs:
+            max_gamma_index = max(max_gamma_index, int(order) + _SHIFTED_DELTA_SERIES_TERMS)
+        reciprocal_terms = workspace.reciprocal_terms(int(reciprocal_shell_count))
+        gamma_fun_all = workspace.upper_gamma_terms(
+            int(reciprocal_shell_count),
+            max_gamma_index,
+        )
+        for shell in range(int(reciprocal_shell_count) + 1):
+            start = reciprocal_terms.shell_offsets[shell]
+            stop = reciprocal_terms.shell_offsets[shell + 1]
+            kgt = reciprocal_terms.kgt[start:stop]
+            rho = reciprocal_terms.rho[start:stop]
+            phi = reciprocal_terms.phi[start:stop]
+            gamma = reciprocal_terms.gamma[start:stop]
 
-        phase_same = cp.exp(-1j * (cxy[same_idx] @ kgt.T))
-        exp_m_phi = {m: cp.exp(1j * m * phi) for m in range(-order, order + 1)}
-        gamma_fun = workspace.upper_gamma(shell, max_same_n)
-        for degree in range(order + 1):
-            for m in range(-degree, degree + 1):
-                if (degree - abs(m)) % 2:
-                    continue
-                root = (
-                    math.sqrt(2 * degree + 1.0)
-                    * math.sqrt(factorial_int(degree - m))
-                    * math.sqrt(factorial_int(degree + m))
-                )
-                prefactor = (
-                    (1j) ** m
-                    * root
-                    / (workspace.lattice.area * float(k) * (2.0 * float(k)) ** degree)
-                )
-                n_vals = np.arange((degree - abs(m)) // 2 + 1, dtype=np.int64)
-                inner = cp.zeros_like(gamma, dtype=cp.complex128)
-                for n in n_vals:
-                    denom = (
-                        factorial_int(n)
-                        * factorial_int((degree + m) // 2 - n)
-                        * factorial_int((degree - m) // 2 - n)
+            phase_same = cp.exp(-1j * (cxy[same_idx] @ kgt.T))
+            exp_m_phi = {m: cp.exp(1j * m * phi) for m in range(-order, order + 1)}
+            gamma_fun = gamma_fun_all[start:stop, : max_same_n + 1]
+            for degree in range(order + 1):
+                for m in range(-degree, degree + 1):
+                    if (degree - abs(m)) % 2:
+                        continue
+                    root = (
+                        math.sqrt(2 * degree + 1.0)
+                        * math.sqrt(factorial_int(degree - m))
+                        * math.sqrt(factorial_int(degree + m))
                     )
-                    inner += (
-                        gamma_fun[:, int(n)]
-                        * gamma ** (2 * int(n) - 1)
-                        * rho ** (degree - 2 * int(n))
-                        / denom
+                    prefactor = (
+                        (1j) ** m
+                        * root
+                        / (workspace.lattice.area * float(k) * (2.0 * float(k)) ** degree)
                     )
-                vec = exp_m_phi[m] * inner
-                vals = structural_sum_m_normalization(m) * prefactor * (phase_same @ vec)
-                sums[same_idx, degree, m + offset] = sums[same_idx, degree, m + offset] + vals
+                    n_vals = np.arange((degree - abs(m)) // 2 + 1, dtype=np.int64)
+                    inner = cp.zeros_like(gamma, dtype=cp.complex128)
+                    for n in n_vals:
+                        denom = (
+                            factorial_int(n)
+                            * factorial_int((degree + m) // 2 - n)
+                            * factorial_int((degree - m) // 2 - n)
+                        )
+                        inner += (
+                            gamma_fun[:, int(n)]
+                            * gamma ** (2 * int(n) - 1)
+                            * rho ** (degree - 2 * int(n))
+                            / denom
+                        )
+                    vec = exp_m_phi[m] * inner
+                    vals = structural_sum_m_normalization(m) * prefactor * (phase_same @ vec)
+                    sums[same_idx, degree, m + offset] = sums[same_idx, degree, m + offset] + vals
 
-    _add_shifted_reciprocal_structural_sums_cupy(
-        c=c,
-        same_plane=same_plane,
-        sums=sums,
-        workspace=workspace,
-        reciprocal_shell_count=int(reciprocal_shell_count),
-        order=int(order),
-        k=float(k),
-    )
+    if n_same < n_pairs:
+        _add_shifted_reciprocal_structural_sums_cupy(
+            c=c,
+            same_plane=same_plane,
+            sums=sums,
+            workspace=workspace,
+            reciprocal_shell_count=int(reciprocal_shell_count),
+            order=int(order),
+            k=float(k),
+        )
 
     _add_real_space_structural_sums_cupy(
         c=c,
@@ -1002,7 +950,5 @@ def ewald_structural_sums_2d_fixed_cupy(
 
 __all__ = [
     "CupyEwaldShellWorkspace",
-    "CupyRealShell",
-    "CupyReciprocalShell",
     "ewald_structural_sums_2d_fixed_cupy",
 ]

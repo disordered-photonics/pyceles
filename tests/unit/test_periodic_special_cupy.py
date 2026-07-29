@@ -149,3 +149,32 @@ def test_fixed_cupy_ewald_near_coplanar_matches_numpy(
         max_shells=12,
     )
     np.testing.assert_allclose(got, want, rtol=2e-8, atol=2e-9)
+
+
+def test_shifted_delta_sequence_cupy_honors_series_exclusion(
+    cupy_runtime: tuple[Any, Any],
+) -> None:
+    cp, _ = cupy_runtime
+    from pyceles.core.periodic.special import shifted_delta_sequence
+    from pyceles.core.periodic.special_cupy import shifted_delta_sequence_cupy
+
+    gamma = np.asarray([1.0e-10j], dtype=np.complex128)
+    exclusion = np.asarray([True])
+    got = cp.asnumpy(
+        shifted_delta_sequence_cupy(
+            0,
+            cp.asarray(gamma),
+            z_offset=1.0e-3,
+            eta=1.0e-4,
+            series_exclusion=cp.asarray(exclusion),
+            cupy=cp,
+        )
+    )
+    want = shifted_delta_sequence(
+        0,
+        gamma,
+        z_offset=1.0e-3,
+        eta=1.0e-4,
+        series_exclusion=exclusion,
+    )
+    np.testing.assert_allclose(got, want, rtol=1e-14, atol=1e-14)

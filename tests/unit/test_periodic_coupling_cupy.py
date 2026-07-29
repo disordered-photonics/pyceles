@@ -281,8 +281,10 @@ def test_periodic_cupy_rayleigh_hybrid_matches_numpy_scan_and_near_cache(
 
     expected = cpu.apply(x.astype(dtype))
     actual = gpu.apply(cp.asarray(x, dtype=dtype))
+    repeated = gpu.apply(cp.asarray(x, dtype=dtype))
 
     np.testing.assert_allclose(cp.asnumpy(actual), expected, rtol=rtol, atol=atol)
+    np.testing.assert_allclose(cp.asnumpy(repeated), expected, rtol=rtol, atol=atol)
     assert gpu._near_cache_memory_plan is not None
     assert gpu._near_cache_memory_plan.residency == cache_residency
     cache = (
