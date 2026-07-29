@@ -84,6 +84,7 @@ def _build_exciting_scattered_flat_generic_route(
     prepared = sim._prepared_operator_cache
     if prepared is None:
         return None
+    operator_dtype = np.dtype(prepared.dtype)
     use_cupy = bool(
         str(sim.config.operator_backend).lower() == "cupy"
         or is_cupy_array(coeffs)
@@ -91,19 +92,63 @@ def _build_exciting_scattered_flat_generic_route(
     )
     if use_cupy:
         cupy, _ = import_cupy()
-        # Solved coefficients may arrive through a private CuPy handoff, while
-        # incident coefficients are public host payloads. Upload the latter only
-        # when a local-dissipation route actually needs them.
-        x_flat = cupy.asarray(coeffs, dtype=accum_dtype).reshape(-1)
+        # Keep the operator application in its configured compute dtype.  Only
+        # the final local-power reduction needs accumulation-precision copies.
+        # Immediate postprocessing normally receives backend-native solve
+        # coefficients, so this also avoids a host round trip.
+        x_operator = cupy.asarray(coeffs, dtype=operator_dtype).reshape(-1)
+        wx = prepared.apply_W(x_operator)
+        x_flat = cupy.asarray(x_operator, dtype=accum_dtype).reshape(-1)
         b_flat = cupy.asarray(initial_coeffs, dtype=accum_dtype).reshape(-1)
-        wx = prepared.apply_W(x_flat)
-        return b_flat + wx, x_flat
-    x_flat = np.asarray(coeffs, dtype=accum_dtype).reshape(-1)
-    wx = prepared.apply_W(x_flat)
+        e_flat = b_flat + cupy.asarray(wx, dtype=accum_dtype).reshape(-1)
+        return e_flat, x_flat
+    x_operator = np.asarray(coeffs, dtype=operator_dtype).reshape(-1)
+    wx = prepared.apply_W(x_operator)
+    x_flat = np.asarray(x_operator, dtype=accum_dtype).reshape(-1)
     e_flat = np.asarray(initial_coeffs, dtype=accum_dtype).reshape(-1) + np.asarray(
         wx, dtype=accum_dtype
     ).reshape(-1)
     return e_flat, x_flat
+
+
+def _periodic_local_absorptance_generic_route(
+    sim: Simulation,
+    *,
+    initial_coeffs: Any,
+    coeffs: Any,
+    k0: float,
+    incident_power_per_area: float,
+    unit_cell_area: float,
+    accum_dtype: np.dtype,
+) -> float | None:
+    """Return the local periodic power defect normalized by incident cell power.
+
+    For a converged solve this is the material absorptance obtained from the
+    local exciting/scattered SVWF coefficients.  For a nominally lossless
+    system, a nonzero value instead measures the solve-equation defect.  Its
+    difference from ``1 - R - T`` isolates coupling/far-field closure error.
+    """
+    payload = _build_exciting_scattered_flat_generic_route(
+        sim,
+        initial_coeffs=initial_coeffs,
+        coeffs=coeffs,
+        accum_dtype=accum_dtype,
+    )
+    if payload is None:
+        return None
+    e_flat, x_flat = payload
+    components = local_absorbed_power_components_from_exciting(
+        e_flat,
+        x_flat,
+        k0=float(k0),
+        n_medium=sim.config.n_medium,
+    )
+    incident_cell_power = float(incident_power_per_area) * float(unit_cell_area)
+    if incident_cell_power <= 0.0 or not np.isfinite(incident_cell_power):
+        raise ValueError(
+            "Periodic incident cell power must be finite and positive for local power diagnostics."
+        )
+    return float(components["P_abs_local"]) / incident_cell_power
 
 
 def _plane_wave_local_absorption_generic_route(
@@ -710,6 +755,26 @@ def postprocess_sources_impl(
                 coeffs=np.asarray(x_col),
                 k=float(solved.k),
             )
+            backend_coeffs = (
+                None if backend_coeffs_by_label is None else backend_coeffs_by_label[label]
+            )
+            local_absorptance = _periodic_local_absorptance_generic_route(
+                sim,
+                initial_coeffs=solved.initial_coeffs[label],
+                coeffs=x_col if backend_coeffs is None else backend_coeffs,
+                k0=float(solved.k0),
+                incident_power_per_area=float(periodic_payload.incident_power_per_area),
+                unit_cell_area=float(periodic_payload.unit_cell_area),
+                accum_dtype=accum_dtype,
+            )
+            if local_absorptance is not None:
+                periodic_payload = replace(
+                    periodic_payload,
+                    local_absorptance=float(local_absorptance),
+                    power_closure_error=float(
+                        periodic_payload.absorptance_raw_diff - local_absorptance
+                    ),
+                )
             if cfg.verbose:
                 order_count = int(np.asarray(periodic_payload.order_mn).shape[0])
                 propagating_count = int(
@@ -718,11 +783,22 @@ def postprocess_sources_impl(
                 prefix = "Periodic orders"
                 if n_channels > 1:
                     prefix = f"{prefix} [{label}]"
+                local_text = (
+                    "n/a"
+                    if periodic_payload.local_absorptance is None
+                    else f"{periodic_payload.local_absorptance:.6g}"
+                )
+                closure_text = (
+                    "n/a"
+                    if periodic_payload.power_closure_error is None
+                    else f"{periodic_payload.power_closure_error:.6g}"
+                )
                 print(
                     f"{prefix}: total={order_count} propagating={propagating_count} "
                     f"R={float(periodic_payload.reflectance):.6g} "
                     f"T={float(periodic_payload.transmittance):.6g} "
-                    f"A={float(periodic_payload.absorptance):.6g}"
+                    f"A_raw={float(periodic_payload.absorptance_raw_diff):.6g} "
+                    f"A_local={local_text} closure={closure_text}"
                 )
             periodic_runs[label] = _assemble_simulation_result(
                 sim,

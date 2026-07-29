@@ -36,7 +36,21 @@ class PeriodicFarFieldPayload:
     incident_power_per_area: float
     reflectance: float
     transmittance: float
-    absorptance: float
+    absorptance_raw_diff: float
+    local_absorptance: float | None = None
+    power_closure_error: float | None = None
+
+    @property
+    def absorptance(self) -> float:
+        """Return the historical alias for ``absorptance_raw_diff``.
+
+        The canonical field is named ``absorptance_raw_diff`` because it is the
+        flux deficit ``1 - R - T``. It is only a physical absorption estimate
+        when the solved coefficients and periodic coupling satisfy the same
+        power identity; ``local_absorptance`` and ``power_closure_error``
+        separate those effects when available.
+        """
+        return float(self.absorptance_raw_diff)
 
 
 @dataclass(frozen=True)
@@ -243,15 +257,20 @@ def periodic_plane_wave_orders(
     order_kz = np.asarray(orders_payload.order_kz, dtype=np.complex128)
     order_propagating = np.asarray(orders_payload.order_propagating, dtype=bool)
 
-    reflected_power = np.zeros((n_orders,), dtype=np.float64)
-    transmitted_power = np.zeros((n_orders,), dtype=np.float64)
-    for i in range(n_orders):
-        if not bool(order_propagating[i]):
-            continue
-        kz_abs = float(abs(np.real(order_kz[i])))
-        pref = n_real * kz_abs / (2.0 * k_f)
-        reflected_power[i] = float(pref * np.sum(np.abs(reflected[i, :]) ** 2))
-        transmitted_power[i] = float(pref * np.sum(np.abs(transmitted[i, :]) ** 2))
+    kz_abs = np.abs(np.real(order_kz))
+    flux_prefactor = np.where(
+        order_propagating,
+        n_real * kz_abs / (2.0 * k_f),
+        0.0,
+    )
+    reflected_power = np.asarray(
+        flux_prefactor * np.sum(np.abs(reflected) ** 2, axis=1),
+        dtype=np.float64,
+    )
+    transmitted_power = np.asarray(
+        flux_prefactor * np.sum(np.abs(transmitted) ** 2, axis=1),
+        dtype=np.float64,
+    )
 
     incident_norm = float(np.sum(np.abs(orders_payload.incident_polarization) ** 2))
     incident_power = n_real * abs(float(np.cos(float(source.polar_angle)))) * incident_norm / 2.0
@@ -282,7 +301,7 @@ def periodic_plane_wave_orders(
         incident_power_per_area=float(incident_power),
         reflectance=float(r_tot),
         transmittance=float(t_tot),
-        absorptance=float(a_tot),
+        absorptance_raw_diff=float(a_tot),
     )
 
 

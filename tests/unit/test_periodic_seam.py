@@ -685,6 +685,17 @@ def test_periodic_postprocess_populates_periodic_result_payload() -> None:
     assert np.isfinite(periodic.reflectance)
     assert np.isfinite(periodic.transmittance)
     assert np.isfinite(periodic.absorptance)
+    assert periodic.absorptance_raw_diff == periodic.absorptance
+    assert periodic.local_absorptance is not None
+    assert periodic.power_closure_error is not None
+    assert np.isfinite(periodic.local_absorptance)
+    assert np.isfinite(periodic.power_closure_error)
+    np.testing.assert_allclose(
+        periodic.absorptance_raw_diff,
+        periodic.local_absorptance + periodic.power_closure_error,
+        rtol=0.0,
+        atol=2.0e-15,
+    )
     assert run.farfield.scattered_te["coeff"].shape == (0, 0)
 
 
@@ -753,4 +764,7 @@ def test_periodic_hdf5_roundtrip(tmp_path) -> None:
 
     assert "order_mn" in loaded
     assert "reflectance" in loaded
+    assert "absorptance_raw_diff" in loaded
+    assert "local_absorptance" in loaded
+    assert "power_closure_error" in loaded
     assert int(np.asarray(loaded["order_mn"]).shape[1]) == 2

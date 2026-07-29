@@ -75,6 +75,13 @@ Dipole diagnostics:
 Periodic far-field results are exposed through:
 
 - `pyceles.PeriodicFarFieldPayload`
+  - `reflectance` and `transmittance` are propagating-order flux fractions,
+  - `absorptance_raw_diff` is the raw balance residual `1 - R - T`, with
+    `absorptance` retained as its historical alias,
+  - `local_absorptance` evaluates the local exciting/scattered coefficient
+    identity, and
+  - `power_closure_error = absorptance_raw_diff - local_absorptance` separates
+    coupling/far-field closure error from solve-equation or material loss.
 
 ## Periodic descriptors
 

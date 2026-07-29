@@ -181,6 +181,17 @@ def save_simulation_h5(
             "reflectance": float(run.periodic.reflectance),
             "transmittance": float(run.periodic.transmittance),
             "absorptance": float(run.periodic.absorptance),
+            "absorptance_raw_diff": float(run.periodic.absorptance_raw_diff),
+            "local_absorptance": (
+                None
+                if run.periodic.local_absorptance is None
+                else float(run.periodic.local_absorptance)
+            ),
+            "power_closure_error": (
+                None
+                if run.periodic.power_closure_error is None
+                else float(run.periodic.power_closure_error)
+            ),
         }
     if run.polarization_jones is not None:
         diagnostics["polarization_jones"] = {

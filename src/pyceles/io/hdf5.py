@@ -541,6 +541,9 @@ def _periodic_to_mapping(periodic: Any) -> dict[str, Any]:
         "reflectance",
         "transmittance",
         "absorptance",
+        "absorptance_raw_diff",
+        "local_absorptance",
+        "power_closure_error",
     )
     out: dict[str, Any] = {}
     for key in keys:

@@ -5,6 +5,8 @@ import numpy as np
 import pyceles as pcl
 from pyceles.core.particles import spheres_from_arrays
 from pyceles.core.tmatrix import pec_mie_cross_sections
+from pyceles.postprocessing.farfield.periodic import periodic_plane_wave_orders
+from pyceles.postprocessing.farfield.power import local_absorbed_power_from_exciting
 
 
 def test_lossless_cluster_plane_wave_has_negligible_absorption():
@@ -89,3 +91,78 @@ def test_pec_sphere_plane_wave_has_zero_local_absorption():
     np.testing.assert_allclose(cs["C_abs"], 0.0, rtol=0.0, atol=0.0)
     np.testing.assert_allclose(cs["C_abs_local"], 0.0, rtol=0.0, atol=0.0)
     assert float(cs["C_sca"]) > 0.0
+
+
+def test_periodic_raw_flux_defect_matches_local_power_defect_for_exact_ewald():
+    """An arbitrary coefficient defect must close through the exact periodic identity."""
+    wavelength = 632.8
+    source = pcl.PlaneWave(
+        wavelength=wavelength,
+        medium_n=1.0 + 0j,
+        polarization="TE",
+        polar_angle=0.0,
+        azimuthal_angle=0.0,
+        amplitude=1.0,
+    )
+    periodic = pcl.PeriodicSpec(
+        lattice=pcl.RectangularLattice2D(900.0, 950.0),
+        options=pcl.PeriodicOptions(
+            method="ewald",
+            eta=3.0e-3,
+            real_shells=6,
+            reciprocal_shells=6,
+        ),
+    )
+    particles = pcl.pec_spheres_from_arrays(
+        positions=np.array(
+            [[-120.0, -80.0, -35.0], [135.0, 95.0, 90.0]],
+            dtype=float,
+        ),
+        radii=np.array([55.0, 60.0], dtype=float),
+    )
+    cfg = pcl.SimulationConfig(
+        wavelength=wavelength,
+        n_medium=1.0 + 0j,
+        lmax=1,
+        source=source,
+        periodic=periodic,
+        solver_method="direct",
+        verbose=False,
+    )
+    sim = pcl.Simulation(cfg, particles=particles)
+    solved = sim.solve_sources({"source": source})
+    prepared = sim._prepared_operator_cache
+    if prepared is None:
+        raise AssertionError("Periodic solve must retain its prepared operator.")
+
+    exact = np.asarray(solved.coeffs["source"], dtype=np.complex128).reshape(-1)
+    rng = np.random.default_rng(20260729)
+    perturbation = rng.normal(size=exact.size) + 1j * rng.normal(size=exact.size)
+    perturbed = exact + 2.0e-3 * np.linalg.norm(exact) * perturbation / np.linalg.norm(perturbation)
+    incident = np.asarray(solved.initial_coeffs["source"], dtype=np.complex128).reshape(-1)
+    exciting = incident + np.asarray(prepared.apply_W(perturbed)).reshape(-1)
+
+    local_power = local_absorbed_power_from_exciting(
+        exciting,
+        perturbed,
+        k0=float(solved.k0),
+        n_medium=cfg.n_medium,
+    )
+    payload = periodic_plane_wave_orders(
+        source=source,
+        lattice=periodic.lattice,
+        positions=sim.positions,
+        coeffs=perturbed.reshape(sim.positions.shape[0], -1),
+        lmax=cfg.lmax,
+        k=float(solved.k),
+        n_medium=cfg.n_medium,
+    )
+    local_absorptance = local_power / (payload.incident_power_per_area * payload.unit_cell_area)
+
+    assert abs(payload.absorptance_raw_diff) > 1.0e-8
+    np.testing.assert_allclose(
+        payload.absorptance_raw_diff,
+        local_absorptance,
+        rtol=2.0e-10,
+        atol=2.0e-13,
+    )

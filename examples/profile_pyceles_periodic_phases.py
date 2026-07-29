@@ -259,6 +259,13 @@ def _periodic_summary(payload: Any) -> dict[str, Any]:
         "reflectance": float(payload.reflectance),
         "transmittance": float(payload.transmittance),
         "absorptance": float(payload.absorptance),
+        "absorptance_raw_diff": float(payload.absorptance_raw_diff),
+        "local_absorptance": (
+            None if payload.local_absorptance is None else float(payload.local_absorptance)
+        ),
+        "power_closure_error": (
+            None if payload.power_closure_error is None else float(payload.power_closure_error)
+        ),
         "order_count": int(np.asarray(payload.order_mn).shape[0]),
         "propagating_count": int(
             np.count_nonzero(np.asarray(payload.order_propagating, dtype=bool))
@@ -301,6 +308,16 @@ def _save_periodic_payload(path: Path, payload: Any) -> None:
         transmitted_amplitudes=np.asarray(payload.transmitted_amplitudes, dtype=np.complex128),
         reflected_power_per_order=np.asarray(payload.reflected_power_per_order, dtype=float),
         transmitted_power_per_order=np.asarray(payload.transmitted_power_per_order, dtype=float),
+        incident_power_per_area=np.asarray(float(payload.incident_power_per_area), dtype=float),
+        reflectance=np.asarray(float(payload.reflectance), dtype=float),
+        transmittance=np.asarray(float(payload.transmittance), dtype=float),
+        absorptance_raw_diff=np.asarray(float(payload.absorptance_raw_diff), dtype=float),
+        local_absorptance=np.asarray(
+            np.nan if payload.local_absorptance is None else float(payload.local_absorptance)
+        ),
+        power_closure_error=np.asarray(
+            np.nan if payload.power_closure_error is None else float(payload.power_closure_error)
+        ),
     )
 
 

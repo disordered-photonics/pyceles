@@ -45,6 +45,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pairwise-vs-MLFMM scaling benchmark.
 
 ### Changed
+- Periodic plane-wave results now report the raw flux deficit, local
+  exciting-field absorptance, and their power-closure difference separately.
+  This distinguishes iterative-solve/material loss from periodic coupling or
+  far-field closure error without changing the historical `absorptance` field.
 - Default solver selection now uses BiCGSTAB for finite clusters and restarted
   GMRES for periodic systems, reflecting their measured convergence behavior.
 
