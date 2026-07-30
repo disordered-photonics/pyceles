@@ -26,6 +26,7 @@ from .patterns import (
 from .periodic import (
     PeriodicFarFieldPayload,
     PeriodicOrderAmplitudes,
+    mix_periodic_farfield_payloads,
     periodic_order_amplitudes,
     periodic_plane_wave_orders,
 )
@@ -54,6 +55,7 @@ __all__ = [
     "local_absorbed_power_from_exciting",
     "local_absorption_cross_section_from_exciting",
     "local_power_balance_from_exciting",
+    "mix_periodic_farfield_payloads",
     "periodic_order_amplitudes",
     "periodic_plane_wave_orders",
     "plane_wave_cross_section_balance",

@@ -19,14 +19,13 @@ from .slice import (
 )
 
 if TYPE_CHECKING:
-    from pyceles.simulation import SimulationResult
+    from pyceles.simulation import ChannelResult
 
 
 def compute_periodic_near_field(
-    run: SimulationResult,
+    run: ChannelResult,
     *,
     points: np.ndarray,
-    channel: Literal["mixed", "te", "tm"] = "mixed",
     field_bmax: float | None = None,
     slab_tolerance: float = 1e-12,
     show_progress: bool = False,
@@ -74,7 +73,6 @@ def compute_periodic_near_field(
         nf_ext = compute_periodic_near_field_exterior(
             run,
             points=pts_flat[outer_mask],
-            channel=channel,
             field_bmax=field_bmax,
             slab_tolerance=slab_tolerance,
             show_progress=show_progress,
@@ -93,7 +91,6 @@ def compute_periodic_near_field(
         nf_int = compute_periodic_near_field_interior(
             run,
             points=pts_flat[slab_mask],
-            channel=channel,
             show_progress=show_progress,
         )
         e_initial[slab_mask] = np.asarray(nf_int.E_initial, dtype=out_dtype).reshape(-1, 3)
@@ -126,7 +123,7 @@ def compute_periodic_near_field(
 
 
 def compute_periodic_near_field_slice(
-    run: SimulationResult,
+    run: ChannelResult,
     *,
     axis_0_min: float = -4000.0,
     axis_0_max: float = 4000.0,
@@ -135,7 +132,6 @@ def compute_periodic_near_field_slice(
     dx: float = 40.0,
     plane: str = "y",
     plane_value: float = 0.0,
-    channel: Literal["mixed", "te", "tm"] = "mixed",
     field_bmax: float | None = None,
     slab_tolerance: float = 1e-12,
     center_pixel_policy: Literal["none", "interpolate"] = "interpolate",
@@ -181,7 +177,6 @@ def compute_periodic_near_field_slice(
     nf = compute_periodic_near_field(
         run,
         points=pts,
-        channel=channel,
         field_bmax=field_bmax,
         slab_tolerance=slab_tolerance,
         show_progress=show_progress,

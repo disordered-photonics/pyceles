@@ -25,13 +25,12 @@ def _run_single_particle(
         wavelength=float(source.wavelength),
         n_medium=complex(source.medium_n),
         lmax=int(lmax),
-        source=source,
         solver_method="direct",
         verbose=False,
         compute_dtype="complex128",
         accum_dtype="complex128",
     )
-    return Simulation(cfg, particles=[particle]).run(include_farfield=False)
+    return Simulation(cfg, particles=[particle]).run(source, include_farfield=False)
 
 
 def test_ar1_spheroid_matches_sphere_nearfield_along_hotspot_line() -> None:
@@ -71,12 +70,8 @@ def test_ar1_spheroid_matches_sphere_nearfield_along_hotspot_line() -> None:
     z = np.full_like(x, -0.75 * radius)
     points = np.stack([x, y, z], axis=1)
 
-    nf_sphere = pcl.compute_near_field(
-        run_sphere, points=points, channel="mixed", show_progress=False
-    )
-    nf_spheroid = pcl.compute_near_field(
-        run_spheroid, points=points, channel="mixed", show_progress=False
-    )
+    nf_sphere = pcl.compute_near_field(run_sphere, points=points, show_progress=False)
+    nf_spheroid = pcl.compute_near_field(run_spheroid, points=points, show_progress=False)
 
     np.testing.assert_allclose(
         np.asarray(nf_spheroid.E_total),

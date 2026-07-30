@@ -67,7 +67,6 @@ def _run(
         wavelength=_WAVELENGTH,
         n_medium=_N_MEDIUM,
         lmax=int(lmax),
-        source=source,
         polar_angles=np.asarray(polar_angles, dtype=float),
         azimuthal_angles=np.asarray(azimuthal_angles, dtype=float),
         solver_method="direct",
@@ -75,7 +74,7 @@ def _run(
         compute_dtype="complex128",
         accum_dtype="complex128",
     )
-    return pcl.Simulation(config, particles=particles).run()
+    return pcl.Simulation(config, particles=particles).run(source)
 
 
 def _cross_sections(run: pcl.SimulationResult) -> pcl.CrossSectionBalance:
@@ -505,7 +504,6 @@ def _bistatic_scattering_matrix(
         wavelength=_WAVELENGTH,
         n_medium=_N_MEDIUM,
         lmax=int(lmax),
-        source=sources["te"],
         solver_method="direct",
         verbose=False,
         compute_dtype="complex128",

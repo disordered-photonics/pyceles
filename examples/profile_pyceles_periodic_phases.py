@@ -470,7 +470,6 @@ def _save_nearfield_npz(path: Path, nf_slice: Any, field_bmax: float) -> dict[st
 def _build_config(
     *,
     args: argparse.Namespace,
-    source: pcl.PlaneWave,
     side_nm: float,
     cache_blocks: bool,
     coupling_backend: Literal["pairwise", "mlfmm"],
@@ -495,7 +494,6 @@ def _build_config(
         wavelength=float(args.wavelength),
         n_medium=complex(float(args.n_medium), 0.0),
         lmax=int(args.lmax),
-        source=source,
         periodic=periodic,
         polar_angles=pcl.core.uniform_polar_grid(int(args.n_beta)),
         azimuthal_angles=pcl.core.uniform_periodic_azimuth_grid(int(args.n_alpha)),
@@ -519,13 +517,14 @@ def _build_config(
 
 def _simulation_run_callable(
     cfg: pcl.SimulationConfig,
+    source: pcl.PlaneWave,
     particles: Any,
     state: dict[str, Any],
 ) -> Callable[[], pcl.SimulationResult]:
     def _run() -> pcl.SimulationResult:
         simulation = pcl.Simulation(cfg, particles=particles)
         state["simulation"] = simulation
-        return simulation.run(include_farfield=False)
+        return simulation.run(source, include_farfield=False)
 
     return _run
 
@@ -712,7 +711,6 @@ def main() -> None:
     for cache_on in cache_flags:
         cfg = _build_config(
             args=args,
-            source=source,
             side_nm=float(args.side_nm),
             cache_blocks=bool(cache_on),
             coupling_backend=coupling_backend,
@@ -727,7 +725,7 @@ def main() -> None:
             phase=phase_name,
             out_dir=out_dir,
             top_n=int(args.top_n),
-            fn=_simulation_run_callable(cfg, particles, simulation_state),
+            fn=_simulation_run_callable(cfg, source, particles, simulation_state),
             synchronize_gpu=operator_backend == "cupy",
             cuda_profiler_api=bool(args.cuda_profiler_api and operator_backend == "cupy"),
         )
@@ -802,7 +800,6 @@ def main() -> None:
                 axis_1_min=-0.5 * side,
                 axis_1_max=0.5 * side,
                 dx=float(args.dx),
-                channel="mixed",
                 field_bmax=float(field_bmax),
                 center_pixel_policy="none",
                 show_progress=not bool(args.quiet),
@@ -833,7 +830,6 @@ def main() -> None:
                 axis_1_min=float(zmin),
                 axis_1_max=float(zmax),
                 dx=float(args.dx),
-                channel="mixed",
                 field_bmax=float(field_bmax),
                 center_pixel_policy="none",
                 show_progress=not bool(args.quiet),

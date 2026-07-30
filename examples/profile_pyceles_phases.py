@@ -232,7 +232,6 @@ def main() -> None:
         wavelength=float(args.wavelength),
         n_medium=float(args.n_medium) + 0j,
         lmax=int(args.lmax),
-        source=source,
         polar_angles=pcl.core.uniform_polar_grid(int(args.n_beta)),
         azimuthal_angles=pcl.core.uniform_periodic_azimuth_grid(int(args.n_alpha)),
         radial_lut_dr=float(args.radial_lut_dr),
@@ -415,6 +414,7 @@ def main() -> None:
             raise RuntimeError("Internal error: near-field profiling requires farfield payload.")
         run = pcl.SimulationResult(
             config=cfg,
+            source=source,
             particles=tuple(
                 pcl.core.spheres_from_arrays(
                     positions=positions,
@@ -427,22 +427,15 @@ def main() -> None:
             coeffs=coeffs,
             rhs=rhs.reshape(n_spheres, n_modes_l),
             initial_coeffs=b,
-            initial_coeffs_basis=None,
-            coeffs_basis=None,
             solver_result=primary_solver_res,
-            solver_result_basis=None,
             farfield=farfield,
-            farfield_basis=None,
             power=None,
-            power_basis=None,
             cross_sections=None,
-            cross_sections_basis=None,
-            unpolarized=None,
             decomposition_forward=None,
             decomposition_backward=None,
-            decomposition_forward_basis=None,
-            decomposition_backward_basis=None,
-            polarization_jones=source.jones_coefficients(),
+            periodic=None,
+            compute_dtype=str(cfg.compute_dtype),
+            accum_dtype=str(cfg.accum_dtype),
         )
 
         if not args.quiet:

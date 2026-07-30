@@ -13,7 +13,7 @@ import numpy as np
 
 from pyceles.core.operators import PreparedOperator
 from pyceles.core.particles import Particle, ParticleCollection
-from pyceles.core.sources import Source
+from pyceles.core.sources import JonesPolarizedSource, Source
 from pyceles.linear.solvers import DenseLUFactorization
 
 from .config import SimulationConfig
@@ -21,23 +21,24 @@ from .helpers import (
     first_overlapping_circumscribing_pair,
     normalize_particle_geometry,
 )
-from .postprocess import postprocess_sources_impl, run_impl
+from .postprocess import postprocess_sources_impl, run_impl, run_polarizations_impl
 from .results import (
-    MultiSourceSimulationResult,
+    MultiSourceResult,
+    MultiSourceSolveResult,
+    PolarizationResult,
     ResultRetention,
     SimulationResult,
-    SolvedSourcesResult,
 )
 from .solve import (
+    _MultiSourceExecution,
     _solve_sources_for_immediate_postprocess_core,
-    _SolvedSourcesExecution,
     normalize_sources_argument,
     solve_sources_core,
 )
 
 
 class Simulation:
-    """High-level orchestrator for one many-particle scattering experiment."""
+    """Reusable many-particle system with explicit source execution methods."""
 
     _config: SimulationConfig
     _particles: ParticleCollection
@@ -134,24 +135,18 @@ class Simulation:
                     "`check_circumscribing_sphere_overlap=False`."
                 )
 
-    def _validate_ready_to_run(self) -> Source:
-        if self.config.source is None:
-            raise ValueError(
-                "Cannot run simulation: missing required `source` in SimulationConfig. "
-                "Set `source` before calling `run()`."
-            )
-        return self.config.source
-
     def solve_sources(
         self,
         sources: Mapping[str, Source],
         *,
+        warm_start: np.ndarray | Mapping[str, np.ndarray] | None = None,
         solver_compute_final_residual: bool | None = None,
-    ) -> SolvedSourcesResult:
+    ) -> MultiSourceSolveResult:
         labeled = normalize_sources_argument(self, sources)
         return solve_sources_core(
             self,
             labeled,
+            warm_start=warm_start,
             solver_compute_final_residual=solver_compute_final_residual,
         )
 
@@ -159,24 +154,26 @@ class Simulation:
         self,
         sources: Mapping[str, Source],
         *,
+        warm_start: np.ndarray | Mapping[str, np.ndarray] | None = None,
         solver_compute_final_residual: bool | None = None,
-    ) -> _SolvedSourcesExecution:
+    ) -> _MultiSourceExecution:
         labeled = normalize_sources_argument(self, sources)
         return _solve_sources_for_immediate_postprocess_core(
             self,
             labeled,
+            warm_start=warm_start,
             solver_compute_final_residual=solver_compute_final_residual,
         )
 
     def postprocess_sources(
         self,
-        solved: SolvedSourcesResult,
+        solved: MultiSourceSolveResult,
         *,
         include_farfield: bool = True,
         farfield_polar_angles: np.ndarray | None = None,
         farfield_azimuthal_angles: np.ndarray | None = None,
         retention: ResultRetention | None = None,
-    ) -> MultiSourceSimulationResult:
+    ) -> MultiSourceResult:
         return postprocess_sources_impl(
             self,
             solved,
@@ -186,16 +183,69 @@ class Simulation:
             retention=retention,
         )
 
+    def run_sources(
+        self,
+        sources: Mapping[str, Source],
+        *,
+        include_farfield: bool = True,
+        farfield_polar_angles: np.ndarray | None = None,
+        farfield_azimuthal_angles: np.ndarray | None = None,
+        retention: ResultRetention | None = None,
+        warm_start: np.ndarray | Mapping[str, np.ndarray] | None = None,
+        solver_compute_final_residual: bool | None = None,
+    ) -> MultiSourceResult:
+        """Solve and postprocess labeled sources with one shared block solve."""
+        execution = self._solve_sources_for_immediate_postprocess(
+            sources,
+            warm_start=warm_start,
+            solver_compute_final_residual=solver_compute_final_residual,
+        )
+        return postprocess_sources_impl(
+            self,
+            execution.solved,
+            include_farfield=include_farfield,
+            farfield_polar_angles=farfield_polar_angles,
+            farfield_azimuthal_angles=farfield_azimuthal_angles,
+            backend_coeffs_by_label=execution.backend_coeffs,
+            retention=retention,
+        )
+
     def run(
         self,
+        source: Source,
         *,
         include_farfield: bool = True,
         retention: ResultRetention | None = None,
+        warm_start: np.ndarray | None = None,
+        solver_compute_final_residual: bool | None = None,
     ) -> SimulationResult:
+        """Solve and postprocess one explicit source channel."""
         return run_impl(
             self,
+            source,
             include_farfield=include_farfield,
             retention=retention,
+            warm_start=warm_start,
+            solver_compute_final_residual=solver_compute_final_residual,
+        )
+
+    def run_polarizations(
+        self,
+        source: JonesPolarizedSource,
+        *,
+        include_farfield: bool = True,
+        retention: ResultRetention | None = None,
+        warm_start: np.ndarray | Mapping[str, np.ndarray] | None = None,
+        solver_compute_final_residual: bool | None = None,
+    ) -> PolarizationResult:
+        """Solve orthogonal TE/TM channels together for one Jones source."""
+        return run_polarizations_impl(
+            self,
+            source,
+            include_farfield=include_farfield,
+            retention=retention,
+            warm_start=warm_start,
+            solver_compute_final_residual=solver_compute_final_residual,
         )
 
 

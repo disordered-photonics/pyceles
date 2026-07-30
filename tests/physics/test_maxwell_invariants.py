@@ -36,14 +36,13 @@ def test_source_only_plane_wave_satisfies_local_maxwell_identities():
         wavelength=550.0,
         n_medium=1.0 + 0j,
         lmax=1,
-        source=source,
         solver_method="direct",
         verbose=False,
     )
     run = pcl.Simulation(
         cfg,
         particles=[],
-    ).run()
+    ).run(source)
 
     eps = 0.2
     x = np.array([15.0, 15.0 + eps], dtype=float)
@@ -52,7 +51,7 @@ def test_source_only_plane_wave_satisfies_local_maxwell_identities():
     X, Y, Z = np.meshgrid(x, y, z, indexing="ij")
     points = np.stack([X, Y, Z], axis=-1)
 
-    nf = pcl.compute_near_field(run, points=points, channel="mixed", show_progress=False)
+    nf = pcl.compute_near_field(run, points=points, show_progress=False)
     E = np.asarray(nf.E_total, dtype=np.complex128)
     H = np.asarray(nf.H_total, dtype=np.complex128)
 

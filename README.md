@@ -158,14 +158,13 @@ config = pcl.SimulationConfig(
     wavelength=550.0,
     n_medium=1.0 + 0j,
     lmax=3,
-    source=source,
     solver_method="bicgstab",
     solver_rtol=1e-6,
 )
 
-result = pcl.Simulation(config, particles=particles).run()
+result = pcl.Simulation(config, particles=particles).run(source)
 print(result.n_particles)
-print(result.cross_sections.keys())
+print(result.cross_sections)
 ```
 
 See [docs/quickstart.md](docs/quickstart.md) for near-field and HDF5 examples.

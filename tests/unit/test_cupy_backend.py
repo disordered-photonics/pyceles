@@ -522,13 +522,11 @@ def _sim_cfg(
     compute_dtype: Literal["complex64", "complex128"],
     wavelength: float,
     n_medium: complex,
-    source: pcl.PlaneWave,
 ) -> pcl.SimulationConfig:
     return pcl.SimulationConfig(
         wavelength=wavelength,
         n_medium=n_medium,
         lmax=3,
-        source=source,
         polar_angles=pcl.core.uniform_polar_grid(181),
         azimuthal_angles=pcl.core.uniform_periodic_azimuth_grid(36),
         radial_lut_dr=0.5,
@@ -582,7 +580,6 @@ def test_cupy_local_absorption_postprocess_uses_backend_coefficients(monkeypatch
         wavelength=wavelength,
         n_medium=1.0 + 0j,
         lmax=2,
-        source=source,
         polar_angles=pcl.core.uniform_polar_grid(91),
         azimuthal_angles=pcl.core.uniform_periodic_azimuth_grid(24),
         radial_lut_dr=0.5,
@@ -602,7 +599,7 @@ def test_cupy_local_absorption_postprocess_uses_backend_coefficients(monkeypatch
     )
 
     sim = pcl.Simulation(cfg, particles=particles)
-    run = sim.run(include_farfield=True)
+    run = sim.run(source, include_farfield=True)
 
     assert run.cross_sections is not None
     assert seen_backend_payloads
@@ -618,7 +615,6 @@ def test_cupy_public_solve_sources_does_not_retain_backend_handoff() -> None:
         wavelength=wavelength,
         n_medium=1.0 + 0j,
         lmax=2,
-        source=source,
         radial_lut_dr=0.5,
         solver_method="direct",
         operator_backend="cupy",
@@ -1106,18 +1102,16 @@ def test_cupy_simulation_run_matches_numpy_for_coeffs_farfield_and_nearfield(
         compute_dtype=compute_dtype,
         wavelength=wavelength,
         n_medium=n_medium,
-        source=source,
     )
     cfg_cupy = _sim_cfg(
         operator_backend="cupy",
         compute_dtype=compute_dtype,
         wavelength=wavelength,
         n_medium=n_medium,
-        source=source,
     )
 
-    run_numpy = pcl.Simulation(cfg_numpy, particles=particles).run(include_farfield=True)
-    run_cupy = pcl.Simulation(cfg_cupy, particles=particles).run(include_farfield=True)
+    run_numpy = pcl.Simulation(cfg_numpy, particles=particles).run(source, include_farfield=True)
+    run_cupy = pcl.Simulation(cfg_cupy, particles=particles).run(source, include_farfield=True)
 
     np.testing.assert_allclose(
         run_cupy.coeffs,
@@ -1218,12 +1212,8 @@ def test_cupy_simulation_run_matches_numpy_for_coeffs_farfield_and_nearfield(
         ],
         dtype=float,
     )
-    nf_numpy = pcl.compute_near_field(
-        run_numpy, points=nearfield_points, channel="mixed", show_progress=False
-    )
-    nf_cupy = pcl.compute_near_field(
-        run_cupy, points=nearfield_points, channel="mixed", show_progress=False
-    )
+    nf_numpy = pcl.compute_near_field(run_numpy, points=nearfield_points, show_progress=False)
+    nf_cupy = pcl.compute_near_field(run_cupy, points=nearfield_points, show_progress=False)
 
     np.testing.assert_array_equal(np.asarray(nf_cupy.inside_mask), np.asarray(nf_numpy.inside_mask))
     np.testing.assert_allclose(
@@ -1275,18 +1265,16 @@ def test_cupy_mixed_particle_groups_match_numpy_for_solve_and_backscatter() -> N
         compute_dtype="complex128",
         wavelength=wavelength,
         n_medium=n_medium,
-        source=source,
     )
     cfg_cupy = _sim_cfg(
         operator_backend="cupy",
         compute_dtype="complex128",
         wavelength=wavelength,
         n_medium=n_medium,
-        source=source,
     )
 
-    run_numpy = pcl.Simulation(cfg_numpy, particles=particles).run(include_farfield=True)
-    run_cupy = pcl.Simulation(cfg_cupy, particles=particles).run(include_farfield=True)
+    run_numpy = pcl.Simulation(cfg_numpy, particles=particles).run(source, include_farfield=True)
+    run_cupy = pcl.Simulation(cfg_cupy, particles=particles).run(source, include_farfield=True)
 
     np.testing.assert_allclose(run_cupy.coeffs, run_numpy.coeffs, rtol=5e-8, atol=5e-10)
 

@@ -13,7 +13,6 @@ from pyceles._dtypes import resolve_compute_accum_dtypes
 from pyceles.core.angular import uniform_periodic_azimuth_grid, uniform_polar_grid
 from pyceles.core.operators.mlfmm import MLFMMOptions
 from pyceles.core.periodic import PeriodicSpec
-from pyceles.core.sources import PlaneWave, Source
 
 
 def _as_1d_float_array(name: str, values: np.ndarray) -> np.ndarray:
@@ -85,9 +84,9 @@ def warn_redundant_periodic_azimuth_endpoint(*, azimuth_name: str, azimuth: np.n
 
 @dataclass(frozen=True)
 class SimulationConfig:
-    """High-level configuration for one homogeneous-medium many-particle run.
+    """Reusable homogeneous-medium many-particle system and numerical policy.
 
-    The config gathers physical inputs (wavelength, embedding medium, source,
+    The config gathers physical-system inputs (wavelength, embedding medium,
     truncation) together with numerical policy (angular grids, solver strategy,
     precision, caching, preconditioning) so a run remains explicit and
     reproducible.
@@ -130,7 +129,6 @@ class SimulationConfig:
     wavelength: float = 550.0
     n_medium: complex = 1.0 + 0j
     lmax: int = 3
-    source: Source | None = None
     polar_angles: np.ndarray = field(default_factory=lambda: uniform_polar_grid(1801))
     azimuthal_angles: np.ndarray = field(default_factory=lambda: uniform_periodic_azimuth_grid(360))
     source_polar_angles: np.ndarray | None = None
@@ -147,7 +145,6 @@ class SimulationConfig:
     solver_compute_final_residual: bool = True
     solver_restart: int = 100
     solver_maxiter: int = 1000
-    solver_warm_start: np.ndarray | None = None
     solver_preconditioner: Callable[[np.ndarray], np.ndarray] | None = None
     operator_backend: Literal["numpy", "cupy"] = "numpy"
     coupling_backend: Literal["pairwise", "mlfmm"] = "pairwise"
@@ -159,7 +156,6 @@ class SimulationConfig:
     cache_translation_blocks: bool = False
     check_circumscribing_sphere_overlap: bool = True
     circumscribing_sphere_overlap_atol: float = 0.0
-    solve_polarization_basis: bool = False
     verbose: bool = True
 
     def __post_init__(self) -> None:
@@ -201,15 +197,6 @@ class SimulationConfig:
             )
         if self.solver_preconditioner is not None and not callable(self.solver_preconditioner):
             raise ValueError("`solver_preconditioner` must be callable or None.")
-        if self.solver_warm_start is not None:
-            ws = np.asarray(self.solver_warm_start)
-            if ws.ndim not in (1, 2):
-                raise ValueError("`solver_warm_start` must be 1D, 2D, or None.")
-            object.__setattr__(
-                self,
-                "solver_warm_start",
-                _owned_read_only_array(ws),
-            )
         resolve_compute_accum_dtypes(
             compute_dtype=self.compute_dtype,
             accum_dtype=self.accum_dtype,
@@ -335,30 +322,6 @@ class SimulationConfig:
             warn_redundant_periodic_azimuth_endpoint(
                 azimuth_name="farfield_azimuthal_angles", azimuth=az_farfield
             )
-
-        if self.source is not None:
-            if not isinstance(self.source, Source):
-                raise TypeError(
-                    "`source` must satisfy the pyceles Source protocol "
-                    "(wavelength/medium_n + incident_coeffs + has_finite_incident_power APIs). "
-                    f"Got {type(self.source).__name__}."
-                )
-            if self.periodic is not None and not isinstance(self.source, PlaneWave):
-                raise NotImplementedError(
-                    "Periodic workflows currently support PlaneWave excitation only."
-                )
-            source_wavelength = float(self.source.wavelength)
-            source_n_medium = complex(self.source.medium_n)
-            if not np.isclose(source_wavelength, float(self.wavelength), rtol=0.0, atol=0.0):
-                raise ValueError(
-                    "Configuration mismatch: `source.wavelength` must match `SimulationConfig.wavelength` "
-                    f"({source_wavelength!r} != {self.wavelength!r})."
-                )
-            if not np.isclose(source_n_medium, n_medium, rtol=0.0, atol=0.0):
-                raise ValueError(
-                    "Configuration mismatch: `source.medium_n` must match `SimulationConfig.n_medium` "
-                    f"({source_n_medium!r} != {n_medium!r})."
-                )
 
     def source_angular_grids(self) -> tuple[np.ndarray, np.ndarray]:
         polar_values = (

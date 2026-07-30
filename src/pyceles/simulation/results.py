@@ -1,22 +1,25 @@
-"""Simulation result containers and result-shaping helpers.
+"""Typed simulation result containers.
 
-Result field bindings are frozen, but numerical arrays and diagnostic mappings
-remain mutable. This avoids duplicating potentially GiB-scale payloads merely
-to claim deep immutability. In particular, ``SimulationResult.coeffs`` may
-share storage with ``solver_result.x``; callers that need an independently
-mutable snapshot should copy the array explicitly.
+A completed physical channel is represented independently from the solve that
+produced it. Ordinary single-source runs add one matching solver report,
+whereas multi-source and polarization envelopes own the shared block solve.
+This keeps source cardinality and solver provenance explicit without copying
+large coefficient arrays. Field bindings and labeled mappings are read-only;
+numerical arrays remain mutable so result construction never requires deep
+copies of potentially GiB-scale payloads.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
+from types import MappingProxyType
 
 import numpy as np
 import numpy.typing as npt
 
 from pyceles.core.particles import Particle, ParticleCollection
-from pyceles.core.sources import Source
+from pyceles.core.sources import JonesPolarizedSource, Source
 from pyceles.linear.solvers import LinearSolveResult
 from pyceles.postprocessing.farfield import (
     CrossSectionBalance,
@@ -30,17 +33,17 @@ from .config import SimulationConfig
 
 @dataclass(frozen=True, slots=True)
 class ResultRetention:
-    """Control optional large arrays retained by completed run results.
+    """Control optional large arrays retained by completed channel results.
 
-    The default preserves the full diagnostic payload. Solved coefficients
-    remain available in every mode because they are the restart and deferred
-    postprocessing state.
+    Solved coefficients are always retained because they are the restart and
+    deferred-postprocessing state. Multi-source and polarization results retain
+    every solved RHS channel; those vectors are essential state, not optional
+    duplicated diagnostics.
     """
 
     initial_coeffs: bool = True
     rhs: bool = True
     residual_history: bool = True
-    polarization_basis_coeffs: bool = True
 
     @classmethod
     def minimal(cls) -> ResultRetention:
@@ -49,7 +52,6 @@ class ResultRetention:
             initial_coeffs=False,
             rhs=False,
             residual_history=False,
-            polarization_basis_coeffs=False,
         )
 
 
@@ -86,40 +88,107 @@ class UnpolarizedDiagnostics:
         return out
 
 
-@dataclass(frozen=True)
-class SimulationResult:
-    """Container for solved multipole coefficients and derived observables.
+def _solver_solution_matrix(result: LinearSolveResult) -> np.ndarray:
+    """Return the authoritative solver solution as ``(unknowns, rhs_count)``."""
+    rhs_count = int(result.rhs_count)
+    if rhs_count < 1:
+        raise ValueError(f"Solver RHS count must be positive. Got {rhs_count}.")
+    x = np.asarray(result.x)
+    if rhs_count == 1:
+        if x.ndim == 1:
+            return x.reshape(-1, 1)
+        if x.ndim == 2 and x.shape[1] == 1:
+            return x
+        raise ValueError(
+            f"Single-RHS solver solutions must be 1D or have shape (unknowns, 1). Got {x.shape}."
+        )
+    if x.ndim != 2 or x.shape[1] != rhs_count:
+        raise ValueError(
+            "Multi-RHS solver solution shape must match rhs_count: "
+            f"shape={x.shape}, rhs_count={rhs_count}."
+        )
+    return x
 
-    For periodic runs, finite-cluster far-field payloads remain empty placeholders
-    and periodic diffraction-order observables live under `periodic`.
+
+def _validate_channel_solution_views(
+    *,
+    labels: tuple[str, ...],
+    coeffs_by_label: Mapping[str, np.ndarray],
+    solver_result: LinearSolveResult,
+) -> None:
+    """Require each solved channel to be a zero-copy view of its solver column."""
+    solution = _solver_solution_matrix(solver_result)
+    if solution.shape[1] != len(labels):
+        raise ValueError(
+            "Solver solution column count must match channel labels: "
+            f"{solution.shape[1]} != {len(labels)}."
+        )
+    for column, label in enumerate(labels):
+        coeffs = np.asarray(coeffs_by_label[label]).reshape(-1)
+        solved = solution[:, column]
+        if coeffs.shape != solved.shape:
+            raise ValueError(
+                f"Coefficient shape for channel '{label}' does not match solver column: "
+                f"{coeffs.shape} != {solved.shape}."
+            )
+        if coeffs.size and not np.shares_memory(coeffs, solved):
+            raise ValueError(
+                f"Channel '{label}' coefficients must be a zero-copy view of the "
+                "authoritative solver solution."
+            )
+
+
+def _compact_labels(labels: Sequence[str], *, limit: int = 4) -> str:
+    values = tuple(labels)
+    if len(values) <= limit:
+        return repr(values)
+    head = ", ".join(repr(label) for label in values[:limit])
+    return f"({head}, ...; {len(values)} total)"
+
+
+def _array_summary(value: object) -> str:
+    shape = getattr(value, "shape", None)
+    if shape is None:
+        return f"type={type(value).__name__}"
+    return f"shape={tuple(shape)}, dtype={getattr(value, 'dtype', None)}"
+
+
+def _channel_repr_body(channel: ChannelResult) -> str:
+    return (
+        f"source={type(channel.source).__name__}, particles={channel.n_particles}, "
+        f"coeffs=({_array_summary(channel.coeffs)}), "
+        f"farfield={bool(channel.farfield.scattered_te)}, periodic={channel.periodic is not None}, "
+        f"power={channel.power is not None}, cross_sections={channel.cross_sections is not None}, "
+        f"compute_dtype={channel.compute_dtype!r}, accum_dtype={channel.accum_dtype!r}"
+    )
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class ChannelResult:
+    """One physical source channel and its derived observables.
+
+    This payload deliberately has no solver report. A channel may be solved
+    directly, extracted from a shared block solve, or coherently derived from
+    polarization-basis channels. The owning result envelope records that
+    provenance explicitly.
     """
 
     config: SimulationConfig
+    source: Source
     k: float
     k0: float
     coeffs: np.ndarray
     rhs: np.ndarray | None
     initial_coeffs: np.ndarray | None
-    initial_coeffs_basis: dict[str, np.ndarray] | None
-    coeffs_basis: dict[str, np.ndarray] | None
-    solver_result: LinearSolveResult
-    solver_result_basis: LinearSolveResult | None
     farfield: FarFieldPatterns
-    farfield_basis: dict[str, FarFieldPatterns] | None
     power: PowerBalance | None
-    power_basis: dict[str, PowerBalance] | None
     cross_sections: CrossSectionBalance | None
-    cross_sections_basis: dict[str, CrossSectionBalance] | None
-    unpolarized: UnpolarizedDiagnostics | None
     decomposition_forward: dict[str, float] | None
     decomposition_backward: dict[str, float] | None
-    decomposition_forward_basis: dict[str, dict[str, float]] | None
-    decomposition_backward_basis: dict[str, dict[str, float]] | None
     particles: ParticleCollection | Sequence[Particle]
-    periodic: PeriodicFarFieldPayload | None = None
-    polarization_jones: tuple[complex, complex] | None = None
-    compute_dtype: str = "complex128"
-    accum_dtype: str = "complex128"
+    periodic: PeriodicFarFieldPayload | None
+    compute_dtype: str
+    accum_dtype: str
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -136,47 +205,304 @@ class SimulationResult:
     def positions(self) -> np.ndarray:
         particles = self.particles
         if not isinstance(particles, ParticleCollection):
-            raise RuntimeError("SimulationResult particles were not normalized.")
+            raise RuntimeError("ChannelResult particles were not normalized.")
         return particles.positions
 
     @property
     def circumscribing_radii(self) -> np.ndarray:
         particles = self.particles
         if not isinstance(particles, ParticleCollection):
-            raise RuntimeError("SimulationResult particles were not normalized.")
+            raise RuntimeError("ChannelResult particles were not normalized.")
         return particles.circumscribing_radii
 
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}({_channel_repr_body(self)})"
 
-@dataclass(frozen=True)
-class SolvedSourcesResult:
+
+@dataclass(frozen=True, slots=True, repr=False)
+class SimulationResult(ChannelResult):
+    """One directly solved source channel plus its matching solver report."""
+
+    solver_result: LinearSolveResult
+
+    def __post_init__(self) -> None:
+        ChannelResult.__post_init__(self)
+        _validate_channel_solution_views(
+            labels=("source",),
+            coeffs_by_label={"source": self.coeffs},
+            solver_result=self.solver_result,
+        )
+
+    def __repr__(self) -> str:
+        return f"SimulationResult({_channel_repr_body(self)}, solver={self.solver_result!r})"
+
+
+def _validate_labeled_payload(
+    *,
+    labels: tuple[str, ...],
+    payloads: Sequence[Mapping[str, object]],
+    rhs_count: int,
+) -> None:
+    if not labels:
+        raise ValueError("Labeled multi-source results require at least one channel.")
+    if any(not isinstance(label, str) for label in labels):
+        raise TypeError("Labeled result keys must be strings.")
+    if any(label == "" for label in labels):
+        raise ValueError("Labeled result keys must be non-empty strings.")
+    if len(set(labels)) != len(labels):
+        raise ValueError(f"Source labels must be unique. Got {labels!r}.")
+    expected = set(labels)
+    for payload in payloads:
+        if set(payload) != expected:
+            raise ValueError(
+                "Labeled result keys must exactly match `labels`: "
+                f"expected {labels!r}, got {tuple(payload)!r}."
+            )
+    if rhs_count != len(labels):
+        raise ValueError(
+            f"Solver RHS count must match the labeled channel count: {rhs_count} != {len(labels)}."
+        )
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class MultiSourceSolveResult:
     """Solve-only outputs from one shared-operator multi-RHS solve."""
 
+    config: SimulationConfig
+    particles: ParticleCollection | Sequence[Particle]
     labels: tuple[str, ...]
-    sources: dict[str, Source]
+    sources: Mapping[str, Source]
     solver_result: LinearSolveResult
-    initial_coeffs: dict[str, np.ndarray]
-    rhs: dict[str, np.ndarray]
-    coeffs: dict[str, np.ndarray]
+    initial_coeffs: Mapping[str, np.ndarray]
+    rhs: Mapping[str, np.ndarray]
+    coeffs: Mapping[str, np.ndarray]
     k: float
     k0: float
     compute_dtype: str
     accum_dtype: str
 
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "particles",
+            ParticleCollection.from_particles(self.particles),
+        )
+        object.__setattr__(self, "sources", MappingProxyType(dict(self.sources)))
+        object.__setattr__(
+            self,
+            "initial_coeffs",
+            MappingProxyType(dict(self.initial_coeffs)),
+        )
+        object.__setattr__(self, "rhs", MappingProxyType(dict(self.rhs)))
+        object.__setattr__(self, "coeffs", MappingProxyType(dict(self.coeffs)))
+        _validate_labeled_payload(
+            labels=self.labels,
+            payloads=(self.sources, self.initial_coeffs, self.rhs, self.coeffs),
+            rhs_count=int(self.solver_result.rhs_count),
+        )
+        _validate_channel_solution_views(
+            labels=self.labels,
+            coeffs_by_label=self.coeffs,
+            solver_result=self.solver_result,
+        )
 
-@dataclass(frozen=True)
-class MultiSourceSimulationResult:
-    """Postprocessed channel results for one solved multi-source payload."""
+    def __repr__(self) -> str:
+        return (
+            f"MultiSourceSolveResult(labels={_compact_labels(self.labels)}, "
+            f"particles={len(self.particles)}, coeffs={len(self.coeffs)}, "
+            f"compute_dtype={self.compute_dtype!r}, accum_dtype={self.accum_dtype!r}, "
+            f"solver={self.solver_result!r})"
+        )
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class MultiSourceResult:
+    """Postprocessed channels from one shared block solve.
+
+    Channels contain physical per-source state only; ``solver_result`` is the
+    single authoritative multi-RHS report for the whole block execution.
+    """
 
     labels: tuple[str, ...]
-    sources: dict[str, Source]
-    runs: dict[str, SimulationResult]
+    channels: Mapping[str, ChannelResult]
     solver_result: LinearSolveResult
-    initial_coeffs: dict[str, np.ndarray] | None
-    rhs: dict[str, np.ndarray] | None
-    coeffs: dict[str, np.ndarray]
 
-    def __getitem__(self, label: str) -> SimulationResult:
-        return self.runs[label]
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "channels", MappingProxyType(dict(self.channels)))
+        _validate_labeled_payload(
+            labels=self.labels,
+            payloads=(self.channels,),
+            rhs_count=int(self.solver_result.rhs_count),
+        )
+        _validate_channel_solution_views(
+            labels=self.labels,
+            coeffs_by_label={label: self.channels[label].coeffs for label in self.labels},
+            solver_result=self.solver_result,
+        )
+        first = self.channels[self.labels[0]]
+        for label in self.labels[1:]:
+            channel = self.channels[label]
+            if channel.config is not first.config:
+                raise ValueError("All channels must share one SimulationConfig.")
+            if channel.particles is not first.particles:
+                raise ValueError("All channels must share one particle collection.")
+
+    def __getitem__(self, label: str) -> ChannelResult:
+        return self.channels[label]
+
+    @property
+    def config(self) -> SimulationConfig:
+        """Return the shared immutable simulation configuration."""
+        return self.channels[self.labels[0]].config
+
+    @property
+    def particles(self) -> ParticleCollection:
+        """Return the shared immutable particle collection."""
+        particles = self.channels[self.labels[0]].particles
+        if not isinstance(particles, ParticleCollection):
+            raise RuntimeError("MultiSourceResult particles were not normalized.")
+        return particles
+
+    @property
+    def sources(self) -> Mapping[str, Source]:
+        return MappingProxyType({label: self.channels[label].source for label in self.labels})
+
+    def __repr__(self) -> str:
+        return (
+            f"MultiSourceResult(labels={_compact_labels(self.labels)}, "
+            f"particles={len(self.particles)}, channels={len(self.channels)}, "
+            f"solver={self.solver_result!r})"
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _CoherentChannelPayload:
+    farfield: FarFieldPatterns
+    power: PowerBalance | None
+    cross_sections: CrossSectionBalance | None
+    decomposition_forward: dict[str, float] | None
+    decomposition_backward: dict[str, float] | None
+    periodic: PeriodicFarFieldPayload | None
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class PolarizationResult:
+    """TE/TM basis channels from one block solve and their Jones combination.
+
+    ``te`` and ``tm`` are the two solved channels and share the block solve in
+    ``solver_result``. The requested coherent channel is exposed by ``mixed``;
+    its large coefficient/RHS arrays are materialized on demand, so the result
+    does not permanently retain a third coefficient vector.
+    """
+
+    source: JonesPolarizedSource
+    te: ChannelResult
+    tm: ChannelResult
+    solver_result: LinearSolveResult
+    unpolarized: UnpolarizedDiagnostics
+    _mixed_payload: _CoherentChannelPayload
+
+    def __post_init__(self) -> None:
+        if self.te.config is not self.tm.config:
+            raise ValueError("TE and TM channels must share one SimulationConfig.")
+        if self.te.particles is not self.tm.particles:
+            raise ValueError("TE and TM channels must share one particle collection.")
+        if int(self.solver_result.rhs_count) != 2:
+            raise ValueError(
+                "PolarizationResult requires one two-RHS TE/TM solver report. "
+                f"Got rhs_count={self.solver_result.rhs_count}."
+            )
+        _validate_channel_solution_views(
+            labels=self.labels,
+            coeffs_by_label={"te": self.te.coeffs, "tm": self.tm.coeffs},
+            solver_result=self.solver_result,
+        )
+
+    @property
+    def jones(self) -> tuple[complex, complex]:
+        """Return the coherent Jones weights requested by ``source``."""
+        a_te, a_tm = self.source.jones_coefficients()
+        return complex(a_te), complex(a_tm)
+
+    @property
+    def config(self) -> SimulationConfig:
+        """Return the shared immutable simulation configuration."""
+        return self.te.config
+
+    @property
+    def particles(self) -> ParticleCollection:
+        """Return the shared immutable particle collection."""
+        particles = self.te.particles
+        if not isinstance(particles, ParticleCollection):
+            raise RuntimeError("PolarizationResult particles were not normalized.")
+        return particles
+
+    @property
+    def labels(self) -> tuple[str, str]:
+        """Return the deterministic solved-basis label order."""
+        return ("te", "tm")
+
+    @property
+    def channels(self) -> Mapping[str, ChannelResult]:
+        """Return the two solved orthogonal basis channels."""
+        return MappingProxyType({"te": self.te, "tm": self.tm})
+
+    def __getitem__(self, label: str) -> ChannelResult:
+        if label == "te":
+            return self.te
+        if label == "tm":
+            return self.tm
+        raise KeyError(label)
+
+    def __repr__(self) -> str:
+        return (
+            f"PolarizationResult(source={type(self.source).__name__}, jones={self.jones!r}, "
+            f"particles={len(self.particles)}, periodic={self.te.periodic is not None}, "
+            f"solver={self.solver_result!r})"
+        )
+
+    @property
+    def mixed(self) -> ChannelResult:
+        """Materialize the source-requested coherent Jones channel.
+
+        The returned arrays are linear combinations of the retained basis
+        vectors. They are allocated only when this property is requested and
+        are not retained by the polarization envelope.
+        """
+        a_te, a_tm = self.jones
+        compute_dtype = np.dtype(self.te.compute_dtype)
+        accum_dtype = np.dtype(self.te.accum_dtype)
+
+        coeffs = np.asarray(a_te * self.te.coeffs + a_tm * self.tm.coeffs, dtype=compute_dtype)
+        rhs = None
+        if self.te.rhs is not None and self.tm.rhs is not None:
+            rhs = np.asarray(a_te * self.te.rhs + a_tm * self.tm.rhs, dtype=accum_dtype)
+        initial_coeffs = None
+        if self.te.initial_coeffs is not None and self.tm.initial_coeffs is not None:
+            initial_coeffs = np.asarray(
+                a_te * self.te.initial_coeffs + a_tm * self.tm.initial_coeffs,
+                dtype=accum_dtype,
+            )
+
+        payload = self._mixed_payload
+        return ChannelResult(
+            config=self.te.config,
+            source=self.source,
+            particles=self.te.particles,
+            k=self.te.k,
+            k0=self.te.k0,
+            coeffs=coeffs,
+            rhs=rhs,
+            initial_coeffs=initial_coeffs,
+            farfield=payload.farfield,
+            power=payload.power,
+            cross_sections=payload.cross_sections,
+            decomposition_forward=payload.decomposition_forward,
+            decomposition_backward=payload.decomposition_backward,
+            periodic=payload.periodic,
+            compute_dtype=self.te.compute_dtype,
+            accum_dtype=self.te.accum_dtype,
+        )
 
 
 def average_power_balances(first: PowerBalance, second: PowerBalance) -> PowerBalance:
@@ -248,65 +574,43 @@ def empty_farfield_patterns(dtype: npt.DTypeLike) -> FarFieldPatterns:
     )
 
 
-def single_rhs_result_from_multi(result: LinearSolveResult, col: int) -> LinearSolveResult:
-    """Extract one RHS column from a multi-RHS `LinearSolveResult`."""
-    if int(result.rhs_count) <= 1:
-        return result
-
-    x_arr = np.asarray(result.x)
-    if x_arr.ndim != 2:
-        raise ValueError(
-            f"Expected multi-RHS solver output with 2D `x` array. Got shape {x_arr.shape}."
-        )
-    if col < 0 or col >= x_arr.shape[1]:
-        raise IndexError(f"RHS column index {col} out of bounds for shape {x_arr.shape}.")
-
-    def _pick_scalar(value: int | float | np.ndarray, index: int) -> int | float:
-        arr = np.asarray(value)
-        selected = arr.item() if arr.ndim == 0 else arr.reshape(-1)[index]
-        return float(selected) if arr.dtype.kind == "f" else int(selected)
-
-    def _pick_optional_text(value: str | np.ndarray | None, index: int) -> str | None:
-        if value is None:
-            return None
-        arr = np.asarray(value, dtype=object)
-        selected = arr.item() if arr.ndim == 0 else arr.reshape(-1)[index]
-        return str(selected)
-
-    residual_history = None
-    if isinstance(result.residual_history, list):
-        if col < len(result.residual_history):
-            residual_history = result.residual_history[col]
-    elif isinstance(result.residual_history, np.ndarray):
-        residual_history = result.residual_history
-
-    return LinearSolveResult(
-        x=np.asarray(x_arr[:, col]),
-        info=int(_pick_scalar(result.info, col)),
-        residual_norm=float(_pick_scalar(result.residual_norm, col)),
-        relative_residual=float(_pick_scalar(result.relative_residual, col)),
-        iterations=int(_pick_scalar(result.iterations, col)),
-        method=str(result.method),
-        residual_history=residual_history,
-        rhs_count=1,
-        preconditioned_residual_history=result.preconditioned_residual_history,
-        true_residual_history=result.true_residual_history,
-        converged_reason=_pick_optional_text(result.converged_reason, col),
-        block_residual_history=result.block_residual_history,
-        stopping_rule=result.stopping_rule,
-        block_metadata=result.block_metadata,
+def simulation_result_from_channel(
+    channel: ChannelResult,
+    solver_result: LinearSolveResult,
+) -> SimulationResult:
+    """Attach a matching single-RHS solver report to one solved channel."""
+    return SimulationResult(
+        config=channel.config,
+        source=channel.source,
+        k=channel.k,
+        k0=channel.k0,
+        coeffs=channel.coeffs,
+        rhs=channel.rhs,
+        initial_coeffs=channel.initial_coeffs,
+        farfield=channel.farfield,
+        power=channel.power,
+        cross_sections=channel.cross_sections,
+        decomposition_forward=channel.decomposition_forward,
+        decomposition_backward=channel.decomposition_backward,
+        particles=channel.particles,
+        periodic=channel.periodic,
+        compute_dtype=channel.compute_dtype,
+        accum_dtype=channel.accum_dtype,
+        solver_result=solver_result,
     )
 
 
 __all__ = [
-    "MultiSourceSimulationResult",
+    "ChannelResult",
+    "MultiSourceResult",
+    "MultiSourceSolveResult",
+    "PolarizationResult",
     "ResultRetention",
     "SimulationResult",
-    "SolvedSourcesResult",
     "UnpolarizedDiagnostics",
     "average_cross_section_balances",
     "average_power_balances",
     "empty_farfield_patterns",
     "empty_pwp",
-    "single_rhs_result_from_multi",
+    "simulation_result_from_channel",
 ]

@@ -37,7 +37,7 @@ from .krylov_cupy import (
 )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class LinearSolveResult:
     """Result bundle for linear solves of the many-sphere system."""
 
@@ -55,6 +55,23 @@ class LinearSolveResult:
     block_residual_history: np.ndarray | list[np.ndarray] | None = None
     stopping_rule: str | None = None
     block_metadata: dict[str, Any] | None = None
+
+    def __repr__(self) -> str:
+        def summary(value: object) -> str:
+            shape = getattr(value, "shape", None)
+            if shape is not None:
+                dtype = getattr(value, "dtype", None)
+                return f"shape={tuple(shape)}, dtype={dtype}"
+            return repr(value)
+
+        return (
+            f"LinearSolveResult(method={self.method!r}, rhs_count={int(self.rhs_count)}, "
+            f"x=({summary(self.x)}), info={summary(self.info)}, "
+            f"iterations={summary(self.iterations)}, "
+            f"relative_residual={summary(self.relative_residual)}, "
+            f"residual_history={self.residual_history is not None}, "
+            f"block_metadata={self.block_metadata is not None})"
+        )
 
 
 GmresResult = LinearSolveResult

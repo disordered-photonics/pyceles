@@ -39,14 +39,13 @@ config = pcl.SimulationConfig(
     wavelength=550.0,
     n_medium=1.0 + 0.0j,
     lmax=3,
-    source=source,
     solver_method="bicgstab",
     solver_rtol=1e-6,
     verbose=True,
 )
 
 simulation = pcl.Simulation(config, particles=particles)
-result = simulation.run()
+result = simulation.run(source)
 
 print(result.n_particles)
 if result.cross_sections is not None:
@@ -63,7 +62,6 @@ config_gpu = pcl.SimulationConfig(
     wavelength=550.0,
     n_medium=1.0 + 0.0j,
     lmax=3,
-    source=source,
     operator_backend="cupy",
     coupling_backend="pairwise",
     solver_method="bicgstab",

@@ -9,20 +9,24 @@ from __future__ import annotations
 
 from .config import SimulationConfig
 from .results import (
-    MultiSourceSimulationResult,
+    ChannelResult,
+    MultiSourceResult,
+    MultiSourceSolveResult,
+    PolarizationResult,
     ResultRetention,
     SimulationResult,
-    SolvedSourcesResult,
     UnpolarizedDiagnostics,
 )
 from .workflow import Simulation
 
 __all__ = [
-    "MultiSourceSimulationResult",
+    "ChannelResult",
+    "MultiSourceResult",
+    "MultiSourceSolveResult",
+    "PolarizationResult",
     "ResultRetention",
     "Simulation",
     "SimulationConfig",
     "SimulationResult",
-    "SolvedSourcesResult",
     "UnpolarizedDiagnostics",
 ]

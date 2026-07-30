@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 import numpy as np
 from tqdm.auto import tqdm
@@ -32,7 +32,7 @@ from .periodic_projection import l1_projection_data, reduce_structural_sums_to_l
 from .slice import reshape_field_points
 
 if TYPE_CHECKING:
-    from pyceles.simulation import SimulationResult
+    from pyceles.simulation import ChannelResult
 
 
 def _wrap_points_to_nearest_rectangular_image(
@@ -317,10 +317,9 @@ def _local_regular_l1_fields_at_center(
 
 
 def compute_periodic_near_field_interior(
-    run: SimulationResult,
+    run: ChannelResult,
     *,
     points: np.ndarray,
-    channel: Literal["mixed", "te", "tm"] = "mixed",
     show_progress: bool = False,
 ) -> NearFieldComponents:
     """Evaluate periodic near fields for points inside the particle slab.
@@ -342,13 +341,7 @@ def compute_periodic_near_field_interior(
             "Periodic near-field evaluation requires `run.config.periodic` to be a PeriodicSpec."
         )
 
-    channel_key = str(channel).lower()
-    if channel_key not in {"mixed", "te", "tm"}:
-        raise ValueError("`channel` must be one of {'mixed', 'te', 'tm'}.")
-    channel_literal: Literal["mixed", "te", "tm"] = (
-        "mixed" if channel_key == "mixed" else ("te" if channel_key == "te" else "tm")
-    )
-    coeffs, source = _resolve_periodic_channel_payload(run, channel=channel_literal)
+    coeffs, source = _resolve_periodic_channel_payload(run)
 
     pts_flat, lead_shape = reshape_field_points(points)
     n_points = int(pts_flat.shape[0])

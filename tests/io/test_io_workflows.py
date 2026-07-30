@@ -6,49 +6,17 @@ import pytest
 from pyceles.core.fields import PlaneWave
 from pyceles.core.particles import ParticleCollection, Sphere, spheres_from_arrays
 from pyceles.io.workflows import load_simulation_h5, save_simulation_h5
-from pyceles.linear.solvers import LinearSolveResult
-from pyceles.postprocessing.farfield import CrossSectionBalance, FarFieldPatterns, PowerBalance
 from pyceles.postprocessing.nearfield import NearFieldSlice
 from pyceles.simulation import (
     ResultRetention,
     Simulation,
     SimulationConfig,
-    SimulationResult,
-    UnpolarizedDiagnostics,
 )
 
 pytestmark = [pytest.mark.filesystem, pytest.mark.hdf5]
 
 
-def _dummy_pwp(alpha: np.ndarray, beta: np.ndarray) -> dict:
-    coeff = np.ones((alpha.size, beta.size), dtype=np.complex128)
-    agrid = alpha[:, None]
-    bgrid = beta[None, :]
-    return {
-        "alpha": alpha,
-        "beta": beta,
-        "kx": np.sin(bgrid) * np.cos(agrid),
-        "ky": np.sin(bgrid) * np.sin(agrid),
-        "kz": np.cos(bgrid) * np.ones_like(agrid),
-        "coeff": coeff,
-    }
-
-
-def test_save_simulation_h5_writes_basis_and_diagnostics(tmp_path):
-    alpha = np.linspace(0.0, 2.0 * np.pi, 13, endpoint=False)
-    beta = np.linspace(0.0, np.pi, 21)
-    pwp = _dummy_pwp(alpha, beta)
-
-    ff = FarFieldPatterns(
-        initial_te=pwp,
-        initial_tm=pwp,
-        scattered_te=pwp,
-        scattered_tm=pwp,
-        total_te=pwp,
-        total_tm=pwp,
-    )
-    ff_basis = {"te": ff, "tm": ff}
-
+def test_save_simulation_h5_serializes_one_explicit_polarization_channel(tmp_path):
     source = PlaneWave(
         wavelength=550.0,
         medium_n=1.0 + 0j,
@@ -56,86 +24,23 @@ def test_save_simulation_h5_writes_basis_and_diagnostics(tmp_path):
         polar_angle=0.2,
         azimuthal_angle=0.3,
     )
-    cfg = SimulationConfig(
-        wavelength=550.0,
-        n_medium=1.0 + 0j,
-        lmax=1,
-        source=source,
-        solver_method="direct",
-        verbose=False,
+    sim = Simulation(
+        SimulationConfig(
+            wavelength=550.0,
+            n_medium=1.0 + 0j,
+            lmax=1,
+            solver_method="direct",
+            verbose=False,
+        ),
+        particles=[
+            Sphere(
+                position=(0.0, 0.0, 0.0),
+                radius=100.0,
+                refractive_index=1.5 + 0.0j,
+            )
+        ],
     )
-
-    run = SimulationResult(
-        config=cfg,
-        particles=spheres_from_arrays(
-            positions=np.array([[0.0, 0.0, 0.0]], dtype=float),
-            radii=np.array([100.0], dtype=float),
-            refractive_indices=np.array([1.5 + 0.0j], dtype=np.complex128),
-        ),
-        k=2.0 * np.pi / 550.0,
-        k0=2.0 * np.pi / 550.0,
-        coeffs=np.ones((1, 6), dtype=np.complex128),
-        rhs=np.ones((1, 6), dtype=np.complex128),
-        initial_coeffs=np.ones((1, 6), dtype=np.complex128),
-        initial_coeffs_basis={
-            "te": np.ones((1, 6), dtype=np.complex128),
-            "tm": np.ones((1, 6), dtype=np.complex128),
-        },
-        coeffs_basis={
-            "te": np.ones((1, 6), dtype=np.complex128),
-            "tm": np.ones((1, 6), dtype=np.complex128),
-        },
-        solver_result=LinearSolveResult(
-            x=np.ones((6, 2), dtype=np.complex128),
-            info=np.array([0, 0], dtype=int),
-            residual_norm=np.array([1e-6, 1e-6], dtype=float),
-            relative_residual=np.array([1e-5, 1e-5], dtype=float),
-            iterations=np.array([5, 5], dtype=int),
-            method="gmres",
-            residual_history=[np.array([1.0, 0.5], dtype=float), np.array([1.0, 0.5], dtype=float)],
-            rhs_count=2,
-            converged_reason=np.asarray(["converged", "converged"], dtype=object),
-        ),
-        solver_result_basis=None,
-        farfield=ff,
-        farfield_basis=ff_basis,
-        power=PowerBalance(
-            incident_power=1.0,
-            reflected_power=0.0,
-            transmitted_power=1.0,
-            local_absorbed_power=0.0,
-            local_absorbed_power_per_particle=np.zeros((1,), dtype=float),
-        ),
-        power_basis={
-            "te": PowerBalance(
-                incident_power=1.0,
-                reflected_power=0.0,
-                transmitted_power=1.0,
-                local_absorbed_power=0.0,
-            ),
-            "tm": PowerBalance(
-                incident_power=1.0,
-                reflected_power=0.0,
-                transmitted_power=1.0,
-                local_absorbed_power=0.0,
-            ),
-        },
-        cross_sections=CrossSectionBalance(extinction=2.0, scattering=1.0, local_absorption=1.0),
-        cross_sections_basis={
-            "te": CrossSectionBalance(extinction=2.0, scattering=1.0, local_absorption=1.0),
-            "tm": CrossSectionBalance(extinction=2.0, scattering=1.0, local_absorption=1.0),
-        },
-        unpolarized=UnpolarizedDiagnostics(
-            cross_sections=CrossSectionBalance(extinction=2.0, scattering=1.0, local_absorption=1.0)
-        ),
-        decomposition_forward={"P_total": 1.0},
-        decomposition_backward={"P_total": 0.0},
-        decomposition_forward_basis={"te": {"P_total": 1.0}, "tm": {"P_total": 1.0}},
-        decomposition_backward_basis={"te": {"P_total": 0.0}, "tm": {"P_total": 0.0}},
-        polarization_jones=(1.0 + 0j, 1.0j),
-        compute_dtype="complex128",
-        accum_dtype="complex128",
-    )
+    polarized = sim.run_polarizations(source)
 
     X, Z = np.meshgrid(np.linspace(-1.0, 1.0, 4), np.linspace(-1.0, 1.0, 3), indexing="xy")
     zero = np.zeros((*X.shape, 3), dtype=np.complex128)
@@ -150,38 +55,28 @@ def test_save_simulation_h5_writes_basis_and_diagnostics(tmp_path):
         axis_1_label="z",
     )
 
-    out = save_simulation_h5(run, near, tmp_path / "run_full.h5")
+    te_path = save_simulation_h5(polarized.te, near, tmp_path / "te.h5")
+    mixed_path = save_simulation_h5(polarized.mixed, near, tmp_path / "mixed.h5")
 
     import h5py
 
-    with h5py.File(out, "r") as h5:
-        assert "solution_basis" in h5
-        assert "solution_basis/te" in h5
-        assert "far_field_basis/te" in h5
-        assert "far_field_basis/tm" in h5
-        assert "diagnostics" in h5
-        assert "cross_sections" in h5["diagnostics"]
-        attrs = h5["diagnostics/cross_sections"].attrs
-        assert float(attrs["extinction"]) == 2.0
-        assert float(attrs["scattering"]) == 1.0
-        assert float(attrs["local_absorption"]) == 1.0
-        assert float(attrs["absorption_by_difference"]) == 1.0
-        assert float(attrs["closure_error"]) == 0.0
-        assert "C_abs" not in attrs
-        assert "power_basis" in h5["diagnostics"]
-        assert "unpolarized" in h5["diagnostics"]
-        np.testing.assert_array_equal(
-            h5["solution"].attrs["converged_reason"],
-            np.asarray([b"converged", b"converged"]),
-        )
+    with h5py.File(te_path, "r") as h5:
+        assert "solution/coeffs" in h5
+        assert "far_field" in h5
+        assert "diagnostics/cross_sections" in h5
+        assert "solver" not in h5["solution"].attrs
+        assert "solution_basis" not in h5
+        assert "far_field_basis" not in h5
+        assert "power_basis" not in h5["diagnostics"]
+        assert "unpolarized" not in h5["diagnostics"]
 
-    loaded = load_simulation_h5(out)
-    assert "geometry" in loaded
-    assert "solution" in loaded
-    assert "far_field" in loaded
-    assert "diagnostics" in loaded
-    assert "solution_basis" in loaded
-    assert "far_field_basis" in loaded
+    with h5py.File(mixed_path, "r") as h5:
+        assert "solution/coeffs" in h5
+        assert "far_field" in h5
+        assert "solver" not in h5["solution"].attrs
+
+    loaded = load_simulation_h5(te_path)
+    assert set(loaded) >= {"geometry", "solution", "far_field", "diagnostics"}
 
 
 def test_no_scatterer_run_roundtrip_io_workflow(tmp_path):
@@ -196,7 +91,6 @@ def test_no_scatterer_run_roundtrip_io_workflow(tmp_path):
         wavelength=550.0,
         n_medium=1.0 + 0j,
         lmax=3,
-        source=source,
         solver_method="gmres",
         verbose=False,
     )
@@ -204,7 +98,7 @@ def test_no_scatterer_run_roundtrip_io_workflow(tmp_path):
         cfg,
         particles=[],
     )
-    run = sim.run()
+    run = sim.run(source)
 
     X, Z = np.meshgrid(np.linspace(-1.0, 1.0, 4), np.linspace(-1.0, 1.0, 3), indexing="xy")
     zero = np.zeros((*X.shape, 3), dtype=np.complex128)
@@ -245,7 +139,6 @@ def test_save_simulation_h5_geometry_loads_particles(tmp_path):
         wavelength=550.0,
         n_medium=1.0 + 0j,
         lmax=2,
-        source=source,
         solver_method="direct",
         verbose=False,
     )
@@ -255,7 +148,7 @@ def test_save_simulation_h5_geometry_loads_particles(tmp_path):
         refractive_indices=np.array([1.5 + 0.01j], dtype=np.complex128),
     )
     sim = Simulation(cfg, particles=particles)
-    run = sim.run(include_farfield=False)
+    run = sim.run(source, include_farfield=False)
 
     X, Z = np.meshgrid(np.linspace(-1.0, 1.0, 3), np.linspace(-1.0, 1.0, 3), indexing="xy")
     zero = np.zeros((*X.shape, 3), dtype=np.complex128)
@@ -292,7 +185,6 @@ def test_save_simulation_h5_accepts_minimal_result_retention(tmp_path):
             wavelength=550.0,
             n_medium=1.0 + 0j,
             lmax=1,
-            source=source,
             solver_method="direct",
             verbose=False,
         ),
@@ -305,6 +197,7 @@ def test_save_simulation_h5_accepts_minimal_result_retention(tmp_path):
         ],
     )
     run = sim.run(
+        source,
         include_farfield=False,
         retention=ResultRetention.minimal(),
     )

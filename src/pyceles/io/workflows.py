@@ -23,29 +23,16 @@ from .hdf5 import (
 
 if TYPE_CHECKING:
     from pyceles.postprocessing.nearfield.slice import NearFieldSlice
-    from pyceles.simulation import SimulationResult
+    from pyceles.simulation import ChannelResult
 
 
-def save_simulation_h5(
-    run: SimulationResult, near_field: NearFieldSlice, out_h5: str | Path
-) -> Path:
-    """Persist geometry, solver outputs, near field, far field, and diagnostics.
+def save_simulation_h5(run: ChannelResult, near_field: NearFieldSlice, out_h5: str | Path) -> Path:
+    """Persist one explicit channel, its fields, and scalar diagnostics.
 
-    If polarization-basis channels are present (for example from
-    `SimulationConfig(solve_polarization_basis=True)` + `Simulation.run()`
-    convenience mode),
-    this workflow also stores:
-    - basis coefficient solutions (`solution_basis/te`, `solution_basis/tm`)
-    - basis far-field families (`far_field_basis/te`, `far_field_basis/tm`)
-    - basis and unpolarized diagnostics under `diagnostics`.
-
-    For periodic runs (`run.periodic is not None`), this workflow stores the
-    periodic diffraction-order payload under the dedicated `periodic` group
-    instead of serializing finite far-field families.
-
-    For `Simulation.solve_sources(...)` + `Simulation.postprocess_sources(...)`,
-    save each channel result individually (for example
-    `save_simulation_h5(multi["te"], ...)`).
+    Multi-source and polarization envelopes are intentionally not serialized as
+    disguised single runs. Save the desired channel explicitly, for example
+    ``save_simulation_h5(result["left"], ...)`` or
+    ``save_simulation_h5(polarized.mixed, ...)``.
     """
     out_h5 = Path(out_h5)
     out_h5.parent.mkdir(parents=True, exist_ok=True)
@@ -57,45 +44,38 @@ def save_simulation_h5(
         lmax=run.config.lmax,
         mode="w",
     )
-    solver_attrs: dict[str, object] = {
-        "solver": run.solver_result.method,
-        "relative_residual": run.solver_result.relative_residual,
-        "iterations": run.solver_result.iterations,
-    }
-    if run.solver_result.converged_reason is not None:
-        reason = np.asarray(run.solver_result.converged_reason, dtype=object)
-        solver_attrs["converged_reason"] = (
-            str(reason.item()) if reason.ndim == 0 else np.asarray(reason, dtype="S")
+    solver_result = getattr(run, "solver_result", None)
+    solver_attrs: dict[str, object] = {}
+    residual_history = None
+    info = None
+    if solver_result is not None:
+        solver_attrs.update(
+            solver=solver_result.method,
+            relative_residual=solver_result.relative_residual,
+            iterations=solver_result.iterations,
         )
-    if run.solver_result.stopping_rule is not None:
-        solver_attrs["stopping_rule"] = run.solver_result.stopping_rule
+        if solver_result.converged_reason is not None:
+            reason = np.asarray(solver_result.converged_reason, dtype=object)
+            solver_attrs["converged_reason"] = (
+                str(reason.item()) if reason.ndim == 0 else np.asarray(reason, dtype="S")
+            )
+        if solver_result.stopping_rule is not None:
+            solver_attrs["stopping_rule"] = solver_result.stopping_rule
+        residual_history = (
+            solver_result.residual_history
+            if isinstance(solver_result.residual_history, np.ndarray)
+            else None
+        )
+        info = solver_result.info
     save_solution_h5(
         out_h5,
         coeffs=run.coeffs,
         rhs=run.rhs,
         initial_coeffs=run.initial_coeffs,
-        residual_history=(
-            run.solver_result.residual_history
-            if isinstance(run.solver_result.residual_history, np.ndarray)
-            else None
-        ),
-        info=run.solver_result.info,
+        residual_history=residual_history,
+        info=info,
         attrs=solver_attrs,
     )
-    if run.coeffs_basis is not None and run.initial_coeffs_basis is not None:
-        for pol in ("te", "tm"):
-            if pol not in run.coeffs_basis or pol not in run.initial_coeffs_basis:
-                continue
-            save_solution_h5(
-                out_h5,
-                group=f"solution_basis/{pol}",
-                coeffs=run.coeffs_basis[pol],
-                initial_coeffs=run.initial_coeffs_basis[pol],
-                mode="a",
-                attrs={
-                    "polarization_channel": pol,
-                },
-            )
     save_near_field_components_h5(
         out_h5,
         X=near_field.axis_0,
@@ -137,32 +117,6 @@ def save_simulation_h5(
             },
         )
 
-        if run.farfield_basis is not None:
-            for pol, ff_pol in run.farfield_basis.items():
-                patt_pol = {"scattered": {"te": ff_pol.scattered_te, "tm": ff_pol.scattered_tm}}
-                if ff_pol.initial_te is not None and ff_pol.initial_tm is not None:
-                    patt_pol["initial"] = {"te": ff_pol.initial_te, "tm": ff_pol.initial_tm}
-                if ff_pol.total_te is not None and ff_pol.total_tm is not None:
-                    patt_pol["total"] = {"te": ff_pol.total_te, "tm": ff_pol.total_tm}
-                save_far_field_h5(
-                    out_h5,
-                    patterns=patt_pol,
-                    group=f"far_field_basis/{pol}",
-                    mode="a",
-                    attrs={
-                        "polarization_channel": pol,
-                        "k_medium": float(k_medium),
-                        "source_beta_points": int(source_beta.size),
-                        "source_alpha_points": int(source_alpha.size),
-                        "farfield_beta_points": int(farfield_beta.size),
-                        "farfield_alpha_points": int(farfield_alpha.size),
-                        "source_farfield_grid_equal": bool(
-                            np.array_equal(source_beta, farfield_beta)
-                            and np.array_equal(source_alpha, farfield_alpha)
-                        ),
-                    },
-                )
-
         same_source_farfield_grids = bool(
             np.array_equal(source_beta, farfield_beta)
             and np.array_equal(source_alpha, farfield_alpha)
@@ -197,13 +151,6 @@ def save_simulation_h5(
             ),
             "incident_flux": float(run.periodic.incident_flux),
         }
-    if run.polarization_jones is not None:
-        diagnostics["polarization_jones"] = {
-            "a_te_real": float(np.real(run.polarization_jones[0])),
-            "a_te_imag": float(np.imag(run.polarization_jones[0])),
-            "a_tm_real": float(np.real(run.polarization_jones[1])),
-            "a_tm_imag": float(np.imag(run.polarization_jones[1])),
-        }
     if run.power is not None:
         diagnostics["power"] = run.power.to_mapping()
     if run.cross_sections is not None:
@@ -212,20 +159,6 @@ def save_simulation_h5(
         diagnostics["decomposition_forward"] = run.decomposition_forward
     if run.decomposition_backward is not None:
         diagnostics["decomposition_backward"] = run.decomposition_backward
-    if run.power_basis is not None:
-        diagnostics["power_basis"] = {
-            label: power.to_mapping() for label, power in run.power_basis.items()
-        }
-    if run.cross_sections_basis is not None:
-        diagnostics["cross_sections_basis"] = {
-            label: balance.to_mapping() for label, balance in run.cross_sections_basis.items()
-        }
-    if run.decomposition_forward_basis is not None:
-        diagnostics["decomposition_forward_basis"] = run.decomposition_forward_basis
-    if run.decomposition_backward_basis is not None:
-        diagnostics["decomposition_backward_basis"] = run.decomposition_backward_basis
-    if run.unpolarized is not None:
-        diagnostics["unpolarized"] = run.unpolarized.to_mapping()
     save_mapping_h5(out_h5, mapping=diagnostics, group="diagnostics", mode="a")
     return out_h5
 
@@ -248,8 +181,6 @@ def load_simulation_h5(path: str | Path) -> dict[str, object]:
         has_far_field = "far_field" in h5
         has_periodic = "periodic" in h5
         has_diagnostics = "diagnostics" in h5
-        has_solution_basis = "solution_basis" in h5
-        has_far_field_basis = "far_field_basis" in h5
 
     if has_near_field_components:
         out["near_field_components"] = load_near_field_components_h5(
@@ -261,24 +192,5 @@ def load_simulation_h5(path: str | Path) -> dict[str, object]:
         out["periodic"] = load_periodic_h5(p, group="periodic")
     if has_diagnostics:
         out["diagnostics"] = load_mapping_h5(p, group="diagnostics")
-
-    # Optional basis groups.
-    basis_solution: dict[str, object] = {}
-    basis_farfield: dict[str, object] = {}
-    with h5py.File(str(p), "r") as h5:
-        if has_solution_basis:
-            for pol in ("te", "tm"):
-                group = f"solution_basis/{pol}"
-                if group in h5:
-                    basis_solution[pol] = load_solution_h5(p, group=group)
-        if has_far_field_basis:
-            for pol in ("te", "tm"):
-                group = f"far_field_basis/{pol}"
-                if group in h5:
-                    basis_farfield[pol] = load_far_field_h5(p, group=group)
-    if basis_solution:
-        out["solution_basis"] = basis_solution
-    if basis_farfield:
-        out["far_field_basis"] = basis_farfield
 
     return out

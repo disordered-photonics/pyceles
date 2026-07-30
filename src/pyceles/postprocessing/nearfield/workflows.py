@@ -5,8 +5,6 @@ from typing import TYPE_CHECKING, Literal
 import numpy as np
 
 from pyceles._dtypes import resolve_compute_accum_dtypes
-from pyceles.core.sources import JonesPolarizedSource
-from pyceles.postprocessing._channels import is_pure_channel_result
 
 from .components import NearFieldComponents, compute_near_field_components
 from .slice import (
@@ -17,7 +15,7 @@ from .slice import (
 )
 
 if TYPE_CHECKING:
-    from pyceles.simulation import SimulationResult
+    from pyceles.simulation import ChannelResult
 
 
 def _mix_complex_vector_fields(
@@ -96,52 +94,22 @@ def mix_near_field_slices(
 
 
 def compute_near_field(
-    run: SimulationResult,
+    run: ChannelResult,
     *,
     points: np.ndarray,
-    channel: Literal["mixed", "te", "tm"] = "mixed",
     show_progress: bool = True,
     force_general_initial_field: bool | None = None,
 ) -> NearFieldComponents:
-    """Evaluate near-field components on arbitrary point coordinates."""
+    """Evaluate finite-cluster near fields on arbitrary point coordinates."""
+    if run.config.periodic is not None:
+        raise ValueError(
+            "`compute_near_field` requires a finite-cluster channel. "
+            "Use `compute_periodic_near_field` for periodic channels."
+        )
     pts_flat, lead_shape = reshape_field_points(points)
 
-    source = run.config.source
-    if source is None:
-        raise RuntimeError(
-            "SimulationResult has no source attached. "
-            "Run a simulation with an explicit `SimulationConfig.source`."
-        )
-
-    channel_key = str(channel).lower()
-    if channel_key not in {"mixed", "te", "tm"}:
-        raise ValueError("`channel` must be one of {'mixed', 'te', 'tm'}.")
-
+    source = run.source
     coeffs = run.coeffs
-    source_eff = source
-    if channel_key in {"te", "tm"}:
-        used_basis_payload = False
-        if run.coeffs_basis is not None and channel_key in run.coeffs_basis:
-            coeffs = run.coeffs_basis[channel_key]
-            used_basis_payload = True
-        elif is_pure_channel_result(run, channel_key):
-            coeffs = run.coeffs
-        else:
-            raise ValueError(
-                "Requested basis near-field channel, but `run.coeffs_basis` is not available. "
-                "Use `solve_polarization_basis=True` with `Simulation.run()`, or use a "
-                "channel result from "
-                "`Simulation.postprocess_sources(Simulation.solve_sources(...))` and query it with "
-                "`channel='mixed'`."
-            )
-        if used_basis_payload:
-            pol_label: Literal["TE", "TM"] = "TE" if channel_key == "te" else "TM"
-            if not isinstance(source, JonesPolarizedSource):
-                raise ValueError(
-                    "Basis near-field channel requires a source with Jones metadata "
-                    "and `with_polarization('TE'/'TM')`."
-                )
-            source_eff = source.with_polarization(pol_label)
 
     source_polar_angles, source_azimuthal_angles = run.config.source_angular_grids()
     postprocessing_backend = run.config.resolved_postprocessing_backend()
@@ -155,7 +123,7 @@ def compute_near_field(
         coeffs=coeffs,
         k=run.k,
         lmax=run.config.lmax,
-        beam=source_eff,
+        beam=source,
         polar_angles=source_polar_angles,
         azimuthal_angles=source_azimuthal_angles,
         particles=run.particles,
@@ -193,7 +161,7 @@ def compute_near_field(
 
 
 def compute_near_field_slice(
-    run: SimulationResult,
+    run: ChannelResult,
     *,
     axis_0_min: float = -4000.0,
     axis_0_max: float = 4000.0,
@@ -202,7 +170,6 @@ def compute_near_field_slice(
     dx: float = 40.0,
     plane: str = "y",
     plane_value: float = 0.0,
-    channel: Literal["mixed", "te", "tm"] = "mixed",
     show_progress: bool = True,
     force_general_initial_field: bool | None = None,
     center_pixel_policy: Literal["none", "interpolate"] = "interpolate",
@@ -248,7 +215,6 @@ def compute_near_field_slice(
     nf = compute_near_field(
         run,
         points=pts,
-        channel=channel,
         show_progress=show_progress,
         force_general_initial_field=force_general_initial_field,
     )

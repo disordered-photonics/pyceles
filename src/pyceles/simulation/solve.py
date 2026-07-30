@@ -35,7 +35,7 @@ from .helpers import (
     print_startup_logo_once,
     warn_local_sources_inside_circumspheres,
 )
-from .results import SolvedSourcesResult
+from .results import MultiSourceSolveResult
 
 
 def _source_projection_uses_angular_grid(source: Source) -> bool:
@@ -149,15 +149,82 @@ def normalize_sources_argument(sim: Simulation, sources: Mapping[str, Source]) -
         raise TypeError("`sources` must be a mapping `{label: source}`.")
     out: dict[str, Source] = {}
     for key, src in sources.items():
-        lbl = str(key)
-        if lbl in out:
-            raise ValueError(f"Duplicate source label '{lbl}'.")
-        out[lbl] = src
+        if not isinstance(key, str):
+            raise TypeError(
+                f"Source labels must be strings. Got {type(key).__name__} for key {key!r}."
+            )
+        if key == "":
+            raise ValueError("Source labels must be non-empty strings.")
+        if key in out:
+            raise ValueError(f"Duplicate source label '{key}'.")
+        out[key] = src
     if len(out) == 0:
         raise ValueError("`sources` must contain at least one source.")
     for label, src in out.items():
         validate_source_compatibility(sim, src, label=label)
     return out
+
+
+def normalize_warm_start_argument(
+    warm_start: np.ndarray | Mapping[str, np.ndarray] | None,
+    *,
+    labels: tuple[str, ...],
+    unknowns: int,
+    dtype: np.dtype,
+) -> np.ndarray | None:
+    """Normalize explicit single- or multi-channel initial guesses.
+
+    A mapping is aligned by source label. Array inputs may be one coefficient
+    vector (broadcast to every RHS) or a block whose final axis follows
+    ``labels``. For one source, particle-by-mode coefficient arrays are also
+    accepted and flattened.
+    """
+    if warm_start is None:
+        return None
+    n_channels = len(labels)
+    if isinstance(warm_start, Mapping):
+        normalized: dict[str, np.ndarray] = {}
+        for key, value in warm_start.items():
+            label = str(key)
+            if label in normalized:
+                raise ValueError(f"Duplicate warm-start label '{label}'.")
+            normalized[label] = np.asarray(value, dtype=dtype).reshape(-1)
+        if set(normalized) != set(labels):
+            raise ValueError(
+                "Warm-start mapping keys must exactly match source labels: "
+                f"expected {labels!r}, got {tuple(normalized)!r}."
+            )
+        columns: list[np.ndarray] = []
+        for label in labels:
+            column = normalized[label]
+            if column.size != unknowns:
+                raise ValueError(
+                    f"Warm start for channel '{label}' must contain {unknowns} "
+                    f"coefficients. Got {column.size}."
+                )
+            columns.append(column)
+        matrix = np.column_stack(columns)
+        return matrix[:, 0] if n_channels == 1 else matrix
+
+    values = np.asarray(warm_start, dtype=dtype)
+    if values.size == unknowns:
+        vector = values.reshape(unknowns)
+        if n_channels == 1:
+            return vector
+        return np.repeat(vector[:, None], n_channels, axis=1)
+    if values.size == unknowns * n_channels and values.ndim >= 2:
+        if values.shape[-1] != n_channels:
+            raise ValueError(
+                "Block warm-start arrays must use the final axis for source channels "
+                f"in label order {labels!r}. Got shape {values.shape}."
+            )
+        matrix = values.reshape(unknowns, n_channels)
+        return matrix[:, 0] if n_channels == 1 else matrix
+    raise ValueError(
+        "`warm_start` must be one coefficient vector, a block with final axis "
+        f"matching {n_channels} source channels, or a label mapping. "
+        f"Got shape {values.shape} for {unknowns} unknowns."
+    )
 
 
 def periodic_shared_k_parallel(
@@ -192,10 +259,10 @@ def periodic_shared_k_parallel(
 
 
 @dataclass(frozen=True)
-class _SolvedSourcesExecution:
+class _MultiSourceExecution:
     """Private solve result plus short-lived backend data for immediate postprocessing."""
 
-    solved: SolvedSourcesResult
+    solved: MultiSourceSolveResult
     backend_coeffs: dict[str, Any] | None = None
 
 
@@ -203,9 +270,10 @@ def _solve_sources_impl(
     sim: Simulation,
     labeled_sources: Mapping[str, Source],
     *,
+    warm_start: np.ndarray | Mapping[str, np.ndarray] | None = None,
     solver_compute_final_residual: bool | None = None,
     retain_backend_handoff: bool,
-) -> _SolvedSourcesExecution:
+) -> _MultiSourceExecution:
     """Solve labeled sources with one shared operator build (solve-only)."""
     cfg = sim.config
     positions = sim.positions
@@ -424,34 +492,12 @@ def _solve_sources_impl(
     rhs_matrix = np.column_stack([rhs_flat[label] for label in labels])
     rhs_arg = rhs_matrix[:, 0] if n_channels == 1 else rhs_matrix
 
-    warm_start: np.ndarray | None = None
-    if cfg.solver_warm_start is not None:
-        ws = np.asarray(cfg.solver_warm_start, dtype=compute_dtype)
-        if ws.ndim == 1:
-            if ws.size != unknowns:
-                raise ValueError(
-                    f"`solver_warm_start` length must match unknown count ({unknowns}). Got {ws.size}."
-                )
-            warm_start = np.repeat(ws[:, None], n_channels, axis=1) if n_channels > 1 else ws
-        elif ws.ndim == 2:
-            if ws.shape[0] != unknowns:
-                raise ValueError(
-                    f"`solver_warm_start` first dimension must match unknown count ({unknowns}). "
-                    f"Got {ws.shape}."
-                )
-            if ws.shape[1] == n_channels:
-                warm_start = ws
-            elif ws.shape[1] == 1 and n_channels > 1:
-                warm_start = np.repeat(ws, n_channels, axis=1)
-            else:
-                raise ValueError(
-                    "`solver_warm_start` 2D second dimension must be 1 or match the number of channels. "
-                    f"Got {ws.shape[1]} for {n_channels} channels."
-                )
-        else:
-            raise ValueError("`solver_warm_start` must be 1D or 2D.")
-    if n_channels == 1 and warm_start is not None and np.ndim(warm_start) == 2:
-        warm_start = np.asarray(warm_start)[:, 0]
+    normalized_warm_start = normalize_warm_start_argument(
+        warm_start,
+        labels=labels,
+        unknowns=unknowns,
+        dtype=compute_dtype,
+    )
 
     solver_preconditioner = cfg.solver_preconditioner
     if operator_backend == "cupy" and solver_preconditioner is not None:
@@ -480,7 +526,7 @@ def _solve_sources_impl(
                     method=solver_method,
                     A_dense=A_dense,
                     A_factorized=A_lu,
-                    x0=warm_start,
+                    x0=normalized_warm_start,
                     preconditioner=solver_preconditioner,
                     rtol=float(cfg.solver_rtol),
                     atol=0.0,
@@ -501,7 +547,7 @@ def _solve_sources_impl(
                 method=solver_method,
                 A_dense=A_dense,
                 A_factorized=A_lu,
-                x0=warm_start,
+                x0=normalized_warm_start,
                 preconditioner=solver_preconditioner,
                 rtol=float(cfg.solver_rtol),
                 atol=0.0,
@@ -543,7 +589,9 @@ def _solve_sources_impl(
         if backend_coeffs is not None:
             backend_coeffs[label] = x_backend_matrix[:, j].reshape(Ns, Nm)
 
-    solved = SolvedSourcesResult(
+    solved = MultiSourceSolveResult(
+        config=sim.config,
+        particles=sim.particles,
         labels=labels,
         sources=dict(labeled_sources),
         solver_result=solver_result,
@@ -555,19 +603,21 @@ def _solve_sources_impl(
         compute_dtype=str(compute_dtype),
         accum_dtype=str(accum_dtype),
     )
-    return _SolvedSourcesExecution(solved=solved, backend_coeffs=backend_coeffs)
+    return _MultiSourceExecution(solved=solved, backend_coeffs=backend_coeffs)
 
 
 def solve_sources_core(
     sim: Simulation,
     labeled_sources: Mapping[str, Source],
     *,
+    warm_start: np.ndarray | Mapping[str, np.ndarray] | None = None,
     solver_compute_final_residual: bool | None = None,
-) -> SolvedSourcesResult:
+) -> MultiSourceSolveResult:
     """Solve labeled sources with one shared operator build (solve-only)."""
     return _solve_sources_impl(
         sim,
         labeled_sources,
+        warm_start=warm_start,
         solver_compute_final_residual=solver_compute_final_residual,
         retain_backend_handoff=False,
     ).solved
@@ -577,12 +627,14 @@ def _solve_sources_for_immediate_postprocess_core(
     sim: Simulation,
     labeled_sources: Mapping[str, Source],
     *,
+    warm_start: np.ndarray | Mapping[str, np.ndarray] | None = None,
     solver_compute_final_residual: bool | None = None,
-) -> _SolvedSourcesExecution:
+) -> _MultiSourceExecution:
     """Solve sources while retaining backend coefficients for the immediate consumer."""
     return _solve_sources_impl(
         sim,
         labeled_sources,
+        warm_start=warm_start,
         solver_compute_final_residual=solver_compute_final_residual,
         retain_backend_handoff=sim.config.periodic is None,
     )
@@ -590,6 +642,7 @@ def _solve_sources_for_immediate_postprocess_core(
 
 __all__ = [
     "normalize_sources_argument",
+    "normalize_warm_start_argument",
     "periodic_shared_k_parallel",
     "solve_sources_core",
     "validate_source_compatibility",

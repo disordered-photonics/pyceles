@@ -32,7 +32,6 @@ def test_layered_single_layer_farfield_matches_homogeneous_sphere():
         wavelength=wavelength,
         n_medium=n_medium,
         lmax=7,
-        source=source,
         polar_angles=np.linspace(0.0, np.pi, 161),
         azimuthal_angles=np.linspace(0.0, 2.0 * np.pi, 201, endpoint=False),
         solver_method="direct",
@@ -58,8 +57,8 @@ def test_layered_single_layer_farfield_matches_homogeneous_sphere():
         ],
     )
 
-    run_sphere = sim_sphere.run()
-    run_layered = sim_layered.run()
+    run_sphere = sim_sphere.run(source)
+    run_layered = sim_layered.run(source)
 
     assert run_layered.initial_coeffs is not None
     assert run_sphere.initial_coeffs is not None
@@ -110,7 +109,6 @@ def test_layered_single_layer_finite_beam_power_matches_homogeneous_sphere():
         wavelength=wavelength,
         n_medium=n_medium,
         lmax=5,
-        source=source,
         polar_angles=np.linspace(0.0, np.pi, 181),
         azimuthal_angles=np.linspace(0.0, 2.0 * np.pi, 181, endpoint=False),
         solver_method="direct",
@@ -124,7 +122,7 @@ def test_layered_single_layer_finite_beam_power_matches_homogeneous_sphere():
         particles=[
             Sphere(position=(0.0, 0.0, 0.0), radius=radius, refractive_index=n_particle),
         ],
-    ).run()
+    ).run(source)
     run_layered = Simulation(
         cfg,
         particles=[
@@ -134,7 +132,7 @@ def test_layered_single_layer_finite_beam_power_matches_homogeneous_sphere():
                 layer_refractive_indices=(n_particle,),
             )
         ],
-    ).run()
+    ).run(source)
 
     assert run_sphere.power is not None
     assert run_layered.power is not None

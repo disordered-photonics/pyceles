@@ -69,7 +69,6 @@ def _run_case(
             wavelength=550.0,
             n_medium=1.0 + 0j,
             lmax=2,
-            source=source,
             polar_angles=beta,
             azimuthal_angles=alpha,
             solver_method="gmres",
@@ -78,8 +77,8 @@ def _run_case(
         ),
         particles=particles,
     )
-    run = sim.run()
-    nf = pcl.compute_near_field(run, points=probes, channel="mixed", show_progress=False)
+    run = sim.run(source)
+    nf = pcl.compute_near_field(run, points=probes, show_progress=False)
     if run.farfield.initial_te is None or run.farfield.initial_tm is None:
         raise AssertionError("Dipole regression expects initial far-field channels.")
     if run.farfield.total_te is None or run.farfield.total_tm is None:

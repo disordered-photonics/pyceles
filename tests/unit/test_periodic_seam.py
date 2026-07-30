@@ -28,7 +28,7 @@ def _plane_wave(
     *,
     polar_angle: float = 0.0,
     azimuthal_angle: float = 0.0,
-    polarization: Literal["TE", "TM"] = "TE",
+    polarization: Literal["TE", "TM"] | tuple[complex, complex] = "TE",
 ) -> pcl.PlaneWave:
     return pcl.PlaneWave(
         wavelength=550.0,
@@ -72,7 +72,6 @@ def test_rectangular_lattice_rejects_invalid_periods(kwargs: dict[str, float], m
 
 def test_periodic_config_accepts_rectangular_lattice_spec() -> None:
     cfg = SimulationConfig(
-        source=_plane_wave(),
         periodic=pcl.PeriodicSpec(lattice=pcl.RectangularLattice2D(300.0, 400.0)),
         verbose=False,
     )
@@ -117,7 +116,6 @@ def test_periodic_config_accepts_cupy_operator_backend() -> None:
     spec = pcl.PeriodicSpec(lattice=pcl.RectangularLattice2D(300.0, 400.0))
 
     cfg = SimulationConfig(
-        source=_plane_wave(),
         periodic=spec,
         operator_backend="cupy",
         verbose=False,
@@ -133,9 +131,7 @@ def test_periodic_config_rejects_cupy_directsum_method() -> None:
         options=pcl.PeriodicOptions(method="directsum"),
     )
     with pytest.raises(NotImplementedError, match="Ewald or Rayleigh"):
-        SimulationConfig(
-            source=_plane_wave(), periodic=spec, operator_backend="cupy", verbose=False
-        )
+        SimulationConfig(periodic=spec, operator_backend="cupy", verbose=False)
 
 
 def test_periodic_config_accepts_cupy_rayleigh_method() -> None:
@@ -143,9 +139,7 @@ def test_periodic_config_accepts_cupy_rayleigh_method() -> None:
         lattice=pcl.RectangularLattice2D(300.0, 400.0),
         options=pcl.PeriodicOptions(method="rayleigh"),
     )
-    cfg = SimulationConfig(
-        source=_plane_wave(), periodic=spec, operator_backend="cupy", verbose=False
-    )
+    cfg = SimulationConfig(periodic=spec, operator_backend="cupy", verbose=False)
 
     assert cfg.periodic == spec
 
@@ -153,7 +147,6 @@ def test_periodic_config_accepts_cupy_rayleigh_method() -> None:
 def test_periodic_config_accepts_numpy_ewald_mlfmm_combination() -> None:
     spec = pcl.PeriodicSpec(lattice=pcl.RectangularLattice2D(300.0, 400.0))
     cfg = SimulationConfig(
-        source=_plane_wave(),
         periodic=spec,
         coupling_backend="mlfmm",
         operator_backend="numpy",
@@ -166,7 +159,6 @@ def test_periodic_config_accepts_numpy_ewald_mlfmm_combination() -> None:
 def test_periodic_config_accepts_cupy_ewald_mlfmm_combination() -> None:
     spec = pcl.PeriodicSpec(lattice=pcl.RectangularLattice2D(300.0, 400.0))
     cfg = SimulationConfig(
-        source=_plane_wave(),
         periodic=spec,
         coupling_backend="mlfmm",
         operator_backend="cupy",
@@ -187,7 +179,6 @@ def test_periodic_config_rejects_rayleigh_mlfmm_combination(
     )
     with pytest.raises(NotImplementedError, match="method='ewald'"):
         SimulationConfig(
-            source=_plane_wave(),
             periodic=spec,
             coupling_backend="mlfmm",
             operator_backend=backend,
@@ -202,7 +193,6 @@ def test_periodic_config_rejects_mlfmm_translation_block_cache(
     spec = pcl.PeriodicSpec(lattice=pcl.RectangularLattice2D(300.0, 400.0))
     with pytest.raises(NotImplementedError, match="does not cache"):
         SimulationConfig(
-            source=_plane_wave(),
             periodic=spec,
             coupling_backend="mlfmm",
             operator_backend=backend,
@@ -221,17 +211,20 @@ def test_periodic_config_rejects_non_plane_wave_embedded_source() -> None:
         beam_width=1000.0,
         focal_point=(0.0, 0.0, 0.0),
     )
-    with pytest.raises(NotImplementedError, match="PlaneWave excitation"):
+    sim = Simulation(
         SimulationConfig(
-            source=source,
             periodic=pcl.PeriodicSpec(lattice=pcl.RectangularLattice2D(300.0, 400.0)),
             verbose=False,
-        )
+        ),
+        particles=[_sphere(radius=10.0)],
+    )
+    with pytest.raises(NotImplementedError, match="PlaneWave excitation"):
+        sim.run(source)
 
 
 def test_periodic_overlap_validator_checks_self_images() -> None:
     spec = pcl.PeriodicSpec(lattice=pcl.RectangularLattice2D(100.0, 100.0))
-    cfg = SimulationConfig(source=_plane_wave(), periodic=spec, verbose=False)
+    cfg = SimulationConfig(periodic=spec, verbose=False)
 
     with pytest.raises(ValueError, match="lattice shift"):
         Simulation(cfg, particles=[_sphere(radius=60.0)])
@@ -240,7 +233,7 @@ def test_periodic_overlap_validator_checks_self_images() -> None:
 @pytest.mark.reference
 def test_periodic_overlap_validator_accepts_separated_reference_cell() -> None:
     spec = pcl.PeriodicSpec(lattice=pcl.RectangularLattice2D(300.0, 300.0))
-    cfg = SimulationConfig(source=_plane_wave(), periodic=spec, verbose=False)
+    cfg = SimulationConfig(periodic=spec, verbose=False)
 
     sim = Simulation(cfg, particles=[_sphere(radius=10.0), _sphere(radius=10.0, x=80.0)])
 
@@ -249,7 +242,7 @@ def test_periodic_overlap_validator_accepts_separated_reference_cell() -> None:
 
 def test_periodic_overlap_validator_uses_minimum_image_for_unwrapped_positions() -> None:
     spec = pcl.PeriodicSpec(lattice=pcl.RectangularLattice2D(100.0, 200.0))
-    cfg = SimulationConfig(source=_plane_wave(), periodic=spec, verbose=False)
+    cfg = SimulationConfig(periodic=spec, verbose=False)
     particles = [
         pcl.Sphere(position=(0.0, 0.0, 0.0), radius=30.0, refractive_index=1.5 + 0j),
         pcl.Sphere(position=(250.0, 0.0, 0.0), radius=30.0, refractive_index=1.5 + 0j),
@@ -624,7 +617,6 @@ def test_periodic_direct_sum_solve_runs_through_dense_fallback() -> None:
         lmax=1,
         periodic=spec,
         solver_method="direct",
-        source=source,
         verbose=False,
     )
     sim = Simulation(cfg, particles=[_sphere(radius=10.0)])
@@ -646,7 +638,6 @@ def test_periodic_ewald_solve_runs_through_dense_fallback() -> None:
         lmax=1,
         periodic=spec,
         solver_method="direct",
-        source=source,
         verbose=False,
     )
     sim = Simulation(cfg, particles=[_sphere(radius=10.0)])
@@ -668,7 +659,6 @@ def test_periodic_postprocess_populates_periodic_result_payload() -> None:
         lmax=1,
         periodic=spec,
         solver_method="direct",
-        source=source,
         verbose=False,
     )
     sim = Simulation(cfg, particles=[_sphere(radius=10.0)])
@@ -718,34 +708,102 @@ def test_periodic_postprocess_output_bmax_includes_evanescent_orders() -> None:
         lmax=1,
         periodic=spec,
         solver_method="direct",
-        source=source,
         verbose=False,
     )
     sim = Simulation(cfg, particles=[_sphere(radius=10.0)])
 
-    run = sim.run(include_farfield=False)
+    run = sim.run(source, include_farfield=False)
     assert run.periodic is not None
     periodic = run.periodic
     assert periodic.output_bmax == pytest.approx(0.05)
     assert periodic.order_mn.shape[0] > int(np.count_nonzero(periodic.order_propagating))
 
 
-def test_periodic_run_rejects_polarization_basis_mode() -> None:
-    source = _plane_wave(polar_angle=0.2, azimuthal_angle=0.3, polarization="TE")
-    spec = pcl.PeriodicSpec(lattice=pcl.RectangularLattice2D(300.0, 320.0))
-    cfg = SimulationConfig(
-        wavelength=550.0,
-        n_medium=1.0 + 0j,
-        lmax=1,
-        periodic=spec,
-        solver_method="direct",
-        source=source,
-        solve_polarization_basis=True,
-        verbose=False,
+def test_periodic_polarization_result_matches_direct_mixed_channel() -> None:
+    source = _plane_wave(
+        polar_angle=0.2,
+        azimuthal_angle=0.3,
+        polarization=(0.6 + 0.2j, -0.3 + 0.7j),
     )
-    sim = Simulation(cfg, particles=[_sphere(radius=10.0)])
-    with pytest.raises(NotImplementedError, match="solve_polarization_basis"):
-        sim.run(include_farfield=False)
+    spec = pcl.PeriodicSpec(lattice=pcl.RectangularLattice2D(300.0, 320.0))
+    sim = Simulation(
+        SimulationConfig(
+            wavelength=550.0,
+            n_medium=1.0 + 0j,
+            lmax=1,
+            periodic=spec,
+            solver_method="direct",
+            verbose=False,
+        ),
+        particles=[_sphere(radius=10.0)],
+    )
+
+    direct = sim.run(source)
+    polarized = sim.run_polarizations(source)
+    mixed = polarized.mixed
+
+    assert polarized.solver_result.rhs_count == 2
+    assert not hasattr(polarized.te, "solver_result")
+    assert not hasattr(polarized.tm, "solver_result")
+    np.testing.assert_allclose(mixed.coeffs, direct.coeffs, rtol=2e-12, atol=2e-13)
+    assert mixed.periodic is not None
+    assert direct.periodic is not None
+    np.testing.assert_allclose(
+        mixed.periodic.reflected_amplitudes,
+        direct.periodic.reflected_amplitudes,
+        rtol=2e-12,
+        atol=2e-13,
+    )
+    np.testing.assert_allclose(
+        mixed.periodic.transmitted_amplitudes,
+        direct.periodic.transmitted_amplitudes,
+        rtol=2e-12,
+        atol=2e-13,
+    )
+    assert mixed.power is not None
+    assert direct.power is not None
+    assert mixed.power.reflectance == pytest.approx(direct.power.reflectance, rel=2e-12)
+    assert mixed.power.transmittance == pytest.approx(direct.power.transmittance, rel=2e-12)
+
+
+@pytest.mark.api_contract
+def test_periodic_polarization_reuses_basis_order_payloads(monkeypatch) -> None:
+    postprocess_module = importlib.import_module("pyceles.simulation.postprocess")
+    source = _plane_wave(
+        polar_angle=0.2,
+        azimuthal_angle=0.3,
+        polarization=(0.6 + 0.2j, -0.3 + 0.7j),
+    )
+    spec = pcl.PeriodicSpec(lattice=pcl.RectangularLattice2D(300.0, 320.0))
+    sim = Simulation(
+        SimulationConfig(
+            wavelength=550.0,
+            n_medium=1.0 + 0j,
+            lmax=1,
+            periodic=spec,
+            solver_method="direct",
+            verbose=False,
+        ),
+        particles=[_sphere(radius=10.0)],
+    )
+    build_periodic_result = postprocess_module._build_periodic_result
+    calls = 0
+
+    def _counted_build_periodic_result(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return build_periodic_result(*args, **kwargs)
+
+    monkeypatch.setattr(
+        postprocess_module,
+        "_build_periodic_result",
+        _counted_build_periodic_result,
+    )
+
+    polarized = sim.run_polarizations(source)
+
+    assert calls == 2
+    assert polarized.mixed.periodic is not None
 
 
 @pytest.mark.hdf5
@@ -758,11 +816,10 @@ def test_periodic_hdf5_roundtrip(tmp_path) -> None:
         lmax=1,
         periodic=spec,
         solver_method="direct",
-        source=source,
         verbose=False,
     )
     sim = Simulation(cfg, particles=[_sphere(radius=10.0)])
-    run = sim.run(include_farfield=False)
+    run = sim.run(source, include_farfield=False)
     assert run.periodic is not None
 
     path = tmp_path / "periodic_payload.h5"

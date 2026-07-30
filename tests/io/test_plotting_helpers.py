@@ -8,7 +8,6 @@ from matplotlib import pyplot as plt
 from matplotlib.patches import Circle, Ellipse
 
 from pyceles.core.particles import LayeredSphere, Particle, Sphere, Spheroid
-from pyceles.core.sources import PlaneWave
 from pyceles.io.plotting import (
     far_field_intensity,
     far_field_intensity_from_result,
@@ -21,6 +20,7 @@ from pyceles.io.plotting import (
     plot_poynting,
     plot_source_showcase_slices,
     plot_spheres,
+    unpolarized_far_field_intensity,
     unpolarized_near_field_intensity,
 )
 from pyceles.postprocessing.nearfield import NearFieldSlice
@@ -45,117 +45,44 @@ def test_far_field_intensity_combines_te_tm():
     np.testing.assert_allclose(I, expected)
 
 
-def test_far_field_intensity_from_result_unpolarized_averages_basis():
+def test_far_field_intensity_from_result_uses_explicit_channel():
     te = {"coeff": np.array([[1 + 0j, 2 + 0j]], dtype=np.complex128)}
     tm = {"coeff": np.array([[3 + 0j, 4 + 0j]], dtype=np.complex128)}
     run = type(
         "Run",
         (),
-        {
-            "farfield": type("FF", (), {"scattered_te": te, "scattered_tm": tm}),
-            "farfield_basis": {
-                "te": type("FF", (), {"scattered_te": te, "scattered_tm": tm}),
-                "tm": type("FF", (), {"scattered_te": tm, "scattered_tm": te}),
-            },
-        },
-    )()
-    Iu = far_field_intensity_from_result(run, channel="unpolarized")
-    I_te = far_field_intensity(
-        run.farfield_basis["te"].scattered_te, run.farfield_basis["te"].scattered_tm
-    )
-    I_tm = far_field_intensity(
-        run.farfield_basis["tm"].scattered_te, run.farfield_basis["tm"].scattered_tm
-    )
-    np.testing.assert_allclose(Iu, 0.5 * (I_te + I_tm))
-
-
-def test_far_field_intensity_from_result_supports_pure_channel_result_without_basis():
-    te = {"coeff": np.array([[1 + 0j, 2 + 0j]], dtype=np.complex128)}
-    tm = {"coeff": np.array([[3 + 0j, 4 + 0j]], dtype=np.complex128)}
-    run = type(
-        "Run",
-        (),
-        {
-            "config": type(
-                "Cfg",
-                (),
-                {
-                    "source": PlaneWave(
-                        wavelength=550.0,
-                        medium_n=1.0 + 0j,
-                        polarization="TE",
-                        polar_angle=0.0,
-                        azimuthal_angle=0.0,
-                    )
-                },
-            )(),
-            "polarization_jones": (1.0 + 0.0j, 0.0 + 0.0j),
-            "farfield": type("FF", (), {"scattered_te": te, "scattered_tm": tm}),
-            "farfield_basis": None,
-        },
+        {"farfield": type("FF", (), {"scattered_te": te, "scattered_tm": tm})},
     )()
     np.testing.assert_allclose(
-        far_field_intensity_from_result(run, channel="te"),
+        far_field_intensity_from_result(run),
         far_field_intensity(te, tm),
     )
 
 
-def test_far_field_intensity_from_result_uses_basis_payload_for_requested_channel():
-    basis_ff = type(
-        "FFBasis",
+def test_far_field_intensity_from_result_rejects_periodic_placeholder():
+    run = type("Run", (), {"periodic": object()})()
+
+    with pytest.raises(ValueError, match="discrete diffraction orders"):
+        far_field_intensity_from_result(run)
+
+
+def test_unpolarized_far_field_intensity_averages_te_tm_channels():
+    te = {"coeff": np.array([[1 + 0j, 2 + 0j]], dtype=np.complex128)}
+    tm = {"coeff": np.array([[3 + 0j, 4 + 0j]], dtype=np.complex128)}
+    ff_te = type("FF", (), {"scattered_te": te, "scattered_tm": tm})()
+    ff_tm = type("FF", (), {"scattered_te": tm, "scattered_tm": te})()
+    result = type(
+        "PolarizationResult",
         (),
         {
-            "scattered_te": {"coeff": np.array([[5 + 0j, 6 + 0j]], dtype=np.complex128)},
-            "scattered_tm": {"coeff": np.array([[7 + 0j, 8 + 0j]], dtype=np.complex128)},
-        },
-    )()
-    run = type(
-        "Run",
-        (),
-        {
-            "config": type("Cfg", (), {"source": None})(),
-            "polarization_jones": None,
-            "farfield": None,
-            "farfield_basis": {"tm": basis_ff},
+            "te": type("Run", (), {"farfield": ff_te})(),
+            "tm": type("Run", (), {"farfield": ff_tm})(),
         },
     )()
     np.testing.assert_allclose(
-        far_field_intensity_from_result(run, channel="tm"),
-        far_field_intensity(basis_ff.scattered_te, basis_ff.scattered_tm),
+        unpolarized_far_field_intensity(result),
+        0.5 * (far_field_intensity(te, tm) + far_field_intensity(tm, te)),
     )
-
-
-@pytest.mark.parametrize("channel", ["te", "unpolarized"])
-def test_far_field_intensity_from_result_rejects_missing_basis_payload(channel: str):
-    te = {"coeff": np.array([[1 + 0j, 2 + 0j]], dtype=np.complex128)}
-    tm = {"coeff": np.array([[3 + 0j, 4 + 0j]], dtype=np.complex128)}
-    run = type(
-        "Run",
-        (),
-        {
-            "config": type("Cfg", (), {"source": None})(),
-            "polarization_jones": None,
-            "farfield": type("FF", (), {"scattered_te": te, "scattered_tm": tm}),
-            "farfield_basis": None,
-        },
-    )()
-    with pytest.raises(ValueError):
-        far_field_intensity_from_result(run, channel=channel)
-
-
-def test_far_field_intensity_from_result_rejects_invalid_channel():
-    run = type(
-        "Run",
-        (),
-        {
-            "config": type("Cfg", (), {"source": None})(),
-            "polarization_jones": None,
-            "farfield": None,
-            "farfield_basis": None,
-        },
-    )()
-    with pytest.raises(ValueError, match="channel must be one of"):
-        far_field_intensity_from_result(run, channel="bad")
 
 
 def test_plot_nearfield_panels_channels_returns_expected_axes_shape():
@@ -471,7 +398,6 @@ def test_plot_source_showcase_slices_returns_3x5_layout(monkeypatch):
     fig, axes = plot_source_showcase_slices(
         run,
         field_component="initial",
-        channel="mixed",
         plane_values=(0.0, 0.0, 0.0),
         show_progress=False,
     )

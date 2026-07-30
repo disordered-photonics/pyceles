@@ -8,8 +8,10 @@ import pyceles.postprocessing.dipole_metrics as dipole_metrics
 from pyceles.core.particles import spheres_from_arrays
 
 
-def _run_no_scatterers(cfg: pcl.SimulationConfig) -> pcl.SimulationResult:
-    return pcl.Simulation(cfg, particles=[]).run()
+def _run_no_scatterers(
+    cfg: pcl.SimulationConfig, source: pcl.DipoleSource | pcl.DipoleCollection
+) -> pcl.SimulationResult:
+    return pcl.Simulation(cfg, particles=[]).run(source)
 
 
 def _single_sphere(radius: float, n_particle: complex):
@@ -31,11 +33,10 @@ def test_dipole_power_ldos_no_scatterers_single_dipole():
         wavelength=550.0,
         n_medium=1.0 + 0j,
         lmax=1,
-        source=source,
         solver_method="direct",
         verbose=False,
     )
-    run = _run_no_scatterers(cfg)
+    run = _run_no_scatterers(cfg, source)
     out = pcl.compute_dipole_power_ldos(run)
 
     np.testing.assert_allclose(out.E_scattered_at_dipoles, 0.0, rtol=0.0, atol=0.0)
@@ -64,11 +65,10 @@ def test_dipole_power_ldos_no_scatterers_collection_matches_background_formula()
         wavelength=550.0,
         n_medium=1.0 + 0j,
         lmax=1,
-        source=source,
         solver_method="direct",
         verbose=False,
     )
-    run = _run_no_scatterers(cfg)
+    run = _run_no_scatterers(cfg, source)
     out = pcl.compute_dipole_power_ldos(run)
 
     p0_ref = source.dissipated_power_homogeneous_background_per_dipole()
@@ -94,11 +94,10 @@ def test_dipole_run_reports_local_absorbed_power_no_scatterers():
         wavelength=550.0,
         n_medium=1.0 + 0j,
         lmax=1,
-        source=source,
         solver_method="direct",
         verbose=False,
     )
-    run = _run_no_scatterers(cfg)
+    run = _run_no_scatterers(cfg, source)
     assert run.power is not None
     assert run.power.local_absorbed_power is not None
     np.testing.assert_allclose(float(run.power.local_absorbed_power), 0.0, rtol=0.0, atol=0.0)
@@ -117,11 +116,10 @@ def test_dipole_run_lossless_sphere_local_absorption_is_nearly_zero():
         wavelength=550.0,
         n_medium=1.0 + 0j,
         lmax=3,
-        source=source,
         solver_method="direct",
         verbose=False,
     )
-    run = pcl.Simulation(cfg, particles=_single_sphere(80.0, 1.5 + 0.0j)).run()
+    run = pcl.Simulation(cfg, particles=_single_sphere(80.0, 1.5 + 0.0j)).run(source)
     assert run.power is not None
     assert run.power.local_absorbed_power is not None
     np.testing.assert_allclose(float(run.power.local_absorbed_power), 0.0, rtol=0.0, atol=1e-10)
@@ -144,11 +142,10 @@ def test_dipole_run_absorbing_sphere_reports_positive_local_absorption():
         wavelength=550.0,
         n_medium=1.0 + 0j,
         lmax=3,
-        source=source,
         solver_method="direct",
         verbose=False,
     )
-    run = pcl.Simulation(cfg, particles=_single_sphere(80.0, 1.5 + 0.01j)).run()
+    run = pcl.Simulation(cfg, particles=_single_sphere(80.0, 1.5 + 0.01j)).run(source)
     assert run.power is not None
     assert run.power.local_absorbed_power is not None
     p_abs = float(run.power.local_absorbed_power)
@@ -169,7 +166,6 @@ def test_dipole_power_ldos_inside_particle_requires_explicit_override():
         wavelength=550.0,
         n_medium=1.0 + 0j,
         lmax=1,
-        source=source,
         solver_method="direct",
         verbose=False,
     )
@@ -185,7 +181,7 @@ def test_dipole_power_ldos_inside_particle_requires_explicit_override():
                 radii=np.array([100.0], dtype=float),
                 refractive_indices=np.array([1.5 + 0.01j], dtype=np.complex128),
             ),
-        ).run()
+        ).run(source)
 
     with pytest.raises(ValueError, match="inside particle index"):
         _ = pcl.compute_dipole_power_ldos(run)
@@ -206,14 +202,13 @@ def test_dipole_near_field_masks_exact_source_position():
         wavelength=550.0,
         n_medium=1.0 + 0j,
         lmax=1,
-        source=source,
         solver_method="direct",
         verbose=False,
     )
-    run = _run_no_scatterers(cfg)
+    run = _run_no_scatterers(cfg, source)
     points = np.array([[0.0, 0.0, 0.0], [50.0, 0.0, 0.0]], dtype=float)
 
-    nf = pcl.compute_near_field(run, points=points, channel="mixed", show_progress=False)
+    nf = pcl.compute_near_field(run, points=points, show_progress=False)
     assert np.all(np.isnan(nf.E_initial[0]))
     assert np.all(np.isnan(nf.H_initial[0]))
     assert np.all(np.isnan(nf.E_total[0]))
@@ -223,20 +218,10 @@ def test_dipole_near_field_masks_exact_source_position():
 
 
 def test_dipole_ldos_uses_channel_source_from_postprocess_sources():
-    base_source = pcl.DipoleCollection(
-        wavelength=550.0,
-        medium_n=1.0 + 0j,
-        positions=np.array([[0.0, 0.0, 0.0], [120.0, 0.0, 0.0]], dtype=float),
-        dipole_moments=np.array(
-            [[1.0 + 0j, 0.0 + 0j, 0.0 + 0j], [0.0 + 0j, 1.0 + 0j, 0.0 + 0j]],
-            dtype=np.complex128,
-        ),
-    )
     cfg = pcl.SimulationConfig(
         wavelength=550.0,
         n_medium=1.0 + 0j,
         lmax=1,
-        source=base_source,
         solver_method="direct",
         verbose=False,
     )
@@ -251,9 +236,9 @@ def test_dipole_ldos_uses_channel_source_from_postprocess_sources():
     solved = sim.solve_sources(probe.cartesian_basis_sources())
     multi = sim.postprocess_sources(solved, include_farfield=False)
 
-    assert isinstance(multi["px"].config.source, pcl.DipoleSource)
-    assert isinstance(multi["py"].config.source, pcl.DipoleSource)
-    assert isinstance(multi["pz"].config.source, pcl.DipoleSource)
+    assert isinstance(multi["px"].source, pcl.DipoleSource)
+    assert isinstance(multi["py"].source, pcl.DipoleSource)
+    assert isinstance(multi["pz"].source, pcl.DipoleSource)
     np.testing.assert_allclose(
         pcl.compute_dipole_ldos_enhancement(multi["px"]),
         1.0,
@@ -274,13 +259,12 @@ def test_dipole_power_ldos_inherits_resolved_postprocessing_backend(monkeypatch)
         wavelength=550.0,
         n_medium=1.0 + 0j,
         lmax=1,
-        source=source,
         solver_method="direct",
         operator_backend="numpy",
         postprocessing_backend="cupy",
         verbose=False,
     )
-    run = pcl.Simulation(cfg, particles=[]).run(include_farfield=False)
+    run = pcl.Simulation(cfg, particles=[]).run(source, include_farfield=False)
 
     seen: dict[str, str] = {}
 

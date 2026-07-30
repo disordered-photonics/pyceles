@@ -13,7 +13,7 @@ New source classes should satisfy the internal `Source` protocol in
 - `has_finite_incident_power()` for finite-power diagnostics policy.
 
 Finite-beam-only diagnostics, including `finite_beam_power_balance`,
-source-aware `pwp_power_decomposition`, and the common `SimulationResult.power`
+source-aware `pwp_power_decomposition`, and the common `ChannelResult.power`
 report, are enabled only when `has_finite_incident_power()` returns `True`.
 This keeps policy centralized and avoids class-name-specific special cases as
 new source wrappers/classes are added.
@@ -43,7 +43,6 @@ Default behavior remains shared unless overrides are explicitly set:
 
 ```python
 cfg = pcl.SimulationConfig(
-    source=source,
     polar_angles=pcl.core.uniform_polar_grid(3601),
     azimuthal_angles=pcl.core.uniform_periodic_azimuth_grid(180),
     # Optional advanced overrides:
@@ -95,90 +94,100 @@ source = pcl.PlaneWave(
 )
 ```
 
-## Multi-source solves
+## Explicit source cardinality
 
-Use `solve_sources(...)` when multiple channels share one geometry, for example
-TE/TM basis sources, dipole x/y/z orientations, or SLM pattern sweeps. Then call
-`postprocess_sources(...)` when channel-level far-field or power diagnostics are
-needed:
+`SimulationConfig` describes the reusable physical and numerical system; source
+cardinality is explicit in the operation being called:
 
 ```python
 sim = pcl.Simulation(cfg, particles=particles)
-solved = sim.solve_sources(
+
+single = sim.run(source)
+multi = sim.run_sources({"left": source_a, "right": source_b})
+polarized = sim.run_polarizations(source)
+```
+
+`run_sources(...)` assembles all right-hand sides and sends them through one
+shared multi-RHS solve. Labels are explicit non-empty strings and preserve mapping
+insertion order; they are never normalized or stringified implicitly. This is the
+preferred path for dipole bases, SLM/Hadamard pattern batches, wavelength-compatible
+source scans, and any other channels that share one operator. The result owns one
+authoritative block solver report and a labeled mapping of solver-free
+`ChannelResult` objects:
+
+```python
+multi = sim.run_sources(
     {
         "te": source.with_polarization("TE"),
         "tm": source.with_polarization("TM"),
     }
 )
-multi = sim.postprocess_sources(solved)
 
 run_te = multi["te"]
 run_tm = multi["tm"]
-print(solved.solver_result.rhs_count)
-print(solved.solver_result.method)
+print(multi.labels)
+print(multi.solver_result.rhs_count)
 ```
+
+For staged workflows, `solve_sources(...)` returns a `MultiSourceSolveResult`
+that can be passed later to `postprocess_sources(...)`. This preserves the same
+block solve while allowing custom far-field grids or deferred postprocessing.
 
 ## Result retention
 
-Completed results retain the full solve and postprocessing payload by default.
-For large solves where only the solution and observables are needed, optional
-duplicate arrays and residual histories can be omitted:
+Completed results retain solved multipole coefficients because they are the
+restart and deferred-postprocessing state. Optional incident coefficients,
+right-hand sides, and residual histories can be omitted:
 
 ```python
 run = sim.run(
+    source,
     include_farfield=False,
     retention=pcl.ResultRetention.minimal(),
 )
 ```
 
-Solved multipole coefficients in `run.coeffs` are always retained because they
-are needed for restarts and deferred postprocessing. Minimal retention omits
-the incident coefficients, right-hand side, residual histories, and optional
-TE/TM basis coefficient maps. It does not reduce the information available
-during the solve or the requested postprocessing itself. The same policy can
-be passed to `postprocess_sources(...)`.
+For multi-source and polarization runs, every solved RHS remains essential and
+is retained exactly once through channel views of the shared block solution.
+Minimal retention does not keep hidden basis copies or a permanently materialized
+coherent mixture.
 
-## Dual-basis convenience runs
+## Polarization runs
 
-For mixed+basis+unpolarized outputs in one `SimulationResult`, use:
+`run_polarizations(...)` is a typed specialization of the same multi-RHS path.
+It solves the orthogonal TE/TM basis in one block Krylov or direct solve and
+returns a `PolarizationResult`:
 
 ```python
-cfg = pcl.SimulationConfig(
-    source=source,
-    solve_polarization_basis=True,
-    solver_method="gmres",
-)
-run = pcl.Simulation(cfg, particles=particles).run()
+polarized = sim.run_polarizations(source)
 
-mixed_coeffs = run.coeffs
-te_coeffs = run.coeffs_basis["te"]
-tm_coeffs = run.coeffs_basis["tm"]
-assert run.unpolarized is not None
-print(run.unpolarized.power)
-print(run.unpolarized.cross_sections)
+te = polarized.te
+tm = polarized.tm
+mixed = polarized.mixed
+
+print(polarized.solver_result.rhs_count)  # 2
+print(polarized.unpolarized.power)
+print(polarized.unpolarized.cross_sections)
 ```
 
-Near-field evaluation can target mixed or basis channels:
+`te` and `tm` are the two solved `ChannelResult` objects. `mixed` is the coherent
+Jones combination requested by `source`; it is derived on demand and therefore
+does not pretend to own an independent solver report or permanently retain a
+third coefficient vector. `unpolarized` contains the incoherent TE/TM averages
+of scalar diagnostics. The same API works for finite and periodic plane-wave
+configurations.
+
+Near-field and plotting helpers accept explicit channels rather than string
+selectors. Finite and periodic channels also use distinct entry points, so the
+physical field formulation cannot be selected accidentally:
 
 ```python
-nf_mixed = pcl.compute_near_field_slice(run, channel="mixed")
-nf_te = pcl.compute_near_field_slice(run, channel="te")
-nf_tm = pcl.compute_near_field_slice(run, channel="tm")
-```
+nf_mixed = pcl.compute_near_field_slice(polarized.mixed, ...)
+nf_te = pcl.compute_near_field_slice(polarized.te, ...)
+nf_tm = pcl.compute_near_field_slice(polarized.tm, ...)
 
-For `postprocess_sources(solve_sources(...))` outputs, each channel run is
-already pure. Use `channel="mixed"` on that channel result:
-
-```python
-nf_te = pcl.compute_near_field_slice(multi["te"], channel="mixed")
-nf_tm = pcl.compute_near_field_slice(multi["tm"], channel="mixed")
-```
-
-For far-field plotting, an unpolarized intensity convenience helper is
-available:
-
-```python
-I_u = pcl.io.far_field_intensity_from_result(run, channel="unpolarized")
+periodic_nf = pcl.compute_periodic_near_field_slice(periodic_polarized.mixed, ...)
+I_unpolarized = pcl.io.unpolarized_far_field_intensity(polarized)
 ```
 
 ## Local dipole sources
@@ -214,9 +223,9 @@ Current dipole scope:
 - homogeneous medium is still restricted to real `n_medium` in the main solver.
   This restriction was inherited from the early beam/plane-wave workflow; it is
   not a fundamental limitation of local dipole sources and may be lifted later.
-- `solve_polarization_basis=True` is not defined for dipole sources. Use
-  `DipoleSource.cartesian_basis_sources()` when the x/y/z dipole orientation
-  basis should be solved in one multi-RHS call.
+- Dipole sources do not have a TE/TM Jones basis. Use
+  `DipoleSource.cartesian_basis_sources()` with `run_sources(...)` when the
+  x/y/z dipole orientation basis should be solved in one multi-RHS call.
 - dipole homogeneous-background dissipated-power helpers are available:
   - `DipoleSource.dissipated_power_homogeneous_background()`,
   - `DipoleCollection.dissipated_power_homogeneous_background()`,
@@ -251,8 +260,10 @@ dip = pcl.DipoleSource(
     medium_n=1.0 + 0j,
     position=(0.0, 0.0, 0.0),
 )
-solved = sim.solve_sources(dip.cartesian_basis_sources())
-multi = sim.postprocess_sources(solved, include_farfield=False)
+multi = sim.run_sources(
+    dip.cartesian_basis_sources(),
+    include_farfield=False,
+)
 ```
 
 ## Mixed particle descriptors
@@ -272,7 +283,7 @@ sim = pcl.Simulation(
         ),
     ],
 )
-run = sim.run(include_farfield=False)
+run = sim.run(source, include_farfield=False)
 print(sim.n_particles, run.n_particles)
 ```
 
@@ -361,7 +372,7 @@ For beam inspection/debugging, run a simulation with no particles:
 run = pcl.Simulation(
     cfg,
     particles=[],
-).run()
+).run(source)
 ```
 
 This yields zero scattered coefficients/fields and preserves incident-field
@@ -369,14 +380,27 @@ outputs.
 
 ## Warm starts and preconditioners
 
+Warm starts are execution state, so they are passed to the operation rather
+than stored in the reusable configuration:
+
 ```python
 cfg = pcl.SimulationConfig(
-    source=source,
     solver_method="gmres",
-    solver_warm_start=x0,
     solver_preconditioner=M_inv_mv,
 )
+sim = pcl.Simulation(cfg, particles=particles)
+
+run = sim.run(source, warm_start=previous.coeffs)
+multi = sim.run_sources(
+    {"left": source_a, "right": source_b},
+    warm_start={"left": previous_left.coeffs, "right": previous_right.coeffs},
+)
 ```
+
+For multi-source operations, one coefficient vector is broadcast to every RHS.
+A block array may instead use its final axis in source-label order, or a mapping
+may provide one initial guess per label. `run_polarizations(...)` follows the
+same rule with the labels `"te"` and `"tm"`.
 
 Notes:
 
@@ -396,36 +420,36 @@ Notes:
   (`pr_rel_res`). SciPy BiCGSTAB, LGMRES, and GCROTMK callbacks do not expose a
   cheap residual scalar, so pyceles reports iteration-only progress for those
   methods instead of spending an extra matrix-vector product per callback.
-- `solver_warm_start` is a user-supplied initial guess. It is not automatically
-  loaded from HDF5, but you can pass previously solved coefficients from a
-  nearby configuration or wavelength sweep when dimensions and mode ordering
-  match.
+- `warm_start` is a user-supplied initial guess on `run(...)`, `solve_sources(...)`,
+  `run_sources(...)`, or `run_polarizations(...)`. It is not automatically loaded
+  from HDF5, but previously solved coefficients can be supplied when dimensions
+  and mode ordering match.
 - `solver_preconditioner` is a custom callable hook: `M_inv_mv(v)` should return
   an approximate application of `M^{-1} v` for the current linear system.
 - pyceles no longer ships a built-in grid-block preconditioner in the high-level
   simulation API. That implementation was explored, but it did not deliver
   robust speedups relative to its maintenance cost.
 
-## HDF5 output with basis channels
+## HDF5 output for explicit channels
 
-`pcl.io.save_simulation_h5(...)` stores:
+`pcl.io.save_simulation_h5(...)` stores one explicit `ChannelResult` or
+`SimulationResult`: particle-native geometry, coefficients, optional incident/RHS
+arrays, near field, finite far field or periodic diffraction orders, and typed
+scalar diagnostics. A direct `SimulationResult` also carries its matching
+single-RHS solver metadata.
 
-- mixed solution/far-field groups,
-- particle-native geometry under `geometry/particles`,
-- optional basis groups when available:
-  - `solution_basis/te`,
-  - `solution_basis/tm`,
-  - `far_field_basis/te`,
-  - `far_field_basis/tm`,
-- diagnostics under `diagnostics`:
-  - mixed and basis power/cross-sections/decompositions,
-  - unpolarized diagnostics,
-  - Jones weights.
+Multi-source and polarization envelopes are not serialized as disguised single
+runs. Select the physical channel deliberately:
 
-For `postprocess_sources(solve_sources(...))`, save each channel result
-separately, for example `save_simulation_h5(multi["te"], ...)`.
+```python
+pcl.save_simulation_h5(multi["left"], near_left, "left.h5")
+pcl.save_simulation_h5(polarized.te, near_te, "te.h5")
+pcl.save_simulation_h5(polarized.mixed, near_mixed, "mixed.h5")
+```
 
-Loading helpers are available via `pcl.io`:
+The shared block solver report remains on `multi.solver_result` or
+`polarized.solver_result`; derived coherent channels never receive fabricated
+solver provenance. Loading helpers are available via `pcl.io`:
 
 - `load_geometry_h5`,
 - `load_solution_h5`,

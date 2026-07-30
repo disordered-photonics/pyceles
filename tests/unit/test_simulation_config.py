@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import fields
 from typing import Any, cast
 
 import numpy as np
@@ -8,7 +9,6 @@ import pytest
 from pyceles.core.lattice import RectangularLattice2D
 from pyceles.core.operators import MLFMMOptions
 from pyceles.core.periodic import PeriodicSpec
-from pyceles.core.sources import PlaneWave
 from pyceles.simulation import SimulationConfig
 
 pytestmark = pytest.mark.api_contract
@@ -17,28 +17,29 @@ pytestmark = pytest.mark.api_contract
 def test_simulation_config_owns_read_only_array_inputs() -> None:
     polar = np.linspace(0.0, np.pi, 9)
     azimuth = np.linspace(0.0, 2.0 * np.pi, 12, endpoint=False)
-    warm_start = np.arange(6, dtype=np.complex128)
     cfg = SimulationConfig(
         polar_angles=polar,
         azimuthal_angles=azimuth,
-        solver_warm_start=warm_start,
         verbose=False,
     )
 
     polar[:] = -1.0
     azimuth[:] = -1.0
-    warm_start[:] = -1.0
 
     np.testing.assert_allclose(cfg.polar_angles, np.linspace(0.0, np.pi, 9))
     np.testing.assert_allclose(
         cfg.azimuthal_angles,
         np.linspace(0.0, 2.0 * np.pi, 12, endpoint=False),
     )
-    np.testing.assert_array_equal(cfg.solver_warm_start, np.arange(6))
     assert not cfg.polar_angles.flags.writeable
     assert not cfg.azimuthal_angles.flags.writeable
-    assert cfg.solver_warm_start is not None
-    assert not cfg.solver_warm_start.flags.writeable
+
+
+def test_simulation_config_is_execution_state_independent() -> None:
+    config_fields = {field.name for field in fields(SimulationConfig)}
+    assert "source" not in config_fields
+    assert "solve_polarization_basis" not in config_fields
+    assert "solver_warm_start" not in config_fields
 
 
 def test_simulation_config_accepts_cupy_operator_backend() -> None:
@@ -50,7 +51,6 @@ def test_simulation_config_accepts_cupy_operator_backend() -> None:
 def test_simulation_config_selects_solver_default_by_periodicity() -> None:
     finite = SimulationConfig(verbose=False)
     periodic = SimulationConfig(
-        source=PlaneWave(wavelength=550.0, medium_n=1.0 + 0j),
         periodic=PeriodicSpec(lattice=RectangularLattice2D(300.0, 300.0)),
         verbose=False,
     )
@@ -86,7 +86,6 @@ def test_simulation_config_rejects_finite_cupy_translation_block_cache() -> None
 
 def test_simulation_config_allows_periodic_cupy_translation_block_cache() -> None:
     cfg = SimulationConfig(
-        source=PlaneWave(wavelength=550.0, medium_n=1.0 + 0j),
         periodic=PeriodicSpec(lattice=RectangularLattice2D(300.0, 300.0)),
         operator_backend="cupy",
         cache_translation_blocks=True,
@@ -152,49 +151,9 @@ def test_simulation_config_accepts_mlfmm_complex64(backend: str) -> None:
         ({"solver_maxiter": 0}, "solver_maxiter"),
         ({"solver_direct_max_n": 0}, "solver_direct_max_n"),
         ({"solver_preconditioner": object()}, "callable"),
-        ({"solver_warm_start": np.zeros((1, 1, 1))}, "1D, 2D, or None"),
     ],
 )
 def test_simulation_config_rejects_invalid_public_policy_inputs(
-    kwargs: dict[str, object], match: str
-) -> None:
-    fn = cast(Any, SimulationConfig)
-    with pytest.raises(ValueError, match=match):
-        fn(verbose=False, **kwargs)
-
-
-@pytest.mark.parametrize(
-    ("kwargs", "match"),
-    [
-        (
-            {
-                "source": PlaneWave(
-                    wavelength=551.0,
-                    medium_n=1.0 + 0j,
-                    polarization="TE",
-                    polar_angle=0.0,
-                    azimuthal_angle=0.0,
-                    amplitude=1.0,
-                )
-            },
-            "source.wavelength",
-        ),
-        (
-            {
-                "source": PlaneWave(
-                    wavelength=550.0,
-                    medium_n=1.2 + 0j,
-                    polarization="TE",
-                    polar_angle=0.0,
-                    azimuthal_angle=0.0,
-                    amplitude=1.0,
-                )
-            },
-            "source.medium_n",
-        ),
-    ],
-)
-def test_simulation_config_rejects_inconsistent_embedded_source(
     kwargs: dict[str, object], match: str
 ) -> None:
     fn = cast(Any, SimulationConfig)

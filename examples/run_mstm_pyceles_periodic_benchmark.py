@@ -966,12 +966,11 @@ def _run_pyceles_case(
             wavelength=float(case.vacuum_wavelength),
             n_medium=complex(case.medium_refractive_index),
             lmax=int(case.lmax),
-            source=source,
             periodic=periodic,
             solver_method="direct",
             verbose=False,
         )
-        run = pcl.Simulation(config, particles=particles).run(include_farfield=False)
+        run = pcl.Simulation(config, particles=particles).run(source, include_farfield=False)
         if run.periodic is None:
             raise RuntimeError("Periodic pyceles run did not populate `SimulationResult.periodic`.")
         periodic_payload = run.periodic
@@ -1027,14 +1026,12 @@ def _run_pyceles_case(
             nf_te = pcl.compute_periodic_near_field(
                 run_te,
                 points=coords,
-                channel="mixed",
                 field_bmax=nearfield_bmax,
                 show_progress=True,
             )
             nf_tm = pcl.compute_periodic_near_field(
                 run_tm,
                 points=coords,
-                channel="mixed",
                 field_bmax=nearfield_bmax,
                 show_progress=True,
             )

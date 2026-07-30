@@ -95,7 +95,6 @@ def _run_case(case: SpheroidSmuthiOracle, pol_name: Literal["TE", "TM"]) -> Simu
         wavelength=550.0,
         n_medium=1.0 + 0j,
         lmax=10,
-        source=src,
         # The oracle comes from a denser SMUTHI far-field reintegration. These
         # bins are only the public test's output sampling grid.
         polar_angles=np.linspace(0.0, np.pi, 61),
@@ -116,7 +115,7 @@ def _run_case(case: SpheroidSmuthiOracle, pol_name: Literal["TE", "TM"]) -> Simu
                 euler_angles=case.angles,
             )
         ],
-    ).run()
+    ).run(src)
     _RUN_CACHE[key] = run
     return run
 

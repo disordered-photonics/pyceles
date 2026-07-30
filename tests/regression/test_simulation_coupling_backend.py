@@ -93,7 +93,6 @@ def test_simulation_direct_solve_uses_matvec_fallback_for_true_mlfmm_coupling(
         wavelength=550.0,
         n_medium=1.0 + 0j,
         lmax=lmax,
-        source=_plane_wave(),
         polar_angles=np.linspace(0.0, np.pi, 5),
         azimuthal_angles=np.linspace(0.0, 2.0 * np.pi, 8, endpoint=False),
         solver_method="direct",

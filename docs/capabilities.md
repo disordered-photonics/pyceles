@@ -41,7 +41,8 @@ Physical source checks are capability based:
   plane-wave spectrum.
 
 Finite-beam and periodic diagnostics share the immutable
-`SimulationResult.power: PowerBalance` contract:
+`ChannelResult.power: PowerBalance` contract (including direct
+`SimulationResult` runs):
 
 - `incident_power`, `reflected_power`, and `transmitted_power`,
 - `local_absorbed_power` from the generic local exciting-field route
@@ -68,7 +69,7 @@ mixed supported particle families:
 - `Spheroid`.
 
 `Simulation` normalizes these inputs into an immutable `ParticleCollection`.
-`Simulation.n_particles` and `SimulationResult.n_particles` provide canonical
+`Simulation.n_particles` and `ChannelResult.n_particles` provide canonical
 particle counts across descriptor and array-generated inputs.
 
 By default, `Simulation` enforces disjoint circumscribing spheres, which is

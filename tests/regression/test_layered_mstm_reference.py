@@ -143,7 +143,6 @@ def _run_case(
         wavelength=550.0,
         n_medium=1.0 + 0j,
         lmax=10,
-        source=src,
         polar_angles=np.linspace(0.0, np.pi, polar_count),
         azimuthal_angles=np.linspace(0.0, 2.0 * np.pi, azimuthal_count, endpoint=False),
         solver_method="direct",
@@ -160,7 +159,7 @@ def _run_case(
                 layer_refractive_indices=case.indices,
             )
         ],
-    ).run()
+    ).run(src)
     cache_obj[key] = run
     return run
 
@@ -209,11 +208,11 @@ def _unpolarized_near_erms(case: LayeredMSTMOracle) -> np.ndarray:
     run_te = _run_case(case, "TE")
     run_tm = _run_case(case, "TM")
     e_te = np.asarray(
-        compute_near_field(run_te, points=points, channel="mixed", show_progress=False).E_total,
+        compute_near_field(run_te, points=points, show_progress=False).E_total,
         dtype=np.complex128,
     )
     e_tm = np.asarray(
-        compute_near_field(run_tm, points=points, channel="mixed", show_progress=False).E_total,
+        compute_near_field(run_tm, points=points, show_progress=False).E_total,
         dtype=np.complex128,
     )
     return np.asarray(

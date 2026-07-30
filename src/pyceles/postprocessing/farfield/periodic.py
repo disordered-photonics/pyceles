@@ -198,6 +198,135 @@ def periodic_order_amplitudes(
     )
 
 
+def _periodic_order_fluxes(
+    *,
+    reflected: np.ndarray,
+    transmitted: np.ndarray,
+    order_kz: np.ndarray,
+    order_propagating: np.ndarray,
+    k: float,
+    n_medium: complex,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return normal power flux carried by each reflected/transmitted order."""
+    k_f = float(k)
+    if k_f <= 0.0 or not np.isfinite(k_f):
+        raise ValueError(f"`k` must be finite and positive. Got {k!r}.")
+    n_real = float(np.real(complex(n_medium)))
+    if n_real <= 0.0:
+        raise ValueError(f"`n_medium` must be positive and real. Got {n_medium!r}.")
+    kz = np.asarray(order_kz, dtype=np.complex128)
+    propagating = np.asarray(order_propagating, dtype=bool)
+    prefactor = np.where(
+        propagating,
+        n_real * np.abs(np.real(kz)) / (2.0 * k_f),
+        0.0,
+    )
+    reflected_flux = np.asarray(
+        prefactor * np.sum(np.abs(np.asarray(reflected)) ** 2, axis=1),
+        dtype=np.float64,
+    )
+    transmitted_flux = np.asarray(
+        prefactor * np.sum(np.abs(np.asarray(transmitted)) ** 2, axis=1),
+        dtype=np.float64,
+    )
+    return reflected_flux, transmitted_flux
+
+
+def mix_periodic_farfield_payloads(
+    first: PeriodicFarFieldPayload,
+    second: PeriodicFarFieldPayload,
+    *,
+    source: PlaneWave,
+    a_first: complex,
+    a_second: complex,
+    k: float,
+    n_medium: complex,
+) -> PeriodicFarFieldPayload:
+    """Coherently combine two order-aligned periodic channel payloads.
+
+    The two inputs must share one diffraction-order geometry, as TE/TM basis
+    channels from the same periodic block solve do. Mixing their order
+    amplitudes is exactly equivalent to re-evaluating the periodic far-field
+    transform on the mixed coefficient vector.
+    """
+    structural_arrays = (
+        "lattice_a1",
+        "lattice_a2",
+        "incident_k_parallel",
+        "order_mn",
+        "order_k_parallel",
+        "order_kz",
+        "order_propagating",
+    )
+    for name in structural_arrays:
+        lhs = np.asarray(getattr(first, name))
+        rhs = np.asarray(getattr(second, name))
+        if lhs.shape != rhs.shape or not np.array_equal(lhs, rhs):
+            raise ValueError(
+                "Cannot mix periodic channels with different order geometry: "
+                f"field '{name}' differs."
+            )
+    if not np.isclose(
+        float(first.unit_cell_area),
+        float(second.unit_cell_area),
+        rtol=0.0,
+        atol=0.0,
+    ):
+        raise ValueError("Cannot mix periodic channels with different unit-cell areas.")
+    if first.output_bmax != second.output_bmax:
+        raise ValueError("Cannot mix periodic channels with different output_bmax values.")
+
+    reflected = np.asarray(
+        a_first * first.reflected_amplitudes + a_second * second.reflected_amplitudes,
+        dtype=np.complex128,
+    )
+    transmitted = np.asarray(
+        a_first * first.transmitted_amplitudes + a_second * second.transmitted_amplitudes,
+        dtype=np.complex128,
+    )
+    reflected_flux, transmitted_flux = _periodic_order_fluxes(
+        reflected=reflected,
+        transmitted=transmitted,
+        order_kz=first.order_kz,
+        order_propagating=first.order_propagating,
+        k=k,
+        n_medium=n_medium,
+    )
+
+    n_real = float(np.real(complex(n_medium)))
+    amp = complex(source.amplitude)
+    incident_norm = float(
+        abs(amp) ** 2 * (abs(complex(a_first)) ** 2 + abs(complex(a_second)) ** 2)
+    )
+    incident_flux = n_real * abs(float(np.cos(float(source.polar_angle)))) * incident_norm / 2.0
+    if incident_flux <= 0.0 or not np.isfinite(incident_flux):
+        raise ValueError("Incident periodic power normalization is non-finite or non-positive.")
+
+    area = float(first.unit_cell_area)
+    power = PowerBalance(
+        incident_power=float(incident_flux * area),
+        reflected_power=float(np.sum(reflected_flux) * area),
+        transmitted_power=float(np.sum(transmitted_flux) * area),
+    )
+    return PeriodicFarFieldPayload(
+        lattice_a1=np.asarray(first.lattice_a1),
+        lattice_a2=np.asarray(first.lattice_a2),
+        unit_cell_area=area,
+        incident_k_parallel=np.asarray(first.incident_k_parallel),
+        output_bmax=first.output_bmax,
+        order_mn=np.asarray(first.order_mn),
+        order_k_parallel=np.asarray(first.order_k_parallel),
+        order_kz=np.asarray(first.order_kz, dtype=np.complex128),
+        order_propagating=np.asarray(first.order_propagating, dtype=bool),
+        reflected_amplitudes=reflected,
+        transmitted_amplitudes=transmitted,
+        reflected_flux_per_order=reflected_flux,
+        transmitted_flux_per_order=transmitted_flux,
+        incident_flux=float(incident_flux),
+        power=power,
+    )
+
+
 def periodic_plane_wave_orders(
     *,
     source: PlaneWave,
@@ -242,19 +371,13 @@ def periodic_plane_wave_orders(
     order_kz = np.asarray(orders_payload.order_kz, dtype=np.complex128)
     order_propagating = np.asarray(orders_payload.order_propagating, dtype=bool)
 
-    kz_abs = np.abs(np.real(order_kz))
-    flux_prefactor = np.where(
-        order_propagating,
-        n_real * kz_abs / (2.0 * k_f),
-        0.0,
-    )
-    reflected_flux = np.asarray(
-        flux_prefactor * np.sum(np.abs(reflected) ** 2, axis=1),
-        dtype=np.float64,
-    )
-    transmitted_flux = np.asarray(
-        flux_prefactor * np.sum(np.abs(transmitted) ** 2, axis=1),
-        dtype=np.float64,
+    reflected_flux, transmitted_flux = _periodic_order_fluxes(
+        reflected=reflected,
+        transmitted=transmitted,
+        order_kz=order_kz,
+        order_propagating=order_propagating,
+        k=k_f,
+        n_medium=n_medium,
     )
 
     incident_norm = float(np.sum(np.abs(orders_payload.incident_polarization) ** 2))
@@ -294,6 +417,7 @@ def periodic_plane_wave_orders(
 __all__ = [
     "PeriodicFarFieldPayload",
     "PeriodicOrderAmplitudes",
+    "mix_periodic_farfield_payloads",
     "periodic_order_amplitudes",
     "periodic_plane_wave_orders",
 ]

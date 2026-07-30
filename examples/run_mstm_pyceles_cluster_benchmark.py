@@ -572,7 +572,6 @@ def _pyceles_run(
         wavelength=float(cfg.wavelength),
         n_medium=1.0 + 0j,
         lmax=int(cfg.lmax),
-        source=source,
         polar_angles=pcl.core.uniform_polar_grid(int(cfg.n_beta)),
         azimuthal_angles=pcl.core.uniform_periodic_azimuth_grid(int(cfg.n_alpha)),
         solver_method=cfg.py_solver_method,
@@ -646,12 +645,8 @@ def _pyceles_run(
     ky = np.sin(alpha)[:, None] * np.sin(beta)[None, :]
     kz = np.cos(beta)[None, :] * np.ones((alpha.size, 1), dtype=float)
 
-    nf_te = pcl.compute_near_field(
-        run_basis["te"], points=nearfield_points, channel="mixed", show_progress=False
-    )
-    nf_tm = pcl.compute_near_field(
-        run_basis["tm"], points=nearfield_points, channel="mixed", show_progress=False
-    )
+    nf_te = pcl.compute_near_field(run_basis["te"], points=nearfield_points, show_progress=False)
+    nf_tm = pcl.compute_near_field(run_basis["tm"], points=nearfield_points, show_progress=False)
     if int(cfg.mstm_near_field_model) == 1:
         e_te = np.asarray(nf_te.E_total, dtype=np.complex128)
         h_te = np.asarray(nf_te.H_total, dtype=np.complex128)
@@ -689,7 +684,7 @@ def _pyceles_run(
             "rhs_count": int(multi.solver_result.rhs_count),
         },
         "efficiencies_basis": eff_basis,
-        "coeffs_basis": {
+        "coefficients_by_polarization": {
             "te": np.asarray(run_basis["te"].coeffs, dtype=np.complex128),
             "tm": np.asarray(run_basis["tm"].coeffs, dtype=np.complex128),
         },
@@ -1587,7 +1582,8 @@ def main() -> None:
     if "numpy" in py_runs and "cupy" in py_runs:
         backend_pair_cmp = {
             "coefficients_basis": _compare_pyceles_coefficients(
-                py_runs["cupy"]["coeffs_basis"], py_runs["numpy"]["coeffs_basis"]
+                py_runs["cupy"]["coefficients_by_polarization"],
+                py_runs["numpy"]["coefficients_by_polarization"],
             ),
             "nearfield": _compare_pyceles_nearfield(
                 py_runs["cupy"]["nearfield_basis"],

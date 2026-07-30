@@ -104,7 +104,6 @@ two-dimensional cells:
 import pyceles as pcl
 
 config = pcl.SimulationConfig(
-    source=source,
     periodic=pcl.PeriodicSpec(
         lattice=pcl.RectangularLattice2D(ax, ay),
         options=pcl.PeriodicOptions(method="ewald"),

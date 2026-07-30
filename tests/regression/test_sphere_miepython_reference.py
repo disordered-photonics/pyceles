@@ -220,7 +220,6 @@ def _run_case(
         wavelength=wavelength,
         n_medium=n_medium + 0j,
         lmax=lmax,
-        source=source,
         # Keep this oracle pinned to the historical explicit LUT spacing so the
         # regression only tracks sphere-vs-miepython agreement, not default
         # radial-LUT policy changes.
@@ -249,7 +248,7 @@ def _run_case(
                 refractive_index=refractive_index,
             )
         ],
-    ).run(include_farfield=include_farfield)
+    ).run(source, include_farfield=include_farfield)
     _RUN_CACHE[key] = run
     return run
 
@@ -267,12 +266,8 @@ def test_sphere_differential_scattering_matches_miepython_oracles() -> None:
             azimuthal_angles=_ALPHA_SAMPLES,
             include_farfield=True,
         )
-        if run.config.source is None:
-            raise AssertionError(
-                "Sphere miepython regression expects an explicit PlaneWave source."
-            )
         dcs = scattering_cross_section(
-            cast(PlaneWave, run.config.source),
+            cast(PlaneWave, run.source),
             run.farfield.scattered_te,
             run.farfield.scattered_tm,
             k0=run.k0,
@@ -304,7 +299,7 @@ def test_sphere_total_near_field_matches_miepython_oracles() -> None:
             lmax=case.lmax,
             include_farfield=False,
         )
-        nf = pcl.compute_near_field(run, points=points, channel="mixed", show_progress=False)
+        nf = pcl.compute_near_field(run, points=points, show_progress=False)
 
         np.testing.assert_allclose(
             np.asarray(nf.E_total, dtype=np.complex128),

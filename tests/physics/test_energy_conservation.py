@@ -22,7 +22,6 @@ def test_lossless_cluster_plane_wave_has_negligible_absorption():
         wavelength=550.0,
         n_medium=1.0 + 0j,
         lmax=2,
-        source=source,
         polar_angles=np.linspace(0.0, np.pi, 241, endpoint=True),
         azimuthal_angles=np.linspace(0.0, 2.0 * np.pi, 120, endpoint=False),
         solver_method="direct",
@@ -35,7 +34,7 @@ def test_lossless_cluster_plane_wave_has_negligible_absorption():
             radii=np.array([90.0, 75.0], dtype=float),
             refractive_indices=np.array([1.46 + 0.0j, 1.61 + 0.0j], dtype=np.complex128),
         ),
-    ).run()
+    ).run(source)
 
     cs = run.cross_sections
     if cs is None:
@@ -68,7 +67,6 @@ def test_pec_sphere_plane_wave_has_zero_local_absorption():
         wavelength=wavelength,
         n_medium=n_medium,
         lmax=5,
-        source=source,
         solver_method="direct",
         verbose=False,
     )
@@ -76,7 +74,7 @@ def test_pec_sphere_plane_wave_has_zero_local_absorption():
     run = pcl.Simulation(
         cfg,
         particles=[pcl.PECSphere(position=(0.0, 0.0, 0.0), radius=radius)],
-    ).run()
+    ).run(source)
 
     cs = run.cross_sections
     if cs is None:
@@ -123,7 +121,6 @@ def test_periodic_raw_flux_defect_matches_local_power_defect_for_exact_ewald():
         wavelength=wavelength,
         n_medium=1.0 + 0j,
         lmax=1,
-        source=source,
         periodic=periodic,
         solver_method="direct",
         verbose=False,

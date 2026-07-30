@@ -13,15 +13,6 @@ def test_layered_sphere_simulation_runs_and_nearfield_dispatches():
         wavelength=550.0,
         n_medium=1.0 + 0j,
         lmax=2,
-        source=PlaneWave(
-            wavelength=550.0,
-            medium_n=1.0 + 0j,
-            polarization="TE",
-            polar_angle=0.0,
-            azimuthal_angle=0.0,
-            amplitude=1.0,
-            focal_point=(0.0, 0.0, 0.0),
-        ),
         polar_angles=np.linspace(0.0, np.pi, 41),
         azimuthal_angles=np.linspace(0.0, 2.0 * np.pi, 33, endpoint=False),
         check_circumscribing_sphere_overlap=True,
@@ -38,7 +29,18 @@ def test_layered_sphere_simulation_runs_and_nearfield_dispatches():
         ],
     )
     assert sim.n_particles == 1
-    run = sim.run(include_farfield=False)
+    run = sim.run(
+        PlaneWave(
+            wavelength=550.0,
+            medium_n=1.0 + 0j,
+            polarization="TE",
+            polar_angle=0.0,
+            azimuthal_angle=0.0,
+            amplitude=1.0,
+            focal_point=(0.0, 0.0, 0.0),
+        ),
+        include_farfield=False,
+    )
     assert run.n_particles == 1
     assert run.particles is not None
     assert len(run.particles) == 1

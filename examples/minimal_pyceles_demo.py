@@ -119,15 +119,9 @@ def _render_quick_ldos_map(
             solver_compute_final_residual=False,
         )
         multi = sim_map.postprocess_sources(solved, include_farfield=False)
-        ldos_px[i, j] = float(
-            pcl.compute_dipole_ldos_enhancement(multi["px"], channel="mixed", show_progress=False)
-        )
-        ldos_py[i, j] = float(
-            pcl.compute_dipole_ldos_enhancement(multi["py"], channel="mixed", show_progress=False)
-        )
-        ldos_pz[i, j] = float(
-            pcl.compute_dipole_ldos_enhancement(multi["pz"], channel="mixed", show_progress=False)
-        )
+        ldos_px[i, j] = float(pcl.compute_dipole_ldos_enhancement(multi["px"], show_progress=False))
+        ldos_py[i, j] = float(pcl.compute_dipole_ldos_enhancement(multi["py"], show_progress=False))
+        ldos_pz[i, j] = float(pcl.compute_dipole_ldos_enhancement(multi["pz"], show_progress=False))
 
     ldos_avg = (ldos_px + ldos_py + ldos_pz) / 3.0
     panel_data = [
@@ -216,7 +210,6 @@ def main() -> None:
         wavelength=550.0,
         n_medium=1.0 + 0j,
         lmax=3,
-        source=source,
         compute_dtype="complex64",
         accum_dtype="complex128",
         polar_angles=pcl.core.uniform_polar_grid(721),
@@ -228,7 +221,7 @@ def main() -> None:
         verbose=True,
     )
     sim = pcl.Simulation(cfg, particles=particles)
-    run = sim.run()
+    run = sim.run(source)
     nf = pcl.compute_near_field_slice(
         run,
         axis_0_min=-700.0,
@@ -267,7 +260,6 @@ def main() -> None:
         wavelength=550.0,
         n_medium=1.0 + 0j,
         lmax=4,
-        source=dipoles,
         compute_dtype="complex128",
         accum_dtype="complex128",
         polar_angles=pcl.core.uniform_polar_grid(721),
@@ -280,7 +272,7 @@ def main() -> None:
         verbose=True,
     )
     sim_dip = pcl.Simulation(cfg_dip, particles=particles)
-    run_dip = sim_dip.run()
+    run_dip = sim_dip.run(dipoles)
     nf_dip = pcl.compute_near_field_slice(
         run_dip,
         axis_0_min=-700.0,

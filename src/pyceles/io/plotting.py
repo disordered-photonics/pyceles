@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Literal, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -15,7 +15,9 @@ from pyceles.core.particles import (
     Spheroid,
     _rotation_matrix_zyz_lab_to_body,
 )
-from pyceles.postprocessing._channels import is_pure_channel_result
+
+if TYPE_CHECKING:
+    from pyceles.simulation import ChannelResult, PolarizationResult
 
 
 def _slice_axis_labels(plane: str) -> tuple[str, str]:
@@ -194,53 +196,22 @@ def far_field_intensity(pwp_te: dict, pwp_tm: dict) -> np.ndarray:
     )
 
 
-def far_field_intensity_from_result(run, *, channel: str = "mixed") -> np.ndarray:
-    """Return far-field intensity map from a `SimulationResult`.
-
-    Parameters
-    ----------
-    channel:
-        - ``"mixed"``: source-requested polarization state (`run.farfield`)
-        - ``"te"`` or ``"tm"``: pure basis channels (`run.farfield_basis`), or
-          a pure single-channel result returned by
-          `postprocess_sources(solve_sources(...))`
-        - ``"unpolarized"``: incoherent average ``0.5*(I_te + I_tm)``
-    """
-    ch = str(channel).lower()
-    if ch == "mixed":
-        return far_field_intensity(run.farfield.scattered_te, run.farfield.scattered_tm)
-    if ch in {"te", "tm"}:
-        if run.farfield_basis is not None and ch in run.farfield_basis:
-            ff = run.farfield_basis[ch]
-            return far_field_intensity(ff.scattered_te, ff.scattered_tm)
-        if is_pure_channel_result(run, ch):
-            return far_field_intensity(run.farfield.scattered_te, run.farfield.scattered_tm)
+def far_field_intensity_from_result(run: ChannelResult) -> np.ndarray:
+    """Return finite-cluster scattered far-field intensity for one channel."""
+    if getattr(run, "periodic", None) is not None:
         raise ValueError(
-            "Requested basis far-field channel, but no TE/TM basis payload is available on this run. "
-            "Use `solve_polarization_basis=True` with `Simulation.run()`, or use a channel result from "
-            "`Simulation.postprocess_sources(Simulation.solve_sources(...))` and query it with "
-            "`channel='mixed'`."
+            "Periodic channels use discrete diffraction orders; inspect "
+            "`run.periodic.reflected_amplitudes` or "
+            "`run.periodic.transmitted_amplitudes` instead."
         )
-    if ch == "unpolarized":
-        if (
-            run.farfield_basis is None
-            or "te" not in run.farfield_basis
-            or "tm" not in run.farfield_basis
-        ):
-            raise ValueError(
-                "Requested unpolarized intensity, but TE/TM basis far fields are unavailable. "
-                "Use `solve_polarization_basis=True` with `Simulation.run()`, or compute it from "
-                "`Simulation.postprocess_sources(Simulation.solve_sources(...))` by averaging "
-                "TE/TM channel intensities."
-            )
-        I_te = far_field_intensity(
-            run.farfield_basis["te"].scattered_te, run.farfield_basis["te"].scattered_tm
-        )
-        I_tm = far_field_intensity(
-            run.farfield_basis["tm"].scattered_te, run.farfield_basis["tm"].scattered_tm
-        )
-        return cast(np.ndarray, 0.5 * (I_te + I_tm))
-    raise ValueError("channel must be one of {'mixed', 'te', 'tm', 'unpolarized'}.")
+    return far_field_intensity(run.farfield.scattered_te, run.farfield.scattered_tm)
+
+
+def unpolarized_far_field_intensity(result: PolarizationResult) -> np.ndarray:
+    """Return the incoherent TE/TM far-field intensity average."""
+    i_te = far_field_intensity_from_result(result.te)
+    i_tm = far_field_intensity_from_result(result.tm)
+    return cast(np.ndarray, 0.5 * (i_te + i_tm))
 
 
 def plot_spheres(
@@ -642,7 +613,6 @@ def plot_source_showcase_slices(
     run,
     *,
     field_component: Literal["initial", "scattered", "internal", "total"] = "initial",
-    channel: Literal["mixed", "te", "tm"] = "mixed",
     plane_values: tuple[float, float, float] = (0.0, 0.0, 0.0),
     phase_component: Literal["Ex", "Ey", "Ez"] = "Ex",
     phase_cmap: str = "twilight_shifted",
@@ -703,7 +673,6 @@ def plot_source_showcase_slices(
                 dx=float(dx),
                 plane=plane,
                 plane_value=float(plane_value),
-                channel=channel,
                 show_progress=bool(show_progress),
                 force_general_initial_field=force_general_initial_field,
                 center_pixel_policy=center_pixel_policy,

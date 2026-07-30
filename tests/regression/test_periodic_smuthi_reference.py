@@ -49,7 +49,6 @@ def test_one_sphere_periodic_coefficients_match_smuthi_reference() -> None:
         wavelength=550.0,
         n_medium=1.0 + 0j,
         lmax=2,
-        source=src,
         periodic=periodic,
         solver_method="direct",
         verbose=False,

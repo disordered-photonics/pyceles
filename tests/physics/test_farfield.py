@@ -470,7 +470,6 @@ def test_finite_beam_simulation_reports_local_absorption_and_closure():
         wavelength=550.0,
         n_medium=1.0 + 0j,
         lmax=3,
-        source=source,
         solver_method="direct",
         verbose=False,
         compute_dtype="complex128",
@@ -479,7 +478,7 @@ def test_finite_beam_simulation_reports_local_absorption_and_closure():
     run = Simulation(
         cfg,
         particles=_single_sphere_particles(radius=60.0, n_particle=1.5 + 0.02j),
-    ).run()
+    ).run(source)
     assert run.power is not None
     flux_defect = _required_float(run.power.flux_defect)
     incident = _required_float(run.power.incident_power)
@@ -524,7 +523,6 @@ def test_finite_beam_lossless_cluster_reports_numerical_local_defect():
         wavelength=550.0,
         n_medium=1.0 + 0j,
         lmax=3,
-        source=source,
         solver_method="direct",
         verbose=False,
         compute_dtype="complex128",
@@ -533,7 +531,7 @@ def test_finite_beam_lossless_cluster_reports_numerical_local_defect():
     run = Simulation(
         cfg,
         particles=_single_sphere_particles(radius=60.0, n_particle=1.5 + 0.0j),
-    ).run()
+    ).run(source)
     assert run.power is not None
     assert run.power.local_absorbed_power is not None
     assert run.power.local_absorbed_power_per_particle is not None
@@ -840,7 +838,6 @@ def test_plane_wave_cross_section_balance_matches_single_sphere_mie():
         wavelength=wavelength,
         n_medium=n_medium,
         lmax=8,
-        source=source,
         # Tighten cross-section regression tolerance by using a finer
         # integration grid for the scattered-power estimate.
         polar_angles=np.linspace(0.0, np.pi, 121),
@@ -854,7 +851,7 @@ def test_plane_wave_cross_section_balance_matches_single_sphere_mie():
         cfg,
         particles=_single_sphere_particles(radius=radius, n_particle=n_particle),
     )
-    run = sim.run()
+    run = sim.run(source)
     assert run.cross_sections is not None
     assert run.initial_coeffs is not None
 
@@ -926,7 +923,6 @@ def test_plane_wave_local_absorption_lossless_single_sphere_is_nearly_zero():
         wavelength=wavelength,
         n_medium=n_medium,
         lmax=8,
-        source=source,
         polar_angles=np.linspace(0.0, np.pi, 121),
         azimuthal_angles=np.linspace(0.0, 2.0 * np.pi, 181, endpoint=False),
         solver_method="direct",
@@ -937,7 +933,7 @@ def test_plane_wave_local_absorption_lossless_single_sphere_is_nearly_zero():
     run = Simulation(
         cfg,
         particles=_single_sphere_particles(radius=radius, n_particle=n_particle),
-    ).run()
+    ).run(source)
     assert run.cross_sections is not None
 
     np.testing.assert_allclose(run.cross_sections.local_absorption, 0.0, rtol=0.0, atol=1e-8)
@@ -970,7 +966,6 @@ def test_plane_wave_circumsphere_flux_matches_local_absorption_single_sphere(
         wavelength=wavelength,
         n_medium=n_medium,
         lmax=8,
-        source=source,
         polar_angles=np.linspace(0.0, np.pi, 121),
         azimuthal_angles=np.linspace(0.0, 2.0 * np.pi, 181, endpoint=False),
         solver_method="direct",
@@ -982,7 +977,7 @@ def test_plane_wave_circumsphere_flux_matches_local_absorption_single_sphere(
         cfg,
         particles=_single_sphere_particles(radius=radius, n_particle=n_particle),
     )
-    run = sim.run()
+    run = sim.run(source)
     assert run.cross_sections is not None
 
     flux_diag = circumsphere_absorbed_power_quadrature(
@@ -1051,7 +1046,6 @@ def test_plane_wave_lossless_cluster_skips_expensive_local_absorption_route(monk
         wavelength=550.0,
         n_medium=1.0 + 0j,
         lmax=3,
-        source=source,
         solver_method="direct",
         verbose=False,
         compute_dtype="complex128",
@@ -1062,7 +1056,7 @@ def test_plane_wave_lossless_cluster_skips_expensive_local_absorption_route(monk
         radii=np.array([60.0, 55.0], dtype=float),
         refractive_indices=np.array([1.50 + 0.0j, 1.45 + 0.0j], dtype=np.complex128),
     )
-    run = Simulation(cfg, particles=particles).run()
+    run = Simulation(cfg, particles=particles).run(source)
     assert run.cross_sections is not None
     np.testing.assert_allclose(run.cross_sections.local_absorption, 0.0, rtol=0.0, atol=0.0)
 
@@ -1083,7 +1077,6 @@ def test_plane_wave_local_absorption_varies_smoothly_with_weak_absorber():
         wavelength=wavelength,
         n_medium=n_medium,
         lmax=3,
-        source=source,
         solver_method="direct",
         verbose=False,
         compute_dtype="complex128",
@@ -1115,7 +1108,7 @@ def test_plane_wave_local_absorption_varies_smoothly_with_weak_absorber():
                 dtype=np.complex128,
             ),
         )
-        run = Simulation(cfg, particles=particles).run()
+        run = Simulation(cfg, particles=particles).run(source)
         assert run.cross_sections is not None
         c_abs_local.append(float(run.cross_sections.local_absorption))
         delta_closure.append(float(run.cross_sections.closure_error))
@@ -1149,7 +1142,6 @@ def test_plane_wave_local_absorption_lossless_layered_sphere_is_nearly_zero():
         wavelength=550.0,
         n_medium=1.0 + 0j,
         lmax=4,
-        source=source,
         solver_method="direct",
         verbose=False,
         compute_dtype="complex128",
@@ -1160,7 +1152,7 @@ def test_plane_wave_local_absorption_lossless_layered_sphere_is_nearly_zero():
         layer_radii=(55.0, 90.0),
         layer_refractive_indices=(1.35 + 0.0j, 1.68 + 0.0j),
     )
-    run = Simulation(cfg, particles=[particle]).run()
+    run = Simulation(cfg, particles=[particle]).run(source)
     assert run.cross_sections is not None
 
     np.testing.assert_allclose(run.cross_sections.local_absorption, 0.0, rtol=0.0, atol=1e-8)
@@ -1187,7 +1179,6 @@ def test_plane_wave_local_absorption_lossless_spheroid_is_small():
         wavelength=550.0,
         n_medium=1.0 + 0j,
         lmax=6,
-        source=source,
         solver_method="direct",
         verbose=False,
         compute_dtype="complex128",
@@ -1200,7 +1191,7 @@ def test_plane_wave_local_absorption_lossless_spheroid_is_small():
         refractive_index=1.47 + 0.0j,
         euler_angles=(0.1, 0.35, -0.2),
     )
-    run = Simulation(cfg, particles=[particle]).run()
+    run = Simulation(cfg, particles=[particle]).run(source)
     assert run.cross_sections is not None
 
     np.testing.assert_allclose(run.cross_sections.local_absorption, 0.0, rtol=0.0, atol=1e-8)
@@ -1287,7 +1278,7 @@ def test_plane_wave_cross_section_balance_requires_local_absorption():
     np.testing.assert_allclose(cs_empty.closure_error, 0.0, rtol=0.0, atol=0.0)
 
 
-def test_simulation_dual_basis_jones_mixing_consistency():
+def test_run_polarizations_jones_mixing_consistency():
     source = PlaneWave(
         wavelength=550.0,
         medium_n=1.0 + 0j,
@@ -1300,32 +1291,30 @@ def test_simulation_dual_basis_jones_mixing_consistency():
         wavelength=550.0,
         n_medium=1.0 + 0j,
         lmax=3,
-        source=source,
         solver_method="direct",
-        solve_polarization_basis=True,
         verbose=False,
     )
     sim = Simulation(
         cfg,
         particles=_single_sphere_particles(radius=60.0, n_particle=1.5 + 0.01j),
     )
-    run = sim.run()
-    assert run.coeffs_basis is not None
+    result = sim.run_polarizations(source)
+    mixed = result.mixed
     np.testing.assert_allclose(
-        run.coeffs,
-        run.coeffs_basis["te"] + 1.0j * run.coeffs_basis["tm"],
+        mixed.coeffs,
+        result.te.coeffs + 1.0j * result.tm.coeffs,
         rtol=1e-12,
         atol=1e-12,
     )
-    assert run.cross_sections_basis is not None
-    assert "te" in run.cross_sections_basis and "tm" in run.cross_sections_basis
-    assert run.cross_sections is not None
-    assert np.isfinite(run.cross_sections.scattering)
-    assert run.unpolarized is not None
-    assert run.unpolarized.cross_sections is not None
+    assert result.te.cross_sections is not None
+    assert result.tm.cross_sections is not None
+    assert mixed.cross_sections is not None
+    assert np.isfinite(mixed.cross_sections.scattering)
+    assert result.unpolarized.cross_sections is not None
+    assert int(result.solver_result.rhs_count) == 2
 
 
-def test_simulation_dual_basis_supports_slm_wrapped_gaussian_source():
+def test_run_polarizations_supports_slm_wrapped_gaussian_source():
     base = GaussianBeam(
         wavelength=550.0,
         medium_n=1.0 + 0j,
@@ -1346,28 +1335,23 @@ def test_simulation_dual_basis_supports_slm_wrapped_gaussian_source():
         wavelength=550.0,
         n_medium=1.0 + 0j,
         lmax=3,
-        source=source,
         solver_method="direct",
-        solve_polarization_basis=True,
         verbose=False,
     )
     sim = Simulation(
         cfg,
         particles=_single_sphere_particles(radius=60.0, n_particle=1.5 + 0.01j),
     )
-    run = sim.run(include_farfield=False)
-    assert run.coeffs_basis is not None
-    assert run.polarization_jones is not None
+    result = sim.run_polarizations(source, include_farfield=False)
     np.testing.assert_allclose(
-        run.coeffs,
-        run.polarization_jones[0] * run.coeffs_basis["te"]
-        + run.polarization_jones[1] * run.coeffs_basis["tm"],
+        result.mixed.coeffs,
+        result.jones[0] * result.te.coeffs + result.jones[1] * result.tm.coeffs,
         rtol=1e-10,
         atol=1e-10,
     )
 
 
-def test_simulation_dual_basis_supports_bessel_beam_source():
+def test_run_polarizations_supports_bessel_beam_source():
     source = BesselBeam(
         wavelength=550.0,
         medium_n=1.0 + 0j,
@@ -1385,9 +1369,7 @@ def test_simulation_dual_basis_supports_bessel_beam_source():
         wavelength=550.0,
         n_medium=1.0 + 0j,
         lmax=3,
-        source=source,
         solver_method="direct",
-        solve_polarization_basis=True,
         polar_angles=np.linspace(0.0, np.pi, 361),
         azimuthal_angles=np.linspace(0.0, 2.0 * np.pi, 241, endpoint=False),
         verbose=False,
@@ -1396,21 +1378,19 @@ def test_simulation_dual_basis_supports_bessel_beam_source():
         cfg,
         particles=_single_sphere_particles(radius=60.0, n_particle=1.5 + 0.01j),
     )
-    run = sim.run()
-    assert run.coeffs_basis is not None
-    assert run.polarization_jones is not None
+    result = sim.run_polarizations(source)
+    mixed = result.mixed
     np.testing.assert_allclose(
-        run.coeffs,
-        run.polarization_jones[0] * run.coeffs_basis["te"]
-        + run.polarization_jones[1] * run.coeffs_basis["tm"],
+        mixed.coeffs,
+        result.jones[0] * result.te.coeffs + result.jones[1] * result.tm.coeffs,
         rtol=1e-10,
         atol=1e-10,
     )
-    assert run.power is None
-    assert run.cross_sections is None
+    assert mixed.power is None
+    assert mixed.cross_sections is None
 
 
-def test_simulation_dual_basis_mixed_precision_runs_without_numpy2_copy_errors():
+def test_run_polarizations_mixed_precision_runs_without_numpy2_copy_errors():
     source = PlaneWave(
         wavelength=550.0,
         medium_n=1.0 + 0j,
@@ -1423,9 +1403,7 @@ def test_simulation_dual_basis_mixed_precision_runs_without_numpy2_copy_errors()
         wavelength=550.0,
         n_medium=1.0 + 0j,
         lmax=2,
-        source=source,
         solver_method="direct",
-        solve_polarization_basis=True,
         compute_dtype="complex64",
         accum_dtype="complex128",
         verbose=False,
@@ -1434,19 +1412,16 @@ def test_simulation_dual_basis_mixed_precision_runs_without_numpy2_copy_errors()
         cfg,
         particles=_single_sphere_particles(radius=50.0, n_particle=1.45 + 0.01j),
     )
-    run = sim.run()
-    assert run.coeffs_basis is not None
-    assert run.polarization_jones is not None
+    result = sim.run_polarizations(source)
     np.testing.assert_allclose(
-        run.coeffs,
-        run.polarization_jones[0] * run.coeffs_basis["te"]
-        + run.polarization_jones[1] * run.coeffs_basis["tm"],
+        result.mixed.coeffs,
+        result.jones[0] * result.te.coeffs + result.jones[1] * result.tm.coeffs,
         rtol=1e-11,
         atol=1e-11,
     )
 
 
-def test_simulation_dual_basis_farfield_matches_single_channel_run():
+def test_run_polarizations_farfield_matches_single_channel_run():
     source = PlaneWave(
         wavelength=550.0,
         medium_n=1.0 + 0j,
@@ -1459,7 +1434,6 @@ def test_simulation_dual_basis_farfield_matches_single_channel_run():
         wavelength=550.0,
         n_medium=1.0 + 0j,
         lmax=3,
-        source=source,
         solver_method="direct",
         compute_dtype="complex64",
         accum_dtype="complex128",
@@ -1467,27 +1441,25 @@ def test_simulation_dual_basis_farfield_matches_single_channel_run():
     )
     particles = _single_sphere_particles(radius=60.0, n_particle=1.5 + 0.01j)
 
-    run_single = Simulation(SimulationConfig(**common), particles=particles).run()
-    run_basis = Simulation(
-        SimulationConfig(**common, solve_polarization_basis=True),
-        particles=particles,
-    ).run()
+    run_single = Simulation(SimulationConfig(**common), particles=particles).run(source)
+    result = Simulation(SimulationConfig(**common), particles=particles).run_polarizations(source)
+    mixed = result.mixed
 
     np.testing.assert_allclose(
-        run_basis.farfield.scattered_te["coeff"],
+        mixed.farfield.scattered_te["coeff"],
         run_single.farfield.scattered_te["coeff"],
         rtol=1e-6,
         atol=1e-7,
     )
     np.testing.assert_allclose(
-        run_basis.farfield.scattered_tm["coeff"],
+        mixed.farfield.scattered_tm["coeff"],
         run_single.farfield.scattered_tm["coeff"],
         rtol=1e-6,
         atol=1e-7,
     )
 
 
-def test_simulation_dual_basis_avoids_redundant_mixed_solve_and_farfield(monkeypatch):
+def test_run_polarizations_uses_one_block_solve_and_two_farfields(monkeypatch):
     import pyceles.simulation.postprocess as simulation_postprocess_module
     import pyceles.simulation.solve as simulation_solve_module
 
@@ -1507,9 +1479,7 @@ def test_simulation_dual_basis_avoids_redundant_mixed_solve_and_farfield(monkeyp
         return compute_far_field_patterns_real(*args, **kwargs)
 
     monkeypatch.setattr(
-        simulation_solve_module,
-        "solve_linear_system",
-        _solve_linear_system_wrapped,
+        simulation_solve_module, "solve_linear_system", _solve_linear_system_wrapped
     )
     monkeypatch.setattr(
         simulation_postprocess_module,
@@ -1529,21 +1499,20 @@ def test_simulation_dual_basis_avoids_redundant_mixed_solve_and_farfield(monkeyp
         wavelength=550.0,
         n_medium=1.0 + 0j,
         lmax=3,
-        source=source,
         solver_method="direct",
-        solve_polarization_basis=True,
         verbose=False,
     )
-    run = Simulation(
+    result = Simulation(
         cfg,
         particles=_single_sphere_particles(radius=60.0, n_particle=1.5 + 0.01j),
-    ).run()
+    ).run_polarizations(source)
 
     assert len(solve_rhs_shapes) == 1
-    assert len(solve_rhs_shapes[0]) == 2 and solve_rhs_shapes[0][1] == 2
+    assert solve_rhs_shapes[0][1] == 2
     assert farfield_calls == 2
-    assert run.solver_result_basis is not None
-    assert int(run.solver_result.rhs_count) == 2
+    assert int(result.solver_result.rhs_count) == 2
+    assert not hasattr(result.te, "solver_result")
+    assert not hasattr(result.tm, "solver_result")
 
 
 def test_solve_sources_reuses_dense_lu_factorization(monkeypatch):
@@ -1575,7 +1544,6 @@ def test_solve_sources_reuses_dense_lu_factorization(monkeypatch):
         wavelength=550.0,
         n_medium=1.0 + 0j,
         lmax=3,
-        source=source,
         solver_method="direct",
         verbose=False,
     )
@@ -1604,7 +1572,6 @@ def test_solve_sources_te_tm_matches_single_runs():
         wavelength=550.0,
         n_medium=1.0 + 0j,
         lmax=3,
-        source=source,
         solver_method="direct",
         compute_dtype="complex64",
         accum_dtype="complex128",
@@ -1622,13 +1589,13 @@ def test_solve_sources_te_tm_matches_single_runs():
     )
     multi = sim.postprocess_sources(solved)
     run_te_single = Simulation(
-        SimulationConfig(**{**cfg.__dict__, "source": source.with_polarization("TE")}),
+        cfg,
         particles=_single_sphere_particles(radius=60.0, n_particle=1.5 + 0.01j),
-    ).run()
+    ).run(source.with_polarization("TE"))
     run_tm_single = Simulation(
-        SimulationConfig(**{**cfg.__dict__, "source": source.with_polarization("TM")}),
+        cfg,
         particles=_single_sphere_particles(radius=60.0, n_particle=1.5 + 0.01j),
-    ).run()
+    ).run(source.with_polarization("TM"))
 
     assert int(multi.solver_result.rhs_count) == 2
     np.testing.assert_allclose(multi["te"].coeffs, run_te_single.coeffs, rtol=1e-6, atol=1e-7)
@@ -1650,7 +1617,6 @@ def test_solve_sources_requires_mapping():
             wavelength=550.0,
             n_medium=1.0 + 0j,
             lmax=2,
-            source=src0,
             solver_method="direct",
             verbose=False,
         ),
@@ -1675,7 +1641,6 @@ def test_solve_sources_mapping_labels():
             wavelength=550.0,
             n_medium=1.0 + 0j,
             lmax=2,
-            source=src0,
             solver_method="direct",
             verbose=False,
         ),
@@ -1684,7 +1649,7 @@ def test_solve_sources_mapping_labels():
     solved = sim.solve_sources({"first": src0, "second": src1})
     multi = sim.postprocess_sources(solved)
     assert tuple(multi.labels) == ("first", "second")
-    assert set(multi.runs) == {"first", "second"}
+    assert set(multi.channels) == {"first", "second"}
 
 
 def test_postprocess_sources_include_farfield_false_keeps_solve_outputs():
@@ -1702,7 +1667,6 @@ def test_postprocess_sources_include_farfield_false_keeps_solve_outputs():
             wavelength=550.0,
             n_medium=1.0 + 0j,
             lmax=2,
-            source=src0,
             solver_method="direct",
             verbose=False,
         ),
@@ -1743,7 +1707,6 @@ def test_simulation_supports_no_particle_source_only_run():
         wavelength=550.0,
         n_medium=1.0 + 0j,
         lmax=3,
-        source=source,
         solver_method="gmres",
         solver_rtol=1e-6,
         compute_dtype="complex64",
@@ -1753,7 +1716,7 @@ def test_simulation_supports_no_particle_source_only_run():
     run = Simulation(
         cfg,
         particles=[],
-    ).run()
+    ).run(source)
 
     assert run.coeffs.shape[0] == 0
     assert run.solver_result.info == 0

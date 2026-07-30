@@ -1,55 +1,33 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 from pyceles.core.periodic import PeriodicSpec
-from pyceles.core.sources import JonesPolarizedSource, PlaneWave
-from pyceles.postprocessing._channels import is_pure_channel_result
+from pyceles.core.sources import PlaneWave
 from pyceles.postprocessing.farfield import periodic_order_amplitudes
 
 from .components import NearFieldComponents
 from .slice import reshape_field_points
 
 if TYPE_CHECKING:
-    from pyceles.simulation import SimulationResult
+    from pyceles.simulation import ChannelResult
 
 
 def _resolve_periodic_channel_payload(
-    run: SimulationResult, *, channel: Literal["mixed", "te", "tm"]
+    run: ChannelResult,
 ) -> tuple[np.ndarray, PlaneWave]:
-    """Resolve coefficient/source payload for one periodic near-field channel."""
-    source = run.config.source
+    """Return the explicit coefficient/source pair for one periodic channel."""
+    source = run.source
     if not isinstance(source, PlaneWave):
         raise NotImplementedError(
             "Periodic near-field evaluation currently supports PlaneWave sources only."
         )
-    if channel == "mixed":
-        return np.asarray(run.coeffs), source
-
-    if run.coeffs_basis is not None and channel in run.coeffs_basis:
-        coeffs = np.asarray(run.coeffs_basis[channel])
-        if not isinstance(source, JonesPolarizedSource):
-            raise ValueError(
-                "Basis periodic near-field channel requires a source with Jones metadata "
-                "and `with_polarization('TE'/'TM')`."
-            )
-        pol_label: Literal["TE", "TM"] = "TE" if channel == "te" else "TM"
-        return coeffs, source.with_polarization(pol_label)
-
-    if is_pure_channel_result(run, channel):
-        return np.asarray(run.coeffs), source
-
-    raise ValueError(
-        "Requested basis periodic near-field channel, but `run.coeffs_basis` is not available. "
-        "Use `solve_polarization_basis=True` with `Simulation.run()`, or use a channel result "
-        "from `Simulation.postprocess_sources(Simulation.solve_sources(...))` and query it with "
-        "`channel='mixed'`."
-    )
+    return np.asarray(run.coeffs), source
 
 
-def _slab_z_bounds(run: SimulationResult) -> tuple[float, float]:
+def _slab_z_bounds(run: ChannelResult) -> tuple[float, float]:
     """Return conservative particle-slab z bounds from circumscribing spheres."""
     if run.n_particles == 0:
         return float("-inf"), float("inf")
@@ -205,10 +183,9 @@ def _accumulate_order_field(
 
 
 def compute_periodic_near_field_exterior(
-    run: SimulationResult,
+    run: ChannelResult,
     *,
     points: np.ndarray,
-    channel: Literal["mixed", "te", "tm"] = "mixed",
     field_bmax: float | None = None,
     slab_tolerance: float = 1e-12,
     show_progress: bool = False,
@@ -224,16 +201,7 @@ def compute_periodic_near_field_exterior(
         raise TypeError(
             "Periodic near-field evaluation requires `run.config.periodic` to be a PeriodicSpec."
         )
-    channel_key = str(channel).lower()
-    if channel_key not in {"mixed", "te", "tm"}:
-        raise ValueError("`channel` must be one of {'mixed', 'te', 'tm'}.")
-    if channel_key == "mixed":
-        channel_literal: Literal["mixed", "te", "tm"] = "mixed"
-    elif channel_key == "te":
-        channel_literal = "te"
-    else:
-        channel_literal = "tm"
-    coeffs, source = _resolve_periodic_channel_payload(run, channel=channel_literal)
+    coeffs, source = _resolve_periodic_channel_payload(run)
 
     pts_flat, lead_shape = reshape_field_points(points)
     n_points = int(pts_flat.shape[0])

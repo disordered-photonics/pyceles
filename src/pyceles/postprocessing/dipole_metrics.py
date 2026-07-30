@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -17,7 +17,7 @@ from pyceles.core.sources import DipoleCollection, DipoleSource
 from pyceles.postprocessing.nearfield.scattered import compute_scattered_field
 
 if TYPE_CHECKING:
-    from pyceles.simulation import SimulationResult
+    from pyceles.simulation import ChannelResult
 
 
 @dataclass(frozen=True)
@@ -66,13 +66,12 @@ def _dipole_arrays(source: DipoleSource | DipoleCollection) -> tuple[np.ndarray,
 
 
 def compute_dipole_power_ldos(
-    run: SimulationResult,
+    run: ChannelResult,
     *,
-    channel: Literal["mixed"] = "mixed",
     allow_inside_particle: bool = False,
     show_progress: bool = False,
 ) -> DipolePowerLDOSResult:
-    r"""Compute dipole dissipated power and LDOS-like enhancement from `SimulationResult`.
+    r"""Compute dipole dissipated power and LDOS-like enhancement from an explicit channel result.
 
     This helper is for local dipole-source runs (`DipoleSource` or
     `DipoleCollection`) and evaluates only particle-scattered fields at dipole
@@ -92,12 +91,7 @@ def compute_dipole_power_ldos(
       currently untested in pyceles; by default this raises unless
       `allow_inside_particle=True`.
     """
-    if channel != "mixed":
-        raise ValueError(
-            "Dipole power/LDOS helpers currently support only `channel='mixed'` "
-            "because dipole sources do not define TE/TM basis channels."
-        )
-    source = run.config.source
+    source = run.source
     if not isinstance(source, (DipoleSource, DipoleCollection)):
         raise TypeError(
             "Dipole power/LDOS helpers require a run produced from DipoleSource "
@@ -179,9 +173,8 @@ def compute_dipole_power_ldos(
 
 
 def compute_dipole_ldos_enhancement(
-    run: SimulationResult,
+    run: ChannelResult,
     *,
-    channel: Literal["mixed"] = "mixed",
     allow_inside_particle: bool = False,
     show_progress: bool = False,
     squeeze: bool = True,
@@ -192,7 +185,6 @@ def compute_dipole_ldos_enhancement(
     """
     out = compute_dipole_power_ldos(
         run,
-        channel=channel,
         allow_inside_particle=allow_inside_particle,
         show_progress=show_progress,
     ).enhancement

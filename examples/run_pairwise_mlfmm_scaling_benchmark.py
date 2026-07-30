@@ -386,7 +386,6 @@ def _run_one(
         wavelength=float(args.wavelength),
         n_medium=float(args.n_medium) + 0j,
         lmax=int(args.lmax),
-        source=source,
         solver_method=cast(SolverMethod, args.solver),
         solver_rtol=float(args.solver_rtol),
         solver_restart=int(args.solver_restart),
@@ -405,7 +404,7 @@ def _run_one(
     )
     sim = pcl.Simulation(cfg, particles=particles)
     start = time.perf_counter()
-    run = sim.run(include_farfield=False)
+    run = sim.run(source, include_farfield=False)
     wall_time = time.perf_counter() - start
     operator_diagnostics = _operator_diagnostics(sim)
     solver = run.solver_result

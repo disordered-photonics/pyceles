@@ -43,7 +43,6 @@ def _derived_focused_na(
 
 
 def _make_no_particle_simulation(
-    source: pcl.core.Source,
     *,
     wavelength: float,
     n_medium: complex,
@@ -57,7 +56,6 @@ def _make_no_particle_simulation(
         wavelength=float(wavelength),
         n_medium=complex(n_medium),
         lmax=int(lmax),
-        source=source,
         polar_angles=pcl.core.uniform_polar_grid(int(n_polar)),
         azimuthal_angles=pcl.core.uniform_periodic_azimuth_grid(int(n_azimuth)),
         solver_method="auto",
@@ -233,7 +231,6 @@ def _render_source_showcase(
     fig, _ = pcl.io.plot_source_showcase_slices(
         run,
         field_component="initial",
-        channel="mixed",
         plane_values=(0.0, 0.0, 0.0),
         phase_component="Ex",
         phase_cmap=str(phase_cmap),
@@ -530,7 +527,6 @@ def main() -> None:
             if not args.quiet:
                 print(f"Running showcase for {label}...")
             sim = _make_no_particle_simulation(
-                source,
                 wavelength=wavelength,
                 n_medium=n_medium,
                 lmax=int(args.lmax),
@@ -538,7 +534,7 @@ def main() -> None:
                 n_azimuth=int(args.n_azimuth),
                 verbose=(not args.quiet),
             )
-            run = sim.run(include_farfield=False)
+            run = sim.run(source, include_farfield=False)
             source_note = f"{_source_note(source)} | {_propagation_and_polarization_note(source)}"
             out_path = _render_source_showcase(
                 run=run,

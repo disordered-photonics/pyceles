@@ -8,7 +8,7 @@ import pyceles as pcl
 from pyceles.core.particles import spheres_from_arrays
 
 
-def _scattered_intensity(run: pcl.SimulationResult) -> np.ndarray:
+def _scattered_intensity(run: pcl.ChannelResult) -> np.ndarray:
     ff = run.farfield
     return cast(
         np.ndarray,
@@ -37,7 +37,6 @@ def test_scattered_field_far_zone_obeys_inverse_radius_scaling():
         wavelength=550.0,
         n_medium=1.0 + 0j,
         lmax=3,
-        source=source,
         solver_method="direct",
         verbose=False,
     )
@@ -48,12 +47,12 @@ def test_scattered_field_far_zone_obeys_inverse_radius_scaling():
             radii=np.array([90.0], dtype=float),
             refractive_indices=np.array([1.55 + 0.01j], dtype=np.complex128),
         ),
-    ).run()
+    ).run(source)
 
     r1 = 30_000.0
     r2 = 60_000.0
     pts = np.array([[r1, 0.0, 0.0], [r2, 0.0, 0.0]], dtype=float)
-    nf = pcl.compute_near_field(run, points=pts, channel="mixed", show_progress=False)
+    nf = pcl.compute_near_field(run, points=pts, show_progress=False)
 
     e1 = float(np.linalg.norm(nf.E_scattered[0]))
     e2 = float(np.linalg.norm(nf.E_scattered[1]))
@@ -79,7 +78,6 @@ def test_single_sphere_normal_incidence_unpolarized_scattering_is_azimuthally_sy
         wavelength=550.0,
         n_medium=1.0 + 0j,
         lmax=3,
-        source=source,
         polar_angles=np.linspace(0.0, np.pi, 161, endpoint=True),
         azimuthal_angles=np.linspace(0.0, 2.0 * np.pi, 96, endpoint=False),
         solver_method="direct",
@@ -156,21 +154,21 @@ def test_global_z_rotation_covariance_for_plane_wave_cluster():
         verbose=False,
     )
     run_1 = pcl.Simulation(
-        pcl.SimulationConfig(source=source_1, **common),
+        pcl.SimulationConfig(**common),
         particles=spheres_from_arrays(
             positions=positions,
             radii=radii,
             refractive_indices=n_particle,
         ),
-    ).run()
+    ).run(source_1)
     run_2 = pcl.Simulation(
-        pcl.SimulationConfig(source=source_2, **common),
+        pcl.SimulationConfig(**common),
         particles=spheres_from_arrays(
             positions=_rotate_z(positions, delta),
             radii=radii,
             refractive_indices=n_particle,
         ),
-    ).run()
+    ).run(source_2)
 
     I1 = _scattered_intensity(run_1)
     I2 = _scattered_intensity(run_2)

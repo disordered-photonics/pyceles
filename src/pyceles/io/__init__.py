@@ -26,6 +26,7 @@ from .plotting import (
     plot_poynting,
     plot_source_showcase_slices,
     plot_spheres,
+    unpolarized_far_field_intensity,
     unpolarized_near_field_intensity,
 )
 from .workflows import load_simulation_h5, save_simulation_h5
@@ -58,5 +59,6 @@ __all__ = [
     "save_periodic_h5",
     "save_simulation_h5",
     "save_solution_h5",
+    "unpolarized_far_field_intensity",
     "unpolarized_near_field_intensity",
 ]

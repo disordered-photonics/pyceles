@@ -25,8 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exact-near/Rayleigh-far split now accelerates local-SVWF near-field points
   inside the particle slab without changing solved coefficients.
 - Added an opt-in `ResultRetention` policy for omitting optional incident,
-  right-hand-side, residual-history, and polarization-basis coefficient arrays
-  from completed large-run results.
+  right-hand-side, and residual-history arrays from completed large-run results.
+  Every solved RHS remains essential state and is retained exactly once.
 - Added a uniform immutable `ParticleCollection` instance/archetype model for
   every particle family. Geometry, HDF5 persistence, and NumPy/CuPy single-body
   preparation now retain one descriptor and one prepared operator per unique
@@ -45,6 +45,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pairwise-vs-MLFMM scaling benchmark.
 
 ### Changed
+- Multi-source labels now must be explicit non-empty strings; arbitrary mapping
+  keys are no longer silently coerced. Simulation, block-source, polarization,
+  and linear-solver result representations are compact structural summaries
+  rather than recursive dumps of coefficient, field, and residual arrays.
+- Breaking: source cardinality and solver ownership are now explicit.
+  `SimulationConfig` is source-independent; execution uses `run(source)`,
+  `run_sources({label: source, ...})`, or `run_polarizations(source)`. Ordinary
+  `SimulationResult` objects represent one directly solved channel and own one
+  matching single-RHS solver report. `MultiSourceResult` and
+  `PolarizationResult` own their authoritative block solver report and expose
+  solver-free `ChannelResult` payloads. Warm starts are now explicit execution
+  inputs on those operations, including label-aligned mappings for block solves,
+  rather than cardinality-dependent arrays embedded in `SimulationConfig`.
+  Polarization uses the same two-RHS block path as arbitrary source batches,
+  supports periodic plane waves, exposes TE/TM channels and typed unpolarized
+  diagnostics, and derives the coherent Jones channel without permanently
+  retaining a third coefficient vector. Periodic Jones mixing reuses the two
+  basis order payloads instead of evaluating a redundant third order transform.
+  The `solve_polarization_basis` flag, parallel `*_basis` result fields, and string
+  channel selectors in near-field/plotting helpers were removed. Finite and
+  periodic near-field entry points now reject channels from the wrong physical
+  formulation instead of silently evaluating an accidental fallback. HDF5
+  workflow serialization accepts one explicit channel at a time and never
+  assigns a fabricated solver report to a derived or block-owned channel.
 - Breaking: simulation-level plane-wave cross sections now use the immutable
   `CrossSectionBalance` contract (`extinction`, `scattering`,
   `local_absorption`, `absorption_by_difference`, and `closure_error`). The
@@ -53,7 +77,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   typed `UnpolarizedDiagnostics` container. Conventional single-particle Mie
   helper mappings are unchanged.
 - Breaking: finite-beam, periodic, and dipole power accounting now uses the
-  common immutable `PowerBalance` exposed on `SimulationResult.power`. Periodic
+  common immutable `PowerBalance` exposed on `ChannelResult.power`. Periodic
   payloads retain only order-resolved amplitudes/fluxes plus the same `power`
   object. Ambiguous `absorptance`, `A_raw`, `P_abs_raw_diff`, and dictionary-key
   aliases were removed; raw missing flux is explicitly `flux_defect`, local

@@ -10,9 +10,10 @@ Most user workflows start from:
 
 - `pyceles.SimulationConfig`
 - `pyceles.Simulation`
-- `pyceles.SimulationResult`
-- `pyceles.MultiSourceSimulationResult`
-- `pyceles.SolvedSourcesResult`
+- `pyceles.SimulationResult` for one directly solved source
+- `pyceles.ChannelResult` for a channel owned by a block result
+- `pyceles.MultiSourceResult` and `pyceles.MultiSourceSolveResult`
+- `pyceles.PolarizationResult`
 - `pyceles.ResultRetention`
 
 The high-level pattern is:
@@ -21,7 +22,11 @@ The high-level pattern is:
 import pyceles as pcl
 
 config = pcl.SimulationConfig(...)
-result = pcl.Simulation(config, particles=[...]).run()
+simulation = pcl.Simulation(config, particles=[...])
+result = simulation.run(source)
+
+multi = simulation.run_sources({"left": source_a, "right": source_b})
+polarized = simulation.run_polarizations(jones_source)
 ```
 
 ## Particles
@@ -72,8 +77,9 @@ Dipole diagnostics:
 - `pyceles.compute_dipole_power_ldos`
 - `pyceles.compute_dipole_ldos_enhancement`
 
-Power accounting is exposed uniformly through `SimulationResult.power`, an
-immutable `pyceles.PowerBalance` for finite beams, periodic plane waves, and
+Power accounting is exposed uniformly through `ChannelResult.power`
+(including the directly solved `SimulationResult` subtype), as an immutable
+`pyceles.PowerBalance` for finite beams, periodic plane waves, and
 local-source workflows where the corresponding quantities exist:
 
 - absolute fields: `incident_power`, `reflected_power`, `transmitted_power`,
@@ -94,12 +100,12 @@ Periodic order-resolved results remain on `pyceles.PeriodicFarFieldPayload`:
 - `reflected_amplitudes` and `transmitted_amplitudes`,
 - `reflected_flux_per_order` and `transmitted_flux_per_order`,
 - `incident_flux`, order indices/wavevectors, and propagation masks,
-- `power`, which is the same common balance exposed as `SimulationResult.power`.
+- `power`, which is the same common balance exposed as `ChannelResult.power`.
 
 There are no `absorptance`, `A_raw`, or historical power-key aliases.
 
 Plane-wave cross sections use the same typed-diagnostic policy through
-`SimulationResult.cross_sections`, an immutable `pyceles.CrossSectionBalance`:
+`ChannelResult.cross_sections`, an immutable `pyceles.CrossSectionBalance`:
 
 - `extinction`, `scattering`, and `local_absorption`,
 - `absorption_by_difference = extinction - scattering`,
@@ -107,9 +113,9 @@ Plane-wave cross sections use the same typed-diagnostic policy through
 
 The low-level constructor is `plane_wave_cross_section_balance(...)`; it
 requires the local absorption estimate explicitly and exposes no `C_*` aliases.
-For polarization-basis runs, `cross_sections_basis` stores one balance per
-channel and `unpolarized` is a typed `pyceles.UnpolarizedDiagnostics` rather
-than a heterogeneous dictionary.
+`PolarizationResult.te` and `.tm` expose one balance per solved basis channel,
+while `.unpolarized` is a typed `pyceles.UnpolarizedDiagnostics`. The coherent
+Jones channel is available as the lazily materialized `.mixed` channel.
 
 ## Periodic descriptors
 

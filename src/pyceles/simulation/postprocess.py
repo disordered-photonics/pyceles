@@ -27,6 +27,7 @@ from pyceles.postprocessing.farfield import (
     finite_beam_power_balance,
     local_absorption_cross_section_from_exciting,
     local_power_balance_from_exciting,
+    mix_periodic_farfield_payloads,
     plane_wave_cross_section_balance,
     pwp_power_decomposition,
 )
@@ -34,16 +35,19 @@ from pyceles.postprocessing.farfield.periodic import periodic_plane_wave_orders
 
 from .config import validate_angular_grid_pair
 from .results import (
-    MultiSourceSimulationResult,
+    ChannelResult,
+    MultiSourceResult,
+    MultiSourceSolveResult,
+    PolarizationResult,
     ResultRetention,
     SimulationResult,
-    SolvedSourcesResult,
     UnpolarizedDiagnostics,
     _apply_solver_result_retention,
+    _CoherentChannelPayload,
     average_cross_section_balances,
     average_power_balances,
     empty_farfield_patterns,
-    single_rhs_result_from_multi,
+    simulation_result_from_channel,
 )
 
 if TYPE_CHECKING:
@@ -436,58 +440,24 @@ def _build_channel_diagnostics(
     return power, cross_sections, decomposition_forward, decomposition_backward
 
 
-def _basis_channel_payloads(
-    run_te: SimulationResult,
-    run_tm: SimulationResult,
-) -> tuple[
-    dict[str, PowerBalance] | None,
-    dict[str, CrossSectionBalance] | None,
-    UnpolarizedDiagnostics | None,
-    dict[str, dict[str, float]] | None,
-    dict[str, dict[str, float]] | None,
-]:
-    """Collect basis-channel diagnostics and incoherent unpolarized averages."""
-    power_basis: dict[str, PowerBalance] | None = None
-    cross_sections_basis: dict[str, CrossSectionBalance] | None = None
-    decomposition_forward_basis: dict[str, dict[str, float]] | None = None
-    decomposition_backward_basis: dict[str, dict[str, float]] | None = None
-    unpolarized: UnpolarizedDiagnostics | None = None
-
-    unpolarized_power = None
-    unpolarized_cross_sections = None
+def _unpolarized_diagnostics(
+    run_te: ChannelResult,
+    run_tm: ChannelResult,
+) -> UnpolarizedDiagnostics:
+    """Build incoherent TE/TM scalar averages for one polarization solve."""
+    power = None
+    cross_sections = None
     if run_te.power is not None and run_tm.power is not None:
-        power_basis = {"te": run_te.power, "tm": run_tm.power}
-        unpolarized_power = average_power_balances(run_te.power, run_tm.power)
+        power = average_power_balances(run_te.power, run_tm.power)
     if run_te.cross_sections is not None and run_tm.cross_sections is not None:
-        cross_sections_basis = {"te": run_te.cross_sections, "tm": run_tm.cross_sections}
-        unpolarized_cross_sections = average_cross_section_balances(
-            run_te.cross_sections, run_tm.cross_sections
+        cross_sections = average_cross_section_balances(
+            run_te.cross_sections,
+            run_tm.cross_sections,
         )
-    if unpolarized_power is not None or unpolarized_cross_sections is not None:
-        unpolarized = UnpolarizedDiagnostics(
-            power=unpolarized_power,
-            cross_sections=unpolarized_cross_sections,
-        )
-    if run_te.decomposition_forward is not None and run_tm.decomposition_forward is not None:
-        decomposition_forward_basis = {
-            "te": run_te.decomposition_forward,
-            "tm": run_tm.decomposition_forward,
-        }
-    if run_te.decomposition_backward is not None and run_tm.decomposition_backward is not None:
-        decomposition_backward_basis = {
-            "te": run_te.decomposition_backward,
-            "tm": run_tm.decomposition_backward,
-        }
-    return (
-        power_basis,
-        cross_sections_basis,
-        unpolarized,
-        decomposition_forward_basis,
-        decomposition_backward_basis,
-    )
+    return UnpolarizedDiagnostics(power=power, cross_sections=cross_sections)
 
 
-def _assemble_simulation_result(
+def _assemble_channel_result(
     sim: Simulation,
     *,
     source: Source,
@@ -495,7 +465,6 @@ def _assemble_simulation_result(
     initial_coeffs: np.ndarray,
     rhs: np.ndarray,
     coeffs: np.ndarray,
-    solver_result,
     k: float,
     k0: float,
     compute_dtype: np.dtype,
@@ -505,68 +474,26 @@ def _assemble_simulation_result(
     cross_sections: CrossSectionBalance | None,
     decomposition_forward: dict[str, float] | None,
     decomposition_backward: dict[str, float] | None,
-    initial_coeffs_basis: dict[str, np.ndarray] | None = None,
-    coeffs_basis: dict[str, np.ndarray] | None = None,
-    solver_result_basis=None,
-    farfield_basis: dict[str, FarFieldPatterns] | None = None,
-    power_basis: dict[str, PowerBalance] | None = None,
-    cross_sections_basis: dict[str, CrossSectionBalance] | None = None,
-    unpolarized: UnpolarizedDiagnostics | None = None,
-    decomposition_forward_basis: dict[str, dict[str, float]] | None = None,
-    decomposition_backward_basis: dict[str, dict[str, float]] | None = None,
-    polarization_jones: tuple[complex, complex] | None = None,
     periodic: PeriodicFarFieldPayload | None = None,
-) -> SimulationResult:
-    """Assemble the canonical completed-run payload from solved coefficients."""
-    cfg = sim.config
+) -> ChannelResult:
+    """Assemble one physical channel without assigning solve provenance."""
     ns = int(sim.positions.shape[0])
-    nm = int(n_modes(cfg.lmax))
-    pol_jones = (
-        source.jones_coefficients()
-        if polarization_jones is None and isinstance(source, JonesPolarizedSource)
-        else polarization_jones
-    )
-    config_out = cfg if cfg.source is source else replace(cfg, source=source)
-    solver_result_out = _apply_solver_result_retention(
-        solver_result,
-        retention=retention,
-    )
-    if solver_result_basis is None:
-        solver_result_basis_out = None
-    elif solver_result_basis is solver_result:
-        solver_result_basis_out = solver_result_out
-    else:
-        solver_result_basis_out = _apply_solver_result_retention(
-            solver_result_basis,
-            retention=retention,
-        )
-    return SimulationResult(
-        config=config_out,
+    nm = int(n_modes(sim.config.lmax))
+    return ChannelResult(
+        config=sim.config,
+        source=source,
         particles=sim.particles,
         k=k,
         k0=k0,
         coeffs=np.asarray(coeffs),
         rhs=np.asarray(rhs).reshape(ns, nm) if retention.rhs else None,
         initial_coeffs=np.asarray(initial_coeffs) if retention.initial_coeffs else None,
-        initial_coeffs_basis=(
-            initial_coeffs_basis if retention.polarization_basis_coeffs else None
-        ),
-        coeffs_basis=coeffs_basis if retention.polarization_basis_coeffs else None,
-        solver_result=solver_result_out,
-        solver_result_basis=solver_result_basis_out,
         farfield=farfield,
-        farfield_basis=farfield_basis,
         power=power,
-        power_basis=power_basis,
         cross_sections=cross_sections,
-        cross_sections_basis=cross_sections_basis,
-        unpolarized=unpolarized,
         decomposition_forward=decomposition_forward,
         decomposition_backward=decomposition_backward,
-        decomposition_forward_basis=decomposition_forward_basis,
-        decomposition_backward_basis=decomposition_backward_basis,
         periodic=periodic,
-        polarization_jones=pol_jones,
         compute_dtype=str(compute_dtype),
         accum_dtype=str(accum_dtype),
     )
@@ -580,7 +507,6 @@ def build_single_channel_result(
     initial_coeffs: np.ndarray,
     rhs_flat: np.ndarray,
     coeffs: np.ndarray,
-    solver_result,
     backend_coeffs: Any | None = None,
     k: float,
     k0: float,
@@ -589,8 +515,8 @@ def build_single_channel_result(
     farfield_polar_angles: np.ndarray,
     farfield_azimuthal_angles: np.ndarray,
     include_farfield: bool,
-) -> SimulationResult:
-    """Assemble one channel `SimulationResult` from solved coefficients."""
+) -> ChannelResult:
+    """Assemble one solved channel from its coefficients and observables."""
     cfg = sim.config
     positions = sim.positions
     Ns = positions.shape[0]
@@ -630,7 +556,7 @@ def build_single_channel_result(
     else:
         ff = empty_farfield_patterns(compute_dtype)
 
-    return _assemble_simulation_result(
+    return _assemble_channel_result(
         sim,
         source=source,
         retention=retention,
@@ -639,7 +565,6 @@ def build_single_channel_result(
         coeffs=coeffs,
         rhs=np.asarray(rhs_flat).reshape(Ns, Nm),
         initial_coeffs=initial_coeffs,
-        solver_result=solver_result,
         compute_dtype=compute_dtype,
         accum_dtype=accum_dtype,
         farfield=ff,
@@ -652,18 +577,23 @@ def build_single_channel_result(
 
 def postprocess_sources_impl(
     sim: Simulation,
-    solved: SolvedSourcesResult,
+    solved: MultiSourceSolveResult,
     *,
     include_farfield: bool = True,
     farfield_polar_angles: np.ndarray | None = None,
     farfield_azimuthal_angles: np.ndarray | None = None,
     backend_coeffs_by_label: Mapping[str, Any] | None = None,
     retention: ResultRetention | None = None,
-) -> MultiSourceSimulationResult:
-    """Postprocess solved channels into per-channel `SimulationResult` payloads."""
+) -> MultiSourceResult:
+    """Postprocess one block solve into explicit per-source channel payloads."""
     retained = ResultRetention() if retention is None else retention
     if not isinstance(retained, ResultRetention):
         raise TypeError("`retention` must be a ResultRetention instance or None.")
+    if solved.config is not sim.config or solved.particles is not sim.particles:
+        raise ValueError(
+            "`solved` must come from this Simulation instance or another Simulation "
+            "sharing the exact same immutable config and particle collection."
+        )
     cfg = sim.config
     labels = tuple(solved.labels)
     n_channels = len(labels)
@@ -675,8 +605,8 @@ def postprocess_sources_impl(
     accum_dtype = np.dtype(solved.accum_dtype)
 
     if periodic_run:
-        periodic_runs: dict[str, SimulationResult] = {}
-        for j, label in enumerate(labels):
+        periodic_runs: dict[str, ChannelResult] = {}
+        for label in labels:
             if label not in solved.sources:
                 raise KeyError(f"Missing source payload for label '{label}'.")
             if label not in solved.initial_coeffs:
@@ -698,11 +628,6 @@ def postprocess_sources_impl(
                     f"Solved RHS for label '{label}' must have shape {(Ns, Nm)}. "
                     f"Got {np.shape(rhs_col)}."
                 )
-            solver_col = (
-                solved.solver_result
-                if n_channels == 1
-                else single_rhs_result_from_multi(solved.solver_result, j)
-            )
             periodic_payload = _build_periodic_result(
                 sim,
                 source=solved.sources[label],
@@ -743,7 +668,7 @@ def postprocess_sources_impl(
                     periodic_payload.power,
                     label=label if n_channels > 1 else None,
                 )
-            periodic_runs[label] = _assemble_simulation_result(
+            periodic_runs[label] = _assemble_channel_result(
                 sim,
                 source=solved.sources[label],
                 retention=retained,
@@ -752,11 +677,10 @@ def postprocess_sources_impl(
                 coeffs=np.asarray(x_col),
                 rhs=np.asarray(rhs_col, dtype=accum_dtype).reshape(Ns, Nm),
                 initial_coeffs=np.asarray(solved.initial_coeffs[label]),
-                solver_result=solver_col,
                 compute_dtype=compute_dtype,
                 accum_dtype=accum_dtype,
                 # Periodic runs expose far-field observables through
-                # `SimulationResult.periodic`; keep finite-cluster PWP families
+                # `ChannelResult.periodic`; keep finite-cluster PWP families
                 # as intentional empty placeholders.
                 farfield=empty_farfield_patterns(compute_dtype),
                 power=periodic_payload.power,
@@ -765,17 +689,13 @@ def postprocess_sources_impl(
                 decomposition_backward=None,
                 periodic=periodic_payload,
             )
-        return MultiSourceSimulationResult(
+        return MultiSourceResult(
             labels=labels,
-            sources=dict(solved.sources),
-            runs=periodic_runs,
+            channels=periodic_runs,
             solver_result=_apply_solver_result_retention(
                 solved.solver_result,
                 retention=retained,
             ),
-            initial_coeffs=(dict(solved.initial_coeffs) if retained.initial_coeffs else None),
-            rhs=dict(solved.rhs) if retained.rhs else None,
-            coeffs=dict(solved.coeffs),
         )
 
     if (farfield_polar_angles is None) != (farfield_azimuthal_angles is None):
@@ -792,8 +712,8 @@ def postprocess_sources_impl(
             azimuthal_values=np.asarray(farfield_azimuthal_angles),
         )
 
-    runs: dict[str, SimulationResult] = {}
-    for j, label in enumerate(labels):
+    runs: dict[str, ChannelResult] = {}
+    for label in labels:
         if label not in solved.sources:
             raise KeyError(f"Missing source payload for label '{label}'.")
         if label not in solved.initial_coeffs:
@@ -815,11 +735,6 @@ def postprocess_sources_impl(
                 f"Solved RHS for label '{label}' must have shape {(Ns, Nm)}. "
                 f"Got {np.shape(rhs_col)}."
             )
-        solver_col = (
-            solved.solver_result
-            if n_channels == 1
-            else single_rhs_result_from_multi(solved.solver_result, j)
-        )
         backend_coeffs = None if backend_coeffs_by_label is None else backend_coeffs_by_label[label]
         run = build_single_channel_result(
             sim,
@@ -828,7 +743,6 @@ def postprocess_sources_impl(
             initial_coeffs=solved.initial_coeffs[label],
             rhs_flat=np.asarray(rhs_col, dtype=accum_dtype).reshape(Ns * Nm),
             coeffs=x_col,
-            solver_result=solver_col,
             backend_coeffs=backend_coeffs,
             k=float(solved.k),
             k0=float(solved.k0),
@@ -842,150 +756,192 @@ def postprocess_sources_impl(
         if cfg.verbose and run.power is not None:
             _print_power_balance(run.power, label=label if n_channels > 1 else None)
 
-    return MultiSourceSimulationResult(
+    return MultiSourceResult(
         labels=labels,
-        sources=dict(solved.sources),
-        runs=runs,
+        channels=runs,
         solver_result=_apply_solver_result_retention(
             solved.solver_result,
             retention=retained,
         ),
-        initial_coeffs=dict(solved.initial_coeffs) if retained.initial_coeffs else None,
-        rhs=dict(solved.rhs) if retained.rhs else None,
-        coeffs=dict(solved.coeffs),
     )
 
 
 def run_impl(
     sim: Simulation,
+    source: Source,
     *,
     include_farfield: bool = True,
     retention: ResultRetention | None = None,
+    warm_start: np.ndarray | None = None,
+    solver_compute_final_residual: bool | None = None,
 ) -> SimulationResult:
-    """Run one simulation for `config.source`."""
+    """Solve and postprocess one explicit source channel."""
+    execution = sim._solve_sources_for_immediate_postprocess(
+        {"source": source},
+        warm_start=warm_start,
+        solver_compute_final_residual=solver_compute_final_residual,
+    )
+    multi = postprocess_sources_impl(
+        sim,
+        execution.solved,
+        include_farfield=include_farfield,
+        backend_coeffs_by_label=execution.backend_coeffs,
+        retention=retention,
+    )
+    return simulation_result_from_channel(multi["source"], multi.solver_result)
+
+
+def run_polarizations_impl(
+    sim: Simulation,
+    source: JonesPolarizedSource,
+    *,
+    include_farfield: bool = True,
+    retention: ResultRetention | None = None,
+    warm_start: np.ndarray | Mapping[str, np.ndarray] | None = None,
+    solver_compute_final_residual: bool | None = None,
+) -> PolarizationResult:
+    """Solve TE/TM basis channels together and build a typed polarization result."""
     retained = ResultRetention() if retention is None else retention
     if not isinstance(retained, ResultRetention):
         raise TypeError("`retention` must be a ResultRetention instance or None.")
-    cfg = sim.config
-    source = sim._validate_ready_to_run()
-    if cfg.periodic is not None and bool(cfg.solve_polarization_basis):
-        raise NotImplementedError(
-            "`solve_polarization_basis=True` is not implemented for periodic postprocessing yet."
+    if not isinstance(source, JonesPolarizedSource):
+        raise TypeError(
+            "`run_polarizations()` requires a source with Jones metadata and "
+            "`with_polarization('TE'/'TM')`."
         )
 
-    if not bool(cfg.solve_polarization_basis):
-        execution = sim._solve_sources_for_immediate_postprocess({"mixed": source})
-        multi = postprocess_sources_impl(
-            sim,
-            execution.solved,
-            include_farfield=include_farfield,
-            backend_coeffs_by_label=execution.backend_coeffs,
-            retention=retained,
-        )
-        return multi["mixed"]
-    if not isinstance(source, JonesPolarizedSource):
-        raise ValueError(
-            "`solve_polarization_basis=True` is only defined for TE/TM polarization sources "
-            "that expose Jones metadata and `with_polarization('TE'/'TM')`."
-        )
     a_te, a_tm = source.jones_coefficients()
     src_te = source.with_polarization("TE")
     src_tm = source.with_polarization("TM")
-
-    basis_execution = sim._solve_sources_for_immediate_postprocess({"te": src_te, "tm": src_tm})
-    basis_solved = basis_execution.solved
-    basis_multi = postprocess_sources_impl(
+    execution = sim._solve_sources_for_immediate_postprocess(
+        {"te": src_te, "tm": src_tm},
+        warm_start=warm_start,
+        solver_compute_final_residual=solver_compute_final_residual,
+    )
+    solved = execution.solved
+    basis = postprocess_sources_impl(
         sim,
-        basis_solved,
+        solved,
         include_farfield=include_farfield,
-        backend_coeffs_by_label=basis_execution.backend_coeffs,
+        backend_coeffs_by_label=execution.backend_coeffs,
         retention=retained,
     )
-    run_te = basis_multi["te"]
-    run_tm = basis_multi["tm"]
+    run_te = basis["te"]
+    run_tm = basis["tm"]
     compute_dtype = np.dtype(run_te.compute_dtype)
     accum_dtype = np.dtype(run_te.accum_dtype)
 
-    b_te = basis_solved.initial_coeffs["te"]
-    b_tm = basis_solved.initial_coeffs["tm"]
-    rhs_te = basis_solved.rhs["te"]
-    rhs_tm = basis_solved.rhs["tm"]
-    x_te = basis_solved.coeffs["te"]
-    x_tm = basis_solved.coeffs["tm"]
-
-    b = a_te * b_te + a_tm * b_tm
-    rhs = a_te * rhs_te + a_tm * rhs_tm
-    x = a_te * x_te + a_tm * x_tm
-    local_b: Any = b
-    local_x: Any = x
-    backend_coeffs_by_label = basis_execution.backend_coeffs
-    if backend_coeffs_by_label is not None:
-        local_x = a_te * backend_coeffs_by_label["te"] + a_tm * backend_coeffs_by_label["tm"]
-
-    ff_basis = {"te": run_te.farfield, "tm": run_tm.farfield}
-    ff = (
-        mix_farfield_patterns(
-            ff_basis["te"], ff_basis["tm"], a_te=a_te, a_tm=a_tm, dtype=compute_dtype
+    mixed_initial_coeffs: np.ndarray | None = None
+    mixed_coeffs: np.ndarray | None = None
+    local_mixed_coeffs: Any | None = None
+    if sim.config.periodic is not None or include_farfield:
+        mixed_initial_coeffs = np.asarray(
+            a_te * solved.initial_coeffs["te"] + a_tm * solved.initial_coeffs["tm"],
+            dtype=accum_dtype,
         )
-        if include_farfield
-        else empty_farfield_patterns(compute_dtype)
-    )
+        mixed_coeffs = np.asarray(
+            a_te * solved.coeffs["te"] + a_tm * solved.coeffs["tm"],
+            dtype=compute_dtype,
+        )
+        local_mixed_coeffs = mixed_coeffs
+        if execution.backend_coeffs is not None:
+            local_mixed_coeffs = (
+                a_te * execution.backend_coeffs["te"] + a_tm * execution.backend_coeffs["tm"]
+            )
 
-    power: PowerBalance | None = None
-    cross_sections = None
-    decomposition_forward = None
-    decomposition_backward = None
-    if include_farfield:
-        power, cross_sections, decomposition_forward, decomposition_backward = (
-            _build_channel_diagnostics(
+    mixed_periodic: PeriodicFarFieldPayload | None = None
+    mixed_power: PowerBalance | None = None
+    mixed_cross_sections: CrossSectionBalance | None = None
+    mixed_forward: dict[str, float] | None = None
+    mixed_backward: dict[str, float] | None = None
+
+    if sim.config.periodic is not None:
+        # Periodic diffraction orders are the canonical far-field result and
+        # are always produced by periodic postprocessing, matching `run()`.
+        mixed_farfield = empty_farfield_patterns(compute_dtype)
+        if not isinstance(source, PlaneWave):
+            raise NotImplementedError(
+                "Periodic polarization postprocessing currently requires PlaneWave excitation."
+            )
+        if run_te.periodic is None or run_tm.periodic is None:
+            raise RuntimeError("Periodic basis channels are missing order payloads.")
+        mixed_periodic = mix_periodic_farfield_payloads(
+            run_te.periodic,
+            run_tm.periodic,
+            source=source,
+            a_first=a_te,
+            a_second=a_tm,
+            k=run_te.k,
+            n_medium=sim.config.n_medium,
+        )
+        if mixed_initial_coeffs is None or local_mixed_coeffs is None:
+            raise RuntimeError("Periodic mixed-channel coefficients were not prepared.")
+        local_components = _local_power_balance_generic_route(
+            sim,
+            initial_coeffs=mixed_initial_coeffs,
+            coeffs=local_mixed_coeffs,
+            k0=run_te.k0,
+            accum_dtype=accum_dtype,
+        )
+        if local_components is not None:
+            mixed_periodic = replace(
+                mixed_periodic,
+                power=replace(
+                    mixed_periodic.power,
+                    local_absorbed_power=local_components.local_absorbed_power,
+                    local_absorbed_power_per_particle=(
+                        local_components.local_absorbed_power_per_particle
+                    ),
+                ),
+            )
+        mixed_power = mixed_periodic.power
+    else:
+        mixed_farfield = (
+            mix_farfield_patterns(
+                run_te.farfield,
+                run_tm.farfield,
+                a_te=a_te,
+                a_tm=a_tm,
+                dtype=compute_dtype,
+            )
+            if include_farfield
+            else empty_farfield_patterns(compute_dtype)
+        )
+        if include_farfield:
+            if mixed_initial_coeffs is None or mixed_coeffs is None or local_mixed_coeffs is None:
+                raise RuntimeError("Mixed-channel coefficients were not prepared.")
+            (
+                mixed_power,
+                mixed_cross_sections,
+                mixed_forward,
+                mixed_backward,
+            ) = _build_channel_diagnostics(
                 sim,
                 source=source,
-                initial_coeffs=b,
-                coeffs=x,
-                local_initial_coeffs=local_b,
-                local_coeffs=local_x,
-                farfield=ff,
+                initial_coeffs=mixed_initial_coeffs,
+                coeffs=mixed_coeffs,
+                local_initial_coeffs=mixed_initial_coeffs,
+                local_coeffs=local_mixed_coeffs,
+                farfield=mixed_farfield,
                 k=run_te.k,
                 k0=run_te.k0,
                 accum_dtype=accum_dtype,
             )
-        )
 
-    (
-        power_basis,
-        cross_sections_basis,
-        unpolarized,
-        decomposition_forward_basis,
-        decomposition_backward_basis,
-    ) = _basis_channel_payloads(run_te, run_tm)
-
-    return _assemble_simulation_result(
-        sim,
+    return PolarizationResult(
         source=source,
-        retention=retained,
-        k=run_te.k,
-        k0=run_te.k0,
-        coeffs=x,
-        rhs=rhs,
-        initial_coeffs=b,
-        solver_result=basis_solved.solver_result,
-        compute_dtype=compute_dtype,
-        accum_dtype=accum_dtype,
-        farfield=ff,
-        power=power,
-        cross_sections=cross_sections,
-        decomposition_forward=decomposition_forward,
-        decomposition_backward=decomposition_backward,
-        initial_coeffs_basis={"te": b_te, "tm": b_tm},
-        coeffs_basis={"te": x_te, "tm": x_tm},
-        solver_result_basis=basis_solved.solver_result,
-        farfield_basis=ff_basis,
-        power_basis=power_basis,
-        cross_sections_basis=cross_sections_basis,
-        unpolarized=unpolarized,
-        decomposition_forward_basis=decomposition_forward_basis,
-        decomposition_backward_basis=decomposition_backward_basis,
-        polarization_jones=(a_te, a_tm),
+        te=run_te,
+        tm=run_tm,
+        solver_result=basis.solver_result,
+        unpolarized=_unpolarized_diagnostics(run_te, run_tm),
+        _mixed_payload=_CoherentChannelPayload(
+            farfield=mixed_farfield,
+            power=mixed_power,
+            cross_sections=mixed_cross_sections,
+            decomposition_forward=mixed_forward,
+            decomposition_backward=mixed_backward,
+            periodic=mixed_periodic,
+        ),
     )
 
 
@@ -994,4 +950,5 @@ __all__ = [
     "mix_farfield_patterns",
     "postprocess_sources_impl",
     "run_impl",
+    "run_polarizations_impl",
 ]

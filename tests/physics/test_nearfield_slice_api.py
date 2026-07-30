@@ -22,15 +22,6 @@ def _make_run():
         wavelength=550.0,
         n_medium=1.0 + 0j,
         lmax=2,
-        source=PlaneWave(
-            wavelength=550.0,
-            medium_n=1.0 + 0j,
-            polarization="TE",
-            polar_angle=0.0,
-            azimuthal_angle=0.0,
-            amplitude=1.0,
-            focal_point=(0.0, 0.0, 0.0),
-        ),
         polar_angles=np.linspace(0.0, np.pi, 31),
         azimuthal_angles=np.linspace(0.0, 2.0 * np.pi, 25, endpoint=False),
         verbose=False,
@@ -39,7 +30,18 @@ def _make_run():
         cfg,
         particles=[Sphere(position=(0.0, 0.0, 0.0), radius=120.0, refractive_index=1.5 + 0.0j)],
     )
-    return sim.run(include_farfield=False)
+    return sim.run(
+        PlaneWave(
+            wavelength=550.0,
+            medium_n=1.0 + 0j,
+            polarization="TE",
+            polar_angle=0.0,
+            azimuthal_angle=0.0,
+            amplitude=1.0,
+            focal_point=(0.0, 0.0, 0.0),
+        ),
+        include_farfield=False,
+    )
 
 
 def test_slice_helpers_cover_metadata_reshape_and_center_interpolation():
@@ -113,13 +115,10 @@ def test_compute_near_field_slice_builds_expected_plane_points_and_interpolates(
 ):
     captured: dict[str, object] = {}
 
-    def _fake_compute_near_field(
-        run, *, points, channel, show_progress, force_general_initial_field
-    ):
+    def _fake_compute_near_field(run, *, points, show_progress, force_general_initial_field):
         del run
         pts = np.asarray(points, dtype=float)
         captured["points"] = pts.copy()
-        captured["channel"] = channel
         captured["show_progress"] = show_progress
         captured["force_general_initial_field"] = force_general_initial_field
         shape = pts.shape[:-1]
@@ -159,7 +158,6 @@ def test_compute_near_field_slice_builds_expected_plane_points_and_interpolates(
         dx=1.0,
         plane=plane,
         plane_value=plane_value,
-        channel="mixed",
         show_progress=False,
         force_general_initial_field=True,
         center_pixel_policy="interpolate",
@@ -168,7 +166,6 @@ def test_compute_near_field_slice_builds_expected_plane_points_and_interpolates(
     pts = cast(np.ndarray, captured["points"])
     np.testing.assert_allclose(pts[0, 0], expected_first)
     np.testing.assert_allclose(pts[-1, -1], expected_last)
-    assert captured["channel"] == "mixed"
     assert captured["show_progress"] is False
     assert captured["force_general_initial_field"] is True
     assert out.axis_0_label == axis_labels[0]
