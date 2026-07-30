@@ -262,6 +262,7 @@ def test_dipole_ldos_uses_channel_source_from_postprocess_sources():
     )
 
 
+@pytest.mark.fake_gpu
 def test_dipole_power_ldos_inherits_resolved_postprocessing_backend(monkeypatch):
     source = pcl.DipoleSource(
         wavelength=550.0,

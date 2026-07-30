@@ -610,6 +610,7 @@ def test_rayleigh_near_cache_memory_plan_uses_host_before_guarded_spill() -> Non
     assert plan.required_device_bytes > plan.available_device_bytes
 
 
+@pytest.mark.fake_gpu
 def test_cupy_rayleigh_release_drops_only_ewald_preparation_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -666,6 +667,7 @@ def test_rayleigh_near_cache_memory_plan_keeps_small_cache_on_device() -> None:
     assert plan.residency == "device"
 
 
+@pytest.mark.fake_gpu
 def test_cupy_near_apply_batch_accounts_for_dense_pair_blocks() -> None:
     positions = np.zeros((700, 3), dtype=float)
     operator = CuPyPeriodicCouplingOperator(
@@ -696,6 +698,7 @@ def test_cupy_near_apply_batch_accounts_for_dense_pair_blocks() -> None:
     assert batch < 20_000
 
 
+@pytest.mark.fake_gpu
 def test_cupy_host_near_cache_staging_buffer_is_reused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

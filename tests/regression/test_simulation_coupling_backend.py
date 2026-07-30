@@ -75,12 +75,16 @@ def prepared_multilevel_mlfmm():
         radial_lut_dr=1.0,
         cache_translation_blocks=False,
         coupling_backend="mlfmm",
-        mlfmm_options=MLFMMOptions(max_leaf_particles=1, max_depth=3),
+        mlfmm_options=MLFMMOptions(
+            max_leaf_particles=1,
+            max_depth=3,
+            accuracy_level=1,
+            order_additive=0,
+        ),
         operator_dtype=np.complex128,
     )
 
 
-@pytest.mark.slow
 def test_simulation_direct_solve_uses_matvec_fallback_for_true_mlfmm_coupling(
     prepared_multilevel_mlfmm,
 ) -> None:
@@ -117,7 +121,12 @@ def test_prepare_matvec_accepts_numpy_mlfmm_complex64_operator_dtype() -> None:
         radial_lut_dr=1.0,
         cache_translation_blocks=False,
         coupling_backend="mlfmm",
-        mlfmm_options=MLFMMOptions(max_leaf_particles=1, max_depth=2),
+        mlfmm_options=MLFMMOptions(
+            max_leaf_particles=1,
+            max_depth=2,
+            accuracy_level=1,
+            order_additive=0,
+        ),
         operator_dtype=np.complex64,
     )
     assert isinstance(prepared.coupling, MLFMMCouplingOperator)
@@ -181,7 +190,12 @@ def test_prepare_matvec_mlfmm_complex64_keeps_far_internal_complex128() -> None:
         radial_lut_dr=1.0,
         cache_translation_blocks=False,
         coupling_backend="mlfmm",
-        mlfmm_options=MLFMMOptions(max_leaf_particles=1, max_depth=3),
+        mlfmm_options=MLFMMOptions(
+            max_leaf_particles=1,
+            max_depth=3,
+            accuracy_level=1,
+            order_additive=0,
+        ),
         operator_dtype=np.complex64,
     )
 

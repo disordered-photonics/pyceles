@@ -374,6 +374,7 @@ def test_prepare_matvec_accepts_numpy_periodic_mlfmm() -> None:
     assert result.shape == (positions.shape[0] * n_modes(1),)
 
 
+@pytest.mark.fake_gpu
 def test_periodized_mlfmm_cupy_host_staging_is_compact_and_precision_aligned() -> None:
     positions, radii, k, k_parallel, periodic = _periodic_fixture()
     lmax = 1

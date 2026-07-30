@@ -4,10 +4,14 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from pyceles._cupy_memory import cupy_allocator_snapshot, guarded_device_limit_bytes
 
 _GIB = 1024**3
 _MIB = 1024**2
+
+pytestmark = pytest.mark.fake_gpu
 
 
 class _FakeRuntime:

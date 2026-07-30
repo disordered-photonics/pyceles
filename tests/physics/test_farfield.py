@@ -1067,7 +1067,6 @@ def test_plane_wave_lossless_cluster_skips_expensive_local_absorption_route(monk
     np.testing.assert_allclose(run.cross_sections.local_absorption, 0.0, rtol=0.0, atol=0.0)
 
 
-@pytest.mark.slow
 def test_plane_wave_local_absorption_varies_smoothly_with_weak_absorber():
     wavelength = 550.0
     n_medium = 1.0 + 0j
@@ -1326,7 +1325,6 @@ def test_simulation_dual_basis_jones_mixing_consistency():
     assert run.unpolarized.cross_sections is not None
 
 
-@pytest.mark.slow
 def test_simulation_dual_basis_supports_slm_wrapped_gaussian_source():
     base = GaussianBeam(
         wavelength=550.0,

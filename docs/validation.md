@@ -13,7 +13,7 @@ The test suite is organized by pytest markers:
 - `regression`: locked behavior and reference cases,
 - `io`: HDF5, plotting, and workflow-oriented tests,
 - `gpu`: tests requiring a real CuPy/CUDA runtime,
-- `fake_gpu`: CuPy-dispatch tests that do not require a real CUDA device,
+- `fake_gpu`: deterministic CuPy-dispatch tests using controlled test doubles; these remain part of CPU-only gates,
 - `slow`: longer-running tests kept out of fast local gates,
 - `filesystem` and `hdf5`: tests touching temporary files or HDF5 payloads,
 - `reference`: comparisons against independent formulas, fixed oracle data, or external references,
@@ -24,6 +24,7 @@ Useful commands:
 ```bash
 python -m pytest -q -m "not gpu and not slow"
 python -m pytest -q -m "not gpu"
+python -m pytest -q -m fake_gpu
 python -m pytest -q -m gpu
 ```
 

@@ -72,7 +72,7 @@ markers = [
   "regression: locked regression coverage for shipped behavior and reference cases",
   "io: persistence, workflow, and plotting-facing tests",
   "gpu: requires CuPy and a working CUDA runtime/device",
-  "fake_gpu: exercises CuPy-facing dispatch paths without a real CUDA runtime",
+  "fake_gpu: exercises CuPy-facing dispatch with controlled doubles and no CUDA runtime",
   "slow: longer-running coverage kept out of the default fast gate",
   "filesystem: writes files or directories under pytest-managed temporary roots",
   "hdf5: reads or writes HDF5 payloads",

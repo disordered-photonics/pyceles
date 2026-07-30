@@ -1116,6 +1116,7 @@ def test_shared_operator_maps_handle_repeated_noncontiguous_archetypes():
     np.testing.assert_allclose(particle_t.apply(x.reshape(-1)), expected.reshape(-1))
 
 
+@pytest.mark.fake_gpu
 def test_cupy_group_wrappers_preserve_shared_operator_maps(monkeypatch):
     from pyceles.core.operators import single_body_cupy
 

@@ -256,6 +256,7 @@ def test_solve_sources_core_zero_particle_case_skips_operator_and_solver(monkeyp
     assert out.rhs["src"].shape == (0, 6)
 
 
+@pytest.mark.fake_gpu
 def test_solve_sources_core_direct_cupy_dense_fallback_releases_dense_cache(monkeypatch):
     sim = _single_sphere_sim(operator_backend="cupy", solver_method="direct")
     recorded: dict[str, object] = {}
@@ -312,6 +313,7 @@ def test_solve_sources_core_direct_cupy_dense_fallback_releases_dense_cache(monk
     assert sim._dense_lu_cache == lu_payload
 
 
+@pytest.mark.fake_gpu
 def test_solve_sources_core_direct_cupy_reuses_lu_without_reassembling_dense_A(monkeypatch):
     sim = _single_sphere_sim(operator_backend="cupy", solver_method="direct")
     apply_calls = 0
@@ -408,6 +410,7 @@ def test_simulation_clear_caches_rebuilds_equivalent_operator_state() -> None:
     )
 
 
+@pytest.mark.fake_gpu
 def test_solve_sources_core_rejects_custom_preconditioner_on_cupy_backend(monkeypatch):
     sim = _single_sphere_sim(
         operator_backend="cupy",

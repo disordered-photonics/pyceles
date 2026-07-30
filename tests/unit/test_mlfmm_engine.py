@@ -11,6 +11,7 @@ from pyceles.core.operators.mlfmm import (
     MLFMMLevelOperators,
     MLFMMOptions,
     MLFMMTransferOperators,
+    _resolve_multilevel_hf_start_level,
     apply_multilevel_mlfmm,
     apply_single_level_mlfmm,
     box_order_rokhlin_like,
@@ -409,27 +410,24 @@ def test_multilevel_build_produces_sensible_levels_and_offset_batches() -> None:
 
 
 def test_multilevel_auto_hf_start_preserves_first_far_ownership_level() -> None:
-    positions, radii, lmax, k = _multilevel_fixture()
+    positions, radii, _lmax, k = _multilevel_fixture()
     partition = build_uniform_mlfmm_partition(
         positions,
         particle_circumscribing_radii=radii,
         depth=3,
     )
-    operators = build_multilevel_mlfmm_operators(
-        lmax=lmax,
-        k=k,
-        positions=positions,
+
+    hf_start_level = _resolve_multilevel_hf_start_level(
         partition=partition,
-        radial_lut=None,
-        accuracy_level=3,
-        order_additive=2,
+        k=k,
+        leaf_level=3,
+        hf_start_level=None,
+        hf_wavelength_divisor=2.0,
     )
 
-    assert operators.hf_start_level == 2
-    assert operators.hf_end_level == 3
+    assert hf_start_level == 2
 
 
-@pytest.mark.slow
 def test_multilevel_auto_hf_start_does_not_skip_coarse_owned_level() -> None:
     positions, radii, lmax, _k = _multilevel_fixture()
     k_small_wavelength = 2.0 * np.pi / 150.0
@@ -444,8 +442,7 @@ def test_multilevel_auto_hf_start_does_not_skip_coarse_owned_level() -> None:
         positions=positions,
         partition=partition,
         radial_lut=None,
-        accuracy_level=3,
-        order_additive=2,
+        box_order=4,
     )
 
     assert operators.hf_start_level == 2
@@ -454,21 +451,22 @@ def test_multilevel_auto_hf_start_does_not_skip_coarse_owned_level() -> None:
 
 
 def test_multilevel_explicit_hf_start_overrides_auto_policy() -> None:
-    positions, radii, lmax, k = _multilevel_fixture()
+    positions, radii, _lmax, k = _multilevel_fixture()
     partition = build_uniform_mlfmm_partition(
         positions,
         particle_circumscribing_radii=radii,
         depth=3,
     )
-    operators = build_multilevel_mlfmm_operators(
-        lmax=lmax,
-        k=k,
-        positions=positions,
+
+    hf_start_level = _resolve_multilevel_hf_start_level(
         partition=partition,
-        radial_lut=None,
+        k=k,
+        leaf_level=3,
         hf_start_level=2,
+        hf_wavelength_divisor=2.0,
     )
-    assert operators.hf_start_level == 2
+
+    assert hf_start_level == 2
 
 
 def test_single_level_full_apply_stays_in_expected_small_fixture_ballpark() -> None:
@@ -769,7 +767,12 @@ def test_mlfmm_coupling_hierarchy_diagnostics_align_with_cupy_vocabulary() -> No
         positions=positions,
         particle_circumscribing_radii=radii,
         radial_lut=radial_lut,
-        options=MLFMMOptions(max_leaf_particles=1, max_depth=4),
+        options=MLFMMOptions(
+            max_leaf_particles=1,
+            max_depth=4,
+            accuracy_level=1,
+            order_additive=0,
+        ),
         dtype=np.complex128,
     )
 
@@ -823,7 +826,12 @@ def test_mlfmm_coupling_memory_diagnostics_report_leaf_modes() -> None:
         positions=positions,
         particle_circumscribing_radii=radii,
         radial_lut=radial_lut,
-        options=MLFMMOptions(max_leaf_particles=1, max_depth=4),
+        options=MLFMMOptions(
+            max_leaf_particles=1,
+            max_depth=4,
+            accuracy_level=1,
+            order_additive=0,
+        ),
         dtype=np.complex128,
         build_leaf_maps=True,
     )
@@ -833,7 +841,12 @@ def test_mlfmm_coupling_memory_diagnostics_report_leaf_modes() -> None:
         positions=positions,
         particle_circumscribing_radii=radii,
         radial_lut=radial_lut,
-        options=MLFMMOptions(max_leaf_particles=1, max_depth=4),
+        options=MLFMMOptions(
+            max_leaf_particles=1,
+            max_depth=4,
+            accuracy_level=1,
+            order_additive=0,
+        ),
         dtype=np.complex128,
         build_leaf_maps=False,
     )

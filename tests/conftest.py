@@ -49,13 +49,6 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         if suite_mark is not None:
             item.add_marker(suite_mark)
 
-        if (
-            rel_path == "tests/unit/test_solvers.py"
-            and "cupy" in item.name
-            and "gpu" not in item.keywords
-        ):
-            item.add_marker(pytest.mark.fake_gpu)
-
         if "tmp_path" in fixture_names:
             item.add_marker(pytest.mark.filesystem)
         if "gpu" in item.keywords:

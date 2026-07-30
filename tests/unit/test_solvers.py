@@ -361,6 +361,7 @@ def test_solve_linear_system_direct_can_skip_final_residual_with_lu_only():
     assert np.isnan(float(out.relative_residual))
 
 
+@pytest.mark.fake_gpu
 def test_solve_linear_system_cupy_backend_supports_bicgstab(monkeypatch):
     monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
     b = np.array([1.0 + 0j, 2.0 + 0j])
@@ -379,6 +380,7 @@ def test_solve_linear_system_cupy_backend_supports_bicgstab(monkeypatch):
     np.testing.assert_allclose(np.asarray(out.x), b, atol=1e-10, rtol=1e-10)
 
 
+@pytest.mark.fake_gpu
 def test_factorize_dense_matrix_cupy_requests_inplace_overwrite(monkeypatch):
     calls: list[tuple[bool, bool]] = []
 
@@ -413,6 +415,7 @@ def test_factorize_dense_matrix_cupy_requests_inplace_overwrite(monkeypatch):
     assert calls == [(True, True)]
 
 
+@pytest.mark.fake_gpu
 def test_gmres_cupy_reports_clear_import_failure(monkeypatch):
     def fail_import():
         raise RuntimeError("broken cuda path")
@@ -423,6 +426,7 @@ def test_gmres_cupy_reports_clear_import_failure(monkeypatch):
         solvers.gmres_cupy(lambda x: x, b, show_progress=False)
 
 
+@pytest.mark.fake_gpu
 def test_fgmres_cupy_reports_clear_import_failure(monkeypatch):
     def fail_import():
         raise RuntimeError("broken cuda path")
@@ -433,6 +437,7 @@ def test_fgmres_cupy_reports_clear_import_failure(monkeypatch):
         solvers.fgmres_cupy(lambda x: x, b, show_progress=False)
 
 
+@pytest.mark.fake_gpu
 def test_lgmres_cupy_reports_clear_import_failure(monkeypatch):
     def fail_import():
         raise RuntimeError("broken cuda path")
@@ -443,6 +448,7 @@ def test_lgmres_cupy_reports_clear_import_failure(monkeypatch):
         solvers.lgmres_cupy(lambda x: x, b, show_progress=False)
 
 
+@pytest.mark.fake_gpu
 def test_bicgstab_cupy_reports_clear_import_failure(monkeypatch):
     def fail_import():
         raise RuntimeError("broken cuda path")
@@ -453,6 +459,7 @@ def test_bicgstab_cupy_reports_clear_import_failure(monkeypatch):
         solvers.bicgstab_cupy(lambda x: x, b, show_progress=False)
 
 
+@pytest.mark.fake_gpu
 def test_gmres_cupy_native_reports_inner_iteration_progress(monkeypatch):
     monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
     progress: list[float] = []
@@ -480,6 +487,7 @@ def test_gmres_cupy_native_reports_inner_iteration_progress(monkeypatch):
     assert float(out.relative_residual) <= 1e-10
 
 
+@pytest.mark.fake_gpu
 def test_fgmres_cupy_variable_preconditioner_state(monkeypatch):
     monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
     b = np.array([1.0 + 0j, -2.0 + 0j, 0.5 + 0j], dtype=np.complex128)
@@ -508,6 +516,7 @@ def test_fgmres_cupy_variable_preconditioner_state(monkeypatch):
     assert seen_states[0] == (0, 0)
 
 
+@pytest.mark.fake_gpu
 def test_fgmres_cupy_matches_gmres_on_toy_system(monkeypatch):
     monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
     rng = np.random.default_rng(21)
@@ -539,6 +548,7 @@ def test_fgmres_cupy_matches_gmres_on_toy_system(monkeypatch):
     np.testing.assert_allclose(np.asarray(out_f.x), np.asarray(out_g.x), atol=1e-8, rtol=1e-8)
 
 
+@pytest.mark.fake_gpu
 def test_lgmres_cupy_matches_gmres_on_toy_system(monkeypatch):
     monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
     rng = np.random.default_rng(22)
@@ -571,6 +581,7 @@ def test_lgmres_cupy_matches_gmres_on_toy_system(monkeypatch):
     np.testing.assert_allclose(np.asarray(out_l.x), np.asarray(out_g.x), atol=1e-8, rtol=1e-8)
 
 
+@pytest.mark.fake_gpu
 def test_bicgstab_cupy_matches_gmres_on_toy_system(monkeypatch):
     monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
     rng = np.random.default_rng(23)
@@ -601,6 +612,7 @@ def test_bicgstab_cupy_matches_gmres_on_toy_system(monkeypatch):
     np.testing.assert_allclose(np.asarray(out_b.x), np.asarray(out_g.x), atol=1e-8, rtol=1e-8)
 
 
+@pytest.mark.fake_gpu
 def test_bicgstab_cupy_breakdown_path_returns_failure_without_crash(monkeypatch):
     monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
     b = np.array([1.0 + 0j, -2.0 + 0j], dtype=np.complex128)
@@ -619,6 +631,7 @@ def test_bicgstab_cupy_breakdown_path_returns_failure_without_crash(monkeypatch)
     assert np.isfinite(float(out.relative_residual))
 
 
+@pytest.mark.fake_gpu
 def test_gmres_cupy_native_breakdown_path_returns_failure_without_crash(monkeypatch):
     monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
     b = np.array([1.0 + 0j, -2.0 + 0j], dtype=np.complex128)
@@ -638,6 +651,7 @@ def test_gmres_cupy_native_breakdown_path_returns_failure_without_crash(monkeypa
     assert np.isfinite(float(out.relative_residual))
 
 
+@pytest.mark.fake_gpu
 def test_gmres_cupy_native_zero_initial_guess_skips_extra_initial_matvec(monkeypatch):
     monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
     b = np.array([1.0 + 0j, -2.0 + 0j, 0.5 + 0j], dtype=np.complex128)
@@ -664,6 +678,7 @@ def test_gmres_cupy_native_zero_initial_guess_skips_extra_initial_matvec(monkeyp
     assert matvec_calls == 2
 
 
+@pytest.mark.fake_gpu
 def test_gmres_cupy_native_clamps_restart_to_system_size(monkeypatch):
     cupy = _fake_cupy_numpy_backend()
     zero_shapes: list[tuple[int, ...]] = []
@@ -694,6 +709,7 @@ def test_gmres_cupy_native_clamps_restart_to_system_size(monkeypatch):
     assert (10, 4) not in zero_shapes
 
 
+@pytest.mark.fake_gpu
 def test_gmres_cupy_releases_completed_basis_before_restart(monkeypatch):
     cupy = _fake_cupy_numpy_backend()
     original_zeros = cupy.zeros
@@ -731,6 +747,7 @@ def test_gmres_cupy_releases_completed_basis_before_restart(monkeypatch):
     assert live_basis_at_second_cycle == [0]
 
 
+@pytest.mark.fake_gpu
 def test_gmres_cupy_native_tracks_scipy_solution_quality_on_toy_system(monkeypatch):
     monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
     rng = np.random.default_rng(9)
@@ -768,6 +785,7 @@ def test_gmres_cupy_native_tracks_scipy_solution_quality_on_toy_system(monkeypat
 
 
 @pytest.mark.parametrize("refine_policy", ["never", "ifneeded", "always"])
+@pytest.mark.fake_gpu
 def test_gmres_cupy_native_supports_cgs_refinement_policies(monkeypatch, refine_policy: str):
     monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
     A = np.array([[3.0 + 0j, 1.0 + 0j], [0.0 + 0j, 2.0 + 0j]], dtype=np.complex128)
@@ -791,6 +809,7 @@ def test_gmres_cupy_native_supports_cgs_refinement_policies(monkeypatch, refine_
     np.testing.assert_allclose(np.asarray(out.x), x_true, atol=1e-9, rtol=1e-9)
 
 
+@pytest.mark.fake_gpu
 def test_gmres_cupy_monitor_channels_and_callbacks(monkeypatch):
     monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
     A = np.array([[2.0 + 0j, 1.0 + 0j], [1.0 + 0j, 3.0 + 0j]], dtype=np.complex128)
@@ -840,6 +859,7 @@ def test_gmres_cupy_monitor_channels_and_callbacks(monkeypatch):
     )
 
 
+@pytest.mark.fake_gpu
 def test_gmres_cupy_reports_nonconverged_reason(monkeypatch):
     monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
     A = np.array([[2.0 + 0j, 1.0 + 0j], [1.0 + 0j, 3.0 + 0j]], dtype=np.complex128)
@@ -859,6 +879,7 @@ def test_gmres_cupy_reports_nonconverged_reason(monkeypatch):
 
 
 @pytest.mark.parametrize("solver_name", ["gmres_cupy", "fgmres_cupy", "lgmres_cupy"])
+@pytest.mark.fake_gpu
 def test_cupy_restart_solvers_reject_block_rhs_at_single_rhs_entrypoint(
     monkeypatch, solver_name: str
 ):
@@ -869,6 +890,7 @@ def test_cupy_restart_solvers_reject_block_rhs_at_single_rhs_entrypoint(
         solver(lambda x: np.asarray(x), b, show_progress=False)
 
 
+@pytest.mark.fake_gpu
 def test_solve_linear_system_cupy_block_gmres_identity_shape_and_metadata(monkeypatch):
     monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
     n, p = 7, 3
@@ -911,6 +933,7 @@ def test_solve_linear_system_cupy_block_gmres_identity_shape_and_metadata(monkey
     np.testing.assert_allclose(np.asarray(out_vec.x), b_vec, atol=1e-9, rtol=1e-9)
 
 
+@pytest.mark.fake_gpu
 def test_solve_linear_system_cupy_block_gmres_matches_direct_on_dense_system(monkeypatch):
     monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
     rng = np.random.default_rng(4321)
@@ -935,6 +958,7 @@ def test_solve_linear_system_cupy_block_gmres_matches_direct_on_dense_system(mon
     assert np.all(np.asarray(out.info, dtype=int) == 0)
 
 
+@pytest.mark.fake_gpu
 def test_solve_linear_system_cupy_block_gmres_vector_only_operator_fallback(monkeypatch):
     monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
     rng = np.random.default_rng(99)
@@ -989,6 +1013,7 @@ def test_solve_linear_system_cupy_block_gmres_vector_only_operator_fallback(monk
     assert bool(out_block.block_metadata["preconditioner_block_adapter_used"])
 
 
+@pytest.mark.fake_gpu
 def test_solve_linear_system_cupy_block_gmres_deflation_and_batching(monkeypatch):
     monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
     rng = np.random.default_rng(777)
@@ -1033,6 +1058,7 @@ def test_solve_linear_system_cupy_block_gmres_deflation_and_batching(monkeypatch
     assert int(out_batched.block_metadata["batch_count"]) == 3
 
 
+@pytest.mark.fake_gpu
 def test_solve_linear_system_cupy_block_gmres_enforces_per_rhs_tolerance(monkeypatch):
     monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
 
@@ -1079,6 +1105,7 @@ def test_solve_linear_system_cupy_block_gmres_enforces_per_rhs_tolerance(monkeyp
     assert bool(out.block_metadata["operator_block_adapter_used"])
 
 
+@pytest.mark.fake_gpu
 def test_solve_linear_system_cupy_block_gmres_callback_payload(monkeypatch):
     monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
     rng = np.random.default_rng(222)
@@ -1107,6 +1134,7 @@ def test_solve_linear_system_cupy_block_gmres_callback_payload(monkeypatch):
         assert payload.iteration >= 0
 
 
+@pytest.mark.fake_gpu
 def test_solve_linear_system_cupy_block_gmres_uses_incycle_true_gate(monkeypatch):
     monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
     rng = np.random.default_rng(1)
@@ -1148,6 +1176,7 @@ def test_solve_linear_system_fgmres_backend_guard():
         )
 
 
+@pytest.mark.fake_gpu
 def test_solve_linear_system_fgmres_cupy_smoke(monkeypatch):
     monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
     b = np.array([1.0 + 0j, -1.5 + 0j], dtype=np.complex128)
@@ -1167,6 +1196,7 @@ def test_solve_linear_system_fgmres_cupy_smoke(monkeypatch):
     np.testing.assert_allclose(np.asarray(out.x), b, atol=1e-10, rtol=1e-10)
 
 
+@pytest.mark.fake_gpu
 def test_solve_linear_system_lgmres_cupy_smoke(monkeypatch):
     monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
     b = np.array([1.0 + 0j, -1.5 + 0j], dtype=np.complex128)
@@ -1188,6 +1218,7 @@ def test_solve_linear_system_lgmres_cupy_smoke(monkeypatch):
 
 
 @pytest.mark.parametrize("method", ["gmres", "fgmres", "lgmres"])
+@pytest.mark.fake_gpu
 def test_solve_linear_system_cupy_restart_solvers_verify_true_residual_each_restart(
     monkeypatch, method: Literal["gmres", "fgmres", "lgmres"]
 ):
@@ -1235,6 +1266,7 @@ def test_solve_linear_system_cupy_restart_solvers_verify_true_residual_each_rest
     assert np.isfinite(float(out.relative_residual))
 
 
+@pytest.mark.fake_gpu
 def test_solve_linear_system_lgmres_cupy_skip_final_residual_avoids_extra_applies(monkeypatch):
     monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
     A = np.asarray([[2.0 + 0.0j, 0.25 + 0.0j], [0.0 + 0.0j, 3.0 + 0.0j]], dtype=np.complex128)
@@ -1264,6 +1296,7 @@ def test_solve_linear_system_lgmres_cupy_skip_final_residual_avoids_extra_applie
     assert np.isnan(float(out.relative_residual))
 
 
+@pytest.mark.fake_gpu
 def test_solve_linear_system_bicgstab_cupy_multi_rhs_smoke(monkeypatch):
     monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
     A = np.array([[3.0 + 0j, 1.0 + 0j], [0.5 + 0j, 2.0 + 0j]], dtype=np.complex128)
@@ -1283,6 +1316,7 @@ def test_solve_linear_system_bicgstab_cupy_multi_rhs_smoke(monkeypatch):
     np.testing.assert_allclose(A @ np.asarray(out.x), B, atol=1e-8, rtol=1e-8)
 
 
+@pytest.mark.fake_gpu
 def test_solve_linear_system_bicgstab_cupy_skip_final_residual_avoids_extra_apply(monkeypatch):
     monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
     A = np.asarray(
@@ -1523,6 +1557,7 @@ def test_apply_operator_falls_back_to_columnwise_vector_calls():
     assert len(calls) == 2
 
 
+@pytest.mark.fake_gpu
 def test_apply_operator_cupy_keeps_columnwise_inputs_on_backend():
     cupy = _fake_cupy_numpy_backend()
     calls: list[np.ndarray] = []
