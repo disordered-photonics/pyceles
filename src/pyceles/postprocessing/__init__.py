@@ -4,9 +4,9 @@ from .dipole_metrics import (
     compute_dipole_power_ldos,
 )
 from .farfield import (
+    CrossSectionBalance,
     FarFieldPatterns,
     PowerBalance,
-    absorption_cross_section,
     compute_far_field_patterns,
     extinction_cross_section,
     finite_beam_power_balance,
@@ -14,8 +14,7 @@ from .farfield import (
     local_absorbed_power_from_exciting,
     local_absorption_cross_section_from_exciting,
     local_power_balance_from_exciting,
-    plane_wave_cross_section_components,
-    plane_wave_cross_sections,
+    plane_wave_cross_section_balance,
     pwp_power_decomposition,
     pwp_power_flux,
     scattered_field_plane_wave_pattern,
@@ -40,13 +39,13 @@ from .nearfield import (
 )
 
 __all__ = [
+    "CrossSectionBalance",
     "DipolePowerLDOSResult",
     "FarFieldPatterns",
     "NearFieldComponents",
     "NearFieldRadialLUT",
     "NearFieldSlice",
     "PowerBalance",
-    "absorption_cross_section",
     "compute_dipole_ldos_enhancement",
     "compute_dipole_power_ldos",
     "compute_far_field_patterns",
@@ -65,8 +64,7 @@ __all__ = [
     "local_power_balance_from_exciting",
     "mix_near_field_components",
     "mix_near_field_slices",
-    "plane_wave_cross_section_components",
-    "plane_wave_cross_sections",
+    "plane_wave_cross_section_balance",
     "poynting",
     "pwp_power_decomposition",
     "pwp_power_flux",

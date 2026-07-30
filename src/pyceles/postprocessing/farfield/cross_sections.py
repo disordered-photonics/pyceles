@@ -1,11 +1,55 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 
 from pyceles._optional import import_cupy, is_cupy_array
 from pyceles.core.sources import PlaneWave, Source
 
 from .common import integrate_periodic_alpha
+
+
+@dataclass(frozen=True, slots=True)
+class CrossSectionBalance:
+    """Plane-wave cross sections with an explicit closure diagnostic.
+
+    Values use the simulation length unit squared. ``local_absorption`` is an
+    independent local estimate; ``absorption_by_difference`` is the global
+    ``extinction - scattering`` estimator. Their difference is retained as
+    ``closure_error`` rather than being hidden behind an absorption alias.
+    """
+
+    extinction: float
+    scattering: float
+    local_absorption: float
+
+    def __post_init__(self) -> None:
+        for name in ("extinction", "scattering", "local_absorption"):
+            value = float(getattr(self, name))
+            if not np.isfinite(value):
+                raise ValueError(f"`{name}` must be finite. Got {value!r}.")
+            object.__setattr__(self, name, value)
+
+    @property
+    def absorption_by_difference(self) -> float:
+        """Return the global estimator ``extinction - scattering``."""
+        return float(self.extinction - self.scattering)
+
+    @property
+    def closure_error(self) -> float:
+        """Return ``absorption_by_difference - local_absorption``."""
+        return float(self.absorption_by_difference - self.local_absorption)
+
+    def to_mapping(self) -> dict[str, float]:
+        """Return the canonical serialization mapping."""
+        return {
+            "extinction": float(self.extinction),
+            "scattering": float(self.scattering),
+            "local_absorption": float(self.local_absorption),
+            "absorption_by_difference": self.absorption_by_difference,
+            "closure_error": self.closure_error,
+        }
 
 
 def _validate_plane_wave_cross_section_inputs(
@@ -184,7 +228,7 @@ def local_absorption_cross_section_from_exciting(
     return pref * (-interference - scattered_norm)
 
 
-def plane_wave_cross_section_components(
+def plane_wave_cross_section_balance(
     source: Source,
     initial_coeffs: np.ndarray,
     scattered_coeffs: np.ndarray,
@@ -193,131 +237,40 @@ def plane_wave_cross_section_components(
     *,
     k0: float,
     n_medium: complex,
-    local_absorption: float | None = None,
-) -> dict[str, float]:
-    """Return raw/local plane-wave cross-section components and closure defect.
+    local_absorption: float,
+) -> CrossSectionBalance:
+    """Return plane-wave cross sections and their closure discrepancy.
 
-    `C_ext_raw` and `C_sca_raw` keep the current global estimators. `C_abs_raw_diff`
-    is their difference. `C_abs_local` can be supplied from a local exciting-field
-    route (for example `e=b+W x`), and `Delta_closure` reports the residual
-    mismatch between the two independent global estimators and the local
-    dissipation estimate.
+    Extinction and scattering are independent global estimators. The caller
+    supplies the local dissipation estimate explicitly, so the result cannot
+    silently relabel a global flux difference as local absorption.
     """
-    c_ext_raw = extinction_cross_section(
+    extinction = extinction_cross_section(
         source,
         initial_coeffs,
         scattered_coeffs,
         k0=k0,
         n_medium=n_medium,
     )
-    c_sca_raw = total_scattering_cross_section(
+    scattering = total_scattering_cross_section(
         source,
         scattered_pwp_te,
         scattered_pwp_tm,
         k0=k0,
         n_medium=n_medium,
     )
-    c_abs_raw_diff = float(c_ext_raw - c_sca_raw)
-    c_abs_local = c_abs_raw_diff if local_absorption is None else float(local_absorption)
-    delta_closure = float(c_abs_raw_diff - c_abs_local)
-    return {
-        "C_ext_raw": float(c_ext_raw),
-        "C_sca_raw": float(c_sca_raw),
-        "C_abs_raw_diff": float(c_abs_raw_diff),
-        "C_abs_local": float(c_abs_local),
-        "Delta_closure": float(delta_closure),
-    }
-
-
-def absorption_cross_section(
-    source: Source,
-    initial_coeffs: np.ndarray,
-    scattered_coeffs: np.ndarray,
-    scattered_pwp_te: dict,
-    scattered_pwp_tm: dict,
-    *,
-    k0: float,
-    n_medium: complex,
-) -> float:
-    """Raw-difference absorption estimator `C_ext_raw - C_sca_raw`.
-
-    This helper keeps the legacy estimator available explicitly. For the
-    physically local dissipation estimate, use
-    `local_absorption_cross_section_from_exciting(...)` and pass it through
-    `plane_wave_cross_sections(..., local_absorption=...)`.
-    """
-    components = plane_wave_cross_section_components(
-        source,
-        initial_coeffs,
-        scattered_coeffs,
-        scattered_pwp_te,
-        scattered_pwp_tm,
-        k0=k0,
-        n_medium=n_medium,
+    return CrossSectionBalance(
+        extinction=float(extinction),
+        scattering=float(scattering),
+        local_absorption=float(local_absorption),
     )
-    return float(components["C_abs_raw_diff"])
-
-
-def plane_wave_cross_sections(
-    source: Source,
-    initial_coeffs: np.ndarray,
-    scattered_coeffs: np.ndarray,
-    scattered_pwp_te: dict,
-    scattered_pwp_tm: dict,
-    *,
-    k0: float,
-    n_medium: complex,
-    local_absorption: float | None = None,
-    allow_raw_diff_fallback: bool = False,
-) -> dict[str, float]:
-    """Return plane-wave cross sections with explicit raw/local decomposition.
-
-    Public `C_abs` follows the local dissipation estimate (`C_abs_local`).
-    The legacy raw-difference estimator remains available as `C_abs_raw_diff`,
-    together with `Delta_closure = C_abs_raw_diff - C_abs_local`.
-
-    By default this helper is strict about local semantics: callers must pass
-    `local_absorption` explicitly. Legacy low-level fallback to
-    `C_abs_local = C_abs_raw_diff` is available only when
-    `allow_raw_diff_fallback=True`.
-    """
-    if local_absorption is None:
-        b_arr = np.asarray(initial_coeffs)
-        x_arr = np.asarray(scattered_coeffs)
-        if int(b_arr.size) == 0 and int(x_arr.size) == 0:
-            local_absorption = 0.0
-    if local_absorption is None and not bool(allow_raw_diff_fallback):
-        raise ValueError(
-            "`plane_wave_cross_sections` requires `local_absorption` under the "
-            "current local-absorption semantics. If you intentionally want the "
-            "legacy raw-difference fallback, pass "
-            "`allow_raw_diff_fallback=True` or call "
-            "`plane_wave_cross_section_components(...)` directly."
-        )
-    components = plane_wave_cross_section_components(
-        source,
-        initial_coeffs,
-        scattered_coeffs,
-        scattered_pwp_te,
-        scattered_pwp_tm,
-        k0=k0,
-        n_medium=n_medium,
-        local_absorption=local_absorption,
-    )
-    return {
-        "C_ext": float(components["C_ext_raw"]),
-        "C_sca": float(components["C_sca_raw"]),
-        "C_abs": float(components["C_abs_local"]),
-        **components,
-    }
 
 
 __all__ = [
-    "absorption_cross_section",
+    "CrossSectionBalance",
     "extinction_cross_section",
     "local_absorption_cross_section_from_exciting",
-    "plane_wave_cross_section_components",
-    "plane_wave_cross_sections",
+    "plane_wave_cross_section_balance",
     "scattering_cross_section",
     "total_scattering_cross_section",
 ]

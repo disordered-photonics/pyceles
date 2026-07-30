@@ -1149,20 +1149,14 @@ def test_cupy_simulation_run_matches_numpy_for_coeffs_farfield_and_nearfield(
     )
     if run_numpy.cross_sections is None or run_cupy.cross_sections is None:
         raise AssertionError("Plane-wave CuPy/NumPy parity run must expose cross sections.")
-    for key in (
-        "C_ext",
-        "C_sca",
-        "C_abs",
-        "C_ext_raw",
-        "C_sca_raw",
-    ):
+    for attribute in ("extinction", "scattering", "local_absorption"):
         np.testing.assert_allclose(
-            run_cupy.cross_sections[key],
-            run_numpy.cross_sections[key],
+            getattr(run_cupy.cross_sections, attribute),
+            getattr(run_numpy.cross_sections, attribute),
             rtol=cs_main_rtol,
             atol=cs_main_atol,
         )
-    # `C_abs_raw_diff` subtracts two large integrated quantities.  In
+    # `absorption_by_difference` subtracts two large integrated quantities.  In
     # complex64, the backend solution difference is amplified by this
     # cancellation even though the fields and primary cross sections agree.
     # Keep cross-backend parity for the precision-critical complex128 path;
@@ -1170,14 +1164,14 @@ def test_cupy_simulation_run_matches_numpy_for_coeffs_farfield_and_nearfield(
     # its backend-sensitive residual as a physical parity target.
     if operator_dtype == np.complex128:
         np.testing.assert_allclose(
-            run_cupy.cross_sections["C_abs_raw_diff"],
-            run_numpy.cross_sections["C_abs_raw_diff"],
+            run_cupy.cross_sections.absorption_by_difference,
+            run_numpy.cross_sections.absorption_by_difference,
             rtol=cs_delta_rtol,
             atol=cs_delta_atol,
         )
         np.testing.assert_allclose(
-            run_cupy.cross_sections["Delta_closure"],
-            run_numpy.cross_sections["Delta_closure"],
+            run_cupy.cross_sections.closure_error,
+            run_numpy.cross_sections.closure_error,
             rtol=cs_delta_rtol,
             atol=cs_delta_atol,
         )
@@ -1185,23 +1179,23 @@ def test_cupy_simulation_run_matches_numpy_for_coeffs_farfield_and_nearfield(
         for cross_sections in (run_numpy.cross_sections, run_cupy.cross_sections):
             if cross_sections is None:
                 raise AssertionError("Cross-section diagnostics unexpectedly missing.")
-            assert np.isfinite(cross_sections["C_abs_raw_diff"])
-            assert np.isfinite(cross_sections["Delta_closure"])
+            assert np.isfinite(cross_sections.absorption_by_difference)
+            assert np.isfinite(cross_sections.closure_error)
             np.testing.assert_allclose(
-                cross_sections["C_abs_raw_diff"],
-                cross_sections["C_ext_raw"] - cross_sections["C_sca_raw"],
+                cross_sections.absorption_by_difference,
+                cross_sections.extinction - cross_sections.scattering,
                 rtol=0.0,
                 atol=1e-12,
             )
             np.testing.assert_allclose(
-                cross_sections["Delta_closure"],
-                cross_sections["C_abs_raw_diff"] - cross_sections["C_abs_local"],
+                cross_sections.closure_error,
+                cross_sections.absorption_by_difference - cross_sections.local_absorption,
                 rtol=0.0,
                 atol=1e-12,
             )
     np.testing.assert_allclose(
-        run_cupy.cross_sections["C_abs_local"],
-        run_numpy.cross_sections["C_abs_local"],
+        run_cupy.cross_sections.local_absorption,
+        run_numpy.cross_sections.local_absorption,
         rtol=0.0,
         atol=cs_local_atol,
     )

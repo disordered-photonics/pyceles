@@ -13,7 +13,7 @@ from .patterns import total_field_plane_wave_pattern
 
 @dataclass(frozen=True, slots=True)
 class PowerBalance:
-    """Common power accounting for finite-beam and periodic simulations.
+    """Common local and flux power accounting for simulation results.
 
     ``flux_defect`` is the raw flux balance
     ``incident - reflected - transmitted``. ``closure_error`` subtracts the
@@ -143,7 +143,13 @@ class PowerBalance:
         )
 
     def to_mapping(self) -> dict[str, float | np.ndarray | None]:
-        """Return an explicit serialization mapping without legacy aliases."""
+        """Return the canonical serialization mapping without redundant arrays.
+
+        Scalar derived diagnostics are included for readable output files. The
+        normalized per-particle vector is intentionally omitted because it is
+        exactly derivable from ``local_absorbed_power_per_particle`` and
+        ``incident_power`` and can otherwise double large diagnostic payloads.
+        """
         return {
             "incident_power": self.incident_power,
             "reflected_power": self.reflected_power,
@@ -157,7 +163,6 @@ class PowerBalance:
             "local_absorptance": self.local_absorptance,
             "flux_defect_fraction": self.flux_defect_fraction,
             "closure_error_fraction": self.closure_error_fraction,
-            "local_absorptance_per_particle": self.local_absorptance_per_particle,
         }
 
 

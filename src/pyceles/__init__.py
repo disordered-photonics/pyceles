@@ -36,7 +36,11 @@ from pyceles.postprocessing.dipole_metrics import (
     compute_dipole_ldos_enhancement,
     compute_dipole_power_ldos,
 )
-from pyceles.postprocessing.farfield import PeriodicFarFieldPayload, PowerBalance
+from pyceles.postprocessing.farfield import (
+    CrossSectionBalance,
+    PeriodicFarFieldPayload,
+    PowerBalance,
+)
 from pyceles.postprocessing.nearfield import (
     NearFieldSlice,
     compute_near_field,
@@ -53,6 +57,7 @@ from pyceles.simulation import (
     SimulationConfig,
     SimulationResult,
     SolvedSourcesResult,
+    UnpolarizedDiagnostics,
 )
 
 __all__ = [
@@ -60,6 +65,7 @@ __all__ = [
     "BesselBeam",
     "CartesianPolarizedBesselBeam",
     "CartesianPolarizedFocusedLaguerreGaussianBeam",
+    "CrossSectionBalance",
     "DipoleCollection",
     "DipolePowerLDOSResult",
     "DipoleSource",
@@ -86,6 +92,7 @@ __all__ = [
     "SolvedSourcesResult",
     "Sphere",
     "Spheroid",
+    "UnpolarizedDiagnostics",
     "__version__",
     "compute_dipole_ldos_enhancement",
     "compute_dipole_power_ldos",

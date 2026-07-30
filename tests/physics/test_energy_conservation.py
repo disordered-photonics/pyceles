@@ -41,9 +41,9 @@ def test_lossless_cluster_plane_wave_has_negligible_absorption():
     if cs is None:
         raise AssertionError("Plane-wave run must provide cross sections.")
 
-    c_ext = float(cs["C_ext"])
-    c_sca = float(cs["C_sca"])
-    c_abs = float(cs["C_abs"])
+    c_ext = float(cs.extinction)
+    c_sca = float(cs.scattering)
+    c_abs = float(cs.local_absorption)
 
     assert c_ext > 0.0
     assert c_sca > 0.0
@@ -87,10 +87,9 @@ def test_pec_sphere_plane_wave_has_zero_local_absorption():
         k_medium=run.k0 * complex(n_medium),
         radius=radius,
     )
-    np.testing.assert_allclose(cs["C_ext"], mie["C_ext"], rtol=1e-12, atol=1e-12)
-    np.testing.assert_allclose(cs["C_abs"], 0.0, rtol=0.0, atol=0.0)
-    np.testing.assert_allclose(cs["C_abs_local"], 0.0, rtol=0.0, atol=0.0)
-    assert float(cs["C_sca"]) > 0.0
+    np.testing.assert_allclose(cs.extinction, mie["C_ext"], rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(cs.local_absorption, 0.0, rtol=0.0, atol=0.0)
+    assert float(cs.scattering) > 0.0
 
 
 def test_periodic_raw_flux_defect_matches_local_power_defect_for_exact_ewald():

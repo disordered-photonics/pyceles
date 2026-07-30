@@ -98,6 +98,19 @@ Periodic order-resolved results remain on `pyceles.PeriodicFarFieldPayload`:
 
 There are no `absorptance`, `A_raw`, or historical power-key aliases.
 
+Plane-wave cross sections use the same typed-diagnostic policy through
+`SimulationResult.cross_sections`, an immutable `pyceles.CrossSectionBalance`:
+
+- `extinction`, `scattering`, and `local_absorption`,
+- `absorption_by_difference = extinction - scattering`,
+- `closure_error = absorption_by_difference - local_absorption`.
+
+The low-level constructor is `plane_wave_cross_section_balance(...)`; it
+requires the local absorption estimate explicitly and exposes no `C_*` aliases.
+For polarization-basis runs, `cross_sections_basis` stores one balance per
+channel and `unpolarized` is a typed `pyceles.UnpolarizedDiagnostics` rather
+than a heterogeneous dictionary.
+
 ## Periodic descriptors
 
 Experimental periodic workflows use:

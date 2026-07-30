@@ -9,7 +9,7 @@ mutable snapshot should copy the array explicitly.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 
 import numpy as np
@@ -19,6 +19,7 @@ from pyceles.core.particles import Particle, ParticleCollection
 from pyceles.core.sources import Source
 from pyceles.linear.solvers import LinearSolveResult
 from pyceles.postprocessing.farfield import (
+    CrossSectionBalance,
     FarFieldPatterns,
     PeriodicFarFieldPayload,
     PowerBalance,
@@ -68,6 +69,23 @@ def _apply_solver_result_retention(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class UnpolarizedDiagnostics:
+    """Incoherent averages of orthogonal TE/TM scalar diagnostics."""
+
+    power: PowerBalance | None = None
+    cross_sections: CrossSectionBalance | None = None
+
+    def to_mapping(self) -> dict[str, object]:
+        """Return the compact canonical serialization mapping."""
+        out: dict[str, object] = {}
+        if self.power is not None:
+            out["power"] = self.power.to_mapping()
+        if self.cross_sections is not None:
+            out["cross_sections"] = self.cross_sections.to_mapping()
+        return out
+
+
 @dataclass(frozen=True)
 class SimulationResult:
     """Container for solved multipole coefficients and derived observables.
@@ -90,9 +108,9 @@ class SimulationResult:
     farfield_basis: dict[str, FarFieldPatterns] | None
     power: PowerBalance | None
     power_basis: dict[str, PowerBalance] | None
-    cross_sections: dict[str, float] | None
-    cross_sections_basis: dict[str, dict[str, float]] | None
-    unpolarized: dict[str, PowerBalance | dict[str, float]] | None
+    cross_sections: CrossSectionBalance | None
+    cross_sections_basis: dict[str, CrossSectionBalance] | None
+    unpolarized: UnpolarizedDiagnostics | None
     decomposition_forward: dict[str, float] | None
     decomposition_backward: dict[str, float] | None
     decomposition_forward_basis: dict[str, dict[str, float]] | None
@@ -161,17 +179,6 @@ class MultiSourceSimulationResult:
         return self.runs[label]
 
 
-def avg_numeric_dict(d1: Mapping[str, object], d2: Mapping[str, object]) -> dict[str, float]:
-    """Average overlapping scalar diagnostics from two channels."""
-    keys = set(d1).intersection(set(d2))
-    out: dict[str, float] = {}
-    for key in keys:
-        v1, v2 = d1[key], d2[key]
-        if isinstance(v1, (int, float, np.floating)) and isinstance(v2, (int, float, np.floating)):
-            out[key] = float(0.5 * (float(v1) + float(v2)))
-    return out
-
-
 def average_power_balances(first: PowerBalance, second: PowerBalance) -> PowerBalance:
     """Return the incoherent arithmetic average of two power balances."""
 
@@ -202,6 +209,18 @@ def average_power_balances(first: PowerBalance, second: PowerBalance) -> PowerBa
             second.local_absorbed_power,
         ),
         local_absorbed_power_per_particle=particles,
+    )
+
+
+def average_cross_section_balances(
+    first: CrossSectionBalance,
+    second: CrossSectionBalance,
+) -> CrossSectionBalance:
+    """Return the incoherent arithmetic average of two cross-section balances."""
+    return CrossSectionBalance(
+        extinction=0.5 * (first.extinction + second.extinction),
+        scattering=0.5 * (first.scattering + second.scattering),
+        local_absorption=0.5 * (first.local_absorption + second.local_absorption),
     )
 
 
@@ -284,8 +303,9 @@ __all__ = [
     "ResultRetention",
     "SimulationResult",
     "SolvedSourcesResult",
+    "UnpolarizedDiagnostics",
+    "average_cross_section_balances",
     "average_power_balances",
-    "avg_numeric_dict",
     "empty_farfield_patterns",
     "empty_pwp",
     "single_rhs_result_from_multi",

@@ -156,15 +156,16 @@ Far-field support includes:
 - differential scattering cross section `dC_sca/dOmega`,
 - PWP-integrated cluster scattering cross section,
 - extinction cross section,
-- local absorption cross section `C_abs = C_abs_local`,
-- explicit raw/closure diagnostics:
-  - `C_abs_raw_diff = C_ext_raw - C_sca_raw`,
-  - `Delta_closure = C_abs_raw_diff - C_abs_local`.
+- an immutable `CrossSectionBalance` on plane-wave simulation results with:
+  - `extinction`,
+  - `scattering`,
+  - `local_absorption`,
+  - `absorption_by_difference = extinction - scattering`,
+  - `closure_error = absorption_by_difference - local_absorption`.
 
-`plane_wave_cross_sections(...)` requires explicit `local_absorption`. The
-legacy raw-difference fallback is opt-in through
-`allow_raw_diff_fallback=True`. pyceles does not expose a coefficient-only
-cluster `C_sca` helper.
+`plane_wave_cross_section_balance(...)` requires the independent local
+absorption estimate explicitly. pyceles does not expose a coefficient-only
+cluster scattering-cross-section helper.
 
 ## CuPy postprocessing coverage
 

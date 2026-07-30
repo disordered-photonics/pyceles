@@ -45,6 +45,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pairwise-vs-MLFMM scaling benchmark.
 
 ### Changed
+- Breaking: simulation-level plane-wave cross sections now use the immutable
+  `CrossSectionBalance` contract (`extinction`, `scattering`,
+  `local_absorption`, `absorption_by_difference`, and `closure_error`). The
+  ambiguous result-level `C_*`/`Delta_closure` dictionary aliases and raw
+  difference fallback were removed. Polarization-basis averages now use the
+  typed `UnpolarizedDiagnostics` container. Conventional single-particle Mie
+  helper mappings are unchanged.
 - Breaking: finite-beam, periodic, and dipole power accounting now uses the
   common immutable `PowerBalance` exposed on `SimulationResult.power`. Periodic
   payloads retain only order-resolved amplitudes/fluxes plus the same `power`
@@ -59,6 +66,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   GMRES for periodic systems, reflecting their measured convergence behavior.
 
 ### Fixed
+- Power-balance console summaries now use the exact normalized field names
+  (`flux_defect_fraction` and `closure_error_fraction`), and serialized power
+  mappings avoid duplicating the full per-particle vector in normalized form.
 - Stabilized near-coplanar shifted reciprocal Ewald sums with an exact
   generalized-incomplete-gamma series. NumPy reuses cached upper-gamma shell
   coefficients, while the fused CuPy kernel evaluates the same short Horner

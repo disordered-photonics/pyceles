@@ -19,6 +19,7 @@ from pyceles.core.sources import (
     Source,
 )
 from pyceles.postprocessing.farfield import (
+    CrossSectionBalance,
     FarFieldPatterns,
     PeriodicFarFieldPayload,
     PowerBalance,
@@ -26,7 +27,7 @@ from pyceles.postprocessing.farfield import (
     finite_beam_power_balance,
     local_absorption_cross_section_from_exciting,
     local_power_balance_from_exciting,
-    plane_wave_cross_sections,
+    plane_wave_cross_section_balance,
     pwp_power_decomposition,
 )
 from pyceles.postprocessing.farfield.periodic import periodic_plane_wave_orders
@@ -37,9 +38,10 @@ from .results import (
     ResultRetention,
     SimulationResult,
     SolvedSourcesResult,
+    UnpolarizedDiagnostics,
     _apply_solver_result_retention,
+    average_cross_section_balances,
     average_power_balances,
-    avg_numeric_dict,
     empty_farfield_patterns,
     single_rhs_result_from_multi,
 )
@@ -187,8 +189,8 @@ def _print_power_balance(power: PowerBalance, *, label: str | None = None) -> No
     print(
         f"{prefix}: R={fmt(power.reflectance)} T={fmt(power.transmittance)} "
         f"local_absorptance={fmt(power.local_absorptance)} "
-        f"flux_defect={fmt(power.flux_defect_fraction)} "
-        f"closure={fmt(power.closure_error_fraction)}"
+        f"flux_defect_fraction={fmt(power.flux_defect_fraction)} "
+        f"closure_error_fraction={fmt(power.closure_error_fraction)}"
     )
 
 
@@ -199,7 +201,7 @@ def _build_periodic_result(
     coeffs: np.ndarray,
     k: float,
 ) -> PeriodicFarFieldPayload:
-    """Compute periodic diffraction-order amplitudes and unit-cell `R/T/A`."""
+    """Compute periodic diffraction orders and the common unit-cell power balance."""
     periodic = sim.config.periodic
     if periodic is None:
         raise RuntimeError("Internal error: periodic postprocess called without periodic config.")
@@ -322,7 +324,7 @@ def _build_channel_diagnostics(
     accum_dtype: np.dtype,
 ) -> tuple[
     PowerBalance | None,
-    dict[str, float] | None,
+    CrossSectionBalance | None,
     dict[str, float] | None,
     dict[str, float] | None,
 ]:
@@ -337,7 +339,7 @@ def _build_channel_diagnostics(
     local_x = coeffs if local_coeffs is None else local_coeffs
 
     power: PowerBalance | None = None
-    cross_sections: dict[str, float] | None = None
+    cross_sections: CrossSectionBalance | None = None
     decomposition_forward: dict[str, float] | None = None
     decomposition_backward: dict[str, float] | None = None
 
@@ -359,7 +361,9 @@ def _build_channel_diagnostics(
                 accum_dtype=accum_dtype,
             )
         )
-        cross_sections = plane_wave_cross_sections(
+        if c_abs_local is None:
+            raise RuntimeError("Plane-wave local absorption could not be evaluated.")
+        cross_sections = plane_wave_cross_section_balance(
             source,
             initial_coeffs,
             coeffs,
@@ -437,27 +441,32 @@ def _basis_channel_payloads(
     run_tm: SimulationResult,
 ) -> tuple[
     dict[str, PowerBalance] | None,
-    dict[str, dict[str, float]] | None,
-    dict[str, PowerBalance | dict[str, float]] | None,
+    dict[str, CrossSectionBalance] | None,
+    UnpolarizedDiagnostics | None,
     dict[str, dict[str, float]] | None,
     dict[str, dict[str, float]] | None,
 ]:
     """Collect basis-channel diagnostics and incoherent unpolarized averages."""
     power_basis: dict[str, PowerBalance] | None = None
-    cross_sections_basis: dict[str, dict[str, float]] | None = None
+    cross_sections_basis: dict[str, CrossSectionBalance] | None = None
     decomposition_forward_basis: dict[str, dict[str, float]] | None = None
     decomposition_backward_basis: dict[str, dict[str, float]] | None = None
-    unpolarized: dict[str, PowerBalance | dict[str, float]] | None = None
+    unpolarized: UnpolarizedDiagnostics | None = None
 
+    unpolarized_power = None
+    unpolarized_cross_sections = None
     if run_te.power is not None and run_tm.power is not None:
         power_basis = {"te": run_te.power, "tm": run_tm.power}
-        unpolarized = dict(unpolarized or {})
-        unpolarized["power"] = average_power_balances(run_te.power, run_tm.power)
+        unpolarized_power = average_power_balances(run_te.power, run_tm.power)
     if run_te.cross_sections is not None and run_tm.cross_sections is not None:
         cross_sections_basis = {"te": run_te.cross_sections, "tm": run_tm.cross_sections}
-        unpolarized = dict(unpolarized or {})
-        unpolarized["cross_sections"] = avg_numeric_dict(
+        unpolarized_cross_sections = average_cross_section_balances(
             run_te.cross_sections, run_tm.cross_sections
+        )
+    if unpolarized_power is not None or unpolarized_cross_sections is not None:
+        unpolarized = UnpolarizedDiagnostics(
+            power=unpolarized_power,
+            cross_sections=unpolarized_cross_sections,
         )
     if run_te.decomposition_forward is not None and run_tm.decomposition_forward is not None:
         decomposition_forward_basis = {
@@ -493,7 +502,7 @@ def _assemble_simulation_result(
     accum_dtype: np.dtype,
     farfield: FarFieldPatterns,
     power: PowerBalance | None,
-    cross_sections: dict[str, float] | None,
+    cross_sections: CrossSectionBalance | None,
     decomposition_forward: dict[str, float] | None,
     decomposition_backward: dict[str, float] | None,
     initial_coeffs_basis: dict[str, np.ndarray] | None = None,
@@ -501,8 +510,8 @@ def _assemble_simulation_result(
     solver_result_basis=None,
     farfield_basis: dict[str, FarFieldPatterns] | None = None,
     power_basis: dict[str, PowerBalance] | None = None,
-    cross_sections_basis: dict[str, dict[str, float]] | None = None,
-    unpolarized: dict[str, PowerBalance | dict[str, float]] | None = None,
+    cross_sections_basis: dict[str, CrossSectionBalance] | None = None,
+    unpolarized: UnpolarizedDiagnostics | None = None,
     decomposition_forward_basis: dict[str, dict[str, float]] | None = None,
     decomposition_backward_basis: dict[str, dict[str, float]] | None = None,
     polarization_jones: tuple[complex, complex] | None = None,

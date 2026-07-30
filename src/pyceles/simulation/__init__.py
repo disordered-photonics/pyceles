@@ -13,6 +13,7 @@ from .results import (
     ResultRetention,
     SimulationResult,
     SolvedSourcesResult,
+    UnpolarizedDiagnostics,
 )
 from .workflow import Simulation
 
@@ -23,4 +24,5 @@ __all__ = [
     "SimulationConfig",
     "SimulationResult",
     "SolvedSourcesResult",
+    "UnpolarizedDiagnostics",
 ]

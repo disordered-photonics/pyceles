@@ -180,6 +180,6 @@ def test_global_z_rotation_covariance_for_plane_wave_cluster():
     cs2 = run_2.cross_sections
     if cs1 is None or cs2 is None:
         raise AssertionError("Plane-wave runs must expose cross sections.")
-    np.testing.assert_allclose(cs1["C_sca"], cs2["C_sca"], rtol=1e-3, atol=0.0)
-    np.testing.assert_allclose(cs1["C_ext"], cs2["C_ext"], rtol=1e-3, atol=0.0)
-    np.testing.assert_allclose(cs1["C_abs"], cs2["C_abs"], rtol=1e-3, atol=0.0)
+    np.testing.assert_allclose(cs1.scattering, cs2.scattering, rtol=1e-3, atol=0.0)
+    np.testing.assert_allclose(cs1.extinction, cs2.extinction, rtol=1e-3, atol=0.0)
+    np.testing.assert_allclose(cs1.local_absorption, cs2.local_absorption, rtol=1e-3, atol=0.0)

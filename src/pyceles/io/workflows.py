@@ -207,7 +207,7 @@ def save_simulation_h5(
     if run.power is not None:
         diagnostics["power"] = run.power.to_mapping()
     if run.cross_sections is not None:
-        diagnostics["cross_sections"] = run.cross_sections
+        diagnostics["cross_sections"] = run.cross_sections.to_mapping()
     if run.decomposition_forward is not None:
         diagnostics["decomposition_forward"] = run.decomposition_forward
     if run.decomposition_backward is not None:
@@ -217,16 +217,15 @@ def save_simulation_h5(
             label: power.to_mapping() for label, power in run.power_basis.items()
         }
     if run.cross_sections_basis is not None:
-        diagnostics["cross_sections_basis"] = run.cross_sections_basis
+        diagnostics["cross_sections_basis"] = {
+            label: balance.to_mapping() for label, balance in run.cross_sections_basis.items()
+        }
     if run.decomposition_forward_basis is not None:
         diagnostics["decomposition_forward_basis"] = run.decomposition_forward_basis
     if run.decomposition_backward_basis is not None:
         diagnostics["decomposition_backward_basis"] = run.decomposition_backward_basis
     if run.unpolarized is not None:
-        diagnostics["unpolarized"] = {
-            key: value.to_mapping() if hasattr(value, "to_mapping") else value
-            for key, value in run.unpolarized.items()
-        }
+        diagnostics["unpolarized"] = run.unpolarized.to_mapping()
     save_mapping_h5(out_h5, mapping=diagnostics, group="diagnostics", mode="a")
     return out_h5
 

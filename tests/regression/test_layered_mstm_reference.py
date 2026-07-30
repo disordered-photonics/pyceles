@@ -230,12 +230,12 @@ def test_layered_spheres_match_mstm_oracles_for_cross_sections():
 
         area = np.pi * float(case.radii[-1]) ** 2
         qext_py = 0.5 * (
-            float(run_te.cross_sections["C_ext"] / area)
-            + float(run_tm.cross_sections["C_ext"] / area)
+            float(run_te.cross_sections.extinction / area)
+            + float(run_tm.cross_sections.extinction / area)
         )
         qsca_py = 0.5 * (
-            float(run_te.cross_sections["C_sca"] / area)
-            + float(run_tm.cross_sections["C_sca"] / area)
+            float(run_te.cross_sections.scattering / area)
+            + float(run_tm.cross_sections.scattering / area)
         )
 
         np.testing.assert_allclose(qext_py, case.qext_mstm, rtol=1e-4, atol=0.0)

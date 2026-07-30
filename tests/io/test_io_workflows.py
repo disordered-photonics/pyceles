@@ -7,13 +7,14 @@ from pyceles.core.fields import PlaneWave
 from pyceles.core.particles import ParticleCollection, Sphere, spheres_from_arrays
 from pyceles.io.workflows import load_simulation_h5, save_simulation_h5
 from pyceles.linear.solvers import LinearSolveResult
-from pyceles.postprocessing.farfield import FarFieldPatterns, PowerBalance
+from pyceles.postprocessing.farfield import CrossSectionBalance, FarFieldPatterns, PowerBalance
 from pyceles.postprocessing.nearfield import NearFieldSlice
 from pyceles.simulation import (
     ResultRetention,
     Simulation,
     SimulationConfig,
     SimulationResult,
+    UnpolarizedDiagnostics,
 )
 
 pytestmark = [pytest.mark.filesystem, pytest.mark.hdf5]
@@ -119,9 +120,14 @@ def test_save_simulation_h5_writes_basis_and_diagnostics(tmp_path):
                 local_absorbed_power=0.0,
             ),
         },
-        cross_sections={"C_sca": 1.0, "C_ext": 2.0, "C_abs": 1.0},
-        cross_sections_basis={"te": {"C_sca": 1.0}, "tm": {"C_sca": 1.0}},
-        unpolarized={"cross_sections": {"C_sca": 1.0}},
+        cross_sections=CrossSectionBalance(extinction=2.0, scattering=1.0, local_absorption=1.0),
+        cross_sections_basis={
+            "te": CrossSectionBalance(extinction=2.0, scattering=1.0, local_absorption=1.0),
+            "tm": CrossSectionBalance(extinction=2.0, scattering=1.0, local_absorption=1.0),
+        },
+        unpolarized=UnpolarizedDiagnostics(
+            cross_sections=CrossSectionBalance(extinction=2.0, scattering=1.0, local_absorption=1.0)
+        ),
         decomposition_forward={"P_total": 1.0},
         decomposition_backward={"P_total": 0.0},
         decomposition_forward_basis={"te": {"P_total": 1.0}, "tm": {"P_total": 1.0}},
@@ -155,6 +161,13 @@ def test_save_simulation_h5_writes_basis_and_diagnostics(tmp_path):
         assert "far_field_basis/tm" in h5
         assert "diagnostics" in h5
         assert "cross_sections" in h5["diagnostics"]
+        attrs = h5["diagnostics/cross_sections"].attrs
+        assert float(attrs["extinction"]) == 2.0
+        assert float(attrs["scattering"]) == 1.0
+        assert float(attrs["local_absorption"]) == 1.0
+        assert float(attrs["absorption_by_difference"]) == 1.0
+        assert float(attrs["closure_error"]) == 0.0
+        assert "C_abs" not in attrs
         assert "power_basis" in h5["diagnostics"]
         assert "unpolarized" in h5["diagnostics"]
         np.testing.assert_array_equal(

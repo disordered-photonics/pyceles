@@ -13,14 +13,14 @@ from pyceles.core.particles import (
 )
 from pyceles.core.tmatrix import mie_cross_sections
 from pyceles.postprocessing.farfield import (
-    absorption_cross_section,
+    CrossSectionBalance,
+    PowerBalance,
     extinction_cross_section,
     finite_beam_power_balance,
     incident_power_from_pwp,
     local_absorbed_power_from_exciting,
     local_power_balance_from_exciting,
-    plane_wave_cross_section_components,
-    plane_wave_cross_sections,
+    plane_wave_cross_section_balance,
     pwp_power_decomposition,
     pwp_power_flux,
     scattering_cross_section,
@@ -269,6 +269,26 @@ def test_local_absorbed_power_from_exciting_scales_inverse_with_n_medium():
         n_medium=1.2 + 0j,
     )
     np.testing.assert_allclose(p_n12 / p_n1, 1.0 / 1.2, rtol=1e-13, atol=1e-13)
+
+
+def test_power_balance_mapping_avoids_duplicate_normalized_particle_vector():
+    power = PowerBalance(
+        incident_power=2.0,
+        reflected_power=0.5,
+        transmitted_power=1.0,
+        local_absorbed_power=0.5,
+        local_absorbed_power_per_particle=np.array([0.2, 0.3]),
+    )
+
+    mapping = power.to_mapping()
+
+    raw = mapping["local_absorbed_power_per_particle"]
+    assert isinstance(raw, np.ndarray)
+    np.testing.assert_allclose(raw, [0.2, 0.3])
+    assert "local_absorptance_per_particle" not in mapping
+    normalized = power.local_absorptance_per_particle
+    assert normalized is not None
+    np.testing.assert_allclose(normalized, [0.1, 0.15])
 
 
 def test_local_power_balance_includes_per_particle_contributions():
@@ -653,7 +673,26 @@ def test_scattering_cross_section_density_integrates_to_total():
     np.testing.assert_allclose(c_sca, c_ref, rtol=1e-12, atol=1e-12)
 
 
-def test_plane_wave_cross_sections_are_invariant_to_global_incident_scale():
+def test_cross_section_balance_mapping_uses_explicit_names():
+    balance = CrossSectionBalance(extinction=2.0, scattering=1.25, local_absorption=0.5)
+    assert balance.to_mapping() == {
+        "extinction": 2.0,
+        "scattering": 1.25,
+        "local_absorption": 0.5,
+        "absorption_by_difference": 0.75,
+        "closure_error": 0.25,
+    }
+
+
+@pytest.mark.parametrize("field", ["extinction", "scattering", "local_absorption"])
+def test_cross_section_balance_rejects_nonfinite_components(field):
+    values = {"extinction": 2.0, "scattering": 1.25, "local_absorption": 0.5}
+    values[field] = np.nan
+    with pytest.raises(ValueError, match=field):
+        CrossSectionBalance(**values)
+
+
+def test_plane_wave_cross_section_balance_is_invariant_to_global_incident_scale():
     alpha = np.linspace(0.0, 2 * np.pi, 31, endpoint=False)
     beta = np.linspace(0.0, np.pi, 25)
     k0 = 2.0 * np.pi / 550.0
@@ -692,7 +731,7 @@ def test_plane_wave_cross_sections_are_invariant_to_global_incident_scale():
     )
     scale = 6.0
 
-    cs_ref = plane_wave_cross_sections(
+    cs_ref = plane_wave_cross_section_balance(
         source_ref,
         b_ref,
         x_ref,
@@ -700,9 +739,9 @@ def test_plane_wave_cross_sections_are_invariant_to_global_incident_scale():
         n_medium=n_medium,
         scattered_pwp_te=pte_ref,
         scattered_pwp_tm=ptm_ref,
-        allow_raw_diff_fallback=True,
+        local_absorption=0.0,
     )
-    cs_scaled = plane_wave_cross_sections(
+    cs_scaled = plane_wave_cross_section_balance(
         source_scaled,
         scale * b_ref,
         scale * x_ref,
@@ -710,14 +749,16 @@ def test_plane_wave_cross_sections_are_invariant_to_global_incident_scale():
         n_medium=n_medium,
         scattered_pwp_te=_dummy_pwp(alpha, beta, scale * gte_ref),
         scattered_pwp_tm=_dummy_pwp(alpha, beta, scale * gtm_ref),
-        allow_raw_diff_fallback=True,
+        local_absorption=0.0,
     )
 
-    for key in ("C_ext", "C_sca", "C_abs"):
-        np.testing.assert_allclose(cs_scaled[key], cs_ref[key], rtol=1e-12, atol=1e-12)
+    for attribute in ("extinction", "scattering", "local_absorption"):
+        np.testing.assert_allclose(
+            getattr(cs_scaled, attribute), getattr(cs_ref, attribute), rtol=1e-12, atol=1e-12
+        )
 
 
-def test_plane_wave_cross_section_components_expose_raw_local_and_closure():
+def test_plane_wave_cross_section_balance_exposes_local_and_closure():
     alpha = np.linspace(0.0, 2 * np.pi, 31, endpoint=False)
     beta = np.linspace(0.0, np.pi, 25)
     k0 = 2.0 * np.pi / 550.0
@@ -745,7 +786,7 @@ def test_plane_wave_cross_section_components_expose_raw_local_and_closure():
     pte = _dummy_pwp(alpha, beta, gte)
     ptm = _dummy_pwp(alpha, beta, gtm)
 
-    base = plane_wave_cross_section_components(
+    base = plane_wave_cross_section_balance(
         source,
         b,
         x,
@@ -753,12 +794,13 @@ def test_plane_wave_cross_section_components_expose_raw_local_and_closure():
         ptm,
         k0=k0,
         n_medium=n_medium,
+        local_absorption=0.0,
     )
-    assert np.isclose(base["C_abs_local"], base["C_abs_raw_diff"])
-    assert np.isclose(base["Delta_closure"], 0.0)
+    np.testing.assert_allclose(base.local_absorption, 0.0)
+    np.testing.assert_allclose(base.closure_error, base.absorption_by_difference)
 
-    override_val = float(base["C_abs_raw_diff"] + 0.123)
-    overridden = plane_wave_cross_section_components(
+    override_val = float(base.absorption_by_difference + 0.123)
+    overridden = plane_wave_cross_section_balance(
         source,
         b,
         x,
@@ -768,10 +810,10 @@ def test_plane_wave_cross_section_components_expose_raw_local_and_closure():
         n_medium=n_medium,
         local_absorption=override_val,
     )
-    np.testing.assert_allclose(overridden["C_abs_local"], override_val, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(overridden.local_absorption, override_val, rtol=0.0, atol=0.0)
     np.testing.assert_allclose(
-        overridden["Delta_closure"],
-        overridden["C_abs_raw_diff"] - override_val,
+        overridden.closure_error,
+        overridden.absorption_by_difference - override_val,
         rtol=0.0,
         atol=0.0,
     )
@@ -779,7 +821,7 @@ def test_plane_wave_cross_section_components_expose_raw_local_and_closure():
 
 @pytest.mark.reference
 @pytest.mark.slow
-def test_plane_wave_cross_sections_from_coefficients_match_single_sphere_mie():
+def test_plane_wave_cross_section_balance_matches_single_sphere_mie():
     wavelength = 550.0
     n_medium = 1.0 + 0j
     radius = 80.0
@@ -816,7 +858,7 @@ def test_plane_wave_cross_sections_from_coefficients_match_single_sphere_mie():
     assert run.cross_sections is not None
     assert run.initial_coeffs is not None
 
-    cs = plane_wave_cross_sections(
+    cs = plane_wave_cross_section_balance(
         source,
         run.initial_coeffs,
         run.coeffs,
@@ -824,7 +866,7 @@ def test_plane_wave_cross_sections_from_coefficients_match_single_sphere_mie():
         n_medium=n_medium,
         scattered_pwp_te=run.farfield.scattered_te,
         scattered_pwp_tm=run.farfield.scattered_tm,
-        local_absorption=float(run.cross_sections["C_abs_local"]),
+        local_absorption=run.cross_sections.local_absorption,
     )
     mie = mie_cross_sections(
         lmax=cfg.lmax,
@@ -834,9 +876,9 @@ def test_plane_wave_cross_sections_from_coefficients_match_single_sphere_mie():
         n_medium=n_medium,
     )
 
-    np.testing.assert_allclose(cs["C_ext"], mie["C_ext"], rtol=2e-11, atol=1e-11)
-    np.testing.assert_allclose(cs["C_sca"], mie["C_sca"], rtol=1e-4, atol=1e-4)
-    np.testing.assert_allclose(cs["C_abs"], mie["C_abs"], rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(cs.extinction, mie["C_ext"], rtol=2e-11, atol=1e-11)
+    np.testing.assert_allclose(cs.scattering, mie["C_sca"], rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(cs.local_absorption, mie["C_abs"], rtol=1e-4, atol=1e-4)
 
     c_ext = extinction_cross_section(
         source,
@@ -845,46 +887,20 @@ def test_plane_wave_cross_sections_from_coefficients_match_single_sphere_mie():
         k0=run.k0,
         n_medium=n_medium,
     )
-    c_abs = absorption_cross_section(
-        source,
-        run.initial_coeffs,
-        run.coeffs,
-        run.farfield.scattered_te,
-        run.farfield.scattered_tm,
-        k0=run.k0,
-        n_medium=n_medium,
-    )
-    np.testing.assert_allclose(c_ext, cs["C_ext"], rtol=1e-13, atol=1e-13)
-    np.testing.assert_allclose(c_abs, cs["C_abs_raw_diff"], rtol=1e-13, atol=1e-13)
-    np.testing.assert_allclose(run.cross_sections["C_ext"], cs["C_ext"], rtol=1e-13, atol=1e-13)
-    np.testing.assert_allclose(run.cross_sections["C_sca"], cs["C_sca"], rtol=1e-13, atol=1e-13)
-    np.testing.assert_allclose(run.cross_sections["C_abs"], cs["C_abs"], rtol=1e-13, atol=1e-13)
-    assert "C_ext_raw" in run.cross_sections
-    assert "C_sca_raw" in run.cross_sections
-    assert "C_abs_raw_diff" in run.cross_sections
-    assert "C_abs_local" in run.cross_sections
-    assert "Delta_closure" in run.cross_sections
+    np.testing.assert_allclose(c_ext, cs.extinction, rtol=1e-13, atol=1e-13)
+    np.testing.assert_allclose(run.cross_sections.extinction, cs.extinction, rtol=1e-13, atol=1e-13)
+    np.testing.assert_allclose(run.cross_sections.scattering, cs.scattering, rtol=1e-13, atol=1e-13)
     np.testing.assert_allclose(
-        run.cross_sections["C_ext_raw"],
-        run.cross_sections["C_ext"],
-        rtol=0.0,
-        atol=0.0,
+        run.cross_sections.local_absorption, cs.local_absorption, rtol=1e-13, atol=1e-13
     )
     np.testing.assert_allclose(
-        run.cross_sections["C_sca_raw"],
-        run.cross_sections["C_sca"],
-        rtol=0.0,
-        atol=0.0,
-    )
-    np.testing.assert_allclose(run.cross_sections["C_abs"], run.cross_sections["C_abs_local"])
-    np.testing.assert_allclose(
-        run.cross_sections["Delta_closure"],
-        run.cross_sections["C_abs_raw_diff"] - run.cross_sections["C_abs_local"],
+        run.cross_sections.closure_error,
+        run.cross_sections.absorption_by_difference - run.cross_sections.local_absorption,
         rtol=1e-14,
         atol=1e-14,
     )
     np.testing.assert_allclose(
-        run.cross_sections["C_abs_local"],
+        run.cross_sections.local_absorption,
         mie["C_abs"],
         rtol=1e-10,
         atol=1e-10,
@@ -924,10 +940,10 @@ def test_plane_wave_local_absorption_lossless_single_sphere_is_nearly_zero():
     ).run()
     assert run.cross_sections is not None
 
-    np.testing.assert_allclose(run.cross_sections["C_abs_local"], 0.0, rtol=0.0, atol=1e-8)
+    np.testing.assert_allclose(run.cross_sections.local_absorption, 0.0, rtol=0.0, atol=1e-8)
     np.testing.assert_allclose(
-        run.cross_sections["Delta_closure"],
-        run.cross_sections["C_abs_raw_diff"],
+        run.cross_sections.closure_error,
+        run.cross_sections.absorption_by_difference,
         rtol=1e-11,
         atol=1e-11,
     )
@@ -1005,7 +1021,7 @@ def test_plane_wave_circumsphere_flux_matches_local_absorption_single_sphere(
     c_abs_surface = float(flux_diag["P_abs_surface_total"]) / incident_scale
     np.testing.assert_allclose(
         c_abs_surface,
-        float(run.cross_sections["C_abs_local"]),
+        float(run.cross_sections.local_absorption),
         rtol=8e-4,
         atol=1e-4,
     )
@@ -1048,7 +1064,7 @@ def test_plane_wave_lossless_cluster_skips_expensive_local_absorption_route(monk
     )
     run = Simulation(cfg, particles=particles).run()
     assert run.cross_sections is not None
-    np.testing.assert_allclose(run.cross_sections["C_abs_local"], 0.0, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(run.cross_sections.local_absorption, 0.0, rtol=0.0, atol=0.0)
 
 
 @pytest.mark.slow
@@ -1102,8 +1118,8 @@ def test_plane_wave_local_absorption_varies_smoothly_with_weak_absorber():
         )
         run = Simulation(cfg, particles=particles).run()
         assert run.cross_sections is not None
-        c_abs_local.append(float(run.cross_sections["C_abs_local"]))
-        delta_closure.append(float(run.cross_sections["Delta_closure"]))
+        c_abs_local.append(float(run.cross_sections.local_absorption))
+        delta_closure.append(float(run.cross_sections.closure_error))
 
     c_abs_local_arr = np.asarray(c_abs_local, dtype=float)
     delta_closure_arr = np.asarray(delta_closure, dtype=float)
@@ -1148,10 +1164,10 @@ def test_plane_wave_local_absorption_lossless_layered_sphere_is_nearly_zero():
     run = Simulation(cfg, particles=[particle]).run()
     assert run.cross_sections is not None
 
-    np.testing.assert_allclose(run.cross_sections["C_abs_local"], 0.0, rtol=0.0, atol=1e-8)
+    np.testing.assert_allclose(run.cross_sections.local_absorption, 0.0, rtol=0.0, atol=1e-8)
     np.testing.assert_allclose(
-        run.cross_sections["Delta_closure"],
-        run.cross_sections["C_abs_raw_diff"],
+        run.cross_sections.closure_error,
+        run.cross_sections.absorption_by_difference,
         rtol=1e-11,
         atol=1e-11,
     )
@@ -1188,10 +1204,10 @@ def test_plane_wave_local_absorption_lossless_spheroid_is_small():
     run = Simulation(cfg, particles=[particle]).run()
     assert run.cross_sections is not None
 
-    np.testing.assert_allclose(run.cross_sections["C_abs_local"], 0.0, rtol=0.0, atol=1e-8)
+    np.testing.assert_allclose(run.cross_sections.local_absorption, 0.0, rtol=0.0, atol=1e-8)
 
 
-def test_plane_wave_cross_sections_require_scattered_pwps():
+def test_plane_wave_cross_section_balance_requires_scattered_pwps():
     source = PlaneWave(
         wavelength=550.0,
         medium_n=1.0 + 0j,
@@ -1204,7 +1220,7 @@ def test_plane_wave_cross_sections_require_scattered_pwps():
     b = np.zeros((1, 8), dtype=np.complex128)
     x = np.zeros((1, 8), dtype=np.complex128)
     with pytest.raises(TypeError):
-        plane_wave_cross_sections(
+        plane_wave_cross_section_balance(
             source,
             b,
             x,
@@ -1213,7 +1229,7 @@ def test_plane_wave_cross_sections_require_scattered_pwps():
         )  # type: ignore[call-arg]
 
 
-def test_plane_wave_cross_sections_require_explicit_local_absorption():
+def test_plane_wave_cross_section_balance_requires_local_absorption():
     source = PlaneWave(
         wavelength=550.0,
         medium_n=1.0 + 0j,
@@ -1229,8 +1245,8 @@ def test_plane_wave_cross_sections_require_explicit_local_absorption():
     b = np.zeros((1, 8), dtype=np.complex128)
     x = np.zeros((1, 8), dtype=np.complex128)
 
-    with pytest.raises(ValueError, match="requires `local_absorption`"):
-        plane_wave_cross_sections(
+    with pytest.raises(TypeError):
+        plane_wave_cross_section_balance(
             source,
             b,
             x,
@@ -1238,9 +1254,9 @@ def test_plane_wave_cross_sections_require_explicit_local_absorption():
             n_medium=1.0 + 0j,
             scattered_pwp_te=p,
             scattered_pwp_tm=p,
-        )
+        )  # type: ignore[call-arg]
 
-    cs = plane_wave_cross_sections(
+    cs = plane_wave_cross_section_balance(
         source,
         b,
         x,
@@ -1248,13 +1264,14 @@ def test_plane_wave_cross_sections_require_explicit_local_absorption():
         n_medium=1.0 + 0j,
         scattered_pwp_te=p,
         scattered_pwp_tm=p,
-        allow_raw_diff_fallback=True,
+        local_absorption=0.125,
     )
-    np.testing.assert_allclose(cs["C_abs"], cs["C_abs_raw_diff"], rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(cs.local_absorption, 0.125, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(cs.closure_error, -0.125, rtol=0.0, atol=0.0)
 
     b_empty = np.zeros((0, 8), dtype=np.complex128)
     x_empty = np.zeros((0, 8), dtype=np.complex128)
-    cs_empty = plane_wave_cross_sections(
+    cs_empty = plane_wave_cross_section_balance(
         source,
         b_empty,
         x_empty,
@@ -1262,12 +1279,13 @@ def test_plane_wave_cross_sections_require_explicit_local_absorption():
         n_medium=1.0 + 0j,
         scattered_pwp_te=p,
         scattered_pwp_tm=p,
+        local_absorption=0.0,
     )
-    np.testing.assert_allclose(cs_empty["C_ext"], 0.0, rtol=0.0, atol=0.0)
-    np.testing.assert_allclose(cs_empty["C_sca"], 0.0, rtol=0.0, atol=0.0)
-    np.testing.assert_allclose(cs_empty["C_abs"], 0.0, rtol=0.0, atol=0.0)
-    np.testing.assert_allclose(cs_empty["C_abs_local"], 0.0, rtol=0.0, atol=0.0)
-    np.testing.assert_allclose(cs_empty["Delta_closure"], 0.0, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(cs_empty.extinction, 0.0, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(cs_empty.scattering, 0.0, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(cs_empty.local_absorption, 0.0, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(cs_empty.absorption_by_difference, 0.0, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(cs_empty.closure_error, 0.0, rtol=0.0, atol=0.0)
 
 
 def test_simulation_dual_basis_jones_mixing_consistency():
@@ -1303,9 +1321,9 @@ def test_simulation_dual_basis_jones_mixing_consistency():
     assert run.cross_sections_basis is not None
     assert "te" in run.cross_sections_basis and "tm" in run.cross_sections_basis
     assert run.cross_sections is not None
-    assert "C_sca" in run.cross_sections
+    assert np.isfinite(run.cross_sections.scattering)
     assert run.unpolarized is not None
-    assert "cross_sections" in run.unpolarized
+    assert run.unpolarized.cross_sections is not None
 
 
 @pytest.mark.slow
@@ -1745,6 +1763,6 @@ def test_simulation_supports_no_particle_source_only_run():
     np.testing.assert_allclose(run.farfield.scattered_te["coeff"], 0.0, atol=0.0)
     np.testing.assert_allclose(run.farfield.scattered_tm["coeff"], 0.0, atol=0.0)
     assert run.cross_sections is not None
-    np.testing.assert_allclose(run.cross_sections["C_sca"], 0.0, atol=0.0)
-    np.testing.assert_allclose(run.cross_sections["C_ext"], 0.0, atol=0.0)
-    np.testing.assert_allclose(run.cross_sections["C_abs"], 0.0, atol=0.0)
+    np.testing.assert_allclose(run.cross_sections.scattering, 0.0, atol=0.0)
+    np.testing.assert_allclose(run.cross_sections.extinction, 0.0, atol=0.0)
+    np.testing.assert_allclose(run.cross_sections.local_absorption, 0.0, atol=0.0)

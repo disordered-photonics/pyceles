@@ -81,9 +81,12 @@ def test_layered_single_layer_farfield_matches_homogeneous_sphere():
     )
     assert run_sphere.cross_sections is not None
     assert run_layered.cross_sections is not None
-    for key in ("C_ext", "C_sca", "C_abs"):
+    for attribute in ("extinction", "scattering", "local_absorption"):
         np.testing.assert_allclose(
-            run_layered.cross_sections[key], run_sphere.cross_sections[key], rtol=1e-11, atol=1e-11
+            getattr(run_layered.cross_sections, attribute),
+            getattr(run_sphere.cross_sections, attribute),
+            rtol=1e-11,
+            atol=1e-11,
         )
 
 

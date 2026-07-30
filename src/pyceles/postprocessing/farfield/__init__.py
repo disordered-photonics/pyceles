@@ -9,11 +9,10 @@ The package surface is organized by physical ownership:
 from __future__ import annotations
 
 from .cross_sections import (
-    absorption_cross_section,
+    CrossSectionBalance,
     extinction_cross_section,
     local_absorption_cross_section_from_exciting,
-    plane_wave_cross_section_components,
-    plane_wave_cross_sections,
+    plane_wave_cross_section_balance,
     scattering_cross_section,
     total_scattering_cross_section,
 )
@@ -41,12 +40,12 @@ from .power import (
 )
 
 __all__ = [
+    "CrossSectionBalance",
     "DiffractionOrders",
     "FarFieldPatterns",
     "PeriodicFarFieldPayload",
     "PeriodicOrderAmplitudes",
     "PowerBalance",
-    "absorption_cross_section",
     "compute_far_field_patterns",
     "enumerate_diffraction_orders_rectangular",
     "extinction_cross_section",
@@ -57,8 +56,7 @@ __all__ = [
     "local_power_balance_from_exciting",
     "periodic_order_amplitudes",
     "periodic_plane_wave_orders",
-    "plane_wave_cross_section_components",
-    "plane_wave_cross_sections",
+    "plane_wave_cross_section_balance",
     "pwp_power_decomposition",
     "pwp_power_flux",
     "scattered_field_plane_wave_pattern",

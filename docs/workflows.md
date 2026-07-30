@@ -153,7 +153,9 @@ run = pcl.Simulation(cfg, particles=particles).run()
 mixed_coeffs = run.coeffs
 te_coeffs = run.coeffs_basis["te"]
 tm_coeffs = run.coeffs_basis["tm"]
-print(run.unpolarized)
+assert run.unpolarized is not None
+print(run.unpolarized.power)
+print(run.unpolarized.cross_sections)
 ```
 
 Near-field evaluation can target mixed or basis channels:

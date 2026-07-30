@@ -49,7 +49,8 @@ simulation = pcl.Simulation(config, particles=particles)
 result = simulation.run()
 
 print(result.n_particles)
-print(result.cross_sections.keys())
+if result.cross_sections is not None:
+    print(result.cross_sections.extinction, result.cross_sections.scattering)
 ```
 
 Plane waves use cross-section diagnostics. Finite-beam power fractions are
