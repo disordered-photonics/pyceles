@@ -299,7 +299,12 @@ def _policy_numpy_mlfmm_coupling() -> MLFMMCouplingOperator:
         radial_lut_dr=0.5,
         cache_translation_blocks=False,
         coupling_backend="mlfmm",
-        mlfmm_options=MLFMMOptions(max_leaf_particles=4, max_depth=4),
+        mlfmm_options=MLFMMOptions(
+            max_leaf_particles=4,
+            max_depth=4,
+            accuracy_level=2,
+            order_additive=1,
+        ),
         backend="numpy",
     )
     coupling = prepared.coupling

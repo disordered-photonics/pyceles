@@ -41,6 +41,7 @@ The current tests cover, among other areas:
 - NumPy and CuPy backend agreement for selected operators,
 - near-field and far-field helper contracts,
 - energy/power consistency checks,
+- translation, rotation, inversion-parity, particle-order, and Lorentz-reciprocity invariants,
 - local absorption and dipole diagnostics,
 - HDF5 workflow persistence,
 - periodic Ewald helper routines and CuPy parity checks,

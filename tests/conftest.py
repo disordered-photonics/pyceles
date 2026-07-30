@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tempfile
+from collections.abc import Iterator
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -55,35 +56,54 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             item.add_marker(pytest.mark.slow)
 
 
-@pytest.fixture(scope="session")
-def cupy_runtime() -> tuple[Any, Any]:
-    return _require_cupy_runtime()
+@pytest.fixture(scope="session", autouse=True)
+def _gpu_compilation_cache_env(
+    request: pytest.FixtureRequest,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[None]:
+    if not any("gpu" in item.keywords for item in request.session.items):
+        yield
+        return
+
+    # Keep compilation artifacts inside one pytest-owned session root. CuPy
+    # and CUDA caches must be shared across real-device tests; assigning fresh
+    # cache directories per test forces repeated JIT work.
+    root = tmp_path_factory.mktemp("cupy-compilation-cache")
+    cupy_cache_dir = root / "cupy-cache"
+    cuda_cache_dir = root / "cuda-cache"
+    cupy_cache_dir.mkdir()
+    cuda_cache_dir.mkdir()
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setenv("CUPY_CACHE_DIR", str(cupy_cache_dir))
+    monkeypatch.setenv("CUDA_CACHE_PATH", str(cuda_cache_dir))
+
+    yield
+    monkeypatch.undo()
 
 
 @pytest.fixture(autouse=True)
-def _gpu_temp_cache_env(
+def _require_gpu_runtime_for_marked_tests(
     request: pytest.FixtureRequest,
     tmp_path_factory: pytest.TempPathFactory,
     monkeypatch: pytest.MonkeyPatch,
+    _gpu_compilation_cache_env: None,
 ) -> None:
     if "gpu" not in request.node.keywords:
         return
 
-    # Keep GPU scratch/cache state inside pytest-owned temp roots rather than
-    # user-owned persistent directories.
+    # Scratch state remains isolated per test even though compiled kernels are
+    # cached for the whole session.
     root = tmp_path_factory.mktemp("cupy-runtime")
     tmp_dir = root / "tmp"
-    cupy_cache_dir = root / "cupy-cache"
-    cuda_cache_dir = root / "cuda-cache"
     tmp_dir.mkdir()
-    cupy_cache_dir.mkdir()
-    cuda_cache_dir.mkdir()
-
     monkeypatch.setenv("TMP", str(tmp_dir))
     monkeypatch.setenv("TEMP", str(tmp_dir))
     monkeypatch.setenv("TMPDIR", str(tmp_dir))
-    monkeypatch.setenv("CUPY_CACHE_DIR", str(cupy_cache_dir))
-    monkeypatch.setenv("CUDA_CACHE_PATH", str(cuda_cache_dir))
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_dir))
-
     _require_cupy_runtime()
+
+
+@pytest.fixture(scope="session")
+def cupy_runtime(_gpu_compilation_cache_env: None) -> tuple[Any, Any]:
+    return _require_cupy_runtime()
