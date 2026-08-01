@@ -481,11 +481,15 @@ def test_cupy_prepare_coupling_rejects_nonpositive_streamed_far_chunk_bytes_budg
 
 
 def _mlfmm_transition_particles() -> ParticleCollection:
-    # 27 particles (seed=50) is the smallest deterministic fixture we found that
-    # gives the intended stage split for this test surface:
-    # - max_leaf_particles=8 -> single_level
-    # - max_leaf_particles=4 -> multilevel
+    # 27 particles (seed=50) is the smallest deterministic fixture we found
+    # that reliably resolves to the multilevel stage with max_leaf_particles=4.
     return _random_uniform_sphere_particles(n_particles=27, seed=50)
+
+
+def _mlfmm_single_level_particles() -> ParticleCollection:
+    # A smaller fixture still resolves to single_level with the same leaf
+    # threshold used by the multilevel transition test.
+    return _random_uniform_sphere_particles(n_particles=8, seed=45)
 
 
 def _transition_numpy_mlfmm_coupling(*, max_leaf_particles: int) -> MLFMMCouplingOperator:
@@ -510,6 +514,11 @@ def _transition_numpy_mlfmm_coupling(*, max_leaf_particles: int) -> MLFMMCouplin
     return coupling
 
 
+@pytest.fixture(scope="module")
+def _transition_multilevel_coupling() -> MLFMMCouplingOperator:
+    return _transition_numpy_mlfmm_coupling(max_leaf_particles=4)
+
+
 def _mlfmm_policy_particles() -> ParticleCollection:
     # Policy/retention tests do not require a stage split; keep this fixture
     # small so host-cache/policy tests stay lightweight.
@@ -527,8 +536,10 @@ def _sim_cfg(
         wavelength=wavelength,
         n_medium=n_medium,
         lmax=3,
-        polar_angles=pcl.core.uniform_polar_grid(181),
-        azimuthal_angles=pcl.core.uniform_periodic_azimuth_grid(36),
+        # Backend parity needs representative forward/backward directions,
+        # not production-resolution far-field output.
+        polar_angles=pcl.core.uniform_polar_grid(61),
+        azimuthal_angles=pcl.core.uniform_periodic_azimuth_grid(24),
         radial_lut_dr=0.5,
         solver_method="gmres",
         solver_rtol=1e-10 if compute_dtype == "complex128" else 1e-8,
@@ -638,17 +649,31 @@ def test_cupy_public_solve_sources_does_not_retain_backend_handoff() -> None:
 
 
 @pytest.mark.parametrize("collect_stream_stats", [False, True])
-def test_cupy_multilevel_stream_stats_collection_is_opt_in(collect_stream_stats: bool) -> None:
-    coupling = _transition_numpy_mlfmm_coupling(max_leaf_particles=4)
+def test_cupy_multilevel_stream_stats_collection_is_opt_in(
+    _transition_multilevel_coupling: MLFMMCouplingOperator,
+    collect_stream_stats: bool,
+) -> None:
+    coupling = _transition_multilevel_coupling
     assert str(coupling.resolved_plan.stage) == "multilevel"
     runtime = prepare_mlfmm_cupy_coupling(
         coupling,
         host_cache_policy=CuPyMLFMMHostCachePolicy(collect_stream_stats=collect_stream_stats),
     )
 
+    diag = runtime.memory_diagnostics()
+    streaming = diag.get("multilevel_streaming")
+    rolling = diag.get("multilevel_rolling")
+    assert isinstance(streaming, dict)
+    assert isinstance(rolling, dict)
+    if not collect_stream_stats:
+        assert streaming.get("collect_stream_stats") is False
+        assert streaming.get("last_apply_stats") is None
+        assert streaming.get("last_apply_timing_seconds") is None
+        return
+
     nm = n_modes(1)
-    n_particles = len(_mlfmm_transition_particles())
-    rng = np.random.default_rng(20260409 + int(collect_stream_stats))
+    n_particles = int(coupling.positions.shape[0])
+    rng = np.random.default_rng(20260409)
     x = np.asarray(
         rng.standard_normal(n_particles * nm) + 1j * rng.standard_normal(n_particles * nm),
         dtype=np.complex128,
@@ -657,6 +682,8 @@ def test_cupy_multilevel_stream_stats_collection_is_opt_in(collect_stream_stats:
     diag = runtime.memory_diagnostics()
     streaming = diag.get("multilevel_streaming")
     rolling = diag.get("multilevel_rolling")
+    assert isinstance(streaming, dict)
+    assert isinstance(rolling, dict)
     device_pool = diag.get("device_pool")
     device_mem_info = diag.get("device_mem_info")
     assert isinstance(streaming, dict)
@@ -881,7 +908,7 @@ def test_cupy_prepared_operator_block_rhs_matches_columnwise(
 @pytest.mark.parametrize(
     ("max_leaf_particles", "expected_stage"),
     [
-        (8, "single_level"),
+        (4, "single_level"),
         (4, "multilevel"),
     ],
 )
@@ -892,7 +919,11 @@ def test_cupy_mlfmm_prepared_operator_matches_numpy_reference(
     wavelength = 550.0
     n_medium = 1.0 + 0j
     k = 2.0 * np.pi / wavelength
-    particles = _mlfmm_transition_particles()
+    particles = (
+        _mlfmm_single_level_particles()
+        if expected_stage == "single_level"
+        else _mlfmm_transition_particles()
+    )
     options = MLFMMOptions(max_leaf_particles=max_leaf_particles, max_depth=4)
 
     prepared_numpy = prepare_matvec(

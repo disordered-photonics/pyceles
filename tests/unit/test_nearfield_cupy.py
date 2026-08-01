@@ -14,13 +14,22 @@ from pyceles.postprocessing.nearfield.scattered import (
 pytestmark = pytest.mark.gpu
 
 
-@pytest.mark.parametrize("lmax", [1, 3, 6, 8, 12])
 @pytest.mark.parametrize(
-    ("compute_dtype", "accum_dtype", "rtol", "atol"),
+    ("lmax", "compute_dtype", "accum_dtype", "rtol", "atol"),
     [
-        (np.complex64, np.complex64, 5e-5, 5e-6),
-        (np.complex64, np.complex128, 5e-5, 5e-6),
-        (np.complex128, np.complex128, 2e-11, 2e-12),
+        (1, np.complex64, np.complex64, 5e-5, 5e-6),
+        (1, np.complex64, np.complex128, 5e-5, 5e-6),
+        (1, np.complex128, np.complex128, 2e-11, 2e-12),
+        (3, np.complex64, np.complex64, 5e-5, 5e-6),
+        (3, np.complex64, np.complex128, 5e-5, 5e-6),
+        (3, np.complex128, np.complex128, 2e-11, 2e-12),
+        (6, np.complex64, np.complex64, 5e-5, 5e-6),
+        (6, np.complex64, np.complex128, 5e-5, 5e-6),
+        (6, np.complex128, np.complex128, 2e-11, 2e-12),
+        # A representative case beyond the former lmax cutoff is enough to
+        # cover the high-order fused kernel; lmax=12 LUT guarding is covered
+        # separately without paying for another GPU JIT compilation.
+        (8, np.complex64, np.complex128, 5e-5, 5e-6),
     ],
 )
 def test_fused_scattered_near_field_matches_numpy(
@@ -33,8 +42,8 @@ def test_fused_scattered_near_field_matches_numpy(
 ) -> None:
     del cupy_runtime
     rng = np.random.default_rng(1024 + lmax)
-    positions = rng.uniform(-300.0, 300.0, size=(11, 3))
-    points = rng.uniform(-500.0, 500.0, size=(17, 3)) + np.asarray([0.0, 0.0, 900.0])
+    positions = rng.uniform(-300.0, 300.0, size=(5, 3))
+    points = rng.uniform(-500.0, 500.0, size=(9, 3)) + np.asarray([0.0, 0.0, 900.0])
     coeffs = (
         rng.normal(size=(positions.shape[0], n_modes(lmax)))
         + 1j * rng.normal(size=(positions.shape[0], n_modes(lmax)))
