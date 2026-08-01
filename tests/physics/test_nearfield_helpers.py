@@ -7,7 +7,8 @@ import pyceles as pcl
 from pyceles.core.fields import PlaneWave
 from pyceles.core.particles import LayeredSphere, Sphere
 from pyceles.core.periodic import plane_wave_k_parallel
-from pyceles.postprocessing.nearfield import compute_near_field_components
+from pyceles.postprocessing.nearfield import NearFieldRadialLUT, compute_near_field_components
+from pyceles.postprocessing.nearfield.common import sph_hankel1
 
 
 def _required_float(value: float | None) -> float:
@@ -44,6 +45,24 @@ def test_compute_near_field_components_without_internal_returns_consistent_total
     np.testing.assert_allclose(out.E_total, out.E_initial + out.E_scattered)
     np.testing.assert_allclose(out.H_total, out.H_initial + out.H_scattered)
     assert not np.any(out.inside_mask)
+
+
+def test_high_order_float32_nearfield_lut_guards_unrepresentable_origin_samples():
+    """Complex64 near-field tables stay finite at high order."""
+    lut = NearFieldRadialLUT(
+        lmax=12,
+        k=2.0 * np.pi / 700.0,
+        r_max=100.0,
+        dr=0.5,
+        dtype=np.complex64,
+    )
+
+    assert all(np.isfinite(table).all() for table in lut.h)
+    assert all(np.isfinite(table).all() for table in lut.dxxz)
+
+    expected = np.asarray(sph_hankel1(1, np.asarray(lut.k * lut.ri[1])), dtype=np.complex64)
+    np.testing.assert_allclose(lut.h[1][1], expected, rtol=1e-6, atol=0.0)
+    assert lut.h[1][1] != lut.h[1][2]
 
 
 def test_compute_near_field_components_zeroes_scattered_inside_particles():

@@ -12,6 +12,7 @@ from pyceles._optional import asnumpy, import_cupy
 from pyceles.core.geometry_bounds import conservative_cross_set_max_distance
 from pyceles.core.indexing import n_modes
 from pyceles.core.spherical import spherical_functions_trigon
+from pyceles.core.translation import _cast_radial_table_with_finite_guard
 
 from .common import contract_modes, dx_xz_hankel1, mode_indices_by_l, sph_hankel1
 
@@ -79,8 +80,10 @@ class NearFieldRadialLUT:
         h = [np.zeros_like(x, dtype=self.dtype) for _ in range(self.lmax + 1)]
         dxxz = [np.zeros_like(x, dtype=self.dtype) for _ in range(self.lmax + 1)]
         for l in range(1, self.lmax + 1):
-            h[l] = sph_hankel1(l, x).astype(self.dtype, copy=False)
-            dxxz[l] = dx_xz_hankel1(l, x).astype(self.dtype, copy=False)
+            h[l] = _cast_radial_table_with_finite_guard(sph_hankel1(l, x)[None, :], self.dtype)[0]
+            dxxz[l] = _cast_radial_table_with_finite_guard(
+                dx_xz_hankel1(l, x)[None, :], self.dtype
+            )[0]
         object.__setattr__(self, "ri", ri)
         object.__setattr__(self, "h", h)
         object.__setattr__(self, "dxxz", dxxz)

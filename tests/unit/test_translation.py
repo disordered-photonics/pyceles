@@ -160,6 +160,18 @@ def test_radial_lut_remains_finite_near_zero():
         assert np.all(np.isfinite(h))
 
 
+def test_high_order_float32_translation_lut_guards_origin_samples():
+    """Complex64 translation tables keep valid low-order guard samples."""
+    k = 2.0 * np.pi / 700.0
+    lut = RadialLUT(lmax=12, k=k, r_max=100.0, dr=0.5, dtype=np.complex64)
+    assert np.isfinite(lut.h).all()
+
+    j0, y0 = spherical_bessel_jy(0, np.asarray(k * lut.r_grid[1]))
+    expected = np.asarray(j0 + 1j * y0, dtype=np.complex64).reshape(-1)[0]
+    np.testing.assert_allclose(lut.h[0, 1], expected, rtol=1e-6, atol=0.0)
+    assert lut.h[0, 1] != lut.h[0, 103]
+
+
 def test_translation_block_lookup_vs_direct_coupling_agree():
     """Kernel-level regression: LUT interpolation must match direct radial evaluation."""
     lmax = 3

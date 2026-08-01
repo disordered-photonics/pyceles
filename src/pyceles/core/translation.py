@@ -39,6 +39,52 @@ def spherical_bessel_jy(lmax: int, z: np.ndarray) -> tuple[np.ndarray, np.ndarra
     return j, y
 
 
+def _cast_radial_table_with_finite_guard(
+    values: np.ndarray,
+    dtype: npt.DTypeLike,
+) -> np.ndarray:
+    """Cast radial rows while replacing only their singular guard prefixes.
+
+    Different spherical orders become representable at different radii. A
+    high-order overflow must therefore not flatten otherwise-valid low-order
+    samples. For each radial row independently, retain every representable
+    sample and repeat its first representable value only across that row's
+    leading singular prefix. Non-finite values after the prefix indicate a
+    genuine table-construction failure and are rejected.
+    """
+    source = np.asarray(values)
+    target = np.dtype(dtype)
+    if source.ndim == 0:
+        return source.astype(target, copy=False)
+    if source.dtype == target and np.isfinite(source).all():
+        return source
+
+    real_dtype = np.empty((), dtype=target).real.dtype
+    max_finite = np.finfo(real_dtype).max
+    rows = source.reshape(-1, source.shape[-1])
+    out_rows = np.empty(rows.shape, dtype=target)
+    for row, out_row in zip(rows, out_rows, strict=True):
+        representable = (
+            np.isfinite(row.real)
+            & np.isfinite(row.imag)
+            & (np.abs(row.real) <= max_finite)
+            & (np.abs(row.imag) <= max_finite)
+        )
+        finite_indices = np.flatnonzero(representable)
+        if finite_indices.size == 0:
+            raise FloatingPointError(
+                f"Radial table for dtype {target} has no finite sample in the requested range."
+            )
+        first_finite = int(finite_indices[0])
+        if not np.all(representable[first_finite:]):
+            raise FloatingPointError(
+                "Radial table contains non-finite samples beyond its guard prefix."
+            )
+        out_row[first_finite:] = row[first_finite:].astype(target, copy=False)
+        out_row[:first_finite] = out_row[first_finite]
+    return out_rows.reshape(source.shape)
+
+
 def spherical_bessel_j(lmax: int, z: np.ndarray) -> np.ndarray:
     """Return `j_l(z)` for `l=0..lmax`."""
 
@@ -94,7 +140,7 @@ class RadialLUT:
             z = z.copy()
             z[0] = z[1]
         j, y = spherical_bessel_jy(2 * self.lmax, z)
-        self.h = (j + 1j * y).astype(self.dtype, copy=False)  # (p, Nr)
+        self.h = _cast_radial_table_with_finite_guard(j + 1j * y, self.dtype)
         self.j = spherical_bessel_j(2 * self.lmax, self.k * self.r_grid).astype(
             self.dtype, copy=False
         )
