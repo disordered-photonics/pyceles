@@ -151,14 +151,12 @@ def compute_scattered_field(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Evaluate the exterior scattered field from outgoing SVWF coefficients.
 
-    The CuPy branch accelerates only the scattered contribution. Initial and
-    internal near-field components still follow their existing reference
-    implementations, so backend inheritance currently gives a partial
-    near-field speedup rather than a fully GPU-native decomposition.
+    CuPy work uses the fused point-owned RawKernel; the CPU path remains the
+    reference implementation.
     """
     backend_name = str(backend).lower()
     if backend_name == "cupy":
-        return _compute_scattered_field_cupy(
+        e, h = _compute_scattered_field_cupy(
             field_points=field_points,
             positions=positions,
             coeffs=coeffs,
@@ -173,6 +171,9 @@ def compute_scattered_field(
             compute_dtype=compute_dtype,
             accum_dtype=accum_dtype,
         )
+        if h is None:
+            raise RuntimeError("Magnetic-field evaluation unexpectedly returned no data.")
+        return e, h
     pts = np.asarray(field_points, np.float64)
     pos = np.asarray(positions, np.float64)
     lmax = int(lmax)
@@ -315,13 +316,168 @@ def _compute_scattered_field_cupy(
     show_progress: bool,
     compute_dtype: npt.DTypeLike,
     accum_dtype: npt.DTypeLike,
+    compute_magnetic: bool = True,
+) -> tuple[np.ndarray, np.ndarray | None]:
+    """Run the fused evaluator and restore the caller's active-point layout."""
+    pts = np.asarray(field_points, np.float64)
+    pos = np.asarray(positions, np.float64)
+    compute_dtype_np = np.dtype(compute_dtype)
+    accum_dtype_np = np.dtype(accum_dtype)
+    empty = np.zeros((pts.shape[0], 3), dtype=accum_dtype_np)
+    if pos.shape[0] == 0:
+        return empty, empty.copy() if compute_magnetic else None
+
+    idx_eval: np.ndarray | None = None
+    if active_mask is None:
+        pts_eval = pts
+    else:
+        mask = np.asarray(active_mask, dtype=bool).reshape(-1)
+        if mask.shape[0] != pts.shape[0]:
+            raise ValueError(f"`active_mask` must have length {pts.shape[0]}. Got {mask.shape[0]}.")
+        idx_eval = np.flatnonzero(mask)
+        if idx_eval.size == 0:
+            return empty, empty.copy() if compute_magnetic else None
+        pts_eval = pts[idx_eval]
+
+    dr = float(particle_distance_resolution)
+    if dr < 0.0:
+        raise ValueError(
+            f"`particle_distance_resolution` must be >= 0. Got {particle_distance_resolution!r}."
+        )
+    k_abs = float(abs(k))
+    if k_abs <= 0.0:
+        raise ValueError(f"`k` must be non-zero for near-field radial LUT setup. Got {k!r}.")
+    dr = (1.0e-2 / k_abs) if dr == 0.0 else dr
+    if lut is None:
+        rmax = conservative_cross_set_max_distance(pos, pts_eval)
+        lut = NearFieldRadialLUT(
+            lmax=int(lmax),
+            k=float(k),
+            r_max=rmax,
+            dr=dr,
+            dtype=compute_dtype_np,
+        )
+
+    from .scattered_cupy import compute_scattered_field_cupy_fused
+
+    # The fused evaluator is one GPU launch over all particles and points.
+    # Splitting it only to update a progress bar would add synchronization and
+    # undermine the reason for using the fused path, so expose the launch as
+    # one logical unit instead.
+    with tqdm(
+        total=1,
+        desc="Scattered field (CuPy)",
+        disable=not show_progress,
+    ) as scattered_pbar:
+        e_eval, h_eval = compute_scattered_field_cupy_fused(
+            field_points=pts_eval,
+            positions=pos,
+            coeffs=coeffs,
+            k=float(k),
+            lmax=int(lmax),
+            n_medium=complex(n_medium),
+            lut=lut,
+            compute_dtype=compute_dtype_np,
+            accum_dtype=accum_dtype_np,
+            compute_magnetic=bool(compute_magnetic),
+        )
+        scattered_pbar.update(1)
+    if idx_eval is None:
+        return e_eval, h_eval
+    e = empty
+    e[idx_eval] = e_eval
+    if not compute_magnetic:
+        return e, None
+    h = np.zeros_like(e)
+    if h_eval is None:
+        raise RuntimeError("Fused near-field kernel did not return magnetic fields.")
+    h[idx_eval] = h_eval
+    return e, h
+
+
+def compute_scattered_electric_field(
+    field_points: np.ndarray,
+    positions: np.ndarray,
+    coeffs: np.ndarray,
+    *,
+    k: float,
+    lmax: int,
+    n_medium: complex = 1.0 + 0j,
+    particle_distance_resolution: float = 0.0,
+    lut: NearFieldRadialLUT | None = None,
+    active_mask: np.ndarray | None = None,
+    batch_size: int = 8192,
+    show_progress: bool = True,
+    backend: str = "numpy",
+    compute_dtype: npt.DTypeLike = np.complex128,
+    accum_dtype: npt.DTypeLike = np.complex128,
+) -> np.ndarray:
+    """Evaluate only the exterior scattered electric field.
+
+    The CuPy path omits magnetic-field arithmetic and storage inside the fused
+    kernel. The NumPy path evaluates the canonical full reference and discards
+    its magnetic result.
+    """
+    if str(backend).lower() == "cupy":
+        e, _ = _compute_scattered_field_cupy(
+            field_points=field_points,
+            positions=positions,
+            coeffs=coeffs,
+            k=k,
+            lmax=lmax,
+            n_medium=n_medium,
+            particle_distance_resolution=particle_distance_resolution,
+            lut=lut,
+            active_mask=active_mask,
+            batch_size=batch_size,
+            show_progress=show_progress,
+            compute_dtype=compute_dtype,
+            accum_dtype=accum_dtype,
+            compute_magnetic=False,
+        )
+        return e
+    e, _ = compute_scattered_field(
+        field_points,
+        positions,
+        coeffs,
+        k=k,
+        lmax=lmax,
+        n_medium=n_medium,
+        particle_distance_resolution=particle_distance_resolution,
+        lut=lut,
+        active_mask=active_mask,
+        batch_size=batch_size,
+        show_progress=show_progress,
+        backend=backend,
+        compute_dtype=compute_dtype,
+        accum_dtype=accum_dtype,
+    )
+    return e
+
+
+def _compute_scattered_field_cupy_vectorized(
+    *,
+    field_points: np.ndarray,
+    positions: np.ndarray,
+    coeffs: np.ndarray,
+    k: float,
+    lmax: int,
+    n_medium: complex,
+    particle_distance_resolution: float,
+    lut: NearFieldRadialLUT | None,
+    active_mask: np.ndarray | None,
+    batch_size: int,
+    show_progress: bool,
+    compute_dtype: npt.DTypeLike,
+    accum_dtype: npt.DTypeLike,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """CuPy-accelerated exterior scattered field assembly.
+    """Reference CuPy assembly retained for differential benchmarking.
 
     This keeps the same near-field formulas as the NumPy reference path but
-    batches spheres and field points on device. We deliberately accelerate only
-    the scattered component first because it is the dominant sphere loop in the
-    current profile and maps cleanly onto CuPy tensor contractions.
+    batches spheres and field points on device. Production dispatch uses the
+    generated fused kernel above; retaining this implementation makes focused
+    kernel parity and regression comparisons possible without restoring a
+    public cutoff policy.
     """
     cupy, _ = import_cupy()
 
@@ -517,4 +673,8 @@ def _compute_scattered_field_cupy(
     return e_eval, h_eval
 
 
-__all__ = ["NearFieldRadialLUT", "compute_scattered_field"]
+__all__ = [
+    "NearFieldRadialLUT",
+    "compute_scattered_electric_field",
+    "compute_scattered_field",
+]

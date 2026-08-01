@@ -641,3 +641,41 @@ def test_periodic_supercell_replication_matches_fundamental_cell_observables():
         rtol=1e-10,
         atol=1e-10,
     )
+
+
+def test_compute_electric_field_matches_full_near_field():
+    source = PlaneWave(
+        wavelength=550.0,
+        medium_n=1.0 + 0j,
+        polarization="TE",
+        polar_angle=0.2,
+        azimuthal_angle=0.4,
+        focal_point=(0.0, 0.0, 0.0),
+        amplitude=1.0,
+    )
+    run = pcl.Simulation(
+        pcl.SimulationConfig(
+            wavelength=550.0,
+            n_medium=1.0 + 0j,
+            lmax=2,
+            solver_method="direct",
+            verbose=False,
+        ),
+        particles=[
+            Sphere(position=(0.0, 0.0, 0.0), radius=80.0, refractive_index=1.6 + 0.0j),
+            Sphere(position=(250.0, 30.0, 120.0), radius=70.0, refractive_index=1.5 + 0.0j),
+        ],
+    ).run(source, include_farfield=False)
+    points = np.asarray(
+        [[0.0, 0.0, 0.0], [120.0, -40.0, 180.0], [300.0, 20.0, 500.0]],
+        dtype=float,
+    )
+
+    full = pcl.compute_near_field(run, points=points, show_progress=False)
+    electric = pcl.compute_electric_field(run, points=points, show_progress=False)
+
+    np.testing.assert_allclose(electric.E_initial, full.E_initial)
+    np.testing.assert_allclose(electric.E_scattered, full.E_scattered)
+    np.testing.assert_allclose(electric.E_internal, full.E_internal)
+    np.testing.assert_allclose(electric.E_total, full.E_total)
+    np.testing.assert_array_equal(electric.inside_mask, full.inside_mask)

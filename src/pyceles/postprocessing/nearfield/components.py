@@ -11,7 +11,7 @@ from pyceles.core.particles import Particle, ParticleCollection
 from .classification import classify_internal_points
 from .initial import compute_initial_field
 from .internal import compute_internal_field
-from .scattered import compute_scattered_field
+from .scattered import compute_scattered_electric_field, compute_scattered_field
 
 
 @dataclass(frozen=True)
@@ -33,6 +33,22 @@ class NearFieldComponents:
     H_internal: np.ndarray
     E_total: np.ndarray
     H_total: np.ndarray
+    inside_mask: np.ndarray
+
+
+@dataclass(frozen=True)
+class ElectricFieldComponents:
+    """Electric-only near-field decomposition on a common point set.
+
+    This compact result is intended for dense visualization and spectral
+    databases that never consume magnetic fields. It preserves the same
+    initial/scattered/internal/total bookkeeping as :class:`NearFieldComponents`.
+    """
+
+    E_initial: np.ndarray
+    E_scattered: np.ndarray
+    E_internal: np.ndarray
+    E_total: np.ndarray
     inside_mask: np.ndarray
 
 
@@ -88,7 +104,7 @@ def compute_total_field(
     return out.E_total, out.H_total, out.inside_mask
 
 
-def compute_near_field_components(
+def _compute_near_field_components(
     field_points: np.ndarray,
     *,
     coeffs: np.ndarray,
@@ -106,8 +122,9 @@ def compute_near_field_components(
     backend: str = "numpy",
     compute_dtype: npt.DTypeLike = np.complex128,
     accum_dtype: npt.DTypeLike = np.complex128,
-) -> NearFieldComponents:
-    """Compute full near-field decomposition in one pass over shared points."""
+    compute_magnetic: bool = True,
+) -> NearFieldComponents | ElectricFieldComponents:
+    """Compute near-field components through one shared classification workflow."""
     pts = np.asarray(field_points, dtype=float)
     pos = _positions_from_particles(particles)
 
@@ -131,29 +148,46 @@ def compute_near_field_components(
     if len(particles) > 0:
         classification = classify_internal_points(pts, particles, n_medium=n_medium)
         inside_hint = np.asarray(classification.inside_any, dtype=bool)
-    es, hs = compute_scattered_field(
-        field_points,
-        pos,
-        coeffs,
-        k=k,
-        lmax=lmax,
-        n_medium=n_medium,
-        show_progress=show_progress,
-        backend=backend,
-        particle_distance_resolution=lut_dr,
-        active_mask=(~inside_hint) if np.any(inside_hint) else None,
-        compute_dtype=compute_dtype,
-        accum_dtype=accum_dtype,
-    )
+    if compute_magnetic:
+        es, hs = compute_scattered_field(
+            field_points,
+            pos,
+            coeffs,
+            k=k,
+            lmax=lmax,
+            n_medium=n_medium,
+            show_progress=show_progress,
+            backend=backend,
+            particle_distance_resolution=lut_dr,
+            active_mask=(~inside_hint) if np.any(inside_hint) else None,
+            compute_dtype=compute_dtype,
+            accum_dtype=accum_dtype,
+        )
+    else:
+        es = compute_scattered_electric_field(
+            field_points,
+            pos,
+            coeffs,
+            k=k,
+            lmax=lmax,
+            n_medium=n_medium,
+            show_progress=show_progress,
+            backend=backend,
+            particle_distance_resolution=lut_dr,
+            active_mask=(~inside_hint) if np.any(inside_hint) else None,
+            compute_dtype=compute_dtype,
+            accum_dtype=accum_dtype,
+        )
+        hs = None
 
     eint = np.zeros_like(ei)
-    hint = np.zeros_like(hi)
+    hint = np.zeros_like(hi) if compute_magnetic else None
     inside = np.zeros(pts.shape[0], dtype=bool)
     et = ei + es
-    ht = hi + hs
+    ht = hi + hs if hs is not None else None
 
     if len(particles) > 0:
-        eint, hint, inside = compute_internal_field(
+        eint, hint_eval, inside = compute_internal_field(
             field_points,
             coeffs,
             k=k,
@@ -166,11 +200,24 @@ def compute_near_field_components(
             compute_dtype=compute_dtype,
             accum_dtype=accum_dtype,
         )
+        if compute_magnetic:
+            if hint is None or hs is None or ht is None:
+                raise RuntimeError("Magnetic near-field components were not initialized.")
+            hint[:] = hint_eval
+            hs[inside] = 0
+            ht[inside] = hint[inside]
         es[inside] = 0
-        hs[inside] = 0
         et[inside] = eint[inside]
-        ht[inside] = hint[inside]
-
+    if not compute_magnetic:
+        return ElectricFieldComponents(
+            E_initial=ei,
+            E_scattered=es,
+            E_internal=eint,
+            E_total=et,
+            inside_mask=inside,
+        )
+    if hint is None or hs is None or ht is None:
+        raise RuntimeError("Magnetic near-field components were not initialized.")
     return NearFieldComponents(
         E_initial=ei,
         H_initial=hi,
@@ -184,13 +231,103 @@ def compute_near_field_components(
     )
 
 
+def compute_near_field_components(
+    field_points: np.ndarray,
+    *,
+    coeffs: np.ndarray,
+    k: float,
+    lmax: int,
+    beam,
+    polar_angles: np.ndarray,
+    azimuthal_angles: np.ndarray,
+    particles: Sequence[Particle],
+    n_medium: complex = 1.0 + 0j,
+    batch_size: int = 2048,
+    show_progress: bool = False,
+    force_general_initial_field: bool = False,
+    lut_dr: float = 1.0,
+    backend: str = "numpy",
+    compute_dtype: npt.DTypeLike = np.complex128,
+    accum_dtype: npt.DTypeLike = np.complex128,
+) -> NearFieldComponents:
+    """Compute the full near-field decomposition on shared points."""
+    result = _compute_near_field_components(
+        field_points,
+        coeffs=coeffs,
+        k=k,
+        lmax=lmax,
+        beam=beam,
+        polar_angles=polar_angles,
+        azimuthal_angles=azimuthal_angles,
+        particles=particles,
+        n_medium=n_medium,
+        batch_size=batch_size,
+        show_progress=show_progress,
+        force_general_initial_field=force_general_initial_field,
+        lut_dr=lut_dr,
+        backend=backend,
+        compute_dtype=compute_dtype,
+        accum_dtype=accum_dtype,
+        compute_magnetic=True,
+    )
+    if not isinstance(result, NearFieldComponents):
+        raise RuntimeError("Full near-field evaluation returned electric-only components.")
+    return result
+
+
+def compute_electric_field_components(
+    field_points: np.ndarray,
+    *,
+    coeffs: np.ndarray,
+    k: float,
+    lmax: int,
+    beam,
+    polar_angles: np.ndarray,
+    azimuthal_angles: np.ndarray,
+    particles: Sequence[Particle],
+    n_medium: complex = 1.0 + 0j,
+    batch_size: int = 2048,
+    show_progress: bool = False,
+    force_general_initial_field: bool = False,
+    lut_dr: float = 1.0,
+    backend: str = "numpy",
+    compute_dtype: npt.DTypeLike = np.complex128,
+    accum_dtype: npt.DTypeLike = np.complex128,
+) -> ElectricFieldComponents:
+    """Compute only electric near-field components."""
+    result = _compute_near_field_components(
+        field_points,
+        coeffs=coeffs,
+        k=k,
+        lmax=lmax,
+        beam=beam,
+        polar_angles=polar_angles,
+        azimuthal_angles=azimuthal_angles,
+        particles=particles,
+        n_medium=n_medium,
+        batch_size=batch_size,
+        show_progress=show_progress,
+        force_general_initial_field=force_general_initial_field,
+        lut_dr=lut_dr,
+        backend=backend,
+        compute_dtype=compute_dtype,
+        accum_dtype=accum_dtype,
+        compute_magnetic=False,
+    )
+    if not isinstance(result, ElectricFieldComponents):
+        raise RuntimeError("Electric near-field evaluation returned full components.")
+    return result
+
+
 def poynting(e: np.ndarray, h: np.ndarray) -> np.ndarray:
     """Time-averaged Poynting vector S = 0.5 * Re(E x H*)."""
     return 0.5 * np.real(np.cross(e, np.conj(h)))
 
 
 __all__ = [
+    "ElectricFieldComponents",
     "NearFieldComponents",
+    "compute_electric_field_components",
     "compute_near_field_components",
     "compute_total_field",
     "poynting",

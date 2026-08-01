@@ -6,7 +6,12 @@ import numpy as np
 
 from pyceles._dtypes import resolve_compute_accum_dtypes
 
-from .components import NearFieldComponents, compute_near_field_components
+from .components import (
+    ElectricFieldComponents,
+    NearFieldComponents,
+    compute_electric_field_components,
+    compute_near_field_components,
+)
 from .slice import (
     NearFieldSlice,
     interpolate_center_pixels,
@@ -90,6 +95,65 @@ def mix_near_field_slices(
         plane_value=float(slice_te.plane_value),
         axis_0_label=slice_te.axis_0_label,
         axis_1_label=slice_te.axis_1_label,
+    )
+
+
+def compute_electric_field(
+    run: ChannelResult,
+    *,
+    points: np.ndarray,
+    show_progress: bool = True,
+    force_general_initial_field: bool | None = None,
+) -> ElectricFieldComponents:
+    """Evaluate finite-cluster electric near fields on arbitrary points.
+
+    This is the preferred dense-visualization path when magnetic fields and
+    Poynting vectors are not required.
+    """
+    if run.config.periodic is not None:
+        raise ValueError(
+            "`compute_electric_field` requires a finite-cluster channel. "
+            "Use `compute_periodic_near_field` for periodic channels."
+        )
+    pts_flat, lead_shape = reshape_field_points(points)
+    source_polar_angles, source_azimuthal_angles = run.config.source_angular_grids()
+    compute_dtype, accum_dtype = resolve_compute_accum_dtypes(
+        compute_dtype=run.config.compute_dtype,
+        accum_dtype=run.config.accum_dtype,
+    )
+    ef = compute_electric_field_components(
+        pts_flat,
+        coeffs=run.coeffs,
+        k=run.k,
+        lmax=run.config.lmax,
+        beam=run.source,
+        polar_angles=source_polar_angles,
+        azimuthal_angles=source_azimuthal_angles,
+        particles=run.particles,
+        n_medium=run.config.n_medium,
+        show_progress=show_progress,
+        force_general_initial_field=(
+            bool(run.config.force_general_initial_field)
+            if force_general_initial_field is None
+            else bool(force_general_initial_field)
+        ),
+        lut_dr=run.config.radial_lut_dr,
+        backend=run.config.resolved_postprocessing_backend(),
+        compute_dtype=compute_dtype,
+        accum_dtype=accum_dtype,
+    )
+    if lead_shape == ():
+        vec_shape: tuple[int, ...] = (3,)
+        mask_shape: tuple[int, ...] = ()
+    else:
+        vec_shape = (*lead_shape, 3)
+        mask_shape = lead_shape
+    return ElectricFieldComponents(
+        E_initial=ef.E_initial.reshape(vec_shape),
+        E_scattered=ef.E_scattered.reshape(vec_shape),
+        E_internal=ef.E_internal.reshape(vec_shape),
+        E_total=ef.E_total.reshape(vec_shape),
+        inside_mask=ef.inside_mask.reshape(mask_shape),
     )
 
 

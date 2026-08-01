@@ -42,7 +42,9 @@ from pyceles.postprocessing.farfield import (
     PowerBalance,
 )
 from pyceles.postprocessing.nearfield import (
+    ElectricFieldComponents,
     NearFieldSlice,
+    compute_electric_field,
     compute_near_field,
     compute_near_field_slice,
     compute_periodic_near_field,
@@ -72,6 +74,7 @@ __all__ = [
     "DipoleCollection",
     "DipolePowerLDOSResult",
     "DipoleSource",
+    "ElectricFieldComponents",
     "FocusedLaguerreGaussianBeam",
     "GaussianBeam",
     "LaguerreGaussianBeam",
@@ -100,6 +103,7 @@ __all__ = [
     "__version__",
     "compute_dipole_ldos_enhancement",
     "compute_dipole_power_ldos",
+    "compute_electric_field",
     "compute_near_field",
     "compute_near_field_slice",
     "compute_periodic_near_field",

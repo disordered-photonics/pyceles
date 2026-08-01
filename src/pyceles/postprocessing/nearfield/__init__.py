@@ -11,17 +11,27 @@ from __future__ import annotations
 from .classification import InternalPointClassification, classify_internal_points
 from .common import clear_caches
 from .components import (
+    ElectricFieldComponents,
     NearFieldComponents,
+    compute_electric_field_components,
     compute_near_field_components,
     compute_total_field,
     poynting,
 )
 from .initial import compute_initial_field
 from .internal import compute_internal_field
-from .periodic import compute_periodic_near_field, compute_periodic_near_field_slice
-from .scattered import NearFieldRadialLUT, compute_scattered_field
+from .periodic import (
+    compute_periodic_near_field,
+    compute_periodic_near_field_slice,
+)
+from .scattered import (
+    NearFieldRadialLUT,
+    compute_scattered_electric_field,
+    compute_scattered_field,
+)
 from .slice import NearFieldSlice
 from .workflows import (
+    compute_electric_field,
     compute_near_field,
     compute_near_field_slice,
     mix_near_field_components,
@@ -29,12 +39,15 @@ from .workflows import (
 )
 
 __all__ = [
+    "ElectricFieldComponents",
     "InternalPointClassification",
     "NearFieldComponents",
     "NearFieldRadialLUT",
     "NearFieldSlice",
     "classify_internal_points",
     "clear_caches",
+    "compute_electric_field",
+    "compute_electric_field_components",
     "compute_initial_field",
     "compute_internal_field",
     "compute_near_field",
@@ -42,6 +55,7 @@ __all__ = [
     "compute_near_field_slice",
     "compute_periodic_near_field",
     "compute_periodic_near_field_slice",
+    "compute_scattered_electric_field",
     "compute_scattered_field",
     "compute_total_field",
     "mix_near_field_components",
