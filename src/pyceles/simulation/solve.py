@@ -23,8 +23,7 @@ from pyceles.core.projection import project_source_to_svwf
 from pyceles.core.sources import LocalExpansionSource, PlaneWave, Source
 from pyceles.linear.solvers import (
     DenseLUFactorization,
-    _finish_backend_solution_capture,
-    _start_backend_solution_capture,
+    _capture_backend_solution,
     estimate_dense_matrix_bytes,
     factorize_dense_matrix,
     solve_linear_system,
@@ -507,40 +506,19 @@ def _solve_sources_impl(
             "API for backend-native experimental preconditioners."
         )
 
-    backend_capture: dict[str, Any] | None = None
     if unknowns == 0:
         solver_result = make_empty_solver_result(
             dtype=compute_dtype, nrhs=n_channels, method=solver_method
         )
         x_matrix = np.zeros((unknowns, n_channels), dtype=compute_dtype)
+        backend_capture: dict[str, Any] | None = None
     else:
         if A_mv is None:
             raise RuntimeError("Internal error: A_mv not prepared for non-empty system.")
         linear_solve_t0 = time.perf_counter()
-        if operator_backend == "cupy" and bool(retain_backend_handoff):
-            token, backend_capture = _start_backend_solution_capture()
-            try:
-                solver_result = solve_linear_system(
-                    A_mv,
-                    rhs_arg,
-                    method=solver_method,
-                    A_dense=A_dense,
-                    A_factorized=A_lu,
-                    x0=normalized_warm_start,
-                    preconditioner=solver_preconditioner,
-                    rtol=float(cfg.solver_rtol),
-                    atol=0.0,
-                    restart=int(cfg.solver_restart),
-                    maxiter=int(cfg.solver_maxiter),
-                    direct_max_n=int(cfg.solver_direct_max_n),
-                    dtype=compute_dtype,
-                    backend=operator_backend,
-                    show_progress=bool(cfg.verbose),
-                    compute_final_residual=compute_final_residual,
-                )
-            finally:
-                _finish_backend_solution_capture(token)
-        else:
+        with _capture_backend_solution(
+            enabled=operator_backend == "cupy" and bool(retain_backend_handoff)
+        ) as backend_capture:
             solver_result = solve_linear_system(
                 A_mv,
                 rhs_arg,

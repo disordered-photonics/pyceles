@@ -17,8 +17,9 @@ Key requirements for development/debugging:
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Iterable
-from contextvars import ContextVar, Token
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
@@ -81,16 +82,18 @@ _BACKEND_SOLUTION_CAPTURE: ContextVar[dict[str, Any] | None] = ContextVar(
 )
 
 
-def _start_backend_solution_capture() -> tuple[Token[dict[str, Any] | None], dict[str, Any]]:
-    """Start capturing backend-native solver output for internal postprocess handoff."""
+@contextmanager
+def _capture_backend_solution(*, enabled: bool) -> Iterator[dict[str, Any] | None]:
+    """Scope the private backend-native solve/postprocess handoff."""
+    if not enabled:
+        yield None
+        return
     payload: dict[str, Any] = {}
     token = _BACKEND_SOLUTION_CAPTURE.set(payload)
-    return token, payload
-
-
-def _finish_backend_solution_capture(token: Token[dict[str, Any] | None]) -> None:
-    """Stop capturing backend-native solver output."""
-    _BACKEND_SOLUTION_CAPTURE.reset(token)
+    try:
+        yield payload
+    finally:
+        _BACKEND_SOLUTION_CAPTURE.reset(token)
 
 
 def _record_backend_solution(x: Any) -> None:
