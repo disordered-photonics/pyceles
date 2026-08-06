@@ -96,14 +96,9 @@ def save_simulation_h5(run: ChannelResult, near_field: NearFieldSlice, out_h5: s
         source_beta, source_alpha = run.config.source_angular_grids()
         farfield_beta, farfield_alpha = run.config.farfield_angular_grids()
         k_medium = 2.0 * np.pi / float(run.config.wavelength) * float(np.real(run.config.n_medium))
-        patterns = {"scattered": {"te": ff.scattered_te, "tm": ff.scattered_tm}}
-        if ff.initial_te is not None and ff.initial_tm is not None:
-            patterns["initial"] = {"te": ff.initial_te, "tm": ff.initial_tm}
-        if ff.total_te is not None and ff.total_tm is not None:
-            patterns["total"] = {"te": ff.total_te, "tm": ff.total_tm}
         save_far_field_h5(
             out_h5,
-            patterns=patterns,
+            farfield=ff,
             attrs={
                 "k_medium": float(k_medium),
                 "source_beta_points": int(source_beta.size),

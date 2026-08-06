@@ -5,6 +5,8 @@ from typing import Literal, Protocol, runtime_checkable
 import numpy as np
 import numpy.typing as npt
 
+from ..plane_wave_spectrum import PlaneWaveSpectrum
+
 Polarization = Literal["TE", "TM"]
 PolarizationInput = Polarization | tuple[complex, complex] | list[complex] | np.ndarray
 
@@ -53,7 +55,7 @@ class AngularSpectrumSource(Protocol):
         k: float,
         polar_angles: np.ndarray,
         azimuthal_angles: np.ndarray,
-    ) -> tuple[dict, dict]: ...
+    ) -> PlaneWaveSpectrum: ...
 
     def incident_coeffs(
         self,

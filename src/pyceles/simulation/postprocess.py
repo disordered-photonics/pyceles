@@ -226,32 +226,6 @@ def _build_periodic_result(
     )
 
 
-def _mix_pwp_dict(
-    p1: dict,
-    p2: dict,
-    *,
-    a1: complex,
-    a2: complex,
-    dtype: np.dtype,
-) -> dict:
-    out = dict(p1)
-    out["coeff"] = np.asarray(a1 * p1["coeff"] + a2 * p2["coeff"], dtype=np.dtype(dtype))
-    return out
-
-
-def _mix_optional_pwp_dict(
-    p1: dict | None,
-    p2: dict | None,
-    *,
-    a1: complex,
-    a2: complex,
-    dtype: np.dtype,
-) -> dict | None:
-    if p1 is None or p2 is None:
-        return None
-    return _mix_pwp_dict(p1, p2, a1=a1, a2=a2, dtype=dtype)
-
-
 def mix_farfield_patterns(
     ff_te: FarFieldPatterns,
     ff_tm: FarFieldPatterns,
@@ -261,56 +235,23 @@ def mix_farfield_patterns(
     dtype: np.dtype,
 ) -> FarFieldPatterns:
     """Build requested Jones far field by coherent TE/TM basis recombination."""
-    initial_te = _mix_optional_pwp_dict(
-        ff_te.initial_te,
-        ff_tm.initial_te,
-        a1=a_te,
-        a2=a_tm,
-        dtype=dtype,
-    )
-    initial_tm = _mix_optional_pwp_dict(
-        ff_te.initial_tm,
-        ff_tm.initial_tm,
-        a1=a_te,
-        a2=a_tm,
-        dtype=dtype,
-    )
-    scattered_te = _mix_pwp_dict(
-        ff_te.scattered_te,
-        ff_tm.scattered_te,
-        a1=a_te,
-        a2=a_tm,
-        dtype=dtype,
-    )
-    scattered_tm = _mix_pwp_dict(
-        ff_te.scattered_tm,
-        ff_tm.scattered_tm,
-        a1=a_te,
-        a2=a_tm,
-        dtype=dtype,
-    )
-    total_te = _mix_optional_pwp_dict(
-        ff_te.total_te,
-        ff_tm.total_te,
-        a1=a_te,
-        a2=a_tm,
-        dtype=dtype,
-    )
-    total_tm = _mix_optional_pwp_dict(
-        ff_te.total_tm,
-        ff_tm.total_tm,
-        a1=a_te,
-        a2=a_tm,
-        dtype=dtype,
-    )
+    initial = None
+    if ff_te.initial is not None and ff_tm.initial is not None:
+        initial = ff_te.initial.linear_combination(
+            ff_tm.initial,
+            weight_self=a_te,
+            weight_other=a_tm,
+            dtype=dtype,
+        )
 
     return FarFieldPatterns(
-        initial_te=initial_te,
-        initial_tm=initial_tm,
-        scattered_te=scattered_te,
-        scattered_tm=scattered_tm,
-        total_te=total_te,
-        total_tm=total_tm,
+        initial=initial,
+        scattered=ff_te.scattered.linear_combination(
+            ff_tm.scattered,
+            weight_self=a_te,
+            weight_other=a_tm,
+            dtype=dtype,
+        ),
     )
 
 
@@ -371,19 +312,14 @@ def _build_channel_diagnostics(
             source,
             initial_coeffs,
             coeffs,
+            farfield.scattered,
             k0=k0,
             n_medium=cfg.n_medium,
-            scattered_pwp_te=farfield.scattered_te,
-            scattered_pwp_tm=farfield.scattered_tm,
             local_absorption=c_abs_local,
         )
         return power, cross_sections, decomposition_forward, decomposition_backward
 
-    if (
-        farfield.initial_te is not None
-        and farfield.initial_tm is not None
-        and source.has_finite_incident_power()
-    ):
+    if farfield.initial is not None and source.has_finite_incident_power():
         p_abs_diag = _local_power_balance_generic_route(
             sim,
             initial_coeffs=local_b,
@@ -396,10 +332,8 @@ def _build_channel_diagnostics(
         )
         power = finite_beam_power_balance(
             source,
-            farfield.initial_te,
-            farfield.initial_tm,
-            farfield.scattered_te,
-            farfield.scattered_tm,
+            farfield.initial,
+            farfield.scattered,
             k0=k0,
             k_medium=k,
             local_absorbed_power=(None if p_abs_diag is None else p_abs_diag.local_absorbed_power),
@@ -407,20 +341,16 @@ def _build_channel_diagnostics(
         )
         decomposition_forward = pwp_power_decomposition(
             direction="forward",
-            initial_pwp_te=farfield.initial_te,
-            initial_pwp_tm=farfield.initial_tm,
-            scattered_pwp_te=farfield.scattered_te,
-            scattered_pwp_tm=farfield.scattered_tm,
+            initial=farfield.initial,
+            scattered=farfield.scattered,
             k0=k0,
             k_medium=k,
             source=source,
         )
         decomposition_backward = pwp_power_decomposition(
             direction="backward",
-            initial_pwp_te=farfield.initial_te,
-            initial_pwp_tm=farfield.initial_tm,
-            scattered_pwp_te=farfield.scattered_te,
-            scattered_pwp_tm=farfield.scattered_tm,
+            initial=farfield.initial,
+            scattered=farfield.scattered,
             k0=k0,
             k_medium=k,
             source=source,

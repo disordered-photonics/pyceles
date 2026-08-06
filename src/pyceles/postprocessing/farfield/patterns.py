@@ -8,22 +8,24 @@ import numpy.typing as npt
 from pyceles._optional import asnumpy, import_cupy
 from pyceles.core.conversions import svwf_outgoing_to_pwp, transformation_coefficients
 from pyceles.core.indexing import iter_modes, n_modes
+from pyceles.core.plane_wave_spectrum import PlaneWaveSpectrum
 from pyceles.core.sources import AngularSpectrumSource, LocalExpansionSource, Source
 from pyceles.core.spherical import spherical_functions_trigon
 
-from .common import cast_pwp_coeff_dtype
 
-
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class FarFieldPatterns:
-    """TE/TM plane-wave spectra on the common `(alpha,beta)` angular grid."""
+    """Independent plane-wave spectra for one finite-scattering channel."""
 
-    initial_te: dict | None
-    initial_tm: dict | None
-    scattered_te: dict
-    scattered_tm: dict
-    total_te: dict | None
-    total_tm: dict | None
+    initial: PlaneWaveSpectrum | None
+    scattered: PlaneWaveSpectrum
+
+    @property
+    def total(self) -> PlaneWaveSpectrum | None:
+        """Return the derived total spectrum when an incident field exists."""
+        if self.initial is None:
+            return None
+        return total_field_plane_wave_pattern(self.initial, self.scattered)
 
 
 def scattered_field_plane_wave_pattern(
@@ -37,11 +39,11 @@ def scattered_field_plane_wave_pattern(
     backend: str = "numpy",
     dtype: npt.DTypeLike = np.complex128,
     show_progress: bool = False,
-) -> tuple[dict, dict]:
+) -> PlaneWaveSpectrum:
     """Compute far-field plane-wave patterns of the scattered field.
 
     The shipped CuPy path accelerates only the outgoing SVWF-to-PWP assembly
-    and still returns canonical NumPy PWP dictionaries. This keeps all
+    and still returns the canonical NumPy spectrum type. This keeps all
     downstream far-field diagnostics on the reference code path while moving
     the dominant particle/angle contraction off CPU.
 
@@ -87,7 +89,7 @@ def _scattered_field_plane_wave_pattern_cupy(
     azimuthal_angles: np.ndarray,
     dtype: npt.DTypeLike,
     show_progress: bool,
-) -> tuple[dict, dict]:
+) -> PlaneWaveSpectrum:
     """CuPy-accelerated outgoing SVWF-to-PWP assembly.
 
     The CPU reference path loops over spheres. For realistic CuPy solves that
@@ -191,38 +193,33 @@ def _scattered_field_plane_wave_pattern_cupy(
     if sphere_pbar is not None:
         sphere_pbar.close()
 
-    return (
-        {
-            "beta": beta_np,
-            "alpha": alpha_np,
-            "kx": asnumpy(kx),
-            "ky": asnumpy(ky),
-            "kz": asnumpy(kz),
-            "coeff": asnumpy(pwp_te_coeff).astype(ctype, copy=False),
-        },
-        {
-            "beta": beta_np,
-            "alpha": alpha_np,
-            "kx": asnumpy(kx),
-            "ky": asnumpy(ky),
-            "kz": asnumpy(kz),
-            "coeff": asnumpy(pwp_tm_coeff).astype(ctype, copy=False),
-        },
+    return PlaneWaveSpectrum(
+        alpha_np,
+        beta_np,
+        asnumpy(kx),
+        asnumpy(ky),
+        asnumpy(kz),
+        asnumpy(pwp_te_coeff).astype(ctype, copy=False),
+        asnumpy(pwp_tm_coeff).astype(ctype, copy=False),
     )
 
 
 def total_field_plane_wave_pattern(
-    initial_pwp_te: dict,
-    initial_pwp_tm: dict,
-    scattered_pwp_te: dict,
-    scattered_pwp_tm: dict,
-) -> tuple[dict, dict]:
-    """Combine initial and scattered PWPs into total-field PWPs."""
-    tot_te = dict(initial_pwp_te)
-    tot_tm = dict(initial_pwp_tm)
-    tot_te["coeff"] = initial_pwp_te["coeff"] + scattered_pwp_te["coeff"]
-    tot_tm["coeff"] = initial_pwp_tm["coeff"] + scattered_pwp_tm["coeff"]
-    return tot_te, tot_tm
+    initial: PlaneWaveSpectrum,
+    scattered: PlaneWaveSpectrum,
+) -> PlaneWaveSpectrum:
+    """Combine initial and scattered spectra into the total field."""
+    return initial.linear_combination(
+        scattered,
+        weight_self=1.0,
+        weight_other=1.0,
+        dtype=np.result_type(
+            initial.coeff_te,
+            initial.coeff_tm,
+            scattered.coeff_te,
+            scattered.coeff_tm,
+        ),
+    )
 
 
 def compute_far_field_patterns(
@@ -241,7 +238,7 @@ def compute_far_field_patterns(
     """Compute scattered PWPs and, when available, initial/total PWPs."""
     ctype = np.dtype(dtype)
 
-    p_s_te, p_s_tm = scattered_field_plane_wave_pattern(
+    scattered = scattered_field_plane_wave_pattern(
         positions=positions,
         coeffs=coeffs,
         k=k,
@@ -253,15 +250,11 @@ def compute_far_field_patterns(
         show_progress=show_progress,
     )
 
-    p_i_te = None
-    p_i_tm = None
-    p_t_te = None
-    p_t_tm = None
-
+    initial = None
     if isinstance(source, LocalExpansionSource):
         src_pos = np.asarray(source.source_positions(), dtype=float).reshape(-1, 3)
         src_coeffs = np.asarray(source.outgoing_coeffs(1, dtype=ctype), dtype=ctype)
-        p_i_te, p_i_tm = scattered_field_plane_wave_pattern(
+        initial = scattered_field_plane_wave_pattern(
             positions=src_pos,
             coeffs=src_coeffs,
             k=k,
@@ -272,24 +265,17 @@ def compute_far_field_patterns(
             dtype=ctype,
             show_progress=False,
         )
-        p_t_te, p_t_tm = total_field_plane_wave_pattern(p_i_te, p_i_tm, p_s_te, p_s_tm)
     elif isinstance(source, AngularSpectrumSource):
-        p_i_te, p_i_tm = source.angular_spectrum(
+        initial = source.angular_spectrum(
             k=float(k),
             polar_angles=np.asarray(polar_angles, dtype=float),
             azimuthal_angles=np.asarray(azimuthal_angles, dtype=float),
         )
-        p_i_te = cast_pwp_coeff_dtype(p_i_te, ctype)
-        p_i_tm = cast_pwp_coeff_dtype(p_i_tm, ctype)
-        p_t_te, p_t_tm = total_field_plane_wave_pattern(p_i_te, p_i_tm, p_s_te, p_s_tm)
+        initial = initial.astype(ctype)
 
     return FarFieldPatterns(
-        initial_te=p_i_te,
-        initial_tm=p_i_tm,
-        scattered_te=p_s_te,
-        scattered_tm=p_s_tm,
-        total_te=p_t_te,
-        total_tm=p_t_tm,
+        initial=initial,
+        scattered=scattered,
     )
 
 

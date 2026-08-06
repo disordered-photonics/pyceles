@@ -15,6 +15,8 @@ from pyceles.core.particles import (
     Sphere,
     Spheroid,
 )
+from pyceles.core.plane_wave_spectrum import PlaneWaveSpectrum
+from pyceles.postprocessing.farfield.patterns import FarFieldPatterns
 
 
 def _pathlike(path: str | Path) -> str:
@@ -306,38 +308,32 @@ def load_solution_h5(path: str | Path, *, group: str = "solution") -> dict[str, 
     return out
 
 
-def _read_pwp(group: h5py.Group) -> dict[str, Any]:
-    """Read one plane-wave pattern group (`alpha`,`beta`,`coeff`)."""
-    out: dict[str, Any] = {}
-    for key in ("alpha", "beta", "coeff"):
-        if key in group:
-            out[key] = group[key][...]
-    out["attrs"] = dict(group.attrs.items())
-    return out
-
-
-def load_far_field_h5(path: str | Path, *, group: str = "far_field") -> dict[str, Any]:
-    """Load far-field patterns saved via `save_far_field_h5`.
-
-    Saved PWPs include ``alpha``, ``beta``, and ``coeff``. Cartesian wavevector
-    grids (``kx``, ``ky``, ``kz``) are intentionally not persisted; reconstruct
-    them from ``alpha``, ``beta``, and stored ``k_medium`` metadata when needed.
-    """
-    out: dict[str, Any] = {"patterns": {}, "attrs": {}}
+def load_far_field_h5(path: str | Path, *, group: str = "far_field") -> FarFieldPatterns:
+    """Load finite far-field patterns saved via `save_far_field_h5`."""
     with h5py.File(_pathlike(path), "r") as h5:
-        if group not in h5:
-            return out
         root = h5[group]
-        out["attrs"] = dict(root.attrs.items())
-        for family_name, fam in root.items():
-            if not isinstance(fam, h5py.Group):
-                continue
-            out["patterns"][family_name] = {}
-            for pol_name, polg in fam.items():
-                if not isinstance(polg, h5py.Group):
-                    continue
-                out["patterns"][family_name][pol_name] = _read_pwp(polg)
-    return out
+        grid = root["grid"]
+        alpha = grid["alpha"][...]
+        beta = grid["beta"][...]
+        kx = grid["kx"][...]
+        ky = grid["ky"][...]
+        kz = grid["kz"][...]
+
+        def load_spectrum(name: str) -> PlaneWaveSpectrum:
+            spectrum = root[name]
+            return PlaneWaveSpectrum(
+                alpha,
+                beta,
+                kx,
+                ky,
+                kz,
+                spectrum["coeff_te"][...],
+                spectrum["coeff_tm"][...],
+            )
+
+        scattered = load_spectrum("scattered")
+        initial = load_spectrum("initial") if "initial" in root else None
+    return FarFieldPatterns(initial=initial, scattered=scattered)
 
 
 def save_near_field_h5(
@@ -444,18 +440,6 @@ def save_near_field_components_h5(
 
         root.attrs["total_omitted_as_redundant"] = bool(omitted_total)
         _write_attrs(root, attrs)
-
-
-def _write_pwp(
-    group: h5py.Group,
-    pwp: Mapping[str, Any],
-    *,
-    compression: str | None,
-) -> None:
-    """Write compact PWP payload (`alpha`,`beta`,`coeff`) into an HDF5 group."""
-    for key in ("alpha", "beta", "coeff"):
-        if key in pwp:
-            _write_dataset(group, key, pwp[key], compression=compression)
 
 
 def _write_mapping_recursive(
@@ -587,42 +571,36 @@ def load_periodic_h5(path: str | Path, *, group: str = "periodic") -> dict[str, 
 def save_far_field_h5(
     path: str | Path,
     *,
-    patterns: Mapping[str, Mapping[str, Mapping[str, Any]]],
+    farfield: FarFieldPatterns,
     group: str = "far_field",
     mode: str = "a",
     attrs: Mapping[str, Any] | None = None,
     compression: str | None = "gzip",
-    drop_redundant_total: bool = True,
 ) -> None:
-    """Save far-field PWPs under nested groups.
-
-    Example `patterns`:
-      {
-        "initial": {"te": pwp_i_te, "tm": pwp_i_tm},
-        "scattered": {"te": pwp_s_te, "tm": pwp_s_tm},
-        "total": {"te": pwp_t_te, "tm": pwp_t_tm},
-      }
-    Only ``alpha``, ``beta``, and ``coeff`` are stored per polarization.
-    When `drop_redundant_total=True` and both `initial` and `scattered` are
-    present, a provided `total` family is omitted to avoid redundant storage.
-    """
-    patterns_to_write = dict(patterns)
-    omitted_total = False
-    if (
-        drop_redundant_total
-        and "total" in patterns_to_write
-        and "initial" in patterns_to_write
-        and "scattered" in patterns_to_write
-    ):
-        patterns_to_write.pop("total")
-        omitted_total = True
-
+    """Save finite far fields with one grid and no derived total copy."""
+    reference = farfield.scattered
+    if farfield.initial is not None:
+        try:
+            reference.require_same_grid(farfield.initial)
+        except ValueError as exc:
+            raise ValueError("Initial and scattered far fields must share one grid.") from exc
     with h5py.File(_pathlike(path), mode) as h5:
         root = _reset_group(h5, group)
-        for family_name, pol_map in patterns_to_write.items():
-            fam = root.create_group(str(family_name))
-            for pol_name, pwp in pol_map.items():
-                polg = fam.create_group(str(pol_name))
-                _write_pwp(polg, pwp, compression=compression)
-        root.attrs["total_omitted_as_redundant"] = bool(omitted_total)
+        grid = root.create_group("grid")
+        for name in ("alpha", "beta", "kx", "ky", "kz"):
+            _write_dataset(
+                grid,
+                name,
+                getattr(reference, name),
+                compression=compression,
+            )
+
+        def save_spectrum(name: str, spectrum: PlaneWaveSpectrum) -> None:
+            target = root.create_group(name)
+            _write_dataset(target, "coeff_te", spectrum.coeff_te, compression=compression)
+            _write_dataset(target, "coeff_tm", spectrum.coeff_tm, compression=compression)
+
+        save_spectrum("scattered", farfield.scattered)
+        if farfield.initial is not None:
+            save_spectrum("initial", farfield.initial)
         _write_attrs(root, attrs)

@@ -6,6 +6,7 @@ import numpy as np
 import numpy.typing as npt
 
 from ..conversions import angular_spectrum_to_svwf_regular
+from ..plane_wave_spectrum import PlaneWaveSpectrum
 from ..polarization import normalize_global_polarization_vector
 from ..projection import incident_coeffs_wavebundle_normal_incidence
 from .base import PolarizationInput, is_normal_incidence, polarization_to_jones
@@ -58,7 +59,7 @@ class GaussianBeam:
         k: float,
         polar_angles: np.ndarray,
         azimuthal_angles: np.ndarray,
-    ) -> tuple[dict, dict]:
+    ) -> PlaneWaveSpectrum:
         return _gaussian_angular_spectrum_coeffs(
             beam=self,
             k=float(k),
@@ -160,7 +161,7 @@ class LaguerreGaussianBeam:
         k: float,
         polar_angles: np.ndarray,
         azimuthal_angles: np.ndarray,
-    ) -> tuple[dict, dict]:
+    ) -> PlaneWaveSpectrum:
         return _laguerre_gaussian_angular_spectrum_coeffs(
             beam=self,
             k=float(k),
@@ -269,7 +270,7 @@ class FocusedLaguerreGaussianBeam:
         k: float,
         polar_angles: np.ndarray,
         azimuthal_angles: np.ndarray,
-    ) -> tuple[dict, dict]:
+    ) -> PlaneWaveSpectrum:
         return _focused_laguerre_gaussian_angular_spectrum_coeffs(
             beam=self,
             k=float(k),
@@ -376,7 +377,7 @@ class CartesianPolarizedFocusedLaguerreGaussianBeam:
         k: float,
         polar_angles: np.ndarray,
         azimuthal_angles: np.ndarray,
-    ) -> tuple[dict, dict]:
+    ) -> PlaneWaveSpectrum:
         return _focused_laguerre_cartesian_angular_spectrum_coeffs(
             beam=self,
             k=float(k),

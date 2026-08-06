@@ -59,10 +59,10 @@ def _render_outputs(
     plt.close(fig_nf)
 
     ff = run.farfield
-    intensity = pcl.io.far_field_intensity(ff.scattered_te, ff.scattered_tm)
+    intensity = pcl.io.far_field_intensity(ff.scattered)
     fig_ff, _ = pcl.io.plot_farfield_hemispheres(
-        polar_angles=ff.scattered_te["beta"],
-        azimuthal_angles=ff.scattered_te["alpha"],
+        polar_angles=ff.scattered.beta,
+        azimuthal_angles=ff.scattered.alpha,
         intensity=intensity,
         cmap="inferno",
         independent_scales=True,

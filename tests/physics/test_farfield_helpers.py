@@ -61,14 +61,12 @@ def test_compute_far_field_patterns_for_gaussian_beam_includes_total():
         source=beam,
         show_progress=False,
     )
-    assert out.initial_te is not None
-    assert out.initial_tm is not None
-    assert out.total_te is not None
-    assert out.total_tm is not None
-    np.testing.assert_allclose(out.scattered_te["coeff"], 0.0, rtol=0.0, atol=0.0)
-    np.testing.assert_allclose(out.scattered_tm["coeff"], 0.0, rtol=0.0, atol=0.0)
-    np.testing.assert_allclose(out.total_te["coeff"], out.initial_te["coeff"])
-    np.testing.assert_allclose(out.total_tm["coeff"], out.initial_tm["coeff"])
+    assert out.initial is not None
+    assert out.total is not None
+    np.testing.assert_allclose(out.scattered.coeff_te, 0.0, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(out.scattered.coeff_tm, 0.0, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(out.total.coeff_te, out.initial.coeff_te)
+    np.testing.assert_allclose(out.total.coeff_tm, out.initial.coeff_tm)
 
 
 def test_compute_far_field_patterns_accepts_local_expansion_source_protocol():
@@ -89,7 +87,5 @@ def test_compute_far_field_patterns_accepts_local_expansion_source_protocol():
         show_progress=False,
     )
 
-    assert out.initial_te is not None
-    assert out.initial_tm is not None
-    assert out.total_te is not None
-    assert out.total_tm is not None
+    assert out.initial is not None
+    assert out.total is not None

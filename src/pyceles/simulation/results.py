@@ -19,6 +19,7 @@ import numpy as np
 import numpy.typing as npt
 
 from pyceles.core.particles import Particle, ParticleCollection
+from pyceles.core.plane_wave_spectrum import PlaneWaveSpectrum
 from pyceles.core.sources import JonesPolarizedSource, Source
 from pyceles.linear.solvers import LinearSolveResult
 from pyceles.postprocessing.farfield import (
@@ -157,7 +158,8 @@ def _channel_repr_body(channel: ChannelResult) -> str:
     return (
         f"source={type(channel.source).__name__}, particles={channel.n_particles}, "
         f"coeffs=({_array_summary(channel.coeffs)}), "
-        f"farfield={bool(channel.farfield.scattered_te)}, periodic={channel.periodic is not None}, "
+        f"farfield={bool(channel.farfield.scattered.coeff_te.size)}, "
+        f"periodic={channel.periodic is not None}, "
         f"power={channel.power is not None}, cross_sections={channel.cross_sections is not None}, "
         f"compute_dtype={channel.compute_dtype!r}, accum_dtype={channel.accum_dtype!r}"
     )
@@ -550,27 +552,11 @@ def average_cross_section_balances(
     )
 
 
-def empty_pwp(dtype: npt.DTypeLike) -> dict[str, np.ndarray]:
-    """Return an empty PWP payload used when far-field postprocessing is disabled."""
-    return {
-        "beta": np.zeros((0,), dtype=float),
-        "alpha": np.zeros((0,), dtype=float),
-        "kx": np.zeros((0, 0), dtype=float),
-        "ky": np.zeros((0, 0), dtype=float),
-        "kz": np.zeros((0, 0), dtype=float),
-        "coeff": np.zeros((0, 0), dtype=np.dtype(dtype)),
-    }
-
-
 def empty_farfield_patterns(dtype: npt.DTypeLike) -> FarFieldPatterns:
     """Return an empty far-field payload for solve-only workflows."""
     return FarFieldPatterns(
-        initial_te=None,
-        initial_tm=None,
-        scattered_te=empty_pwp(dtype),
-        scattered_tm=empty_pwp(dtype),
-        total_te=None,
-        total_tm=None,
+        initial=None,
+        scattered=PlaneWaveSpectrum.empty(dtype),
     )
 
 
@@ -611,6 +597,5 @@ __all__ = [
     "average_cross_section_balances",
     "average_power_balances",
     "empty_farfield_patterns",
-    "empty_pwp",
     "simulation_result_from_channel",
 ]

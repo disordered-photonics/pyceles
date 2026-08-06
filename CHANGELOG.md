@@ -45,6 +45,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pairwise-vs-MLFMM scaling benchmark.
 
 ### Changed
+- Breaking: finite far fields now use one typed `PlaneWaveSpectrum` containing
+  both TE/TM coefficients and their shared wavevector grid. `FarFieldPatterns`
+  retains only the independent incident and scattered spectra and derives the
+  total field on demand. Far-field HDF5 output mirrors that ownership by
+  storing one grid and omitting the derivable total spectrum.
 - Multi-source labels now must be explicit non-empty strings; arbitrary mapping
   keys are no longer silently coerced. Simulation, block-source, polarization,
   and linear-solver result representations are compact structural summaries

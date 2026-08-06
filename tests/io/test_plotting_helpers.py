@@ -8,6 +8,7 @@ from matplotlib import pyplot as plt
 from matplotlib.patches import Circle, Ellipse
 
 from pyceles.core.particles import LayeredSphere, Particle, Sphere, Spheroid
+from pyceles.core.plane_wave_spectrum import PlaneWaveSpectrum
 from pyceles.io.plotting import (
     far_field_intensity,
     far_field_intensity_from_result,
@@ -26,6 +27,14 @@ from pyceles.io.plotting import (
 from pyceles.postprocessing.nearfield import NearFieldSlice
 
 
+def _spectrum(coeff_te: np.ndarray, coeff_tm: np.ndarray) -> PlaneWaveSpectrum:
+    shape = np.asarray(coeff_te).shape
+    alpha = np.arange(shape[0], dtype=float)
+    beta = np.arange(shape[1], dtype=float)
+    grid = np.zeros(shape, dtype=float)
+    return PlaneWaveSpectrum(alpha, beta, grid, grid, grid, coeff_te, coeff_tm)
+
+
 def test_near_field_component_extracts_expected_channels():
     E = np.array([[[1 + 2j, 2 + 0j, 3 - 1j]]], dtype=np.complex128)
     H = np.array([[[4 + 1j, 5 + 0j, 6 - 2j]]], dtype=np.complex128)
@@ -38,24 +47,25 @@ def test_near_field_component_extracts_expected_channels():
 
 
 def test_far_field_intensity_combines_te_tm():
-    te = {"coeff": np.array([[1 + 1j, 2 + 0j]], dtype=np.complex128)}
-    tm = {"coeff": np.array([[0 + 1j, 1 + 0j]], dtype=np.complex128)}
-    I = far_field_intensity(te, tm)
-    expected = np.abs(te["coeff"]) ** 2 + np.abs(tm["coeff"]) ** 2
+    te = np.array([[1 + 1j, 2 + 0j]], dtype=np.complex128)
+    tm = np.array([[0 + 1j, 1 + 0j]], dtype=np.complex128)
+    I = far_field_intensity(_spectrum(te, tm))
+    expected = np.abs(te) ** 2 + np.abs(tm) ** 2
     np.testing.assert_allclose(I, expected)
 
 
 def test_far_field_intensity_from_result_uses_explicit_channel():
-    te = {"coeff": np.array([[1 + 0j, 2 + 0j]], dtype=np.complex128)}
-    tm = {"coeff": np.array([[3 + 0j, 4 + 0j]], dtype=np.complex128)}
+    te = np.array([[1 + 0j, 2 + 0j]], dtype=np.complex128)
+    tm = np.array([[3 + 0j, 4 + 0j]], dtype=np.complex128)
+    spectrum = _spectrum(te, tm)
     run = type(
         "Run",
         (),
-        {"farfield": type("FF", (), {"scattered_te": te, "scattered_tm": tm})},
+        {"farfield": type("FF", (), {"scattered": spectrum})},
     )()
     np.testing.assert_allclose(
         far_field_intensity_from_result(run),
-        far_field_intensity(te, tm),
+        far_field_intensity(spectrum),
     )
 
 
@@ -67,10 +77,12 @@ def test_far_field_intensity_from_result_rejects_periodic_placeholder():
 
 
 def test_unpolarized_far_field_intensity_averages_te_tm_channels():
-    te = {"coeff": np.array([[1 + 0j, 2 + 0j]], dtype=np.complex128)}
-    tm = {"coeff": np.array([[3 + 0j, 4 + 0j]], dtype=np.complex128)}
-    ff_te = type("FF", (), {"scattered_te": te, "scattered_tm": tm})()
-    ff_tm = type("FF", (), {"scattered_te": tm, "scattered_tm": te})()
+    te = np.array([[1 + 0j, 2 + 0j]], dtype=np.complex128)
+    tm = np.array([[3 + 0j, 4 + 0j]], dtype=np.complex128)
+    spectrum_te = _spectrum(te, tm)
+    spectrum_tm = _spectrum(tm, te)
+    ff_te = type("FF", (), {"scattered": spectrum_te})()
+    ff_tm = type("FF", (), {"scattered": spectrum_tm})()
     result = type(
         "PolarizationResult",
         (),
@@ -81,7 +93,7 @@ def test_unpolarized_far_field_intensity_averages_te_tm_channels():
     )()
     np.testing.assert_allclose(
         unpolarized_far_field_intensity(result),
-        0.5 * (far_field_intensity(te, tm) + far_field_intensity(tm, te)),
+        0.5 * (far_field_intensity(spectrum_te) + far_field_intensity(spectrum_tm)),
     )
 
 

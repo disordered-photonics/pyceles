@@ -1151,25 +1151,21 @@ def test_cupy_simulation_run_matches_numpy_for_coeffs_farfield_and_nearfield(
         atol=coeff_atol,
     )
     np.testing.assert_allclose(
-        run_cupy.farfield.scattered_te["coeff"],
-        run_numpy.farfield.scattered_te["coeff"],
+        run_cupy.farfield.scattered.coeff_te,
+        run_numpy.farfield.scattered.coeff_te,
         rtol=coeff_rtol,
         atol=coeff_atol,
     )
     np.testing.assert_allclose(
-        run_cupy.farfield.scattered_tm["coeff"],
-        run_numpy.farfield.scattered_tm["coeff"],
+        run_cupy.farfield.scattered.coeff_tm,
+        run_numpy.farfield.scattered.coeff_tm,
         rtol=coeff_rtol,
         atol=coeff_atol,
     )
 
-    intensity_numpy = far_field_intensity(
-        run_numpy.farfield.scattered_te, run_numpy.farfield.scattered_tm
-    )
-    intensity_cupy = far_field_intensity(
-        run_cupy.farfield.scattered_te, run_cupy.farfield.scattered_tm
-    )
-    kz = np.asarray(run_numpy.farfield.scattered_te["kz"], dtype=float)
+    intensity_numpy = far_field_intensity(run_numpy.farfield.scattered)
+    intensity_cupy = far_field_intensity(run_cupy.farfield.scattered)
+    kz = np.asarray(run_numpy.farfield.scattered.kz, dtype=float)
     backward_mask = kz <= 0.0
     np.testing.assert_allclose(
         intensity_cupy[backward_mask],
@@ -1309,15 +1305,9 @@ def test_cupy_mixed_particle_groups_match_numpy_for_solve_and_backscatter() -> N
 
     np.testing.assert_allclose(run_cupy.coeffs, run_numpy.coeffs, rtol=5e-8, atol=5e-10)
 
-    intensity_numpy = far_field_intensity(
-        run_numpy.farfield.scattered_te,
-        run_numpy.farfield.scattered_tm,
-    )
-    intensity_cupy = far_field_intensity(
-        run_cupy.farfield.scattered_te,
-        run_cupy.farfield.scattered_tm,
-    )
-    kz = np.asarray(run_numpy.farfield.scattered_te["kz"], dtype=float)
+    intensity_numpy = far_field_intensity(run_numpy.farfield.scattered)
+    intensity_cupy = far_field_intensity(run_cupy.farfield.scattered)
+    kz = np.asarray(run_numpy.farfield.scattered.kz, dtype=float)
     backward_mask = kz <= 0.0
     np.testing.assert_allclose(
         intensity_cupy[backward_mask],

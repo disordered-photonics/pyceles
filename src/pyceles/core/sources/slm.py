@@ -7,6 +7,7 @@ import numpy as np
 import numpy.typing as npt
 
 from ..conversions import angular_spectrum_to_svwf_regular
+from ..plane_wave_spectrum import PlaneWaveSpectrum
 from .base import AngularSpectrumSource, JonesPolarizedSource, PolarizationInput, Source
 
 _SLMModulation = complex | np.ndarray | Callable[[np.ndarray, np.ndarray], npt.ArrayLike]
@@ -83,26 +84,25 @@ class AngularSpectrumSLMSource:
         k: float,
         polar_angles: np.ndarray,
         azimuthal_angles: np.ndarray,
-    ) -> tuple[dict, dict]:
+    ) -> PlaneWaveSpectrum:
         base = self.base_source
         if not isinstance(base, AngularSpectrumSource):
             raise TypeError("AngularSpectrumSLMSource requires an angular-spectrum base source.")
-        pwp_te, pwp_tm = base.angular_spectrum(
+        spectrum = base.angular_spectrum(
             k=float(k),
             polar_angles=np.asarray(polar_angles, dtype=float),
             azimuthal_angles=np.asarray(azimuthal_angles, dtype=float),
         )
-        coeff_dtype = np.result_type(pwp_te["coeff"], pwp_tm["coeff"], np.complex64)
+        coeff_dtype = np.result_type(spectrum.coeff_te, spectrum.coeff_tm, np.complex64)
         weights = self._modulation_weights(
-            alpha=np.asarray(pwp_te["alpha"], dtype=float),
-            beta=np.asarray(pwp_te["beta"], dtype=float),
+            alpha=spectrum.alpha,
+            beta=spectrum.beta,
             dtype=coeff_dtype,
         )
-        out_te = dict(pwp_te)
-        out_tm = dict(pwp_tm)
-        out_te["coeff"] = np.asarray(np.asarray(pwp_te["coeff"]) * weights, dtype=coeff_dtype)
-        out_tm["coeff"] = np.asarray(np.asarray(pwp_tm["coeff"]) * weights, dtype=coeff_dtype)
-        return out_te, out_tm
+        return spectrum.with_coefficients(
+            np.asarray(spectrum.coeff_te * weights, dtype=coeff_dtype),
+            np.asarray(spectrum.coeff_tm * weights, dtype=coeff_dtype),
+        )
 
     def incident_coeffs(
         self,

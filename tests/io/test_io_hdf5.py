@@ -8,6 +8,7 @@ from pyceles.core.particles import (
     Sphere,
     Spheroid,
 )
+from pyceles.core.plane_wave_spectrum import PlaneWaveSpectrum
 from pyceles.io.hdf5 import (
     load_far_field_h5,
     load_geometry_h5,
@@ -21,22 +22,24 @@ from pyceles.io.hdf5 import (
     save_near_field_h5,
     save_solution_h5,
 )
+from pyceles.postprocessing.farfield import FarFieldPatterns
 
 pytestmark = [pytest.mark.filesystem, pytest.mark.hdf5]
 
 
-def _dummy_pwp(alpha: np.ndarray, beta: np.ndarray) -> dict:
+def _dummy_spectrum(alpha: np.ndarray, beta: np.ndarray) -> PlaneWaveSpectrum:
     coeff = np.ones((alpha.size, beta.size), dtype=np.complex128)
     agrid = alpha[:, None]
     bgrid = beta[None, :]
-    return {
-        "alpha": alpha,
-        "beta": beta,
-        "kx": np.sin(bgrid) * np.cos(agrid),
-        "ky": np.sin(bgrid) * np.sin(agrid),
-        "kz": np.cos(bgrid) * np.ones_like(agrid),
-        "coeff": coeff,
-    }
+    return PlaneWaveSpectrum(
+        alpha,
+        beta,
+        np.sin(bgrid) * np.cos(agrid),
+        np.sin(bgrid) * np.sin(agrid),
+        np.cos(bgrid) * np.ones_like(agrid),
+        coeff,
+        coeff.copy(),
+    )
 
 
 def test_solution_roundtrip(tmp_path):
@@ -67,7 +70,7 @@ def test_geometry_near_far_write(tmp_path):
 
     alpha = np.linspace(0.0, 2 * np.pi, 17)
     beta = np.linspace(0.0, np.pi, 33)
-    pwp = _dummy_pwp(alpha, beta)
+    spectrum = _dummy_spectrum(alpha, beta)
 
     save_geometry_h5(
         path,
@@ -80,11 +83,10 @@ def test_geometry_near_far_write(tmp_path):
     save_near_field_h5(path, X=X, Z=Z, E=E, H=H, inside=inside)
     save_far_field_h5(
         path,
-        patterns={
-            "initial": {"te": pwp, "tm": pwp},
-            "scattered": {"te": pwp, "tm": pwp},
-            "total": {"te": pwp, "tm": pwp},
-        },
+        farfield=FarFieldPatterns(
+            initial=spectrum,
+            scattered=spectrum,
+        ),
     )
 
     import h5py
@@ -95,16 +97,47 @@ def test_geometry_near_far_write(tmp_path):
         assert "far_field" in h5
         assert "positions" not in h5["geometry"]
         np.testing.assert_allclose(h5["near_field/X"][...], X)
-        np.testing.assert_allclose(h5["far_field/initial/te/coeff"][...], pwp["coeff"])
-        np.testing.assert_allclose(h5["far_field/scattered/te/coeff"][...], pwp["coeff"])
-        assert bool(h5["far_field"].attrs["total_omitted_as_redundant"]) is True
+        np.testing.assert_allclose(h5["far_field/grid/kx"][...], spectrum.kx)
+        np.testing.assert_allclose(h5["far_field/initial/coeff_te"][...], spectrum.coeff_te)
+        np.testing.assert_allclose(h5["far_field/scattered/coeff_tm"][...], spectrum.coeff_tm)
+        assert "total" not in h5["far_field"]
 
     geom_loaded = load_geometry_h5(path)
     loaded_particles = geom_loaded["particles"]
     assert isinstance(loaded_particles, ParticleCollection)
     assert tuple(loaded_particles) == particles
     ff_loaded = load_far_field_h5(path)
-    np.testing.assert_allclose(ff_loaded["patterns"]["initial"]["te"]["coeff"], pwp["coeff"])
+    loaded_initial = ff_loaded.initial
+    assert isinstance(loaded_initial, PlaneWaveSpectrum)
+    np.testing.assert_allclose(loaded_initial.kx, spectrum.kx)
+    np.testing.assert_allclose(loaded_initial.coeff_te, spectrum.coeff_te)
+    loaded_total = ff_loaded.total
+    assert loaded_total is not None
+    np.testing.assert_allclose(loaded_total.coeff_te, 2.0 * spectrum.coeff_te)
+
+
+def test_far_field_writer_rejects_mixed_grids(tmp_path):
+    alpha = np.linspace(0.0, 2 * np.pi, 7, endpoint=False)
+    beta = np.linspace(0.0, np.pi, 9)
+    reference = _dummy_spectrum(alpha, beta)
+    shifted = PlaneWaveSpectrum(
+        alpha + 0.01,
+        beta,
+        reference.kx,
+        reference.ky,
+        reference.kz,
+        reference.coeff_te,
+        reference.coeff_tm,
+    )
+
+    with pytest.raises(ValueError, match="must share one grid"):
+        save_far_field_h5(
+            tmp_path / "mixed-grids.h5",
+            farfield=FarFieldPatterns(
+                initial=shifted,
+                scattered=reference,
+            ),
+        )
 
 
 def test_geometry_particle_descriptor_roundtrip(tmp_path):

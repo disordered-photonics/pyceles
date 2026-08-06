@@ -18,6 +18,7 @@ from pyceles.core.fields import (
     project_source_basis_to_svwf,
     project_source_to_svwf,
 )
+from pyceles.core.plane_wave_spectrum import PlaneWaveSpectrum
 
 
 def test_project_source_to_svwf_matches_planewave_formula():
@@ -121,60 +122,28 @@ def test_gaussian_angular_spectrum_projection_parity_normal():
     np.testing.assert_allclose(got, ref, rtol=0.0, atol=0.0)
 
 
-def test_pwp_to_svwf_regular_rejects_te_tm_grid_mismatch():
-    alpha = np.linspace(0.0, 2.0 * np.pi, 17, endpoint=False)
-    beta = np.linspace(0.0, np.pi, 21)
-    agrid = alpha[:, None]
-    bgrid = beta[None, :]
-    k = 2.0 * np.pi / 550.0
-    pwp_te = {
-        "alpha": alpha,
-        "beta": beta,
-        "kx": k * np.sin(bgrid) * np.cos(agrid),
-        "ky": k * np.sin(bgrid) * np.sin(agrid),
-        "kz": np.broadcast_to(k * np.cos(bgrid), (alpha.size, beta.size)),
-        "coeff": np.ones((alpha.size, beta.size), dtype=np.complex128),
-    }
-    pwp_tm = dict(pwp_te)
-    pwp_tm["alpha"] = alpha + 1e-3
-
-    with np.testing.assert_raises_regex(ValueError, "azimuth grids must be identical"):
-        pwp_to_svwf_regular(
-            np.array([[0.0, 0.0, 0.0]], dtype=float),
-            1,
-            k=k,
-            pwp_te=pwp_te,
-            pwp_tm=pwp_tm,
-        )
-
-
 def test_pwp_to_svwf_regular_rejects_wavevector_k_inconsistency():
     alpha = np.linspace(0.0, 2.0 * np.pi, 17, endpoint=False)
     beta = np.linspace(0.0, np.pi, 21)
     agrid = alpha[:, None]
     bgrid = beta[None, :]
     k = 2.0 * np.pi / 550.0
-    pwp_te = {
-        "alpha": alpha,
-        "beta": beta,
-        "kx": k * np.sin(bgrid) * np.cos(agrid),
-        "ky": k * np.sin(bgrid) * np.sin(agrid),
-        "kz": np.broadcast_to(k * np.cos(bgrid), (alpha.size, beta.size)),
-        "coeff": np.ones((alpha.size, beta.size), dtype=np.complex128),
-    }
-    pwp_tm = dict(pwp_te)
-
-    bad_te = dict(pwp_te)
-    bad_tm = dict(pwp_tm)
-    bad_te["kz"] = np.asarray(pwp_te["kz"], dtype=float) + 0.05 * k
-    bad_tm["kz"] = np.asarray(pwp_tm["kz"], dtype=float) + 0.05 * k
+    shape = (alpha.size, beta.size)
+    spectrum = PlaneWaveSpectrum(
+        alpha,
+        beta,
+        k * np.sin(bgrid) * np.cos(agrid),
+        k * np.sin(bgrid) * np.sin(agrid),
+        np.broadcast_to(k * np.cos(bgrid), shape) + 0.05 * k,
+        np.ones(shape, dtype=np.complex128),
+        np.ones(shape, dtype=np.complex128),
+    )
     with np.testing.assert_raises_regex(ValueError, "inconsistent with `k`"):
         pwp_to_svwf_regular(
             np.array([[0.0, 0.0, 0.0]], dtype=float),
             1,
             k=k,
-            pwp_te=bad_te,
-            pwp_tm=bad_tm,
+            spectrum=spectrum,
         )
 
 
@@ -192,9 +161,9 @@ def test_gaussian_angular_spectrum_tilted_runs():
     k = 2.0 * np.pi / source.wavelength * np.real(source.medium_n)
     polar = np.linspace(0.0, np.pi, 101)
     azimuthal = np.linspace(0.0, 2.0 * np.pi, 61, endpoint=False)
-    te, tm = source.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
-    assert te["coeff"].shape == (azimuthal.size, polar.size)
-    assert tm["coeff"].shape == (azimuthal.size, polar.size)
+    spectrum = source.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
+    assert spectrum.coeff_te.shape == (azimuthal.size, polar.size)
+    assert spectrum.coeff_tm.shape == (azimuthal.size, polar.size)
 
 
 def test_planewave_jones_mixes_basis_linearly():
@@ -297,13 +266,15 @@ def test_slm_source_phase_ramp_matches_focal_shift_in_angular_spectrum():
 
     polar = np.linspace(0.0, np.pi, 181)
     azimuthal = np.linspace(0.0, 2.0 * np.pi, 161, endpoint=False)
-    te_slm, tm_slm = slm.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
-    te_shift, tm_shift = shifted.angular_spectrum(
-        k=k, polar_angles=polar, azimuthal_angles=azimuthal
-    )
+    spectrum_slm = slm.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
+    spectrum_shift = shifted.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
 
-    np.testing.assert_allclose(te_slm["coeff"], te_shift["coeff"], rtol=1e-11, atol=1e-11)
-    np.testing.assert_allclose(tm_slm["coeff"], tm_shift["coeff"], rtol=1e-11, atol=1e-11)
+    np.testing.assert_allclose(
+        spectrum_slm.coeff_te, spectrum_shift.coeff_te, rtol=1e-11, atol=1e-11
+    )
+    np.testing.assert_allclose(
+        spectrum_slm.coeff_tm, spectrum_shift.coeff_tm, rtol=1e-11, atol=1e-11
+    )
 
 
 def test_bessel_beam_angular_spectrum_support_concentrates_on_cone():
@@ -321,9 +292,9 @@ def test_bessel_beam_angular_spectrum_support_concentrates_on_cone():
     k = 2.0 * np.pi / source.wavelength * np.real(source.medium_n)
     polar = np.linspace(0.0, np.pi, 361)
     azimuthal = np.linspace(0.0, 2.0 * np.pi, 181, endpoint=False)
-    te, tm = source.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
+    spectrum = source.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
 
-    amp = np.sqrt(np.abs(te["coeff"]) ** 2 + np.abs(tm["coeff"]) ** 2)
+    amp = np.sqrt(np.abs(spectrum.coeff_te) ** 2 + np.abs(spectrum.coeff_tm) ** 2)
     beta_activity = np.sum(amp, axis=0)
     active = np.where(beta_activity > (1e-10 * np.max(beta_activity)))[0]
     assert active.size <= 2
@@ -348,18 +319,18 @@ def test_bessel_beam_tilted_ring_support_matches_local_cone():
     k = 2.0 * np.pi / source.wavelength * np.real(source.medium_n)
     polar = np.linspace(0.0, np.pi, 361)
     azimuthal = np.linspace(0.0, 2.0 * np.pi, 241, endpoint=False)
-    te, tm = source.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
+    spectrum = source.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
 
-    amp = np.sqrt(np.abs(te["coeff"]) ** 2 + np.abs(tm["coeff"]) ** 2)
+    amp = np.sqrt(np.abs(spectrum.coeff_te) ** 2 + np.abs(spectrum.coeff_tm) ** 2)
     thresh = 1e-12 * np.max(amp)
     active = amp > thresh
     # Sparse cone discretization: only few active beta bins per alpha.
     active_per_alpha = np.sum(active, axis=1)
     assert float(np.median(active_per_alpha)) <= 6.0
 
-    sx = np.asarray(te["kx"], dtype=float) / float(k)
-    sy = np.asarray(te["ky"], dtype=float) / float(k)
-    sz = np.asarray(te["kz"], dtype=float) / float(k)
+    sx = spectrum.kx / float(k)
+    sy = spectrum.ky / float(k)
+    sz = spectrum.kz / float(k)
     n0 = np.array(
         [
             np.sin(source.polar_angle) * np.cos(source.azimuthal_angle),
@@ -389,11 +360,11 @@ def test_bessel_beam_oam_phase_advances_with_order_m():
     k = 2.0 * np.pi / source.wavelength * np.real(source.medium_n)
     polar = np.linspace(0.0, np.pi, 401)
     azimuthal = np.linspace(0.0, 2.0 * np.pi, 241, endpoint=False)
-    te, _ = source.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
+    spectrum = source.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
 
-    beta_activity = np.sum(np.abs(te["coeff"]), axis=0)
+    beta_activity = np.sum(np.abs(spectrum.coeff_te), axis=0)
     j = int(np.argmax(beta_activity))
-    c = np.asarray(te["coeff"][:, j], dtype=np.complex128)
+    c = np.asarray(spectrum.coeff_te[:, j], dtype=np.complex128)
     da = float(azimuthal[1] - azimuthal[0])
     expected = np.exp(1j * source.order_m * da)
     ratio = c[1:] / c[:-1]
@@ -414,9 +385,9 @@ def test_bessel_beam_m0_is_cylindrically_symmetric_in_alpha():
     k = 2.0 * np.pi / source.wavelength * np.real(source.medium_n)
     polar = np.linspace(0.0, np.pi, 321)
     azimuthal = np.linspace(0.0, 2.0 * np.pi, 181, endpoint=False)
-    te, tm = source.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
+    spectrum = source.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
 
-    amp = np.sqrt(np.abs(te["coeff"]) ** 2 + np.abs(tm["coeff"]) ** 2)
+    amp = np.sqrt(np.abs(spectrum.coeff_te) ** 2 + np.abs(spectrum.coeff_tm) ** 2)
     beta_activity = np.sum(amp, axis=0)
     active = np.where(beta_activity > (1e-10 * np.max(beta_activity)))[0]
     profile = np.sum(amp[:, active], axis=1)
@@ -438,9 +409,9 @@ def test_cartesian_bessel_beam_angular_spectrum_support_concentrates_on_cone():
     k = 2.0 * np.pi / source.wavelength * np.real(source.medium_n)
     polar = np.linspace(0.0, np.pi, 361)
     azimuthal = np.linspace(0.0, 2.0 * np.pi, 181, endpoint=False)
-    te, tm = source.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
+    spectrum = source.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
 
-    amp = np.sqrt(np.abs(te["coeff"]) ** 2 + np.abs(tm["coeff"]) ** 2)
+    amp = np.sqrt(np.abs(spectrum.coeff_te) ** 2 + np.abs(spectrum.coeff_tm) ** 2)
     beta_activity = np.sum(amp, axis=0)
     active = np.where(beta_activity > (1e-10 * np.max(beta_activity)))[0]
     assert active.size <= 2
@@ -464,7 +435,7 @@ def test_cartesian_bessel_beam_transverse_projection_enforces_maxwell_constraint
     k = 2.0 * np.pi / source.wavelength * np.real(source.medium_n)
     polar = np.linspace(0.0, np.pi, 321)
     azimuthal = np.linspace(0.0, 2.0 * np.pi, 241, endpoint=False)
-    te, tm = source.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
+    spectrum = source.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
 
     agrid, bgrid = np.meshgrid(azimuthal, polar, indexing="ij")
     sb = np.sin(bgrid)
@@ -477,9 +448,9 @@ def test_cartesian_bessel_beam_transverse_projection_enforces_maxwell_constraint
 
     ephi = np.stack([-sa, ca, np.zeros_like(agrid)], axis=2)
     etheta = np.stack([cb * ca, cb * sa, -sb], axis=2)
-    ex = te["coeff"] * ephi[..., 0] + tm["coeff"] * etheta[..., 0]
-    ey = te["coeff"] * ephi[..., 1] + tm["coeff"] * etheta[..., 1]
-    ez = te["coeff"] * ephi[..., 2] + tm["coeff"] * etheta[..., 2]
+    ex = spectrum.coeff_te * ephi[..., 0] + spectrum.coeff_tm * etheta[..., 0]
+    ey = spectrum.coeff_te * ephi[..., 1] + spectrum.coeff_tm * etheta[..., 1]
+    ez = spectrum.coeff_te * ephi[..., 2] + spectrum.coeff_tm * etheta[..., 2]
     dot = ex * sx + ey * sy + ez * sz
     amp = np.sqrt(np.abs(ex) ** 2 + np.abs(ey) ** 2 + np.abs(ez) ** 2)
     active = amp > (1e-12 * float(np.max(amp)))
@@ -513,10 +484,16 @@ def test_cartesian_bessel_beam_polarization_vector_is_directional_not_amplitude_
     k = 2.0 * np.pi / src_ref.wavelength * np.real(src_ref.medium_n)
     polar = np.linspace(0.0, np.pi, 241)
     azimuthal = np.linspace(0.0, 2.0 * np.pi, 181, endpoint=False)
-    te_ref, tm_ref = src_ref.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
-    te_s, tm_s = src_scaled.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
-    np.testing.assert_allclose(te_ref["coeff"], te_s["coeff"], rtol=1e-12, atol=1e-12)
-    np.testing.assert_allclose(tm_ref["coeff"], tm_s["coeff"], rtol=1e-12, atol=1e-12)
+    spectrum_ref = src_ref.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
+    spectrum_scaled = src_scaled.angular_spectrum(
+        k=k, polar_angles=polar, azimuthal_angles=azimuthal
+    )
+    np.testing.assert_allclose(
+        spectrum_ref.coeff_te, spectrum_scaled.coeff_te, rtol=1e-12, atol=1e-12
+    )
+    np.testing.assert_allclose(
+        spectrum_ref.coeff_tm, spectrum_scaled.coeff_tm, rtol=1e-12, atol=1e-12
+    )
 
 
 def test_cartesian_focused_laguerre_transverse_projection_enforces_maxwell_constraint():
@@ -539,7 +516,7 @@ def test_cartesian_focused_laguerre_transverse_projection_enforces_maxwell_const
     k = 2.0 * np.pi / source.wavelength * np.real(source.medium_n)
     polar = np.linspace(0.0, np.pi, 321)
     azimuthal = np.linspace(0.0, 2.0 * np.pi, 241, endpoint=False)
-    te, tm = source.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
+    spectrum = source.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
 
     agrid, bgrid = np.meshgrid(azimuthal, polar, indexing="ij")
     sb = np.sin(bgrid)
@@ -552,9 +529,9 @@ def test_cartesian_focused_laguerre_transverse_projection_enforces_maxwell_const
 
     ephi = np.stack([-sa, ca, np.zeros_like(agrid)], axis=2)
     etheta = np.stack([cb * ca, cb * sa, -sb], axis=2)
-    ex = te["coeff"] * ephi[..., 0] + tm["coeff"] * etheta[..., 0]
-    ey = te["coeff"] * ephi[..., 1] + tm["coeff"] * etheta[..., 1]
-    ez = te["coeff"] * ephi[..., 2] + tm["coeff"] * etheta[..., 2]
+    ex = spectrum.coeff_te * ephi[..., 0] + spectrum.coeff_tm * etheta[..., 0]
+    ey = spectrum.coeff_te * ephi[..., 1] + spectrum.coeff_tm * etheta[..., 1]
+    ez = spectrum.coeff_te * ephi[..., 2] + spectrum.coeff_tm * etheta[..., 2]
     dot = ex * sx + ey * sy + ez * sz
     amp = np.sqrt(np.abs(ex) ** 2 + np.abs(ey) ** 2 + np.abs(ez) ** 2)
     active = amp > (1e-12 * float(np.max(amp)))
@@ -584,9 +561,12 @@ def test_cartesian_focused_laguerre_spectrum_respects_numerical_aperture_cutoff(
     k = 2.0 * np.pi / source.wavelength * np.real(source.medium_n)
     polar = np.linspace(0.0, np.pi, 501)
     azimuthal = np.linspace(0.0, 2.0 * np.pi, 241, endpoint=False)
-    te, tm = source.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
+    spectrum = source.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
 
-    amp_beta = np.sum(np.sqrt(np.abs(te["coeff"]) ** 2 + np.abs(tm["coeff"]) ** 2), axis=0)
+    amp_beta = np.sum(
+        np.sqrt(np.abs(spectrum.coeff_te) ** 2 + np.abs(spectrum.coeff_tm) ** 2),
+        axis=0,
+    )
     active = np.where(amp_beta > (1e-12 * np.max(amp_beta)))[0]
     beta_max = float(np.max(polar[active]))
     beta_cut = float(np.arcsin(source.numerical_aperture / np.real(source.medium_n)))
@@ -629,10 +609,16 @@ def test_cartesian_focused_laguerre_polarization_vector_is_directional_not_ampli
     k = 2.0 * np.pi / src_ref.wavelength * np.real(src_ref.medium_n)
     polar = np.linspace(0.0, np.pi, 301)
     azimuthal = np.linspace(0.0, 2.0 * np.pi, 241, endpoint=False)
-    te_ref, tm_ref = src_ref.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
-    te_s, tm_s = src_scaled.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
-    np.testing.assert_allclose(te_ref["coeff"], te_s["coeff"], rtol=1e-12, atol=1e-12)
-    np.testing.assert_allclose(tm_ref["coeff"], tm_s["coeff"], rtol=1e-12, atol=1e-12)
+    spectrum_ref = src_ref.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
+    spectrum_scaled = src_scaled.angular_spectrum(
+        k=k, polar_angles=polar, azimuthal_angles=azimuthal
+    )
+    np.testing.assert_allclose(
+        spectrum_ref.coeff_te, spectrum_scaled.coeff_te, rtol=1e-12, atol=1e-12
+    )
+    np.testing.assert_allclose(
+        spectrum_ref.coeff_tm, spectrum_scaled.coeff_tm, rtol=1e-12, atol=1e-12
+    )
 
 
 def test_laguerre_gaussian_l0_p0_matches_gaussian_angular_spectrum():
@@ -663,11 +649,11 @@ def test_laguerre_gaussian_l0_p0_matches_gaussian_angular_spectrum():
     polar = np.linspace(0.0, np.pi, 301)
     azimuthal = np.linspace(0.0, 2.0 * np.pi, 161, endpoint=False)
 
-    te_lg, tm_lg = lg.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
-    te_g, tm_g = g.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
+    spectrum_lg = lg.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
+    spectrum_g = g.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
 
-    np.testing.assert_allclose(te_lg["coeff"], te_g["coeff"], rtol=1e-12, atol=1e-12)
-    np.testing.assert_allclose(tm_lg["coeff"], tm_g["coeff"], rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(spectrum_lg.coeff_te, spectrum_g.coeff_te, rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(spectrum_lg.coeff_tm, spectrum_g.coeff_tm, rtol=1e-12, atol=1e-12)
 
 
 def test_laguerre_gaussian_oam_phase_winding_tracks_azimuthal_order():
@@ -687,13 +673,16 @@ def test_laguerre_gaussian_oam_phase_winding_tracks_azimuthal_order():
     k = 2.0 * np.pi / source.wavelength * np.real(source.medium_n)
     polar = np.linspace(0.0, np.pi, 401)
     azimuthal = np.linspace(0.0, 2.0 * np.pi, 241, endpoint=False)
-    te, tm = source.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
+    spectrum = source.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
 
-    amp = np.sqrt(np.abs(te["coeff"]) ** 2 + np.abs(tm["coeff"]) ** 2)
+    amp = np.sqrt(np.abs(spectrum.coeff_te) ** 2 + np.abs(spectrum.coeff_tm) ** 2)
     beta_activity = np.sum(amp, axis=0)
     j = int(np.argmax(beta_activity))
     # For normal incidence and TE basis, (te - i tm) removes polarization-driven +/-1 azimuth term.
-    c = np.asarray(te["coeff"][:, j] - 1j * tm["coeff"][:, j], dtype=np.complex128)
+    c = np.asarray(
+        spectrum.coeff_te[:, j] - 1j * spectrum.coeff_tm[:, j],
+        dtype=np.complex128,
+    )
     demod = c * np.exp(1j * azimuthal)
     da = float(azimuthal[1] - azimuthal[0])
     expected = np.exp(1j * source.azimuthal_order_l * da)
@@ -717,9 +706,9 @@ def test_laguerre_gaussian_m0_is_cylindrically_symmetric_in_alpha():
     k = 2.0 * np.pi / source.wavelength * np.real(source.medium_n)
     polar = np.linspace(0.0, np.pi, 321)
     azimuthal = np.linspace(0.0, 2.0 * np.pi, 181, endpoint=False)
-    te, tm = source.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
+    spectrum = source.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal)
 
-    amp = np.sqrt(np.abs(te["coeff"]) ** 2 + np.abs(tm["coeff"]) ** 2)
+    amp = np.sqrt(np.abs(spectrum.coeff_te) ** 2 + np.abs(spectrum.coeff_tm) ** 2)
     profile = np.sum(amp, axis=1)
     assert float(np.std(profile)) <= 1e-10 * float(np.max(np.abs(profile)))
 

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from pyceles._optional import import_cupy, is_cupy_array
+from pyceles.core.plane_wave_spectrum import PlaneWaveSpectrum
 from pyceles.core.sources import Source, ensure_finite_power_diagnostics_supported
 
 from .common import integrate_periodic_alpha
@@ -294,10 +295,8 @@ def local_power_balance_from_exciting(
 
 
 def pwp_power_decomposition(
-    initial_pwp_te: dict,
-    initial_pwp_tm: dict,
-    scattered_pwp_te: dict,
-    scattered_pwp_tm: dict,
+    initial: PlaneWaveSpectrum,
+    scattered: PlaneWaveSpectrum,
     *,
     k0: float,
     k_medium: float,
@@ -310,23 +309,10 @@ def pwp_power_decomposition(
             source,
             diagnostic="Power decomposition",
         )
-    total_te, total_tm = total_field_plane_wave_pattern(
-        initial_pwp_te,
-        initial_pwp_tm,
-        scattered_pwp_te,
-        scattered_pwp_tm,
-    )
-    p_initial_te = pwp_power_flux(initial_pwp_te, k0=k0, k_medium=k_medium, direction=direction)
-    p_initial_tm = pwp_power_flux(initial_pwp_tm, k0=k0, k_medium=k_medium, direction=direction)
-    p_initial = p_initial_te + p_initial_tm
-
-    p_scattered_te = pwp_power_flux(scattered_pwp_te, k0=k0, k_medium=k_medium, direction=direction)
-    p_scattered_tm = pwp_power_flux(scattered_pwp_tm, k0=k0, k_medium=k_medium, direction=direction)
-    p_scattered = p_scattered_te + p_scattered_tm
-
-    p_total_te = pwp_power_flux(total_te, k0=k0, k_medium=k_medium, direction=direction)
-    p_total_tm = pwp_power_flux(total_tm, k0=k0, k_medium=k_medium, direction=direction)
-    p_total = p_total_te + p_total_tm
+    total = total_field_plane_wave_pattern(initial, scattered)
+    p_initial = pwp_power_flux(initial, k0=k0, k_medium=k_medium, direction=direction)
+    p_scattered = pwp_power_flux(scattered, k0=k0, k_medium=k_medium, direction=direction)
+    p_total = pwp_power_flux(total, k0=k0, k_medium=k_medium, direction=direction)
     p_interference = p_total - p_initial - p_scattered
 
     return {
@@ -338,16 +324,15 @@ def pwp_power_decomposition(
 
 
 def pwp_power_flux(
-    pwp: dict,
+    spectrum: PlaneWaveSpectrum,
     *,
     k0: float,
     k_medium: float,
     direction: str,
 ) -> float:
-    """Power flux through one hemisphere from a single-polarization PWP."""
-    alpha = np.asarray(pwp["alpha"], dtype=float)
-    beta = np.asarray(pwp["beta"], dtype=float)
-    g = np.asarray(pwp["coeff"])
+    """Power flux through one hemisphere from a TE/TM spectrum."""
+    alpha = spectrum.alpha
+    beta = spectrum.beta
 
     if direction not in {"forward", "backward"}:
         raise ValueError("direction must be 'forward' or 'backward'")
@@ -355,9 +340,8 @@ def pwp_power_flux(
     cb = np.cos(beta)
     mask = cb > 0 if direction == "forward" else cb < 0
     beta_m = beta[mask]
-    g_m = g[:, mask]
-
-    integrand = np.sin(beta_m)[None, :] * (np.abs(g_m) ** 2)
+    intensity = np.abs(spectrum.coeff_te[:, mask]) ** 2 + np.abs(spectrum.coeff_tm[:, mask]) ** 2
+    integrand = np.sin(beta_m)[None, :] * intensity
     int_alpha = integrate_periodic_alpha(integrand, alpha)
     int_beta = np.trapezoid(int_alpha, beta_m)
     pref = 2 * np.pi**2 / (k0 * k_medium)
@@ -365,19 +349,15 @@ def pwp_power_flux(
 
 
 def incident_power_from_pwp(
-    initial_pwp_te: dict,
-    initial_pwp_tm: dict,
+    initial: PlaneWaveSpectrum,
     *,
     k0: float,
     k_medium: float,
 ) -> float:
-    """Incident beam power from the initial TE/TM PWPs."""
-    p_initial = (
-        pwp_power_flux(initial_pwp_te, k0=k0, k_medium=k_medium, direction="forward")
-        + pwp_power_flux(initial_pwp_tm, k0=k0, k_medium=k_medium, direction="forward")
-        + pwp_power_flux(initial_pwp_te, k0=k0, k_medium=k_medium, direction="backward")
-        + pwp_power_flux(initial_pwp_tm, k0=k0, k_medium=k_medium, direction="backward")
-    )
+    """Incident beam power from its initial TE/TM spectrum."""
+    p_initial = pwp_power_flux(
+        initial, k0=k0, k_medium=k_medium, direction="forward"
+    ) + pwp_power_flux(initial, k0=k0, k_medium=k_medium, direction="backward")
     if (not np.isfinite(p_initial)) or (p_initial <= 0.0):
         raise ValueError(
             "Incident power computed from initial PWPs is non-finite or non-positive; "
@@ -388,10 +368,8 @@ def incident_power_from_pwp(
 
 def finite_beam_power_balance(
     source: Source,
-    initial_pwp_te: dict,
-    initial_pwp_tm: dict,
-    scattered_pwp_te: dict,
-    scattered_pwp_tm: dict,
+    initial: PlaneWaveSpectrum,
+    scattered: PlaneWaveSpectrum,
     *,
     k0: float,
     k_medium: float,
@@ -404,27 +382,12 @@ def finite_beam_power_balance(
         diagnostic="Finite-beam power balance",
     )
 
-    total_te, total_tm = total_field_plane_wave_pattern(
-        initial_pwp_te,
-        initial_pwp_tm,
-        scattered_pwp_te,
-        scattered_pwp_tm,
-    )
-    p_transmitted_te = pwp_power_flux(total_te, k0=k0, k_medium=k_medium, direction="forward")
-    p_transmitted_tm = pwp_power_flux(total_tm, k0=k0, k_medium=k_medium, direction="forward")
-    p_transmitted = p_transmitted_te + p_transmitted_tm
-
-    p_reflected_te = pwp_power_flux(
-        scattered_pwp_te, k0=k0, k_medium=k_medium, direction="backward"
-    )
-    p_reflected_tm = pwp_power_flux(
-        scattered_pwp_tm, k0=k0, k_medium=k_medium, direction="backward"
-    )
-    p_reflected = p_reflected_te + p_reflected_tm
+    total = total_field_plane_wave_pattern(initial, scattered)
+    p_transmitted = pwp_power_flux(total, k0=k0, k_medium=k_medium, direction="forward")
+    p_reflected = pwp_power_flux(scattered, k0=k0, k_medium=k_medium, direction="backward")
 
     p_initial = incident_power_from_pwp(
-        initial_pwp_te,
-        initial_pwp_tm,
+        initial,
         k0=k0,
         k_medium=k_medium,
     )

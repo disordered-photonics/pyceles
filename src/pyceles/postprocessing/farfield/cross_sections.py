@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from pyceles._optional import import_cupy, is_cupy_array
+from pyceles.core.plane_wave_spectrum import PlaneWaveSpectrum
 from pyceles.core.sources import PlaneWave, Source
 
 from .common import integrate_periodic_alpha
@@ -91,8 +92,7 @@ def _plane_wave_incident_intensity_scale(source: Source) -> float:
 
 def scattering_cross_section(
     source: Source,
-    scattered_pwp_te: dict,
-    scattered_pwp_tm: dict,
+    scattered: PlaneWaveSpectrum,
     *,
     k0: float,
     n_medium: complex,
@@ -104,22 +104,14 @@ def scattering_cross_section(
         n_medium=n_medium,
     )
 
-    alpha = np.asarray(scattered_pwp_te["alpha"], dtype=float)
-    beta = np.asarray(scattered_pwp_te["beta"], dtype=float)
-    g_te = np.asarray(scattered_pwp_te["coeff"])
-    g_tm = np.asarray(scattered_pwp_tm["coeff"])
-
-    if g_te.shape != g_tm.shape:
-        raise ValueError(
-            "scattered TE/TM PWP coefficient arrays must have identical shapes. "
-            f"Got {g_te.shape} and {g_tm.shape}."
-        )
+    alpha = scattered.alpha
+    beta = scattered.beta
 
     incident_scale = _plane_wave_incident_intensity_scale(source)
     initial_intensity = incident_scale * n_real / 2.0
     pref = (2.0 * np.pi**2) / (float(k0) * k_medium * initial_intensity)
-    dcs_te = pref * (np.abs(g_te) ** 2)
-    dcs_tm = pref * (np.abs(g_tm) ** 2)
+    dcs_te = pref * (np.abs(scattered.coeff_te) ** 2)
+    dcs_tm = pref * (np.abs(scattered.coeff_tm) ** 2)
     dcs_total = dcs_te + dcs_tm
 
     return {
@@ -133,8 +125,7 @@ def scattering_cross_section(
 
 def total_scattering_cross_section(
     source: Source,
-    scattered_pwp_te: dict,
-    scattered_pwp_tm: dict,
+    scattered: PlaneWaveSpectrum,
     *,
     k0: float,
     n_medium: complex,
@@ -142,8 +133,7 @@ def total_scattering_cross_section(
     """Total scattering cross section from far-field PWPs."""
     dcs = scattering_cross_section(
         source,
-        scattered_pwp_te,
-        scattered_pwp_tm,
+        scattered,
         k0=k0,
         n_medium=n_medium,
     )
@@ -232,8 +222,7 @@ def plane_wave_cross_section_balance(
     source: Source,
     initial_coeffs: np.ndarray,
     scattered_coeffs: np.ndarray,
-    scattered_pwp_te: dict,
-    scattered_pwp_tm: dict,
+    scattered: PlaneWaveSpectrum,
     *,
     k0: float,
     n_medium: complex,
@@ -254,8 +243,7 @@ def plane_wave_cross_section_balance(
     )
     scattering = total_scattering_cross_section(
         source,
-        scattered_pwp_te,
-        scattered_pwp_tm,
+        scattered,
         k0=k0,
         n_medium=n_medium,
     )

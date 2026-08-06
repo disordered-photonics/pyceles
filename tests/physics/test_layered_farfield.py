@@ -67,14 +67,14 @@ def test_layered_single_layer_farfield_matches_homogeneous_sphere():
     )
     np.testing.assert_allclose(run_layered.coeffs, run_sphere.coeffs, rtol=1e-12, atol=1e-12)
     np.testing.assert_allclose(
-        run_layered.farfield.scattered_te["coeff"],
-        run_sphere.farfield.scattered_te["coeff"],
+        run_layered.farfield.scattered.coeff_te,
+        run_sphere.farfield.scattered.coeff_te,
         rtol=1e-11,
         atol=1e-11,
     )
     np.testing.assert_allclose(
-        run_layered.farfield.scattered_tm["coeff"],
-        run_sphere.farfield.scattered_tm["coeff"],
+        run_layered.farfield.scattered.coeff_tm,
+        run_sphere.farfield.scattered.coeff_tm,
         rtol=1e-11,
         atol=1e-11,
     )

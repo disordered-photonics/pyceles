@@ -249,17 +249,13 @@ def test_mixed_cluster_farfield_obeys_global_translation_phase_covariance() -> N
         ],
         dtype=float,
     )
-    pattern = reference.farfield.scattered_te
-    outgoing_phase = (
-        np.asarray(pattern["kx"]) * shift[0]
-        + np.asarray(pattern["ky"]) * shift[1]
-        + np.asarray(pattern["kz"]) * shift[2]
-    )
+    pattern = reference.farfield.scattered
+    outgoing_phase = pattern.kx * shift[0] + pattern.ky * shift[1] + pattern.kz * shift[2]
     phase = np.exp(1j * (float(incident_k @ shift) - outgoing_phase))
 
-    for field in ("scattered_te", "scattered_tm"):
-        expected = phase * np.asarray(getattr(reference.farfield, field)["coeff"])
-        actual = np.asarray(getattr(translated.farfield, field)["coeff"])
+    for field in ("coeff_te", "coeff_tm"):
+        expected = phase * np.asarray(getattr(reference.farfield.scattered, field))
+        actual = np.asarray(getattr(translated.farfield.scattered, field))
         np.testing.assert_allclose(actual, expected, rtol=5e-12, atol=5e-14)
 
     _assert_cross_sections_close(
@@ -299,10 +295,10 @@ def test_mixed_cluster_observables_are_invariant_to_particle_permutation() -> No
         rtol=5e-12,
         atol=5e-14,
     )
-    for field in ("scattered_te", "scattered_tm"):
+    for field in ("coeff_te", "coeff_tm"):
         np.testing.assert_allclose(
-            getattr(permuted.farfield, field)["coeff"],
-            getattr(reference.farfield, field)["coeff"],
+            getattr(permuted.farfield.scattered, field),
+            getattr(reference.farfield.scattered, field),
             rtol=5e-12,
             atol=5e-14,
         )
@@ -416,8 +412,7 @@ def test_centrosymmetric_mixed_cluster_obeys_opposite_incidence_parity() -> None
 
 def _scattered_intensity(run: pcl.SimulationResult) -> np.ndarray:
     return np.asarray(
-        np.abs(run.farfield.scattered_te["coeff"]) ** 2
-        + np.abs(run.farfield.scattered_tm["coeff"]) ** 2,
+        np.abs(run.farfield.scattered.coeff_te) ** 2 + np.abs(run.farfield.scattered.coeff_tm) ** 2,
         dtype=float,
     )
 
@@ -514,7 +509,7 @@ def _bistatic_scattering_matrix(
 
     matrix = np.empty((2, 2), dtype=np.complex128)
     for column, label in enumerate(("te", "tm")):
-        scattered_te, scattered_tm = scattered_field_plane_wave_pattern(
+        scattered = scattered_field_plane_wave_pattern(
             positions=simulation.positions,
             coeffs=solved.coeffs[label],
             k=solved.k,
@@ -524,8 +519,8 @@ def _bistatic_scattering_matrix(
             dtype=np.complex128,
         )
         matrix[:, column] = (
-            complex(np.asarray(scattered_te["coeff"])[0, 0]),
-            complex(np.asarray(scattered_tm["coeff"])[0, 0]),
+            complex(scattered.coeff_te[0, 0]),
+            complex(scattered.coeff_tm[0, 0]),
         )
     return matrix
 

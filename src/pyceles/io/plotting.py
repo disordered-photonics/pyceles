@@ -15,6 +15,7 @@ from pyceles.core.particles import (
     Spheroid,
     _rotation_matrix_zyz_lab_to_body,
 )
+from pyceles.core.plane_wave_spectrum import PlaneWaveSpectrum
 
 if TYPE_CHECKING:
     from pyceles.simulation import ChannelResult, PolarizationResult
@@ -188,11 +189,11 @@ def unpolarized_near_field_intensity(E_te: np.ndarray, E_tm: np.ndarray) -> np.n
     )
 
 
-def far_field_intensity(pwp_te: dict, pwp_tm: dict) -> np.ndarray:
-    """Return combined PWP intensity |g_TE|^2 + |g_TM|^2."""
+def far_field_intensity(spectrum: PlaneWaveSpectrum) -> np.ndarray:
+    """Return combined plane-wave intensity |g_TE|^2 + |g_TM|^2."""
     return cast(
         np.ndarray,
-        np.abs(np.asarray(pwp_te["coeff"])) ** 2 + np.abs(np.asarray(pwp_tm["coeff"])) ** 2,
+        np.abs(spectrum.coeff_te) ** 2 + np.abs(spectrum.coeff_tm) ** 2,
     )
 
 
@@ -204,7 +205,7 @@ def far_field_intensity_from_result(run: ChannelResult) -> np.ndarray:
             "`run.periodic.reflected_amplitudes` or "
             "`run.periodic.transmitted_amplitudes` instead."
         )
-    return far_field_intensity(run.farfield.scattered_te, run.farfield.scattered_tm)
+    return far_field_intensity(run.farfield.scattered)
 
 
 def unpolarized_far_field_intensity(result: PolarizationResult) -> np.ndarray:

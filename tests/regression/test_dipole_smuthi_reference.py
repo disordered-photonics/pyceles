@@ -7,8 +7,6 @@ re-running SMUTHI.
 
 from __future__ import annotations
 
-from typing import cast
-
 import numpy as np
 import pytest
 
@@ -49,11 +47,8 @@ def _probe_points(shift_z: float) -> np.ndarray:
     )
 
 
-def _intensity(pwp_te: dict[str, np.ndarray], pwp_tm: dict[str, np.ndarray]) -> np.ndarray:
-    return cast(
-        np.ndarray,
-        np.abs(np.asarray(pwp_te["coeff"])) ** 2 + np.abs(np.asarray(pwp_tm["coeff"])) ** 2,
-    )
+def _intensity(spectrum: pcl.PlaneWaveSpectrum) -> np.ndarray:
+    return np.asarray(np.abs(spectrum.coeff_te) ** 2 + np.abs(spectrum.coeff_tm) ** 2)
 
 
 def _run_case(
@@ -79,14 +74,14 @@ def _run_case(
     )
     run = sim.run(source)
     nf = pcl.compute_near_field(run, points=probes, show_progress=False)
-    if run.farfield.initial_te is None or run.farfield.initial_tm is None:
+    if run.farfield.initial is None:
         raise AssertionError("Dipole regression expects initial far-field channels.")
-    if run.farfield.total_te is None or run.farfield.total_tm is None:
+    if run.farfield.total is None:
         raise AssertionError("Dipole regression expects total far-field channels.")
     return (
-        _intensity(run.farfield.initial_te, run.farfield.initial_tm),
-        _intensity(run.farfield.scattered_te, run.farfield.scattered_tm),
-        _intensity(run.farfield.total_te, run.farfield.total_tm),
+        _intensity(run.farfield.initial),
+        _intensity(run.farfield.scattered),
+        _intensity(run.farfield.total),
         np.asarray(nf.E_total),
         float(source.dissipated_power_homogeneous_background()),
     )

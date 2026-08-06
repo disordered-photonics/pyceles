@@ -11,6 +11,7 @@ from pyceles.core.particles import (
     Spheroid,
     spheres_from_arrays,
 )
+from pyceles.core.plane_wave_spectrum import PlaneWaveSpectrum
 from pyceles.core.tmatrix import mie_cross_sections
 from pyceles.postprocessing.farfield import (
     CrossSectionBalance,
@@ -48,17 +49,25 @@ def _single_sphere_particles(
     )
 
 
-def _dummy_pwp(alpha: np.ndarray, beta: np.ndarray, coeff: np.ndarray) -> dict:
+def _dummy_spectrum(
+    alpha: np.ndarray,
+    beta: np.ndarray,
+    coeff_te: np.ndarray,
+    coeff_tm: np.ndarray | None = None,
+) -> PlaneWaveSpectrum:
     agrid = alpha[:, None]
     bgrid = beta[None, :]
-    return {
-        "alpha": alpha,
-        "beta": beta,
-        "kx": np.sin(bgrid) * np.cos(agrid),
-        "ky": np.sin(bgrid) * np.sin(agrid),
-        "kz": np.cos(bgrid) * np.ones_like(agrid),
-        "coeff": coeff,
-    }
+    if coeff_tm is None:
+        coeff_tm = np.zeros_like(coeff_te)
+    return PlaneWaveSpectrum(
+        alpha,
+        beta,
+        np.sin(bgrid) * np.cos(agrid),
+        np.sin(bgrid) * np.sin(agrid),
+        np.cos(bgrid) * np.ones_like(agrid),
+        coeff_te,
+        coeff_tm,
+    )
 
 
 def test_power_decomposition_identity_forward():
@@ -81,29 +90,20 @@ def test_power_decomposition_identity_forward():
         + 1j * rng.standard_normal((alpha.size, beta.size))
     )
 
-    p_i_te = _dummy_pwp(alpha, beta, gi_te)
-    p_i_tm = _dummy_pwp(alpha, beta, gi_tm)
-    p_s_te = _dummy_pwp(alpha, beta, gs_te)
-    p_s_tm = _dummy_pwp(alpha, beta, gs_tm)
+    initial = _dummy_spectrum(alpha, beta, gi_te, gi_tm)
+    scattered = _dummy_spectrum(alpha, beta, gs_te, gs_tm)
 
     d = pwp_power_decomposition(
-        p_i_te,
-        p_i_tm,
-        p_s_te,
-        p_s_tm,
+        initial,
+        scattered,
         k0=1.3,
         k_medium=2.1,
         direction="forward",
     )
     assert np.isclose(d["P_total"], d["P_initial"] + d["P_scattered"] + d["P_interference"])
 
-    p_t_te, p_t_tm = total_field_plane_wave_pattern(p_i_te, p_i_tm, p_s_te, p_s_tm)
-    direct = pwp_power_flux(p_t_te, k0=1.3, k_medium=2.1, direction="forward") + pwp_power_flux(
-        p_t_tm,
-        k0=1.3,
-        k_medium=2.1,
-        direction="forward",
-    )
+    total = total_field_plane_wave_pattern(initial, scattered)
+    direct = pwp_power_flux(total, k0=1.3, k_medium=2.1, direction="forward")
     assert np.isclose(d["P_total"], direct)
 
 
@@ -111,28 +111,21 @@ def test_incident_power_from_pwp_matches_forward_plus_backward_flux():
     alpha = np.linspace(0.0, 2 * np.pi, 21, endpoint=False)
     beta = np.linspace(0.0, np.pi, 31)
     rng = np.random.default_rng(9)
-    p_i_te = _dummy_pwp(
+    initial = _dummy_spectrum(
         alpha,
         beta,
         rng.standard_normal((alpha.size, beta.size))
         + 1j * rng.standard_normal((alpha.size, beta.size)),
-    )
-    p_i_tm = _dummy_pwp(
-        alpha,
-        beta,
         rng.standard_normal((alpha.size, beta.size))
         + 1j * rng.standard_normal((alpha.size, beta.size)),
     )
     k0 = 2.0 * np.pi / 550.0
     k_medium = 2.0 * np.pi / 550.0
 
-    p_ref = (
-        pwp_power_flux(p_i_te, k0=k0, k_medium=k_medium, direction="forward")
-        + pwp_power_flux(p_i_tm, k0=k0, k_medium=k_medium, direction="forward")
-        + pwp_power_flux(p_i_te, k0=k0, k_medium=k_medium, direction="backward")
-        + pwp_power_flux(p_i_tm, k0=k0, k_medium=k_medium, direction="backward")
+    p_ref = pwp_power_flux(initial, k0=k0, k_medium=k_medium, direction="forward") + pwp_power_flux(
+        initial, k0=k0, k_medium=k_medium, direction="backward"
     )
-    p_inc = incident_power_from_pwp(p_i_te, p_i_tm, k0=k0, k_medium=k_medium)
+    p_inc = incident_power_from_pwp(initial, k0=k0, k_medium=k_medium)
     np.testing.assert_allclose(p_inc, p_ref, rtol=1e-13, atol=1e-13)
 
 
@@ -140,7 +133,7 @@ def test_power_decomposition_rejects_plane_wave_source():
     alpha = np.linspace(0.0, 2 * np.pi, 9)
     beta = np.linspace(0.0, np.pi, 17)
     coeff = np.zeros((alpha.size, beta.size), dtype=np.complex128)
-    p = _dummy_pwp(alpha, beta, coeff)
+    p = _dummy_spectrum(alpha, beta, coeff)
     source = PlaneWave(
         wavelength=550.0,
         medium_n=1.0 + 0j,
@@ -155,8 +148,6 @@ def test_power_decomposition_rejects_plane_wave_source():
         pwp_power_decomposition(
             p,
             p,
-            p,
-            p,
             k0=2.0 * np.pi / 550.0,
             k_medium=2.0 * np.pi / 550.0,
             direction="forward",
@@ -168,7 +159,7 @@ def test_finite_beam_power_balance_rejects_plane_wave_source():
     alpha = np.linspace(0.0, 2 * np.pi, 9)
     beta = np.linspace(0.0, np.pi, 17)
     coeff = np.zeros((alpha.size, beta.size), dtype=np.complex128)
-    p = _dummy_pwp(alpha, beta, coeff)
+    p = _dummy_spectrum(alpha, beta, coeff)
     source = PlaneWave(
         wavelength=550.0,
         medium_n=1.0 + 0j,
@@ -184,8 +175,6 @@ def test_finite_beam_power_balance_rejects_plane_wave_source():
             source,
             p,
             p,
-            p,
-            p,
             k0=2.0 * np.pi / 550.0,
             k_medium=2.0 * np.pi / 550.0,
         )
@@ -196,8 +185,8 @@ def test_finite_beam_power_balance_returns_finite_diagnostics():
     beta = np.linspace(0.0, np.pi, 17)
     coeff_initial = np.ones((alpha.size, beta.size), dtype=np.complex128)
     coeff_scattered = np.zeros((alpha.size, beta.size), dtype=np.complex128)
-    p_initial = _dummy_pwp(alpha, beta, coeff_initial)
-    p_scattered = _dummy_pwp(alpha, beta, coeff_scattered)
+    p_initial = _dummy_spectrum(alpha, beta, coeff_initial)
+    p_scattered = _dummy_spectrum(alpha, beta, coeff_scattered)
     source = GaussianBeam(
         wavelength=550.0,
         medium_n=1.0 + 0j,
@@ -212,8 +201,6 @@ def test_finite_beam_power_balance_returns_finite_diagnostics():
     out = finite_beam_power_balance(
         source,
         p_initial,
-        p_scattered,
-        p_scattered,
         p_scattered,
         k0=2.0 * np.pi / 550.0,
         k_medium=2.0 * np.pi / 550.0,
@@ -317,10 +304,8 @@ def test_finite_beam_power_balance_exposes_local_and_closure_terms():
     beta = np.linspace(0.0, np.pi, 17)
     initial_coeff = np.ones((alpha.size, beta.size), dtype=np.complex128)
     scattered_coeff = 0.03 * np.ones_like(initial_coeff)
-    p_i_te = _dummy_pwp(alpha, beta, initial_coeff)
-    p_i_tm = _dummy_pwp(alpha, beta, np.zeros_like(initial_coeff))
-    p_s_te = _dummy_pwp(alpha, beta, scattered_coeff)
-    p_s_tm = _dummy_pwp(alpha, beta, np.zeros_like(initial_coeff))
+    initial = _dummy_spectrum(alpha, beta, initial_coeff)
+    scattered = _dummy_spectrum(alpha, beta, scattered_coeff)
     source = GaussianBeam(
         wavelength=550.0,
         medium_n=1.0 + 0j,
@@ -333,10 +318,8 @@ def test_finite_beam_power_balance_exposes_local_and_closure_terms():
     )
     out = finite_beam_power_balance(
         source,
-        p_i_te,
-        p_i_tm,
-        p_s_te,
-        p_s_tm,
+        initial,
+        scattered,
         k0=2.0 * np.pi / 550.0,
         k_medium=2.0 * np.pi / 550.0,
         local_absorbed_power=0.123,
@@ -388,10 +371,8 @@ def test_finite_beam_power_balance_uses_initial_pwp_for_tilted_sources():
     # by the provided PWP (not by beam-width/tilt analytic shortcuts).
     initial_coeff = np.ones((alpha.size, beta.size), dtype=np.complex128)
     zero_coeff = np.zeros_like(initial_coeff)
-    p_i_te = _dummy_pwp(alpha, beta, initial_coeff)
-    p_i_tm = _dummy_pwp(alpha, beta, zero_coeff)
-    p_s_te = _dummy_pwp(alpha, beta, zero_coeff)
-    p_s_tm = _dummy_pwp(alpha, beta, zero_coeff)
+    initial = _dummy_spectrum(alpha, beta, initial_coeff)
+    scattered = _dummy_spectrum(alpha, beta, zero_coeff)
 
     source = GaussianBeam(
         wavelength=550.0,
@@ -405,15 +386,13 @@ def test_finite_beam_power_balance_uses_initial_pwp_for_tilted_sources():
     )
     out = finite_beam_power_balance(
         source,
-        p_i_te,
-        p_i_tm,
-        p_s_te,
-        p_s_tm,
+        initial,
+        scattered,
         k0=k0,
         k_medium=k_medium,
     )
-    p_forward = pwp_power_flux(p_i_te, k0=k0, k_medium=k_medium, direction="forward")
-    p_initial = incident_power_from_pwp(p_i_te, p_i_tm, k0=k0, k_medium=k_medium)
+    p_forward = pwp_power_flux(initial, k0=k0, k_medium=k_medium, direction="forward")
+    p_initial = incident_power_from_pwp(initial, k0=k0, k_medium=k_medium)
     np.testing.assert_allclose(
         _required_float(out.incident_power), p_initial, rtol=1e-13, atol=1e-13
     )
@@ -431,7 +410,7 @@ def test_finite_beam_power_balance_rejects_plane_wave_limit_gaussian():
     alpha = np.linspace(0.0, 2 * np.pi, 9, endpoint=False)
     beta = np.linspace(0.0, np.pi, 17)
     coeff = np.zeros((alpha.size, beta.size), dtype=np.complex128)
-    p = _dummy_pwp(alpha, beta, coeff)
+    p = _dummy_spectrum(alpha, beta, coeff)
     source = GaussianBeam(
         wavelength=550.0,
         medium_n=1.0 + 0j,
@@ -446,8 +425,6 @@ def test_finite_beam_power_balance_rejects_plane_wave_limit_gaussian():
     with pytest.raises(ValueError, match="plane-wave limit"):
         finite_beam_power_balance(
             source,
-            p,
-            p,
             p,
             p,
             k0=2.0 * np.pi / 550.0,
@@ -561,8 +538,8 @@ def test_pwp_power_flux_periodic_alpha_endpoint_handling():
     coeff_open = np.exp(1j * alpha_open[:, None]) * np.cos(beta)[None, :]
     coeff_closed = np.exp(1j * alpha_closed[:, None]) * np.cos(beta)[None, :]
 
-    p_open = _dummy_pwp(alpha_open, beta, coeff_open)
-    p_closed = _dummy_pwp(alpha_closed, beta, coeff_closed)
+    p_open = _dummy_spectrum(alpha_open, beta, coeff_open)
+    p_closed = _dummy_spectrum(alpha_closed, beta, coeff_closed)
 
     f_open = pwp_power_flux(p_open, k0=1.7, k_medium=2.3, direction="forward")
     f_closed = pwp_power_flux(p_closed, k0=1.7, k_medium=2.3, direction="forward")
@@ -573,7 +550,7 @@ def test_total_scattering_cross_section_requires_plane_wave_source():
     alpha = np.linspace(0.0, 2 * np.pi, 9)
     beta = np.linspace(0.0, np.pi, 17)
     coeff = np.zeros((alpha.size, beta.size), dtype=np.complex128)
-    p = _dummy_pwp(alpha, beta, coeff)
+    p = _dummy_spectrum(alpha, beta, coeff)
     source = GaussianBeam(
         wavelength=550.0,
         medium_n=1.0 + 0j,
@@ -588,7 +565,6 @@ def test_total_scattering_cross_section_requires_plane_wave_source():
         total_scattering_cross_section(
             source,
             p,
-            p,
             k0=2.0 * np.pi / 550.0,
             n_medium=1.0 + 0j,
         )
@@ -598,7 +574,7 @@ def test_total_scattering_cross_section_plane_wave_zero_scatter_is_zero():
     alpha = np.linspace(0.0, 2 * np.pi, 9)
     beta = np.linspace(0.0, np.pi, 17)
     coeff = np.zeros((alpha.size, beta.size), dtype=np.complex128)
-    p = _dummy_pwp(alpha, beta, coeff)
+    p = _dummy_spectrum(alpha, beta, coeff)
     source = PlaneWave(
         wavelength=550.0,
         medium_n=1.0 + 0j,
@@ -610,7 +586,6 @@ def test_total_scattering_cross_section_plane_wave_zero_scatter_is_zero():
     )
     cs = total_scattering_cross_section(
         source,
-        p,
         p,
         k0=2.0 * np.pi / 550.0,
         n_medium=1.0 + 0j,
@@ -631,8 +606,7 @@ def test_scattering_cross_section_density_integrates_to_total():
         + 1j * rng.standard_normal((alpha.size, beta.size))
     )
 
-    pte = _dummy_pwp(alpha, beta, gte)
-    ptm = _dummy_pwp(alpha, beta, gtm)
+    scattered = _dummy_spectrum(alpha, beta, gte, gtm)
     source = PlaneWave(
         wavelength=550.0,
         medium_n=1.0 + 0j,
@@ -645,8 +619,7 @@ def test_scattering_cross_section_density_integrates_to_total():
     k0 = 2.0 * np.pi / 550.0
     dcs = scattering_cross_section(
         source,
-        pte,
-        ptm,
+        scattered,
         k0=k0,
         n_medium=1.0 + 0j,
     )
@@ -658,8 +631,7 @@ def test_scattering_cross_section_density_integrates_to_total():
 
     c_sca = total_scattering_cross_section(
         source,
-        pte,
-        ptm,
+        scattered,
         k0=k0,
         n_medium=1.0 + 0j,
     )
@@ -706,8 +678,7 @@ def test_plane_wave_cross_section_balance_is_invariant_to_global_incident_scale(
         (alpha.size, beta.size)
     )
 
-    pte_ref = _dummy_pwp(alpha, beta, gte_ref)
-    ptm_ref = _dummy_pwp(alpha, beta, gtm_ref)
+    scattered_ref = _dummy_spectrum(alpha, beta, gte_ref, gtm_ref)
 
     source_ref = PlaneWave(
         wavelength=550.0,
@@ -733,20 +704,18 @@ def test_plane_wave_cross_section_balance_is_invariant_to_global_incident_scale(
         source_ref,
         b_ref,
         x_ref,
+        scattered_ref,
         k0=k0,
         n_medium=n_medium,
-        scattered_pwp_te=pte_ref,
-        scattered_pwp_tm=ptm_ref,
         local_absorption=0.0,
     )
     cs_scaled = plane_wave_cross_section_balance(
         source_scaled,
         scale * b_ref,
         scale * x_ref,
+        _dummy_spectrum(alpha, beta, scale * gte_ref, scale * gtm_ref),
         k0=k0,
         n_medium=n_medium,
-        scattered_pwp_te=_dummy_pwp(alpha, beta, scale * gte_ref),
-        scattered_pwp_tm=_dummy_pwp(alpha, beta, scale * gtm_ref),
         local_absorption=0.0,
     )
 
@@ -781,15 +750,13 @@ def test_plane_wave_cross_section_balance_exposes_local_and_closure():
         focal_point=(0.0, 0.0, 0.0),
         amplitude=1.0,
     )
-    pte = _dummy_pwp(alpha, beta, gte)
-    ptm = _dummy_pwp(alpha, beta, gtm)
+    scattered = _dummy_spectrum(alpha, beta, gte, gtm)
 
     base = plane_wave_cross_section_balance(
         source,
         b,
         x,
-        pte,
-        ptm,
+        scattered,
         k0=k0,
         n_medium=n_medium,
         local_absorption=0.0,
@@ -802,8 +769,7 @@ def test_plane_wave_cross_section_balance_exposes_local_and_closure():
         source,
         b,
         x,
-        pte,
-        ptm,
+        scattered,
         k0=k0,
         n_medium=n_medium,
         local_absorption=override_val,
@@ -859,10 +825,9 @@ def test_plane_wave_cross_section_balance_matches_single_sphere_mie():
         source,
         run.initial_coeffs,
         run.coeffs,
+        run.farfield.scattered,
         k0=run.k0,
         n_medium=n_medium,
-        scattered_pwp_te=run.farfield.scattered_te,
-        scattered_pwp_tm=run.farfield.scattered_tm,
         local_absorption=run.cross_sections.local_absorption,
     )
     mie = mie_cross_sections(
@@ -1231,7 +1196,7 @@ def test_plane_wave_cross_section_balance_requires_local_absorption():
     )
     alpha = np.linspace(0.0, 2 * np.pi, 13, endpoint=False)
     beta = np.linspace(0.0, np.pi, 11)
-    p = _dummy_pwp(alpha, beta, np.zeros((alpha.size, beta.size), dtype=np.complex128))
+    p = _dummy_spectrum(alpha, beta, np.zeros((alpha.size, beta.size), dtype=np.complex128))
     b = np.zeros((1, 8), dtype=np.complex128)
     x = np.zeros((1, 8), dtype=np.complex128)
 
@@ -1240,20 +1205,18 @@ def test_plane_wave_cross_section_balance_requires_local_absorption():
             source,
             b,
             x,
+            p,
             k0=2.0 * np.pi / 550.0,
             n_medium=1.0 + 0j,
-            scattered_pwp_te=p,
-            scattered_pwp_tm=p,
         )  # type: ignore[call-arg]
 
     cs = plane_wave_cross_section_balance(
         source,
         b,
         x,
+        p,
         k0=2.0 * np.pi / 550.0,
         n_medium=1.0 + 0j,
-        scattered_pwp_te=p,
-        scattered_pwp_tm=p,
         local_absorption=0.125,
     )
     np.testing.assert_allclose(cs.local_absorption, 0.125, rtol=0.0, atol=0.0)
@@ -1265,10 +1228,9 @@ def test_plane_wave_cross_section_balance_requires_local_absorption():
         source,
         b_empty,
         x_empty,
+        p,
         k0=2.0 * np.pi / 550.0,
         n_medium=1.0 + 0j,
-        scattered_pwp_te=p,
-        scattered_pwp_tm=p,
         local_absorption=0.0,
     )
     np.testing.assert_allclose(cs_empty.extinction, 0.0, rtol=0.0, atol=0.0)
@@ -1446,14 +1408,14 @@ def test_run_polarizations_farfield_matches_single_channel_run():
     mixed = result.mixed
 
     np.testing.assert_allclose(
-        mixed.farfield.scattered_te["coeff"],
-        run_single.farfield.scattered_te["coeff"],
+        mixed.farfield.scattered.coeff_te,
+        run_single.farfield.scattered.coeff_te,
         rtol=1e-6,
         atol=1e-7,
     )
     np.testing.assert_allclose(
-        mixed.farfield.scattered_tm["coeff"],
-        run_single.farfield.scattered_tm["coeff"],
+        mixed.farfield.scattered.coeff_tm,
+        run_single.farfield.scattered.coeff_tm,
         rtol=1e-6,
         atol=1e-7,
     )
@@ -1686,12 +1648,10 @@ def test_postprocess_sources_include_farfield_false_keeps_solve_outputs():
         np.testing.assert_allclose(run0.rhs, run1.rhs, rtol=1e-7, atol=1e-9)
         assert run0.power is None
         assert run0.cross_sections is None
-        assert run0.farfield.initial_te is None
-        assert run0.farfield.initial_tm is None
-        assert run0.farfield.total_te is None
-        assert run0.farfield.total_tm is None
-        assert int(run0.farfield.scattered_te["coeff"].size) == 0
-        assert int(run0.farfield.scattered_tm["coeff"].size) == 0
+        assert run0.farfield.initial is None
+        assert run0.farfield.total is None
+        assert int(run0.farfield.scattered.coeff_te.size) == 0
+        assert int(run0.farfield.scattered.coeff_tm.size) == 0
 
 
 def test_simulation_supports_no_particle_source_only_run():
@@ -1721,8 +1681,8 @@ def test_simulation_supports_no_particle_source_only_run():
     assert run.coeffs.shape[0] == 0
     assert run.solver_result.info == 0
     assert int(run.solver_result.iterations) == 0
-    np.testing.assert_allclose(run.farfield.scattered_te["coeff"], 0.0, atol=0.0)
-    np.testing.assert_allclose(run.farfield.scattered_tm["coeff"], 0.0, atol=0.0)
+    np.testing.assert_allclose(run.farfield.scattered.coeff_te, 0.0, atol=0.0)
+    np.testing.assert_allclose(run.farfield.scattered.coeff_tm, 0.0, atol=0.0)
     assert run.cross_sections is not None
     np.testing.assert_allclose(run.cross_sections.scattering, 0.0, atol=0.0)
     np.testing.assert_allclose(run.cross_sections.extinction, 0.0, atol=0.0)

@@ -472,7 +472,7 @@ def _compute_initial_field_general(
         return e.astype(accum_dtype, copy=False), h.astype(accum_dtype, copy=False)
 
     if hasattr(beam, "angular_spectrum"):
-        pwp_te, pwp_tm = beam.angular_spectrum(
+        spectrum = beam.angular_spectrum(
             k=float(k),
             polar_angles=np.asarray(polar_angles, float),
             azimuthal_angles=np.asarray(azimuthal_angles, float),
@@ -488,18 +488,18 @@ def _compute_initial_field_general(
     h = np.zeros_like(e)
     alpha_weights = periodic_azimuthal_weights(np.asarray(azimuthal_angles, float))
 
-    beta = np.asarray(pwp_te["beta"], dtype=float)
-    alpha = np.asarray(pwp_te["alpha"], dtype=float)
-    coeff_te = np.asarray(pwp_te["coeff"], dtype=compute_dtype)
-    coeff_tm = np.asarray(pwp_tm["coeff"], dtype=compute_dtype)
+    beta = np.asarray(spectrum.beta, dtype=float)
+    alpha = np.asarray(spectrum.alpha, dtype=float)
+    coeff_te = np.asarray(spectrum.coeff_te, dtype=compute_dtype)
+    coeff_tm = np.asarray(spectrum.coeff_tm, dtype=compute_dtype)
 
     sinb = np.sin(beta).astype(np.float64)
     cosb = np.cos(beta).astype(np.float64)
     beta_weights = trapezoidal_weights(beta).astype(np.float64)
 
-    kx_all = np.asarray(pwp_te["kx"], dtype=np.float64)
-    ky_all = np.asarray(pwp_te["ky"], dtype=np.float64)
-    kz_all = np.asarray(pwp_te["kz"], dtype=np.float64)
+    kx_all = np.asarray(spectrum.kx, dtype=np.float64)
+    ky_all = np.asarray(spectrum.ky, dtype=np.float64)
+    kz_all = np.asarray(spectrum.kz, dtype=np.float64)
 
     n_points = pts.shape[0]
     n_alpha = alpha.shape[0]

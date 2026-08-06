@@ -19,11 +19,4 @@ def integrate_periodic_alpha(values: np.ndarray, alpha: np.ndarray) -> np.ndarra
     return cast(np.ndarray, np.trapezoid(values_ext, alpha_ext, axis=0))
 
 
-def cast_pwp_coeff_dtype(pwp: dict, dtype: np.dtype) -> dict:
-    """Return a shallow-copied PWP dict with `coeff` cast to dtype."""
-    out = dict(pwp)
-    out["coeff"] = np.asarray(out["coeff"], dtype=np.dtype(dtype))
-    return out
-
-
-__all__ = ["cast_pwp_coeff_dtype", "integrate_periodic_alpha"]
+__all__ = ["integrate_periodic_alpha"]

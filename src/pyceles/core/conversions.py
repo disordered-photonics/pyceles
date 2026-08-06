@@ -12,6 +12,7 @@ from tqdm.auto import tqdm
 
 from .angular import periodic_azimuthal_weights, trapezoidal_weights
 from .indexing import iter_modes, n_modes, n_scalar, scalar_index
+from .plane_wave_spectrum import PlaneWaveSpectrum
 from .spherical import spherical_functions_trigon
 
 if TYPE_CHECKING:
@@ -118,11 +119,10 @@ def pwp_to_svwf_regular(
     lmax: int,
     *,
     k: float,
-    pwp_te: dict,
-    pwp_tm: dict,
+    spectrum: PlaneWaveSpectrum,
     dtype: npt.DTypeLike = np.complex128,
 ) -> np.ndarray:
-    """Project TE/TM plane-wave spectrum to regular SVWF coefficients."""
+    """Project one TE/TM plane-wave spectrum to regular SVWF coefficients."""
     pos = np.asarray(positions, dtype=float)
     lmax = int(lmax)
     Ns = pos.shape[0]
@@ -133,43 +133,13 @@ def pwp_to_svwf_regular(
     if (not np.isfinite(k)) or (k <= 0.0):
         raise ValueError(f"`k` must be finite and > 0. Got {k!r}.")
 
-    alpha_te = np.asarray(pwp_te["alpha"], dtype=float).reshape(-1)
-    beta_te = np.asarray(pwp_te["beta"], dtype=float).reshape(-1)
-    alpha_tm = np.asarray(pwp_tm["alpha"], dtype=float).reshape(-1)
-    beta_tm = np.asarray(pwp_tm["beta"], dtype=float).reshape(-1)
-    if alpha_te.shape != alpha_tm.shape or not np.allclose(alpha_te, alpha_tm):
-        raise ValueError("TE/TM PWP azimuth grids must be identical.")
-    if beta_te.shape != beta_tm.shape or not np.allclose(beta_te, beta_tm):
-        raise ValueError("TE/TM PWP polar grids must be identical.")
-
-    alpha = alpha_te
-    beta = beta_te
-    gte = np.asarray(pwp_te["coeff"], dtype=ctype)
-    gtm = np.asarray(pwp_tm["coeff"], dtype=ctype)
-    kx_te = np.asarray(pwp_te["kx"], dtype=float)
-    ky_te = np.asarray(pwp_te["ky"], dtype=float)
-    kz_te = np.asarray(pwp_te["kz"], dtype=float)
-    kx_tm = np.asarray(pwp_tm["kx"], dtype=float)
-    ky_tm = np.asarray(pwp_tm["ky"], dtype=float)
-    kz_tm = np.asarray(pwp_tm["kz"], dtype=float)
-
-    if gte.shape != (alpha.size, beta.size) or gtm.shape != (alpha.size, beta.size):
-        raise ValueError("PWP coefficient arrays must have shape (len(alpha), len(beta)).")
-    for comp_name, comp in (
-        ("kx_te", kx_te),
-        ("ky_te", ky_te),
-        ("kz_te", kz_te),
-        ("kx_tm", kx_tm),
-        ("ky_tm", ky_tm),
-        ("kz_tm", kz_tm),
-    ):
-        if comp.shape != (alpha.size, beta.size):
-            raise ValueError(
-                f"{comp_name} must have shape (len(alpha), len(beta)) = {(alpha.size, beta.size)}. "
-                f"Got {comp.shape}."
-            )
-    if not (np.allclose(kx_te, kx_tm) and np.allclose(ky_te, ky_tm) and np.allclose(kz_te, kz_tm)):
-        raise ValueError("TE/TM PWP wavevector grids must be identical.")
+    alpha = spectrum.alpha
+    beta = spectrum.beta
+    gte = np.asarray(spectrum.coeff_te, dtype=ctype)
+    gtm = np.asarray(spectrum.coeff_tm, dtype=ctype)
+    kx = spectrum.kx
+    ky = spectrum.ky
+    kz = spectrum.kz
 
     agrid = alpha[:, None]
     bgrid = beta[None, :]
@@ -177,16 +147,12 @@ def pwp_to_svwf_regular(
     expected_ky = k * np.sin(bgrid) * np.sin(agrid)
     expected_kz = np.broadcast_to(k * np.cos(bgrid), expected_kx.shape)
     k_atol = max(1e-12, 1e-10 * abs(k))
-    if not np.allclose(kx_te, expected_kx, rtol=1e-10, atol=k_atol):
-        raise ValueError("`pwp_te['kx']` is inconsistent with `k`, `alpha`, and `beta`.")
-    if not np.allclose(ky_te, expected_ky, rtol=1e-10, atol=k_atol):
-        raise ValueError("`pwp_te['ky']` is inconsistent with `k`, `alpha`, and `beta`.")
-    if not np.allclose(kz_te, expected_kz, rtol=1e-10, atol=k_atol):
-        raise ValueError("`pwp_te['kz']` is inconsistent with `k`, `alpha`, and `beta`.")
-
-    kx = kx_te
-    ky = ky_te
-    kz = kz_te
+    if not np.allclose(kx, expected_kx, rtol=1e-10, atol=k_atol):
+        raise ValueError("Spectrum `kx` is inconsistent with `k`, `alpha`, and `beta`.")
+    if not np.allclose(ky, expected_ky, rtol=1e-10, atol=k_atol):
+        raise ValueError("Spectrum `ky` is inconsistent with `k`, `alpha`, and `beta`.")
+    if not np.allclose(kz, expected_kz, rtol=1e-10, atol=k_atol):
+        raise ValueError("Spectrum `kz` is inconsistent with `k`, `alpha`, and `beta`.")
 
     wa, wb, Bdag_pol1, Bdag_pol2, _B_te, _B_tm, _m_of_mode, _eima, mode_weight = (
         _cached_pwp_conversion_tables(
@@ -238,7 +204,7 @@ def angular_spectrum_to_svwf_regular(
     dtype: npt.DTypeLike = np.complex128,
 ) -> np.ndarray:
     """Project any angular-spectrum source to regular SVWF coefficients."""
-    pwp_te, pwp_tm = source.angular_spectrum(
+    spectrum = source.angular_spectrum(
         k=float(k),
         polar_angles=np.asarray(polar_angles, dtype=float),
         azimuthal_angles=np.asarray(azimuthal_angles, dtype=float),
@@ -247,8 +213,7 @@ def angular_spectrum_to_svwf_regular(
         positions,
         lmax,
         k=float(k),
-        pwp_te=pwp_te,
-        pwp_tm=pwp_tm,
+        spectrum=spectrum,
         dtype=dtype,
     )
 
@@ -264,7 +229,7 @@ def _svwf_to_pwp_common(
     prefactor: float,
     dtype: npt.DTypeLike = np.complex128,
     show_progress: bool = False,
-) -> tuple[dict, dict]:
+) -> PlaneWaveSpectrum:
     """Shared SVWF->PWP kernel used by regular/outgoing conversion helpers."""
     ctype = np.dtype(dtype)
     positions = np.asarray(positions, dtype=float)
@@ -295,22 +260,8 @@ def _svwf_to_pwp_common(
         )
     )
 
-    pwp_te = {
-        "beta": beta,
-        "alpha": alpha,
-        "kx": kx,
-        "ky": ky,
-        "kz": kz,
-        "coeff": np.zeros((Na, Nb), dtype=ctype),
-    }
-    pwp_tm = {
-        "beta": beta,
-        "alpha": alpha,
-        "kx": kx,
-        "ky": ky,
-        "kz": kz,
-        "coeff": np.zeros((Na, Nb), dtype=ctype),
-    }
+    coeff_te = np.zeros((Na, Nb), dtype=ctype)
+    coeff_tm = np.zeros((Na, Nb), dtype=ctype)
 
     sphere_iter: Iterable[int] = range(Ns)
     if show_progress:
@@ -321,10 +272,10 @@ def _svwf_to_pwp_common(
         phase = np.asarray(np.exp(-1j * (rj[0] * kx + rj[1] * ky + rj[2] * kz)), dtype=ctype)
         cj = coeffs[jS, :]
         beima = eima * cj[None, :]
-        pwp_te["coeff"] += np.asarray((beima @ B_te) * phase * prefactor, dtype=ctype)
-        pwp_tm["coeff"] += np.asarray((beima @ B_tm) * phase * prefactor, dtype=ctype)
+        coeff_te += np.asarray((beima @ B_te) * phase * prefactor, dtype=ctype)
+        coeff_tm += np.asarray((beima @ B_tm) * phase * prefactor, dtype=ctype)
 
-    return pwp_te, pwp_tm
+    return PlaneWaveSpectrum(alpha, beta, kx, ky, kz, coeff_te, coeff_tm)
 
 
 def svwf_outgoing_to_pwp(
@@ -337,7 +288,7 @@ def svwf_outgoing_to_pwp(
     azimuthal_angles: np.ndarray,
     dtype: npt.DTypeLike = np.complex128,
     show_progress: bool = False,
-) -> tuple[dict, dict]:
+) -> PlaneWaveSpectrum:
     """Convert outgoing SVWF coefficients to TE/TM plane-wave spectrum."""
     return _svwf_to_pwp_common(
         positions,
@@ -362,7 +313,7 @@ def svwf_regular_to_pwp(
     azimuthal_angles: np.ndarray,
     dtype: npt.DTypeLike = np.complex128,
     show_progress: bool = False,
-) -> tuple[dict, dict]:
+) -> PlaneWaveSpectrum:
     """Convert regular SVWF coefficients to TE/TM plane-wave spectrum."""
     return _svwf_to_pwp_common(
         positions,

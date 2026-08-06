@@ -6,6 +6,7 @@ import numpy as np
 import numpy.typing as npt
 
 from ..conversions import angular_spectrum_to_svwf_regular
+from ..plane_wave_spectrum import PlaneWaveSpectrum
 from ..polarization import normalize_global_polarization_vector
 from .base import PolarizationInput, polarization_to_jones
 from .beam_kernels import _bessel_angular_spectrum_coeffs, _bessel_cartesian_angular_spectrum_coeffs
@@ -79,7 +80,7 @@ class BesselBeam:
         k: float,
         polar_angles: np.ndarray,
         azimuthal_angles: np.ndarray,
-    ) -> tuple[dict, dict]:
+    ) -> PlaneWaveSpectrum:
         return _bessel_angular_spectrum_coeffs(
             beam=self,
             k=float(k),
@@ -174,7 +175,7 @@ class CartesianPolarizedBesselBeam:
         k: float,
         polar_angles: np.ndarray,
         azimuthal_angles: np.ndarray,
-    ) -> tuple[dict, dict]:
+    ) -> PlaneWaveSpectrum:
         return _bessel_cartesian_angular_spectrum_coeffs(
             beam=self,
             k=float(k),

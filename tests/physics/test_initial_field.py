@@ -3,6 +3,7 @@ import pytest
 
 from pyceles.core.angular import periodic_azimuthal_weights, trapezoidal_weights
 from pyceles.core.fields import FocusedLaguerreGaussianBeam, GaussianBeam
+from pyceles.core.plane_wave_spectrum import PlaneWaveSpectrum
 from pyceles.postprocessing.nearfield import compute_initial_field
 
 
@@ -125,7 +126,7 @@ def test_general_initial_field_uses_periodic_azimuth_weights():
             k: float,
             polar_angles: np.ndarray,
             azimuthal_angles: np.ndarray,
-        ) -> tuple[dict, dict]:
+        ) -> PlaneWaveSpectrum:
             beta = np.asarray(polar_angles, dtype=float).reshape(-1)
             alpha = np.asarray(azimuthal_angles, dtype=float).reshape(-1)
             agrid, bgrid = np.meshgrid(alpha, beta, indexing="ij")
@@ -141,8 +142,7 @@ def test_general_initial_field_uses_periodic_azimuth_weights():
             coeff_tm = np.zeros_like(coeff_te)
             coeff_tm[0, :] = 1.0 + 0.0j
 
-            pwp_base = {"alpha": alpha, "beta": beta, "kx": kx, "ky": ky, "kz": kz}
-            return {**pwp_base, "coeff": coeff_te}, {**pwp_base, "coeff": coeff_tm}
+            return PlaneWaveSpectrum(alpha, beta, kx, ky, kz, coeff_te, coeff_tm)
 
     k = 2.0
     beta = np.array([0.6, 1.1], dtype=float)

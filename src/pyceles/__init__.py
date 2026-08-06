@@ -30,6 +30,7 @@ from pyceles.core.particles import (
     spheroids_from_arrays,
 )
 from pyceles.core.periodic import PeriodicOptions, PeriodicSpec
+from pyceles.core.plane_wave_spectrum import PlaneWaveSpectrum
 from pyceles.io.workflows import load_simulation_h5, save_simulation_h5
 from pyceles.postprocessing.dipole_metrics import (
     DipolePowerLDOSResult,
@@ -89,6 +90,7 @@ __all__ = [
     "PeriodicOptions",
     "PeriodicSpec",
     "PlaneWave",
+    "PlaneWaveSpectrum",
     "PolarizationResult",
     "PowerBalance",
     "RectangularLattice2D",

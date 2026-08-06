@@ -631,16 +631,12 @@ def _pyceles_run(
             "P_initial": p0,
         }
 
-    ff_te = run_basis["te"].farfield.scattered_te
-    I_te = far_field_intensity(
-        run_basis["te"].farfield.scattered_te, run_basis["te"].farfield.scattered_tm
-    )
-    I_tm = far_field_intensity(
-        run_basis["tm"].farfield.scattered_te, run_basis["tm"].farfield.scattered_tm
-    )
+    ff_te = run_basis["te"].farfield.scattered
+    I_te = far_field_intensity(run_basis["te"].farfield.scattered)
+    I_tm = far_field_intensity(run_basis["tm"].farfield.scattered)
     I_unpol = 0.5 * (I_te + I_tm)
-    alpha = np.asarray(ff_te["alpha"], dtype=float)
-    beta = np.asarray(ff_te["beta"], dtype=float)
+    alpha = np.asarray(ff_te.alpha, dtype=float)
+    beta = np.asarray(ff_te.beta, dtype=float)
     kx = np.cos(alpha)[:, None] * np.sin(beta)[None, :]
     ky = np.sin(alpha)[:, None] * np.sin(beta)[None, :]
     kz = np.cos(beta)[None, :] * np.ones((alpha.size, 1), dtype=float)

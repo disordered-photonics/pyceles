@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from ..angular import beam_axis_and_frame, trapezoidal_weights
+from ..plane_wave_spectrum import PlaneWaveSpectrum
 from ..polarization import (
     normalize_global_polarization_vector,
     project_global_cartesian_to_te_tm,
@@ -12,6 +13,30 @@ from .base import Polarization, is_normal_incidence
 from .common import _as_float_triplet, _laguerre_profile_factor
 
 
+def _combine_jones_spectra(
+    te_basis: PlaneWaveSpectrum,
+    tm_basis: PlaneWaveSpectrum,
+    *,
+    a_te: complex,
+    a_tm: complex,
+) -> PlaneWaveSpectrum:
+    """Coherently combine spectra generated for pure TE/TM source states."""
+    dtype = np.result_type(
+        te_basis.coeff_te,
+        te_basis.coeff_tm,
+        tm_basis.coeff_te,
+        tm_basis.coeff_tm,
+        a_te,
+        a_tm,
+    )
+    return te_basis.linear_combination(
+        tm_basis,
+        weight_self=a_te,
+        weight_other=a_tm,
+        dtype=dtype,
+    )
+
+
 def _gaussian_angular_spectrum_coeffs(
     *,
     beam,
@@ -19,31 +44,32 @@ def _gaussian_angular_spectrum_coeffs(
     polar_angles: np.ndarray,
     azimuthal_angles: np.ndarray,
     polarization_override: Polarization | None = None,
-) -> tuple[dict, dict]:
+) -> PlaneWaveSpectrum:
     """Evaluate Gaussian-beam TE/TM angular-spectrum coefficients on a grid."""
     if polarization_override is None:
         a_te, a_tm = beam.jones_coefficients()
         pure = pure_polarization_label(a_te, a_tm)
         if pure is None:
-            te_te, te_tm = _gaussian_angular_spectrum_coeffs(
+            te_basis = _gaussian_angular_spectrum_coeffs(
                 beam=beam,
                 k=k,
                 polar_angles=polar_angles,
                 azimuthal_angles=azimuthal_angles,
                 polarization_override="TE",
             )
-            tm_te, tm_tm = _gaussian_angular_spectrum_coeffs(
+            tm_basis = _gaussian_angular_spectrum_coeffs(
                 beam=beam,
                 k=k,
                 polar_angles=polar_angles,
                 azimuthal_angles=azimuthal_angles,
                 polarization_override="TM",
             )
-            pwp_te = dict(te_te)
-            pwp_tm = dict(te_tm)
-            pwp_te["coeff"] = a_te * np.asarray(te_te["coeff"]) + a_tm * np.asarray(tm_te["coeff"])
-            pwp_tm["coeff"] = a_te * np.asarray(te_tm["coeff"]) + a_tm * np.asarray(tm_tm["coeff"])
-            return pwp_te, pwp_tm
+            return _combine_jones_spectra(
+                te_basis,
+                tm_basis,
+                a_te=a_te,
+                a_tm=a_tm,
+            )
         polarization_override = pure
 
     beta = np.asarray(polar_angles, float)
@@ -99,10 +125,7 @@ def _gaussian_angular_spectrum_coeffs(
     m22 = np.einsum("abi,abi->ab", etheta_g, etheta_l)
     coeff_te = (m11 * g_te_l + m12 * g_tm_l) * phase
     coeff_tm = (m21 * g_te_l + m22 * g_tm_l) * phase
-    return (
-        {"beta": beta, "alpha": alpha, "kx": kx, "ky": ky, "kz": kz, "coeff": coeff_te},
-        {"beta": beta, "alpha": alpha, "kx": kx, "ky": ky, "kz": kz, "coeff": coeff_tm},
-    )
+    return PlaneWaveSpectrum(alpha, beta, kx, ky, kz, coeff_te, coeff_tm)
 
 
 def _laguerre_gaussian_angular_spectrum_coeffs(
@@ -112,31 +135,32 @@ def _laguerre_gaussian_angular_spectrum_coeffs(
     polar_angles: np.ndarray,
     azimuthal_angles: np.ndarray,
     polarization_override: Polarization | None = None,
-) -> tuple[dict, dict]:
+) -> PlaneWaveSpectrum:
     """Evaluate Maxwell-consistent collimated LG TE/TM angular-spectrum coefficients."""
     if polarization_override is None:
         a_te, a_tm = beam.jones_coefficients()
         pure = pure_polarization_label(a_te, a_tm)
         if pure is None:
-            te_te, te_tm = _laguerre_gaussian_angular_spectrum_coeffs(
+            te_basis = _laguerre_gaussian_angular_spectrum_coeffs(
                 beam=beam,
                 k=k,
                 polar_angles=polar_angles,
                 azimuthal_angles=azimuthal_angles,
                 polarization_override="TE",
             )
-            tm_te, tm_tm = _laguerre_gaussian_angular_spectrum_coeffs(
+            tm_basis = _laguerre_gaussian_angular_spectrum_coeffs(
                 beam=beam,
                 k=k,
                 polar_angles=polar_angles,
                 azimuthal_angles=azimuthal_angles,
                 polarization_override="TM",
             )
-            pwp_te = dict(te_te)
-            pwp_tm = dict(te_tm)
-            pwp_te["coeff"] = a_te * np.asarray(te_te["coeff"]) + a_tm * np.asarray(tm_te["coeff"])
-            pwp_tm["coeff"] = a_te * np.asarray(te_tm["coeff"]) + a_tm * np.asarray(tm_tm["coeff"])
-            return pwp_te, pwp_tm
+            return _combine_jones_spectra(
+                te_basis,
+                tm_basis,
+                a_te=a_te,
+                a_tm=a_tm,
+            )
         polarization_override = pure
 
     beta = np.asarray(polar_angles, float).reshape(-1)
@@ -202,10 +226,7 @@ def _laguerre_gaussian_angular_spectrum_coeffs(
     m22 = np.einsum("abi,abi->ab", etheta_g, etheta_l)
     coeff_te = (m11 * g_te_l + m12 * g_tm_l) * phase
     coeff_tm = (m21 * g_te_l + m22 * g_tm_l) * phase
-    return (
-        {"beta": beta, "alpha": alpha, "kx": kx, "ky": ky, "kz": kz, "coeff": coeff_te},
-        {"beta": beta, "alpha": alpha, "kx": kx, "ky": ky, "kz": kz, "coeff": coeff_tm},
-    )
+    return PlaneWaveSpectrum(alpha, beta, kx, ky, kz, coeff_te, coeff_tm)
 
 
 def _focused_laguerre_geometry(
@@ -290,31 +311,32 @@ def _focused_laguerre_gaussian_angular_spectrum_coeffs(
     polar_angles: np.ndarray,
     azimuthal_angles: np.ndarray,
     polarization_override: Polarization | None = None,
-) -> tuple[dict, dict]:
+) -> PlaneWaveSpectrum:
     """Evaluate Debye/aplanatic-focused LG TE/TM angular-spectrum coefficients."""
     if polarization_override is None:
         a_te, a_tm = beam.jones_coefficients()
         pure = pure_polarization_label(a_te, a_tm)
         if pure is None:
-            te_te, te_tm = _focused_laguerre_gaussian_angular_spectrum_coeffs(
+            te_basis = _focused_laguerre_gaussian_angular_spectrum_coeffs(
                 beam=beam,
                 k=k,
                 polar_angles=polar_angles,
                 azimuthal_angles=azimuthal_angles,
                 polarization_override="TE",
             )
-            tm_te, tm_tm = _focused_laguerre_gaussian_angular_spectrum_coeffs(
+            tm_basis = _focused_laguerre_gaussian_angular_spectrum_coeffs(
                 beam=beam,
                 k=k,
                 polar_angles=polar_angles,
                 azimuthal_angles=azimuthal_angles,
                 polarization_override="TM",
             )
-            pwp_te = dict(te_te)
-            pwp_tm = dict(te_tm)
-            pwp_te["coeff"] = a_te * np.asarray(te_te["coeff"]) + a_tm * np.asarray(tm_te["coeff"])
-            pwp_tm["coeff"] = a_te * np.asarray(te_tm["coeff"]) + a_tm * np.asarray(tm_tm["coeff"])
-            return pwp_te, pwp_tm
+            return _combine_jones_spectra(
+                te_basis,
+                tm_basis,
+                a_te=a_te,
+                a_tm=a_tm,
+            )
         polarization_override = pure
 
     geom = _focused_laguerre_geometry(
@@ -360,10 +382,7 @@ def _focused_laguerre_gaussian_angular_spectrum_coeffs(
     m22 = np.einsum("abi,abi->ab", etheta_g, etheta_l)
     coeff_te = (m11 * g_te_l + m12 * g_tm_l) * phase
     coeff_tm = (m21 * g_te_l + m22 * g_tm_l) * phase
-    return (
-        {"beta": beta, "alpha": alpha, "kx": kx, "ky": ky, "kz": kz, "coeff": coeff_te},
-        {"beta": beta, "alpha": alpha, "kx": kx, "ky": ky, "kz": kz, "coeff": coeff_tm},
-    )
+    return PlaneWaveSpectrum(alpha, beta, kx, ky, kz, coeff_te, coeff_tm)
 
 
 def _focused_laguerre_cartesian_angular_spectrum_coeffs(
@@ -372,7 +391,7 @@ def _focused_laguerre_cartesian_angular_spectrum_coeffs(
     k: float,
     polar_angles: np.ndarray,
     azimuthal_angles: np.ndarray,
-) -> tuple[dict, dict]:
+) -> PlaneWaveSpectrum:
     """Focused-LG spectrum with one lab-frame polarization projected per ray."""
     geom = _focused_laguerre_geometry(
         beam=beam,
@@ -402,10 +421,7 @@ def _focused_laguerre_cartesian_angular_spectrum_coeffs(
     )
     coeff_te = envelope * g_te * phase
     coeff_tm = envelope * g_tm * phase
-    return (
-        {"beta": beta, "alpha": alpha, "kx": kx, "ky": ky, "kz": kz, "coeff": coeff_te},
-        {"beta": beta, "alpha": alpha, "kx": kx, "ky": ky, "kz": kz, "coeff": coeff_tm},
-    )
+    return PlaneWaveSpectrum(alpha, beta, kx, ky, kz, coeff_te, coeff_tm)
 
 
 def _bessel_ring_beta_kernel(beta: np.ndarray, beta0: float) -> np.ndarray:
@@ -658,31 +674,32 @@ def _bessel_angular_spectrum_coeffs(
     polar_angles: np.ndarray,
     azimuthal_angles: np.ndarray,
     polarization_override: Polarization | None = None,
-) -> tuple[dict, dict]:
+) -> PlaneWaveSpectrum:
     """Evaluate exact non-paraxial Bessel-beam ring spectrum on one alpha-beta grid."""
     if polarization_override is None:
         a_te, a_tm = beam.jones_coefficients()
         pure = pure_polarization_label(a_te, a_tm)
         if pure is None:
-            te_te, te_tm = _bessel_angular_spectrum_coeffs(
+            te_basis = _bessel_angular_spectrum_coeffs(
                 beam=beam,
                 k=k,
                 polar_angles=polar_angles,
                 azimuthal_angles=azimuthal_angles,
                 polarization_override="TE",
             )
-            tm_te, tm_tm = _bessel_angular_spectrum_coeffs(
+            tm_basis = _bessel_angular_spectrum_coeffs(
                 beam=beam,
                 k=k,
                 polar_angles=polar_angles,
                 azimuthal_angles=azimuthal_angles,
                 polarization_override="TM",
             )
-            pwp_te = dict(te_te)
-            pwp_tm = dict(te_tm)
-            pwp_te["coeff"] = a_te * np.asarray(te_te["coeff"]) + a_tm * np.asarray(tm_te["coeff"])
-            pwp_tm["coeff"] = a_te * np.asarray(te_tm["coeff"]) + a_tm * np.asarray(tm_tm["coeff"])
-            return pwp_te, pwp_tm
+            return _combine_jones_spectra(
+                te_basis,
+                tm_basis,
+                a_te=a_te,
+                a_tm=a_tm,
+            )
         polarization_override = pure
     geom = _bessel_ring_geometry(
         beam=beam,
@@ -727,10 +744,7 @@ def _bessel_angular_spectrum_coeffs(
     m22 = np.einsum("abi,abi->ab", etheta_g, etheta_l)
     coeff_te = m11 * g_te_l + m12 * g_tm_l
     coeff_tm = m21 * g_te_l + m22 * g_tm_l
-    return (
-        {"beta": beta, "alpha": alpha, "kx": kx, "ky": ky, "kz": kz, "coeff": coeff_te},
-        {"beta": beta, "alpha": alpha, "kx": kx, "ky": ky, "kz": kz, "coeff": coeff_tm},
-    )
+    return PlaneWaveSpectrum(alpha, beta, kx, ky, kz, coeff_te, coeff_tm)
 
 
 def _bessel_cartesian_angular_spectrum_coeffs(
@@ -739,7 +753,7 @@ def _bessel_cartesian_angular_spectrum_coeffs(
     k: float,
     polar_angles: np.ndarray,
     azimuthal_angles: np.ndarray,
-) -> tuple[dict, dict]:
+) -> PlaneWaveSpectrum:
     """Evaluate Bessel ring spectrum with global-Cartesian polarization transport."""
     geom = _bessel_ring_geometry(
         beam=beam,
@@ -767,7 +781,4 @@ def _bessel_cartesian_angular_spectrum_coeffs(
     g_tm = ex_t * etheta_g[..., 0] + ey_t * etheta_g[..., 1] + ez_t * etheta_g[..., 2]
     coeff_te = envelope * g_te
     coeff_tm = envelope * g_tm
-    return (
-        {"beta": beta, "alpha": alpha, "kx": kx, "ky": ky, "kz": kz, "coeff": coeff_te},
-        {"beta": beta, "alpha": alpha, "kx": kx, "ky": ky, "kz": kz, "coeff": coeff_tm},
-    )
+    return PlaneWaveSpectrum(alpha, beta, kx, ky, kz, coeff_te, coeff_tm)

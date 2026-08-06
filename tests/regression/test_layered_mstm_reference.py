@@ -181,16 +181,12 @@ def _unpolarized_farfield_map(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     run_te = _run_case(case, "TE")
     run_tm = _run_case(case, "TM")
-    i_te = np.asarray(
-        far_field_intensity(run_te.farfield.scattered_te, run_te.farfield.scattered_tm), dtype=float
-    )
-    i_tm = np.asarray(
-        far_field_intensity(run_tm.farfield.scattered_te, run_tm.farfield.scattered_tm), dtype=float
-    )
+    i_te = np.asarray(far_field_intensity(run_te.farfield.scattered), dtype=float)
+    i_tm = np.asarray(far_field_intensity(run_tm.farfield.scattered), dtype=float)
     i_un = 0.5 * (i_te + i_tm)
-    kx = np.asarray(run_te.farfield.scattered_te["kx"], dtype=float)
-    ky = np.asarray(run_te.farfield.scattered_te["ky"], dtype=float)
-    kz = np.asarray(run_te.farfield.scattered_te["kz"], dtype=float)
+    kx = np.asarray(run_te.farfield.scattered.kx, dtype=float)
+    ky = np.asarray(run_te.farfield.scattered.ky, dtype=float)
+    kz = np.asarray(run_te.farfield.scattered.kz, dtype=float)
     return i_un, kx, ky, kz
 
 

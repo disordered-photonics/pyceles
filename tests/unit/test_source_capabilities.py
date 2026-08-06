@@ -10,6 +10,7 @@ import pytest
 from _source_contract_helper import assert_source_compliance
 
 from pyceles.core.indexing import n_modes
+from pyceles.core.plane_wave_spectrum import PlaneWaveSpectrum
 from pyceles.core.sources import (
     AngularSpectrumSLMSource,
     BesselBeam,
@@ -30,18 +31,19 @@ from pyceles.postprocessing.farfield import finite_beam_power_balance
 pytestmark = pytest.mark.api_contract
 
 
-def _make_dummy_pwp(alpha: np.ndarray, beta: np.ndarray) -> dict:
+def _make_dummy_spectrum(alpha: np.ndarray, beta: np.ndarray) -> PlaneWaveSpectrum:
     coeff = np.zeros((alpha.size, beta.size), dtype=np.complex128)
     agrid = alpha[:, None]
     bgrid = beta[None, :]
-    return {
-        "alpha": alpha,
-        "beta": beta,
-        "kx": np.sin(bgrid) * np.cos(agrid),
-        "ky": np.sin(bgrid) * np.sin(agrid),
-        "kz": np.cos(bgrid) * np.ones_like(agrid),
-        "coeff": coeff,
-    }
+    return PlaneWaveSpectrum(
+        alpha,
+        beta,
+        np.sin(bgrid) * np.cos(agrid),
+        np.sin(bgrid) * np.sin(agrid),
+        np.cos(bgrid) * np.ones_like(agrid),
+        coeff,
+        coeff.copy(),
+    )
 
 
 @dataclass(frozen=True)
@@ -283,17 +285,15 @@ def test_builtin_sources_satisfy_capability_contract(
 def test_finite_power_policy_honors_explicit_source_capability_contract():
     alpha = np.linspace(0.0, 2.0 * np.pi, 13, endpoint=False)
     beta = np.linspace(0.0, np.pi, 17)
-    pwp = _make_dummy_pwp(alpha, beta)
+    spectrum = _make_dummy_spectrum(alpha, beta)
     source = _ExplicitInfinitePowerSource()
 
     assert source.has_finite_incident_power() is False
     with pytest.raises(ValueError, match="infinite-power sources"):
         finite_beam_power_balance(
             cast(Source, source),
-            pwp,
-            pwp,
-            pwp,
-            pwp,
+            spectrum,
+            spectrum,
             k0=2.0 * np.pi / 550.0,
             k_medium=2.0 * np.pi / 550.0,
         )
@@ -313,18 +313,18 @@ def test_angular_spectrum_slm_wraps_cartesian_focused_source():
     modulation = np.exp(1j * (0.4 * np.cos(alpha[:, None]) + beta[None, :]))
     source = AngularSpectrumSLMSource(base_source=base, modulation=modulation)
 
-    base_te, base_tm = base.angular_spectrum(
+    base_spectrum = base.angular_spectrum(
         k=2.0 * np.pi / 550.0,
         polar_angles=beta,
         azimuthal_angles=alpha,
     )
-    out_te, out_tm = source.angular_spectrum(
+    out_spectrum = source.angular_spectrum(
         k=2.0 * np.pi / 550.0,
         polar_angles=beta,
         azimuthal_angles=alpha,
     )
-    np.testing.assert_allclose(out_te["coeff"], base_te["coeff"] * modulation)
-    np.testing.assert_allclose(out_tm["coeff"], base_tm["coeff"] * modulation)
+    np.testing.assert_allclose(out_spectrum.coeff_te, base_spectrum.coeff_te * modulation)
+    np.testing.assert_allclose(out_spectrum.coeff_tm, base_spectrum.coeff_tm * modulation)
     assert source.has_finite_incident_power() is True
     assert not isinstance(source, JonesPolarizedSource)
     assert not hasattr(source, "with_polarization")

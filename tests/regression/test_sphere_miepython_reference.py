@@ -268,8 +268,7 @@ def test_sphere_differential_scattering_matches_miepython_oracles() -> None:
         )
         dcs = scattering_cross_section(
             cast(PlaneWave, run.source),
-            run.farfield.scattered_te,
-            run.farfield.scattered_tm,
+            run.farfield.scattered,
             k0=run.k0,
             n_medium=run.config.n_medium,
         )

@@ -12,8 +12,7 @@ def _scattered_intensity(run: pcl.ChannelResult) -> np.ndarray:
     ff = run.farfield
     return cast(
         np.ndarray,
-        np.abs(np.asarray(ff.scattered_te["coeff"])) ** 2
-        + np.abs(np.asarray(ff.scattered_tm["coeff"])) ** 2,
+        np.abs(ff.scattered.coeff_te) ** 2 + np.abs(ff.scattered.coeff_tm) ** 2,
     )
 
 

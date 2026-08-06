@@ -693,7 +693,7 @@ def test_periodic_postprocess_populates_periodic_result_payload() -> None:
         rtol=0.0,
         atol=2.0e-15,
     )
-    assert run.farfield.scattered_te["coeff"].shape == (0, 0)
+    assert run.farfield.scattered.coeff_te.shape == (0, 0)
 
 
 def test_periodic_postprocess_output_bmax_includes_evanescent_orders() -> None:

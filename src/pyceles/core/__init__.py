@@ -62,6 +62,7 @@ from .particles import (
     spheroids_from_arrays,
 )
 from .periodic import PeriodicOptions, PeriodicSpec, plane_wave_k_parallel
+from .plane_wave_spectrum import PlaneWaveSpectrum
 from .spherical import clear_caches as _clear_spherical_caches
 from .svwf_rotation import clear_caches as _clear_svwf_rotation_caches
 from .svwf_rotation import rotate_svwf_tmatrix_block, svwf_rotation_matrix
@@ -126,6 +127,7 @@ __all__ = [
     "PeriodicOptions",
     "PeriodicSpec",
     "PlaneWave",
+    "PlaneWaveSpectrum",
     "PreparedOperator",
     "RectangularLattice2D",
     "SLMSource",
