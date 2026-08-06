@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Literal, cast
 
 import numpy as np
@@ -95,6 +96,14 @@ def test_default_result_retention_preserves_complete_payload() -> None:
     np.testing.assert_array_equal(run.rhs, solved.rhs["source"])
     assert multi.solver_result is solved.solver_result
     assert multi.channels["source"] is run
+
+
+def test_solve_result_rejects_malformed_channel_shapes_at_construction() -> None:
+    sim = _simulation()
+    solved = _solved_single_channel(sim, _source())
+
+    with pytest.raises(ValueError, match=r"RHS for channel 'source'.*shape"):
+        replace(solved, rhs={"source": np.zeros((2, 3), dtype=np.complex128)})
 
 
 def test_minimal_result_retention_drops_optional_arrays_without_copying_solution() -> None:

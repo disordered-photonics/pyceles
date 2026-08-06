@@ -18,6 +18,7 @@ from types import MappingProxyType
 import numpy as np
 import numpy.typing as npt
 
+from pyceles.core.indexing import n_modes
 from pyceles.core.particles import Particle, ParticleCollection
 from pyceles.core.plane_wave_spectrum import PlaneWaveSpectrum
 from pyceles.core.sources import JonesPolarizedSource, Source
@@ -302,6 +303,19 @@ class MultiSourceSolveResult:
             payloads=(self.sources, self.initial_coeffs, self.rhs, self.coeffs),
             rhs_count=int(self.solver_result.rhs_count),
         )
+        expected_shape = (len(self.particles), n_modes(self.config.lmax))
+        for payload_name, payload in (
+            ("Initial coefficients", self.initial_coeffs),
+            ("RHS", self.rhs),
+            ("Solved coefficients", self.coeffs),
+        ):
+            for label in self.labels:
+                shape = tuple(np.shape(payload[label]))
+                if shape != expected_shape:
+                    raise ValueError(
+                        f"{payload_name} for channel '{label}' must have "
+                        f"shape {expected_shape}. Got {shape}."
+                    )
         _validate_channel_solution_views(
             labels=self.labels,
             coeffs_by_label=self.coeffs,

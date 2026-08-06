@@ -537,27 +537,8 @@ def postprocess_sources_impl(
     if periodic_run:
         periodic_runs: dict[str, ChannelResult] = {}
         for label in labels:
-            if label not in solved.sources:
-                raise KeyError(f"Missing source payload for label '{label}'.")
-            if label not in solved.initial_coeffs:
-                raise KeyError(f"Missing initial coefficients for label '{label}'.")
-            if label not in solved.rhs:
-                raise KeyError(f"Missing RHS payload for label '{label}'.")
-            if label not in solved.coeffs:
-                raise KeyError(f"Missing solved coefficients for label '{label}'.")
-
             x_col = solved.coeffs[label]
-            if tuple(np.shape(x_col)) != (Ns, Nm):
-                raise ValueError(
-                    f"Solved coefficients for label '{label}' must have shape {(Ns, Nm)}. "
-                    f"Got {np.shape(x_col)}."
-                )
             rhs_col = solved.rhs[label]
-            if tuple(np.shape(rhs_col)) != (Ns, Nm):
-                raise ValueError(
-                    f"Solved RHS for label '{label}' must have shape {(Ns, Nm)}. "
-                    f"Got {np.shape(rhs_col)}."
-                )
             periodic_payload = _build_periodic_result(
                 sim,
                 source=solved.sources[label],
@@ -644,27 +625,8 @@ def postprocess_sources_impl(
 
     runs: dict[str, ChannelResult] = {}
     for label in labels:
-        if label not in solved.sources:
-            raise KeyError(f"Missing source payload for label '{label}'.")
-        if label not in solved.initial_coeffs:
-            raise KeyError(f"Missing initial coefficients for label '{label}'.")
-        if label not in solved.rhs:
-            raise KeyError(f"Missing RHS payload for label '{label}'.")
-        if label not in solved.coeffs:
-            raise KeyError(f"Missing solved coefficients for label '{label}'.")
-
         x_col = solved.coeffs[label]
-        if tuple(np.shape(x_col)) != (Ns, Nm):
-            raise ValueError(
-                f"Solved coefficients for label '{label}' must have shape {(Ns, Nm)}. "
-                f"Got {np.shape(x_col)}."
-            )
         rhs_col = solved.rhs[label]
-        if tuple(np.shape(rhs_col)) != (Ns, Nm):
-            raise ValueError(
-                f"Solved RHS for label '{label}' must have shape {(Ns, Nm)}. "
-                f"Got {np.shape(rhs_col)}."
-            )
         backend_coeffs = None if backend_coeffs_by_label is None else backend_coeffs_by_label[label]
         run = build_single_channel_result(
             sim,
