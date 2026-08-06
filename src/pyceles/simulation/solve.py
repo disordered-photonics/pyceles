@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
@@ -184,7 +184,12 @@ def normalize_warm_start_argument(
     if isinstance(warm_start, Mapping):
         normalized: dict[str, np.ndarray] = {}
         for key, value in warm_start.items():
-            label = str(key)
+            if not isinstance(key, str):
+                raise TypeError(
+                    "Warm-start mapping labels must be strings. "
+                    f"Got {type(key).__name__} for key {key!r}."
+                )
+            label = key
             if label in normalized:
                 raise ValueError(f"Duplicate warm-start label '{label}'.")
             normalized[label] = np.asarray(value, dtype=dtype).reshape(-1)
@@ -265,6 +270,186 @@ class _MultiSourceExecution:
     backend_coeffs: dict[str, Any] | None = None
 
 
+@dataclass(frozen=True)
+class _PreparedLinearSystem:
+    """Prepared operator, transformed right-hand sides, and direct-solve assets."""
+
+    rhs_flat: dict[str, np.ndarray]
+    apply_operator: Callable[[Any], Any] | None
+    dense_operator: Any | None
+    dense_factorization: DenseLUFactorization | None
+
+
+def _prepare_direct_factorization(
+    sim: Simulation,
+    *,
+    prepared: PreparedOperator,
+    apply_operator: Callable[[Any], Any],
+    unknowns: int,
+    compute_dtype: np.dtype,
+    phase_timings: dict[str, float],
+) -> tuple[Any | None, DenseLUFactorization]:
+    """Return cached direct-solve assets, assembling and factoring only when needed."""
+    cfg = sim.config
+    operator_backend = cfg.operator_backend
+    cached_factorization = sim._dense_lu_cache
+    if (
+        cached_factorization is not None
+        and sim._dense_lu_dtype is not None
+        and sim._dense_lu_dtype == compute_dtype
+    ):
+        return None, cached_factorization
+
+    dense_is_current = (
+        sim._dense_operator_cache is not None
+        and sim._dense_operator_dtype is not None
+        and sim._dense_operator_dtype == compute_dtype
+    )
+    if dense_is_current:
+        dense_operator = sim._dense_operator_cache
+    elif operator_backend == "numpy" and isinstance(prepared.coupling, PairwiseCouplingOperator):
+        dense_t0 = time.perf_counter()
+        dense_operator = assemble_dense_A_numpy(
+            prepared,
+            show_progress=bool(cfg.verbose),
+            use_cache=bool(cfg.cache_translation_blocks),
+            store_blocks=False,
+        )
+        _record_elapsed(phase_timings, "dense_operator_assembly_s", dense_t0)
+    else:
+        dense_operator = _assemble_dense_operator_for_prepared(
+            prepared=prepared,
+            A_mv=apply_operator,
+            n=unknowns,
+            dtype=compute_dtype,
+            show_progress=bool(cfg.verbose),
+            timings=phase_timings,
+        )
+
+    if dense_operator is None:
+        raise RuntimeError("Internal error: direct solve requires a dense operator.")
+    sim._dense_operator_cache = dense_operator
+    sim._dense_operator_dtype = compute_dtype
+
+    factor_t0 = time.perf_counter()
+    factorization = factorize_dense_matrix(
+        dense_operator,
+        dtype=compute_dtype,
+        backend=operator_backend,
+        overwrite_input=(operator_backend == "cupy"),
+    )
+    phase_timings["dense_factorization_s"] = time.perf_counter() - factor_t0
+    sim._dense_lu_cache = factorization
+    sim._dense_lu_dtype = compute_dtype
+
+    if operator_backend == "cupy":
+        # The in-place LU payload owns the device matrix. Retaining or passing
+        # the unfactorized matrix would consume VRAM and trigger an avoidable copy.
+        sim._dense_operator_cache = None
+        sim._dense_operator_dtype = None
+        dense_operator = None
+    return dense_operator, factorization
+
+
+def _prepare_linear_system(
+    sim: Simulation,
+    *,
+    labels: tuple[str, ...],
+    initial_coeffs: Mapping[str, np.ndarray],
+    k: float,
+    k_parallel: np.ndarray | None,
+    compute_dtype: np.dtype,
+    accum_dtype: np.dtype,
+    will_use_direct: bool,
+    phase_timings: dict[str, float],
+) -> _PreparedLinearSystem:
+    """Prepare the shared coupling operator and transformed source columns."""
+    cfg = sim.config
+    n_particles = sim.positions.shape[0]
+    modes_per_particle = n_modes(cfg.lmax)
+    unknowns = n_particles * modes_per_particle
+    rhs_flat = {label: np.zeros((unknowns,), dtype=accum_dtype) for label in labels}
+    if unknowns == 0:
+        return _PreparedLinearSystem(rhs_flat, None, None, None)
+
+    periodic_key = (
+        None
+        if k_parallel is None
+        else (float(np.asarray(k_parallel)[0]), float(np.asarray(k_parallel)[1]))
+    )
+    operator_is_current = (
+        sim._prepared_operator_cache is not None
+        and sim._prepared_operator_dtype is not None
+        and sim._prepared_operator_dtype == compute_dtype
+        and sim._prepared_operator_periodic_key == periodic_key
+    )
+    if operator_is_current:
+        prepared = sim._prepared_operator_cache
+    else:
+        prepare_t0 = time.perf_counter()
+        prepared = prepare_matvec(
+            lmax=cfg.lmax,
+            k=k,
+            particles=sim.particles,
+            n_medium=cfg.n_medium,
+            radial_lut_dr=cfg.radial_lut_dr,
+            cache_translation_blocks=cfg.cache_translation_blocks,
+            operator_dtype=compute_dtype,
+            coupling_backend=cfg.coupling_backend,
+            mlfmm_options=cfg.mlfmm_options,
+            periodic=cfg.periodic,
+            k_parallel=k_parallel,
+            backend=cfg.operator_backend,
+            show_progress=bool(cfg.verbose),
+        )
+        phase_timings["prepare_operator_s"] = time.perf_counter() - prepare_t0
+        sim._prepared_operator_cache = prepared
+        sim._prepared_operator_dtype = compute_dtype
+        sim._prepared_operator_periodic_key = periodic_key
+        sim._dense_operator_cache = None
+        sim._dense_operator_dtype = None
+        sim._dense_lu_cache = None
+        sim._dense_lu_dtype = None
+
+    if prepared is None:
+        raise RuntimeError("Internal error: prepared operator cache not initialized.")
+    apply_operator = prepared.apply_A
+    rhs_t0 = time.perf_counter()
+    for label in labels:
+        rhs_flat[label] = prepared.rhs_Tb(initial_coeffs[label].reshape(unknowns))
+    phase_timings["rhs_Tb_s"] = time.perf_counter() - rhs_t0
+
+    rayleigh_preparation = cfg.periodic is not None and cfg.periodic.options.method == "rayleigh"
+    if (bool(cfg.cache_translation_blocks) and not will_use_direct) or rayleigh_preparation:
+        populate_t0 = time.perf_counter()
+        prepared.populate_coupling(show_progress=bool(cfg.verbose))
+        populate_elapsed = time.perf_counter() - populate_t0
+        timing_key = (
+            "periodic_rayleigh_preparation_s"
+            if rayleigh_preparation
+            else "periodic_w_block_generation_s"
+        )
+        phase_timings[timing_key] = populate_elapsed
+
+    dense_operator = None
+    dense_factorization = None
+    if will_use_direct:
+        dense_operator, dense_factorization = _prepare_direct_factorization(
+            sim,
+            prepared=prepared,
+            apply_operator=apply_operator,
+            unknowns=unknowns,
+            compute_dtype=compute_dtype,
+            phase_timings=phase_timings,
+        )
+    return _PreparedLinearSystem(
+        rhs_flat,
+        apply_operator,
+        dense_operator,
+        dense_factorization,
+    )
+
+
 def _solve_sources_impl(
     sim: Simulation,
     labeled_sources: Mapping[str, Source],
@@ -303,11 +488,6 @@ def _solve_sources_impl(
     solver_name = str(solver_method).lower()
     operator_backend = cfg.operator_backend
     k_parallel = periodic_shared_k_parallel(sim, labeled_sources)
-    periodic_key = (
-        None
-        if k_parallel is None
-        else (float(np.asarray(k_parallel)[0]), float(np.asarray(k_parallel)[1]))
-    )
     will_use_direct = solver_name == "direct" or (
         solver_name == "auto" and unknowns <= int(cfg.solver_direct_max_n)
     )
@@ -356,137 +536,21 @@ def _solve_sources_impl(
         initial_coeffs[label] = np.asarray(coeff, dtype=accum_dtype)
     phase_timings["source_projection_s"] = time.perf_counter() - source_projection_t0
 
-    rhs_flat: dict[str, np.ndarray] = {
-        label: np.zeros((unknowns,), dtype=accum_dtype) for label in labels
-    }
-    prepared: PreparedOperator | None = None
-    A_mv = None
-    A_dense = None
-    if unknowns > 0:
-        need_prepared = (
-            sim._prepared_operator_cache is None
-            or sim._prepared_operator_dtype is None
-            or sim._prepared_operator_dtype != compute_dtype
-            or sim._prepared_operator_periodic_key != periodic_key
-        )
-        if need_prepared:
-            prepare_t0 = time.perf_counter()
-            prepared = prepare_matvec(
-                lmax=cfg.lmax,
-                k=k,
-                particles=sim.particles,
-                n_medium=cfg.n_medium,
-                radial_lut_dr=cfg.radial_lut_dr,
-                cache_translation_blocks=cfg.cache_translation_blocks,
-                operator_dtype=compute_dtype,
-                coupling_backend=cfg.coupling_backend,
-                mlfmm_options=cfg.mlfmm_options,
-                periodic=cfg.periodic,
-                k_parallel=k_parallel,
-                backend=operator_backend,
-                show_progress=bool(cfg.verbose),
-            )
-            phase_timings["prepare_operator_s"] = time.perf_counter() - prepare_t0
-            sim._prepared_operator_cache = prepared
-            sim._prepared_operator_dtype = np.dtype(compute_dtype)
-            sim._prepared_operator_periodic_key = periodic_key
-            sim._dense_operator_cache = None
-            sim._dense_operator_dtype = None
-            sim._dense_lu_cache = None
-            sim._dense_lu_dtype = None
-        else:
-            prepared = sim._prepared_operator_cache
-        if prepared is None:
-            raise RuntimeError("Internal error: prepared operator cache not initialized.")
-        A_mv = prepared.apply_A
-        rhs_t0 = time.perf_counter()
-        for label in labels:
-            rhs_flat[label] = prepared.rhs_Tb(initial_coeffs[label].reshape(Ns * Nm))
-        phase_timings["rhs_Tb_s"] = time.perf_counter() - rhs_t0
-        rayleigh_preparation = (
-            cfg.periodic is not None and cfg.periodic.options.method == "rayleigh"
-        )
-        if (bool(cfg.cache_translation_blocks) and not will_use_direct) or rayleigh_preparation:
-            populate_t0 = time.perf_counter()
-            prepared.populate_coupling(show_progress=bool(cfg.verbose))
-            populate_elapsed = time.perf_counter() - populate_t0
-            if rayleigh_preparation:
-                phase_timings["periodic_rayleigh_preparation_s"] = populate_elapsed
-            elif bool(cfg.cache_translation_blocks) and not will_use_direct:
-                phase_timings["periodic_w_block_generation_s"] = populate_elapsed
-        if will_use_direct:
-            need_dense_lu = (
-                sim._dense_lu_cache is None
-                or sim._dense_lu_dtype is None
-                or sim._dense_lu_dtype != compute_dtype
-            )
-            if need_dense_lu:
-                need_dense = (
-                    sim._dense_operator_cache is None
-                    or sim._dense_operator_dtype is None
-                    or sim._dense_operator_dtype != compute_dtype
-                )
-                if need_dense:
-                    if operator_backend == "numpy" and isinstance(
-                        prepared.coupling, PairwiseCouplingOperator
-                    ):
-                        dense_t0 = time.perf_counter()
-                        A_dense = assemble_dense_A_numpy(
-                            prepared,
-                            show_progress=bool(cfg.verbose),
-                            use_cache=bool(cfg.cache_translation_blocks),
-                            store_blocks=False,
-                        )
-                        _record_elapsed(phase_timings, "dense_operator_assembly_s", dense_t0)
-                    else:
-                        if A_mv is None:
-                            raise RuntimeError(
-                                "Internal error: direct dense assembly requires prepared A_mv."
-                            )
-                        A_dense = _assemble_dense_operator_for_prepared(
-                            prepared=prepared,
-                            A_mv=A_mv,
-                            n=unknowns,
-                            dtype=np.dtype(compute_dtype),
-                            show_progress=bool(cfg.verbose),
-                            timings=phase_timings,
-                        )
-                    sim._dense_operator_cache = A_dense
-                    sim._dense_operator_dtype = np.dtype(compute_dtype)
-                else:
-                    A_dense = sim._dense_operator_cache
-                if A_dense is None:
-                    raise RuntimeError("Internal error: direct solve requires dense operator.")
-                factor_t0 = time.perf_counter()
-                sim._dense_lu_cache = factorize_dense_matrix(
-                    A_dense,
-                    dtype=compute_dtype,
-                    backend=operator_backend,
-                    overwrite_input=(operator_backend == "cupy"),
-                )
-                phase_timings["dense_factorization_s"] = time.perf_counter() - factor_t0
-                sim._dense_lu_dtype = np.dtype(compute_dtype)
-                # On the CuPy direct path, the cached LU payload is the useful
-                # repeated-RHS asset. Releasing the unfactorized dense operator
-                # after in-place GPU LU factorization keeps VRAM available for
-                # the factorization workspace and subsequent postprocessing.
-                if operator_backend == "cupy":
-                    sim._dense_operator_cache = None
-                    sim._dense_operator_dtype = None
-                    # The LU payload is now the owner of the device matrix.  Do
-                    # not pass the unfactorized dense matrix into the direct
-                    # solver again; that would only trigger an avoidable copy
-                    # for residual bookkeeping.
-                    A_dense = None
-            else:
-                # Repeated direct solves only need the cached LU payload.
-                # Reassembling dense A here would defeat the intended repeated-RHS fast path.
-                A_dense = None
-            A_lu: DenseLUFactorization | None = sim._dense_lu_cache
-        else:
-            A_lu = None
-    else:
-        A_lu = None
+    prepared_system = _prepare_linear_system(
+        sim,
+        labels=labels,
+        initial_coeffs=initial_coeffs,
+        k=float(k),
+        k_parallel=k_parallel,
+        compute_dtype=compute_dtype,
+        accum_dtype=accum_dtype,
+        will_use_direct=will_use_direct,
+        phase_timings=phase_timings,
+    )
+    rhs_flat = prepared_system.rhs_flat
+    A_mv = prepared_system.apply_operator
+    A_dense = prepared_system.dense_operator
+    A_lu = prepared_system.dense_factorization
 
     rhs_matrix = np.column_stack([rhs_flat[label] for label in labels])
     rhs_arg = rhs_matrix[:, 0] if n_channels == 1 else rhs_matrix

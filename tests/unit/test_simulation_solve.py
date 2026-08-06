@@ -469,3 +469,11 @@ def test_normalize_warm_start_mapping_is_label_aligned() -> None:
             unknowns=6,
             dtype=np.dtype(np.complex128),
         )
+
+    with pytest.raises(TypeError, match="labels must be strings"):
+        sim_solve.normalize_warm_start_argument(
+            {1: first, "second": second},  # type: ignore[dict-item]
+            labels=("first", "second"),
+            unknowns=6,
+            dtype=np.dtype(np.complex128),
+        )

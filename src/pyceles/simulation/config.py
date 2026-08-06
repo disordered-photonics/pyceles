@@ -63,6 +63,46 @@ def validate_angular_grid_pair(
     return polar, azimuth
 
 
+def _normalize_angular_grid_pair(
+    *,
+    polar_name: str,
+    azimuthal_name: str,
+    polar_values: np.ndarray,
+    azimuthal_values: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Validate and take immutable ownership of one angular-grid pair."""
+    polar, azimuth = validate_angular_grid_pair(
+        polar_name=polar_name,
+        azimuthal_name=azimuthal_name,
+        polar_values=polar_values,
+        azimuthal_values=azimuthal_values,
+    )
+    return (
+        _owned_read_only_array(polar, dtype=np.dtype(float)),
+        _owned_read_only_array(azimuth, dtype=np.dtype(float)),
+    )
+
+
+def _normalize_optional_angular_grid_pair(
+    *,
+    polar_name: str,
+    azimuthal_name: str,
+    polar_values: np.ndarray | None,
+    azimuthal_values: np.ndarray | None,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Normalize an optional pair while rejecting partially specified grids."""
+    if (polar_values is None) != (azimuthal_values is None):
+        raise ValueError(f"Set both `{polar_name}` and `{azimuthal_name}`, or set neither.")
+    if polar_values is None or azimuthal_values is None:
+        return None
+    return _normalize_angular_grid_pair(
+        polar_name=polar_name,
+        azimuthal_name=azimuthal_name,
+        polar_values=polar_values,
+        azimuthal_values=azimuthal_values,
+    )
+
+
 def warn_redundant_periodic_azimuth_endpoint(*, azimuth_name: str, azimuth: np.ndarray) -> None:
     """Warn when a periodic azimuth grid duplicates both 0 and 2*pi endpoints."""
     if azimuth.size < 2:
@@ -251,74 +291,40 @@ class SimulationConfig:
                 "`cache_translation_blocks=True` is not supported with finite `operator_backend='cupy'`. "
                 "The finite CuPy direct-coupling path does not expose translation-block caching."
             )
-        polar_shared, az_shared = validate_angular_grid_pair(
+        polar_shared, az_shared = _normalize_angular_grid_pair(
             polar_name="polar_angles",
             azimuthal_name="azimuthal_angles",
             polar_values=self.polar_angles,
             azimuthal_values=self.azimuthal_angles,
         )
-        object.__setattr__(
-            self,
-            "polar_angles",
-            _owned_read_only_array(polar_shared, dtype=np.dtype(float)),
-        )
-        object.__setattr__(
-            self,
-            "azimuthal_angles",
-            _owned_read_only_array(az_shared, dtype=np.dtype(float)),
-        )
+        object.__setattr__(self, "polar_angles", polar_shared)
+        object.__setattr__(self, "azimuthal_angles", az_shared)
         warn_redundant_periodic_azimuth_endpoint(azimuth_name="azimuthal_angles", azimuth=az_shared)
 
-        has_source_polar = self.source_polar_angles is not None
-        has_source_azimuth = self.source_azimuthal_angles is not None
-        if has_source_polar != has_source_azimuth:
-            raise ValueError(
-                "Set both `source_polar_angles` and `source_azimuthal_angles`, or set neither."
-            )
-        if has_source_polar:
-            polar_source, az_source = validate_angular_grid_pair(
-                polar_name="source_polar_angles",
-                azimuthal_name="source_azimuthal_angles",
-                polar_values=np.asarray(self.source_polar_angles),
-                azimuthal_values=np.asarray(self.source_azimuthal_angles),
-            )
-            object.__setattr__(
-                self,
-                "source_polar_angles",
-                _owned_read_only_array(polar_source, dtype=np.dtype(float)),
-            )
-            object.__setattr__(
-                self,
-                "source_azimuthal_angles",
-                _owned_read_only_array(az_source, dtype=np.dtype(float)),
-            )
+        source_grid = _normalize_optional_angular_grid_pair(
+            polar_name="source_polar_angles",
+            azimuthal_name="source_azimuthal_angles",
+            polar_values=self.source_polar_angles,
+            azimuthal_values=self.source_azimuthal_angles,
+        )
+        if source_grid is not None:
+            polar_source, az_source = source_grid
+            object.__setattr__(self, "source_polar_angles", polar_source)
+            object.__setattr__(self, "source_azimuthal_angles", az_source)
             warn_redundant_periodic_azimuth_endpoint(
                 azimuth_name="source_azimuthal_angles", azimuth=az_source
             )
 
-        has_farfield_polar = self.farfield_polar_angles is not None
-        has_farfield_azimuth = self.farfield_azimuthal_angles is not None
-        if has_farfield_polar != has_farfield_azimuth:
-            raise ValueError(
-                "Set both `farfield_polar_angles` and `farfield_azimuthal_angles`, or set neither."
-            )
-        if has_farfield_polar:
-            polar_farfield, az_farfield = validate_angular_grid_pair(
-                polar_name="farfield_polar_angles",
-                azimuthal_name="farfield_azimuthal_angles",
-                polar_values=np.asarray(self.farfield_polar_angles),
-                azimuthal_values=np.asarray(self.farfield_azimuthal_angles),
-            )
-            object.__setattr__(
-                self,
-                "farfield_polar_angles",
-                _owned_read_only_array(polar_farfield, dtype=np.dtype(float)),
-            )
-            object.__setattr__(
-                self,
-                "farfield_azimuthal_angles",
-                _owned_read_only_array(az_farfield, dtype=np.dtype(float)),
-            )
+        farfield_grid = _normalize_optional_angular_grid_pair(
+            polar_name="farfield_polar_angles",
+            azimuthal_name="farfield_azimuthal_angles",
+            polar_values=self.farfield_polar_angles,
+            azimuthal_values=self.farfield_azimuthal_angles,
+        )
+        if farfield_grid is not None:
+            polar_farfield, az_farfield = farfield_grid
+            object.__setattr__(self, "farfield_polar_angles", polar_farfield)
+            object.__setattr__(self, "farfield_azimuthal_angles", az_farfield)
             warn_redundant_periodic_azimuth_endpoint(
                 azimuth_name="farfield_azimuthal_angles", azimuth=az_farfield
             )
