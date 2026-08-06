@@ -184,31 +184,19 @@ def test_geometry_particle_descriptor_roundtrip(tmp_path):
         assert len(stored["archetypes"]) == 4
 
 
-def test_geometry_loader_accepts_legacy_descriptor_schema(tmp_path):
+@pytest.mark.parametrize("schema", [None, "pyceles.particles.v1", "pyceles.particles.v3"])
+def test_geometry_loader_rejects_noncanonical_particle_schema(tmp_path, schema):
     import h5py
 
-    path = tmp_path / "legacy_particles.h5"
+    path = tmp_path / "noncanonical_particles.h5"
     with h5py.File(path, "w") as h5:
         geometry = h5.create_group("geometry")
-        geometry.attrs["n_medium"] = 1.0 + 0j
-        geometry.attrs["wavelength"] = 550.0
-        geometry.attrs["lmax"] = 3
         stored = geometry.create_group("particles")
-        stored.attrs["schema"] = "pyceles.particles.v1"
-        for index, position in enumerate(((0.0, 0.0, 0.0), (100.0, 0.0, 0.0))):
-            particle = stored.create_group(str(index))
-            particle.attrs["type"] = "Sphere"
-            particle.create_dataset("position", data=np.asarray(position, dtype=float))
-            particle.create_dataset("radius", data=20.0)
-            particle.create_dataset("refractive_index", data=np.asarray(1.5 + 0.01j))
+        if schema is not None:
+            stored.attrs["schema"] = schema
 
-    loaded = load_geometry_h5(path)["particles"]
-    assert isinstance(loaded, ParticleCollection)
-    assert loaded.n_archetypes == 1
-    assert tuple(loaded) == (
-        Sphere(position=(0.0, 0.0, 0.0), radius=20.0, refractive_index=1.5 + 0.01j),
-        Sphere(position=(100.0, 0.0, 0.0), radius=20.0, refractive_index=1.5 + 0.01j),
-    )
+    with pytest.raises(ValueError, match="Unsupported particle schema"):
+        load_geometry_h5(path)
 
 
 def test_geometry_roundtrip_preserves_shared_archetypes(tmp_path):

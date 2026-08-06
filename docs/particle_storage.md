@@ -72,6 +72,5 @@ properties and archetype groups instead.
 ## Persistence
 
 HDF5 geometry schema `pyceles.particles.v2` stores positions, compact archetype
-indices, and one typed payload per archetype. The loader still accepts the
-legacy descriptor-per-instance `v1` schema and normalizes it to a
-`ParticleCollection`.
+indices, and one typed payload per archetype. The loader accepts only this
+canonical schema; older descriptor-per-instance files must be regenerated.

@@ -186,46 +186,32 @@ def _load_particle_payload(pgroup: h5py.Group, *, position: tuple[float, float, 
 
 
 def _load_particle_descriptors(group: h5py.Group) -> ParticleCollection:
-    """Load canonical particles, including legacy descriptor-per-instance files."""
+    """Load particles from the canonical shared-archetype schema."""
     if "particles" not in group:
         raise ValueError(
             "Missing required geometry payload `particles`. "
             "This file does not follow the canonical particle-native geometry schema."
         )
     pg = group["particles"]
-    schema = str(pg.attrs.get("schema", "pyceles.particles.v1"))
-    if schema == "pyceles.particles.v2":
-        positions = np.asarray(pg["positions"][...], dtype=float).reshape(-1, 3)
-        archetype_indices = np.asarray(pg["archetype_indices"][...]).reshape(-1)
-        archetypes_group = pg["archetypes"]
-        keys = sorted(archetypes_group.keys(), key=lambda key: int(key))
-        archetypes = tuple(
-            _load_particle_payload(
-                archetypes_group[key],
-                position=(0.0, 0.0, 0.0),
-            )
-            for key in keys
-        )
-        return ParticleCollection.from_archetypes(
-            positions=positions,
-            archetypes=archetypes,
-            archetype_indices=archetype_indices,
-        )
-    if schema != "pyceles.particles.v1":
+    schema = str(pg.attrs.get("schema", ""))
+    if schema != "pyceles.particles.v2":
         raise ValueError(f"Unsupported particle schema {schema!r}.")
-
-    particles: list[Particle] = []
-    keys = sorted(pg.keys(), key=lambda key: int(key))
-    for key in keys:
-        pgroup = pg[key]
-        pos_arr = np.asarray(pgroup["position"][...], dtype=float).reshape(3)
-        particles.append(
-            _load_particle_payload(
-                pgroup,
-                position=(float(pos_arr[0]), float(pos_arr[1]), float(pos_arr[2])),
-            )
+    positions = np.asarray(pg["positions"][...], dtype=float).reshape(-1, 3)
+    archetype_indices = np.asarray(pg["archetype_indices"][...]).reshape(-1)
+    archetypes_group = pg["archetypes"]
+    keys = sorted(archetypes_group.keys(), key=lambda key: int(key))
+    archetypes = tuple(
+        _load_particle_payload(
+            archetypes_group[key],
+            position=(0.0, 0.0, 0.0),
         )
-    return ParticleCollection.from_particles(particles)
+        for key in keys
+    )
+    return ParticleCollection.from_archetypes(
+        positions=positions,
+        archetypes=archetypes,
+        archetype_indices=archetype_indices,
+    )
 
 
 def save_geometry_h5(
