@@ -48,6 +48,10 @@ def _fake_cupy_numpy_backend():
             return np.concatenate(xs, axis=axis)
 
         @staticmethod
+        def column_stack(xs):
+            return np.column_stack(xs)
+
+        @staticmethod
         def abs(x):
             return np.abs(x)
 
@@ -1314,6 +1318,99 @@ def test_solve_linear_system_bicgstab_cupy_multi_rhs_smoke(monkeypatch):
     assert out.rhs_count == 2
     assert np.all(np.asarray(out.info, dtype=int) == 0)
     np.testing.assert_allclose(A @ np.asarray(out.x), B, atol=1e-8, rtol=1e-8)
+
+
+def test_independent_multi_rhs_reuses_finalized_child_diagnostics(monkeypatch):
+    child_results = [
+        solvers.LinearSolveResult(
+            x=np.asarray([1.0, 2.0]),
+            info=0,
+            residual_norm=1.0e-7,
+            relative_residual=2.0e-8,
+            iterations=3,
+            method="bicgstab",
+            residual_history=np.asarray([0.5, 2.0e-8]),
+            converged_reason="converged",
+        ),
+        solvers.LinearSolveResult(
+            x=np.asarray([3.0, 4.0]),
+            info=2,
+            residual_norm=5.0e-4,
+            relative_residual=6.0e-5,
+            iterations=7,
+            method="bicgstab",
+            residual_history=np.asarray([0.7, 6.0e-5]),
+            converged_reason="maxiter_reached",
+        ),
+    ]
+    child_index = 0
+
+    def fake_bicgstab(*args: Any, **kwargs: Any) -> solvers.LinearSolveResult:
+        del args, kwargs
+        nonlocal child_index
+        result = child_results[child_index]
+        child_index += 1
+        return result
+
+    parent_apply_count = 0
+
+    def A_mv(x: np.ndarray) -> np.ndarray:
+        del x
+        nonlocal parent_apply_count
+        parent_apply_count += 1
+        raise AssertionError("finalized child diagnostics must not trigger another apply")
+
+    monkeypatch.setattr(solvers, "bicgstab_scipy", fake_bicgstab)
+    out = solve_linear_system(
+        A_mv,
+        np.ones((2, 2), dtype=np.complex128),
+        method="bicgstab",
+        backend="numpy",
+        show_progress=False,
+    )
+
+    assert parent_apply_count == 0
+    np.testing.assert_array_equal(out.x, [[1.0, 3.0], [2.0, 4.0]])
+    np.testing.assert_array_equal(out.info, [0, 2])
+    np.testing.assert_array_equal(out.iterations, [3, 7])
+    np.testing.assert_allclose(out.residual_norm, [1.0e-7, 5.0e-4])
+    np.testing.assert_allclose(out.relative_residual, [2.0e-8, 6.0e-5])
+    np.testing.assert_array_equal(out.converged_reason, ["converged", "maxiter_reached"])
+
+
+@pytest.mark.fake_gpu
+def test_independent_multi_rhs_retains_all_backend_columns(monkeypatch):
+    cupy = _fake_cupy_numpy_backend()
+    monkeypatch.setattr(solvers, "import_cupy", lambda: (cupy, None))
+
+    def fake_bicgstab(A_mv: Any, b: np.ndarray, **kwargs: Any) -> solvers.LinearSolveResult:
+        del A_mv, kwargs
+        x = cupy.asarray(2.0 * np.asarray(b))
+        solvers._record_backend_solution(x)
+        return solvers.LinearSolveResult(
+            x=np.asarray(x),
+            info=0,
+            residual_norm=0.0,
+            relative_residual=0.0,
+            iterations=1,
+            method="bicgstab[cupy]",
+            converged_reason="converged",
+        )
+
+    monkeypatch.setattr(solvers, "bicgstab_cupy", fake_bicgstab)
+    rhs = np.asarray([[1.0, 3.0], [2.0, 4.0]], dtype=np.complex128)
+    with solvers._capture_backend_solution(enabled=True) as capture:
+        out = solve_linear_system(
+            lambda x: np.asarray(x),
+            rhs,
+            method="bicgstab",
+            backend="cupy",
+            show_progress=False,
+        )
+
+    assert capture is not None
+    np.testing.assert_array_equal(out.x, 2.0 * rhs)
+    np.testing.assert_array_equal(capture["x"], 2.0 * rhs)
 
 
 @pytest.mark.fake_gpu

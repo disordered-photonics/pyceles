@@ -307,6 +307,31 @@ def _finalize_multi_result(
     )
 
 
+def _combine_independent_results(
+    results: list[LinearSolveResult], *, method: str
+) -> LinearSolveResult:
+    """Combine finalized single-RHS solves without applying the operator again."""
+    if not results:
+        raise ValueError("At least one single-RHS result is required.")
+
+    histories: list[np.ndarray | None] = []
+    for result in results:
+        history = result.residual_history
+        histories.append(history if isinstance(history, np.ndarray) else None)
+
+    return LinearSolveResult(
+        x=np.column_stack([np.asarray(result.x).reshape(-1) for result in results]),
+        info=np.asarray([int(result.info) for result in results], dtype=int),
+        residual_norm=np.asarray([float(result.residual_norm) for result in results]),
+        relative_residual=np.asarray([float(result.relative_residual) for result in results]),
+        iterations=np.asarray([int(result.iterations) for result in results], dtype=int),
+        method=str(method),
+        residual_history=histories,
+        rhs_count=len(results),
+        converged_reason=np.asarray([result.converged_reason for result in results], dtype=object),
+    )
+
+
 def _estimate_eta(
     history: list[float], *, target_rel: float, elapsed: float
 ) -> tuple[int, float] | None:
@@ -1959,59 +1984,54 @@ def solve_linear_system(
         )
 
     if nrhs > 1:
-        xs: list[np.ndarray] = []
-        infos: list[int] = []
-        iters: list[int] = []
-        histories: list[np.ndarray | None] = []
+        results: list[LinearSolveResult] = []
+        backend_columns: list[Any] | None = (
+            [] if backend_name == "cupy" and _BACKEND_SOLUTION_CAPTURE.get() is not None else None
+        )
         for j in range(nrhs):
             if show_progress:
                 print(f"[solver] RHS {j + 1}/{nrhs}")
             x0_j = None if x0_mat is None else x0_mat[:, j]
-            rj = solve_linear_system(
-                A_mv,
-                b_mat[:, j],
-                method=m,
-                A_dense=A_dense,
-                A_factorized=A_factorized,
-                x0=x0_j,
-                preconditioner=preconditioner,
-                rtol=rtol,
-                atol=atol,
-                restart=restart,
-                maxiter=maxiter,
-                gmres_monitor=gmres_monitor,
-                gmres_progress_residual=gmres_progress_residual,
-                gmres_orthogonalization=gmres_orthogonalization,
-                gmres_cgs_refinement=gmres_cgs_refinement,
-                gmres_happy_breakdown_tol=gmres_happy_breakdown_tol,
-                gmres_block_batch_size=gmres_block_batch_size,
-                gmres_block_deflation_tol=gmres_block_deflation_tol,
-                gmres_block_reorthogonalize=gmres_block_reorthogonalize,
-                lgmres_outer_k=lgmres_outer_k,
-                lgmres_store_outer_av=lgmres_store_outer_av,
-                direct_max_n=direct_max_n,
-                dtype=dtype,
-                backend=backend_name,
-                show_progress=show_progress,
-                compute_final_residual=compute_final_residual,
-            )
-            xs.append(np.asarray(rj.x).reshape(-1))
-            infos.append(int(rj.info))
-            iters.append(int(rj.iterations))
-            if isinstance(rj.residual_history, np.ndarray) or rj.residual_history is None:
-                histories.append(rj.residual_history)
-            else:
-                histories.append(None)
-        return _finalize_multi_result(
-            A_mv,
-            b_mat,
-            np.column_stack(xs),
-            info=np.asarray(infos, dtype=int),
-            iterations=np.asarray(iters, dtype=int),
-            method=m,
-            residual_history=histories,
-            compute_final_residual=compute_final_residual,
-        )
+            with _capture_backend_solution(enabled=backend_columns is not None) as column_capture:
+                result = solve_linear_system(
+                    A_mv,
+                    b_mat[:, j],
+                    method=m,
+                    A_dense=A_dense,
+                    A_factorized=A_factorized,
+                    x0=x0_j,
+                    preconditioner=preconditioner,
+                    rtol=rtol,
+                    atol=atol,
+                    restart=restart,
+                    maxiter=maxiter,
+                    gmres_monitor=gmres_monitor,
+                    gmres_progress_residual=gmres_progress_residual,
+                    gmres_orthogonalization=gmres_orthogonalization,
+                    gmres_cgs_refinement=gmres_cgs_refinement,
+                    gmres_happy_breakdown_tol=gmres_happy_breakdown_tol,
+                    gmres_block_batch_size=gmres_block_batch_size,
+                    gmres_block_deflation_tol=gmres_block_deflation_tol,
+                    gmres_block_reorthogonalize=gmres_block_reorthogonalize,
+                    lgmres_outer_k=lgmres_outer_k,
+                    lgmres_store_outer_av=lgmres_store_outer_av,
+                    direct_max_n=direct_max_n,
+                    dtype=dtype,
+                    backend=backend_name,
+                    show_progress=show_progress,
+                    compute_final_residual=compute_final_residual,
+                )
+            results.append(result)
+            if backend_columns is not None:
+                backend_x = None if column_capture is None else column_capture.get("x")
+                if backend_x is None:
+                    raise RuntimeError("CuPy solver did not retain its backend-native solution.")
+                backend_columns.append(backend_x)
+
+        if backend_columns is not None:
+            cupy, _ = import_cupy()
+            _record_backend_solution(cupy.column_stack(backend_columns))
+        return _combine_independent_results(results, method=m)
 
     b_vec = b_mat[:, 0]
     x0_vec = None if x0_mat is None else x0_mat[:, 0]
