@@ -2,13 +2,11 @@
 
 The package surface mirrors the physical decomposition used throughout
 `pyceles`: initial, scattered, internal, and total fields, plus slice helpers
-and point-classification utilities used to decide which contribution is valid
-at each observation point.
+used to inspect those contributions at arbitrary observation points.
 """
 
 from __future__ import annotations
 
-from .classification import InternalPointClassification, classify_internal_points
 from .common import clear_caches
 from .components import (
     ElectricFieldComponents,
@@ -40,11 +38,9 @@ from .workflows import (
 
 __all__ = [
     "ElectricFieldComponents",
-    "InternalPointClassification",
     "NearFieldComponents",
     "NearFieldRadialLUT",
     "NearFieldSlice",
-    "classify_internal_points",
     "clear_caches",
     "compute_electric_field",
     "compute_electric_field_components",

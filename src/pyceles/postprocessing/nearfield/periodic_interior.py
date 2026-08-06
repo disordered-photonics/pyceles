@@ -78,11 +78,8 @@ def _classify_periodic_internal_particle_points(
     wrapped_points = np.asarray(pts, dtype=float).copy()
     bloch_phase = np.ones((n_points,), dtype=np.complex128)
     inside_any = np.zeros((n_points,), dtype=bool)
-    point_indices_by_particle: list[np.ndarray] = []
+    active_entries: list[tuple[int, np.ndarray]] = []
     kpar = np.asarray(k_parallel, dtype=float).reshape(2)
-
-    for _particle in particles:
-        point_indices_by_particle.append(np.empty((0,), dtype=np.intp))
 
     n_medium_c = complex(n_medium)
 
@@ -111,7 +108,7 @@ def _classify_periodic_internal_particle_points(
         if not np.any(mask):
             continue
         owned = remaining[mask]
-        point_indices_by_particle[j] = owned.astype(np.intp, copy=False)
+        active_entries.append((j, owned.astype(np.intp, copy=False)))
         inside_any[owned] = True
         wrapped_points[owned] = wrapped_remain[mask]
         phase_arg = kpar[0] * nx[mask].astype(float) * float(lattice_ax) + kpar[1] * ny[
@@ -120,9 +117,10 @@ def _classify_periodic_internal_particle_points(
         bloch_phase[owned] = np.exp(1j * phase_arg)
 
     return (
-        InternalPointClassification(
+        InternalPointClassification.from_active_points(
+            n_particles=len(particles),
             inside_any=inside_any,
-            point_indices_by_particle=tuple(point_indices_by_particle),
+            entries=active_entries,
         ),
         wrapped_points,
         bloch_phase,

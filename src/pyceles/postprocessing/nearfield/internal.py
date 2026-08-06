@@ -68,7 +68,8 @@ def _compute_internal_field_homogeneous_spheres(
     k: float,
     lmax: int,
     n_particle: np.ndarray,
-    inside_indices_by_sphere: Sequence[np.ndarray] | None = None,
+    classification: InternalPointClassification | None = None,
+    particle_indices: np.ndarray | None = None,
     n_medium: complex = 1.0 + 0j,
     show_progress: bool = False,
     backend: str = "numpy",
@@ -86,10 +87,10 @@ def _compute_internal_field_homogeneous_spheres(
     rad = np.asarray(radii, dtype=float).reshape(-1)
     if rad.shape[0] != n_spheres:
         raise ValueError(f"radii must have length Ns={n_spheres}, got {rad.shape}")
-    if inside_indices_by_sphere is not None and len(inside_indices_by_sphere) != n_spheres:
+    if particle_indices is not None and np.asarray(particle_indices).size != n_spheres:
         raise ValueError(
-            "`inside_indices_by_sphere` length must match number of spheres "
-            f"({n_spheres}). Got {len(inside_indices_by_sphere)}."
+            "`particle_indices` length must match number of spheres "
+            f"({n_spheres}). Got {np.asarray(particle_indices).size}."
         )
 
     if np.ndim(n_particle) == 0:
@@ -117,7 +118,8 @@ def _compute_internal_field_homogeneous_spheres(
             k=k,
             lmax=lmax,
             n_particle=n_particle_arr,
-            inside_indices_by_sphere=inside_indices_by_sphere,
+            classification=classification,
+            particle_indices=particle_indices,
             n_medium=n_medium_c,
             show_progress=show_progress,
             compute_dtype=compute_dtype,
@@ -131,12 +133,15 @@ def _compute_internal_field_homogeneous_spheres(
     mode_by_l = mode_indices_by_l(lmax)
 
     for j_sphere in sphere_iter:
-        if inside_indices_by_sphere is None:
+        if classification is None:
             r_full = pts - pos[j_sphere]
             r2_full = np.sum(r_full * r_full, axis=1)
             idx = np.flatnonzero(r2_full < (rad[j_sphere] ** 2))
         else:
-            idx = np.asarray(inside_indices_by_sphere[j_sphere], dtype=np.intp).reshape(-1)
+            particle_index = (
+                j_sphere if particle_indices is None else int(particle_indices[j_sphere])
+            )
+            idx = classification.points_for_particle(particle_index)
         if idx.size == 0:
             continue
 
@@ -208,7 +213,8 @@ def _compute_internal_field_homogeneous_spheres_cupy(
     k: float,
     lmax: int,
     n_particle: np.ndarray,
-    inside_indices_by_sphere: Sequence[np.ndarray] | None,
+    classification: InternalPointClassification | None,
+    particle_indices: np.ndarray | None,
     n_medium: complex,
     show_progress: bool,
     compute_dtype: np.dtype,
@@ -244,12 +250,15 @@ def _compute_internal_field_homogeneous_spheres_cupy(
     mode_by_l = mode_indices_by_l(lmax)
 
     for j_sphere in sphere_iter:
-        if inside_indices_by_sphere is None:
+        if classification is None:
             r_full = field_points - positions[j_sphere]
             r2_full = np.sum(r_full * r_full, axis=1)
             idx = np.flatnonzero(r2_full < (radii[j_sphere] ** 2))
         else:
-            idx = np.asarray(inside_indices_by_sphere[j_sphere], dtype=np.intp).reshape(-1)
+            particle_index = (
+                j_sphere if particle_indices is None else int(particle_indices[j_sphere])
+            )
+            idx = classification.points_for_particle(particle_index)
         if idx.size == 0:
             continue
 
@@ -336,7 +345,7 @@ def _compute_internal_field_particles(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Compute internal fields for a canonical particle collection."""
     pts = np.asarray(field_points, dtype=float).reshape(-1, 3)
-    part = particles
+    part = ParticleCollection.from_particles(particles)
     n_particles = len(part)
     n_points = pts.shape[0]
     compute_dtype = np.dtype(compute_dtype)
@@ -357,10 +366,10 @@ def _compute_internal_field_particles(
                 "`classification.inside_any` must have shape "
                 f"({n_points},). Got {classification.inside_any.shape}."
             )
-        if len(classification.point_indices_by_particle) != n_particles:
+        if classification.n_particles != n_particles:
             raise ValueError(
-                "`classification.point_indices_by_particle` length must match "
-                f"particle count ({n_particles}). Got {len(classification.point_indices_by_particle)}."
+                "`classification.n_particles` must match "
+                f"particle count ({n_particles}). Got {classification.n_particles}."
             )
 
     c = np.asarray(coeffs, dtype=compute_dtype)
@@ -370,43 +379,22 @@ def _compute_internal_field_particles(
         )
     c = c.reshape(n_particles, n_modes_total)
 
-    pec_idx = [j for j, p in enumerate(part) if isinstance(p, PECSphere)]
-    if pec_idx:
+    pec_idx = part.indices_of_type(PECSphere)
+    if pec_idx.size:
         for j in pec_idx:
             if classification is None:
                 idx = np.flatnonzero(particle_contains_points(part[j], pts)).astype(
                     np.intp, copy=False
                 )
             else:
-                idx = np.asarray(
-                    classification.point_indices_by_particle[j], dtype=np.intp
-                ).reshape(-1)
+                idx = classification.points_for_particle(j)
             inside[idx] = True
-        if len(pec_idx) == n_particles:
+        if pec_idx.size == n_particles:
             return e, h, inside
 
-    sphere_arrays = (
-        part.homogeneous_sphere_arrays() if isinstance(part, ParticleCollection) else None
-    )
-    spheres = None if sphere_arrays is not None else [p for p in part if isinstance(p, Sphere)]
-    if sphere_arrays is not None or (spheres is not None and len(spheres) == n_particles):
-        if sphere_arrays is None:
-            assert spheres is not None
-            positions = np.asarray([sp.position for sp in spheres], dtype=float).reshape(
-                n_particles, 3
-            )
-            radii = np.asarray([sp.radius for sp in spheres], dtype=float).reshape(n_particles)
-            n_particle = np.asarray(
-                [complex(sp.refractive_index) for sp in spheres],
-                dtype=np.complex128,
-            )
-        else:
-            positions, radii, n_particle = sphere_arrays
-        inside_idx = (
-            [np.asarray(v, dtype=np.intp) for v in classification.point_indices_by_particle]
-            if classification is not None
-            else None
-        )
+    sphere_arrays = part.homogeneous_sphere_arrays()
+    if sphere_arrays is not None:
+        positions, radii, n_particle = sphere_arrays
         return _compute_internal_field_homogeneous_spheres(
             pts,
             positions,
@@ -415,7 +403,7 @@ def _compute_internal_field_particles(
             k=float(k),
             lmax=lmax,
             n_particle=n_particle,
-            inside_indices_by_sphere=inside_idx,
+            classification=classification,
             n_medium=n_medium_c,
             show_progress=show_progress,
             backend=backend,
@@ -424,33 +412,30 @@ def _compute_internal_field_particles(
         )
 
     supported = (Sphere, PECSphere, LayeredSphere, Spheroid)
-    bad = [type(p).__name__ for p in part if not isinstance(p, supported)]
+    bad = [type(p).__name__ for p in part.archetypes if not isinstance(p, supported)]
     if bad:
         raise TypeError(
             "compute_internal_field currently supports Sphere, PECSphere, LayeredSphere, and Spheroid in "
             f"particle-dispatch mode. Got {bad}."
         )
 
-    sphere_idx = [j for j, p in enumerate(part) if isinstance(p, Sphere)]
-    layered_idx = [j for j, p in enumerate(part) if isinstance(p, LayeredSphere)]
-    spheroid_idx = [j for j, p in enumerate(part) if isinstance(p, Spheroid)]
+    sphere_idx = part.indices_of_type(Sphere)
+    layered_idx = part.indices_of_type(LayeredSphere)
+    spheroid_idx = part.indices_of_type(Spheroid)
 
-    if sphere_idx:
-        sphere_part = [p for p in part if isinstance(p, Sphere)]
-        positions = np.asarray([sp.position for sp in sphere_part], dtype=float).reshape(-1, 3)
-        radii = np.asarray([sp.radius for sp in sphere_part], dtype=float).reshape(-1)
-        n_particle = np.asarray(
-            [complex(sp.refractive_index) for sp in sphere_part], dtype=np.complex128
+    if sphere_idx.size:
+        positions = part.positions[sphere_idx]
+        radii = part.scalar_attribute(
+            sphere_idx,
+            "radius",
+            dtype=np.dtype(float),
         )
-        c_sphere = c[np.asarray(sphere_idx, dtype=int), :]
-        inside_idx = (
-            [
-                np.asarray(classification.point_indices_by_particle[j], dtype=np.intp)
-                for j in sphere_idx
-            ]
-            if classification is not None
-            else None
+        n_particle = part.scalar_attribute(
+            sphere_idx,
+            "refractive_index",
+            dtype=np.dtype(np.complex128),
         )
+        c_sphere = c[sphere_idx, :]
         e_s, h_s, inside_s = _compute_internal_field_homogeneous_spheres(
             pts,
             positions,
@@ -459,7 +444,8 @@ def _compute_internal_field_particles(
             k=float(k),
             lmax=lmax,
             n_particle=n_particle,
-            inside_indices_by_sphere=inside_idx,
+            classification=classification,
+            particle_indices=sphere_idx,
             n_medium=n_medium_c,
             show_progress=show_progress,
             backend=backend,
@@ -470,12 +456,17 @@ def _compute_internal_field_particles(
         h += h_s
         inside |= inside_s
 
-    if spheroid_idx:
+    if spheroid_idx.size:
         eps = 1e-12
         mode_by_l = mode_indices_by_l(lmax)
-        sph_iter: Iterable[int] = spheroid_idx
+        sph_iter: Iterable[int] = (int(index) for index in spheroid_idx)
         if show_progress:
-            sph_iter = tqdm(spheroid_idx, desc="Internal field (spheroids)", leave=True)
+            sph_iter = tqdm(
+                (int(index) for index in spheroid_idx),
+                total=int(spheroid_idx.size),
+                desc="Internal field (spheroids)",
+                leave=True,
+            )
         internal_block_memo: dict[tuple[object, ...], np.ndarray] = {}
 
         for j_sphere in sph_iter:
@@ -485,9 +476,7 @@ def _compute_internal_field_particles(
             if classification is None:
                 idx = np.flatnonzero(particle_contains_points(particle, pts))
             else:
-                idx = np.asarray(
-                    classification.point_indices_by_particle[j_sphere], dtype=np.intp
-                ).reshape(-1)
+                idx = classification.points_for_particle(j_sphere)
             if idx.size == 0:
                 continue
 
@@ -564,14 +553,19 @@ def _compute_internal_field_particles(
                 h[idx] += (-1j * n_s) * contract_modes(a_int, n_reg)
                 h[idx] += (-1j * n_s) * contract_modes(b_int, m_reg)
 
-    if not layered_idx:
+    if not layered_idx.size:
         return e, h, inside
 
     eps = 1e-12
     mode_by_l = mode_indices_by_l(lmax)
-    layer_iter: Iterable[int] = layered_idx
+    layer_iter: Iterable[int] = (int(index) for index in layered_idx)
     if show_progress:
-        layer_iter = tqdm(layered_idx, desc="Internal field (layered particles)", leave=True)
+        layer_iter = tqdm(
+            (int(index) for index in layered_idx),
+            total=int(layered_idx.size),
+            desc="Internal field (layered particles)",
+            leave=True,
+        )
 
     for j_sphere in layer_iter:
         particle = part[j_sphere]
@@ -585,9 +579,7 @@ def _compute_internal_field_particles(
             r2_full = np.sum(r_full * r_full, axis=1)
             idx = np.flatnonzero(r2_full < (outer_radius**2))
         else:
-            idx = np.asarray(
-                classification.point_indices_by_particle[j_sphere], dtype=np.intp
-            ).reshape(-1)
+            idx = classification.points_for_particle(j_sphere)
         if idx.size == 0:
             continue
 

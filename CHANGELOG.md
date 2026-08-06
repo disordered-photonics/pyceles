@@ -45,6 +45,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pairwise-vs-MLFMM scaling benchmark.
 
 ### Changed
+- Near-field interior classification now uses a spatial broad phase and compact
+  sparse particle-to-point ownership. Finite and periodic field evaluation no
+  longer retain one empty NumPy index array per particle, and mixed particle
+  collections consume the canonical array-native particle representation.
 - Breaking: finite far fields now use one typed `PlaneWaveSpectrum` containing
   both TE/TM coefficients and their shared wavevector grid. `FarFieldPatterns`
   retains only the independent incident and scattered spectra and derives the
