@@ -616,8 +616,8 @@ def _pyceles_run(
         if run_ch.power.transmittance is None or run_ch.power.reflectance is None:
             raise RuntimeError("Finite-beam run did not report normalized flux diagnostics.")
         p0 = float(run_ch.power.incident_power)
-        s_up = float(run_ch.decomposition_forward["P_scattered"] / p0)
-        s_down = float(run_ch.decomposition_backward["P_scattered"] / p0)
+        s_up = float(run_ch.decomposition_forward.scattered_power / p0)
+        s_down = float(run_ch.decomposition_backward.scattered_power / p0)
         t_frac = float(run_ch.power.transmittance)
         r_frac = float(run_ch.power.reflectance)
         q_abs = float(1.0 - t_frac - r_frac)

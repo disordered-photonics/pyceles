@@ -28,6 +28,7 @@ from pyceles.postprocessing.farfield import (
     FarFieldPatterns,
     PeriodicFarFieldPayload,
     PowerBalance,
+    PowerFluxDecomposition,
 )
 
 from .config import SimulationConfig
@@ -186,19 +187,36 @@ class ChannelResult:
     farfield: FarFieldPatterns
     power: PowerBalance | None
     cross_sections: CrossSectionBalance | None
-    decomposition_forward: dict[str, float] | None
-    decomposition_backward: dict[str, float] | None
+    decomposition_forward: PowerFluxDecomposition | None
+    decomposition_backward: PowerFluxDecomposition | None
     particles: ParticleCollection | Sequence[Particle]
     periodic: PeriodicFarFieldPayload | None
     compute_dtype: str
     accum_dtype: str
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "particles",
-            ParticleCollection.from_particles(self.particles),
-        )
+        particles = ParticleCollection.from_particles(self.particles)
+        object.__setattr__(self, "particles", particles)
+        expected_shape = (len(particles), n_modes(self.config.lmax))
+        for payload_name, payload in (
+            ("Solved coefficients", self.coeffs),
+            ("RHS", self.rhs),
+            ("Initial coefficients", self.initial_coeffs),
+        ):
+            if payload is None:
+                continue
+            shape = tuple(np.shape(payload))
+            if shape != expected_shape:
+                raise ValueError(f"{payload_name} must have shape {expected_shape}. Got {shape}.")
+        for payload_name, decomposition, expected_direction in (
+            ("Forward decomposition", self.decomposition_forward, "forward"),
+            ("Backward decomposition", self.decomposition_backward, "backward"),
+        ):
+            if decomposition is not None and decomposition.direction != expected_direction:
+                raise ValueError(
+                    f"{payload_name} must have direction {expected_direction!r}. "
+                    f"Got {decomposition.direction!r}."
+                )
 
     @property
     def n_particles(self) -> int:
@@ -396,8 +414,8 @@ class _CoherentChannelPayload:
     farfield: FarFieldPatterns
     power: PowerBalance | None
     cross_sections: CrossSectionBalance | None
-    decomposition_forward: dict[str, float] | None
-    decomposition_backward: dict[str, float] | None
+    decomposition_forward: PowerFluxDecomposition | None
+    decomposition_backward: PowerFluxDecomposition | None
     periodic: PeriodicFarFieldPayload | None
 
 

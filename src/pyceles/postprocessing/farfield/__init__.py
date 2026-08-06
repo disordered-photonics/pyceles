@@ -32,6 +32,7 @@ from .periodic import (
 )
 from .power import (
     PowerBalance,
+    PowerFluxDecomposition,
     finite_beam_power_balance,
     incident_power_from_pwp,
     local_absorbed_power_from_exciting,
@@ -47,6 +48,7 @@ __all__ = [
     "PeriodicFarFieldPayload",
     "PeriodicOrderAmplitudes",
     "PowerBalance",
+    "PowerFluxDecomposition",
     "compute_far_field_patterns",
     "enumerate_diffraction_orders_rectangular",
     "extinction_cross_section",

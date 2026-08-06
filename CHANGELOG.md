@@ -45,6 +45,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pairwise-vs-MLFMM scaling benchmark.
 
 ### Changed
+- Breaking: finite-beam directional power decomposition now uses immutable
+  `PowerFluxDecomposition` values with explicit field names instead of mutable
+  `P_*` dictionaries. Completed channel payloads validate coefficient, RHS, and
+  incident-coefficient shapes at construction, and warm-start mappings require
+  the same explicit string labels as source mappings.
+- Breaking: HDF5 geometry loading now accepts only the canonical
+  `pyceles.particles.v2` shared-archetype schema; obsolete descriptor-per-instance
+  files must be regenerated.
 - Near-field interior classification now uses a spatial broad phase and compact
   sparse particle-to-point ownership. Finite and periodic field evaluation no
   longer retain one empty NumPy index array per particle, and mixed particle
@@ -99,6 +107,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   GMRES for periodic systems, reflecting their measured convergence behavior.
 
 ### Fixed
+- Independent iterative multi-RHS solves now reuse the finalized per-RHS
+  diagnostics and backend-native solution columns instead of applying the
+  operator again solely to rebuild the combined result.
 - Power-balance console summaries now use the exact normalized field names
   (`flux_defect_fraction` and `closure_error_fraction`), and serialized power
   mappings avoid duplicating the full per-particle vector in normalized form.

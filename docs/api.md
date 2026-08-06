@@ -103,6 +103,9 @@ Periodic order-resolved results remain on `pyceles.PeriodicFarFieldPayload`:
 - `power`, which is the same common balance exposed as `ChannelResult.power`.
 
 There are no `absorptance`, `A_raw`, or historical power-key aliases.
+Finite-beam forward/backward field contributions are exposed as immutable
+`pyceles.PowerFluxDecomposition` objects with `initial_power`,
+`scattered_power`, `interference_power`, and `total_power`.
 
 Plane-wave cross sections use the same typed-diagnostic policy through
 `ChannelResult.cross_sections`, an immutable `pyceles.CrossSectionBalance`:

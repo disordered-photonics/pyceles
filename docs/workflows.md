@@ -15,6 +15,8 @@ New source classes should satisfy the internal `Source` protocol in
 Finite-beam-only diagnostics, including `finite_beam_power_balance`,
 source-aware `pwp_power_decomposition`, and the common `ChannelResult.power`
 report, are enabled only when `has_finite_incident_power()` returns `True`.
+`pwp_power_decomposition` returns an immutable `PowerFluxDecomposition` rather
+than a string-keyed mapping.
 This keeps policy centralized and avoids class-name-specific special cases as
 new source wrappers/classes are added.
 

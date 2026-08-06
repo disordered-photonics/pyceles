@@ -41,6 +41,7 @@ from pyceles.postprocessing.farfield import (
     CrossSectionBalance,
     PeriodicFarFieldPayload,
     PowerBalance,
+    PowerFluxDecomposition,
 )
 from pyceles.postprocessing.nearfield import (
     ElectricFieldComponents,
@@ -93,6 +94,7 @@ __all__ = [
     "PlaneWaveSpectrum",
     "PolarizationResult",
     "PowerBalance",
+    "PowerFluxDecomposition",
     "RectangularLattice2D",
     "ResultRetention",
     "SLMSource",

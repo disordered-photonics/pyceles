@@ -100,11 +100,22 @@ def test_power_decomposition_identity_forward():
         k_medium=2.1,
         direction="forward",
     )
-    assert np.isclose(d["P_total"], d["P_initial"] + d["P_scattered"] + d["P_interference"])
+    assert np.isclose(
+        d.total_power,
+        d.initial_power + d.scattered_power + d.interference_power,
+    )
 
     total = total_field_plane_wave_pattern(initial, scattered)
     direct = pwp_power_flux(total, k0=1.3, k_medium=2.1, direction="forward")
-    assert np.isclose(d["P_total"], direct)
+    assert d.direction == "forward"
+    assert np.isclose(d.total_power, direct)
+    assert d.to_mapping() == {
+        "direction": "forward",
+        "initial_power": d.initial_power,
+        "scattered_power": d.scattered_power,
+        "interference_power": d.interference_power,
+        "total_power": d.total_power,
+    }
 
 
 def test_incident_power_from_pwp_matches_forward_plus_backward_flux():

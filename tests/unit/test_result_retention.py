@@ -10,6 +10,7 @@ from pyceles.core.fields import PlaneWave
 from pyceles.core.indexing import n_modes
 from pyceles.core.particles import Sphere
 from pyceles.linear.solvers import LinearSolveResult
+from pyceles.postprocessing.farfield import PowerFluxDecomposition
 from pyceles.simulation import (
     MultiSourceSolveResult,
     ResultRetention,
@@ -104,6 +105,23 @@ def test_solve_result_rejects_malformed_channel_shapes_at_construction() -> None
 
     with pytest.raises(ValueError, match=r"RHS for channel 'source'.*shape"):
         replace(solved, rhs={"source": np.zeros((2, 3), dtype=np.complex128)})
+
+
+def test_channel_result_rejects_reshaped_solver_view() -> None:
+    sim = _simulation()
+    run = sim.run(_source(), include_farfield=False)
+
+    with pytest.raises(ValueError, match=r"Solved coefficients must have shape"):
+        replace(run, coeffs=run.coeffs.reshape(2, 3))
+
+    backward = PowerFluxDecomposition(
+        direction="backward",
+        initial_power=1.0,
+        scattered_power=0.5,
+        interference_power=-0.25,
+    )
+    with pytest.raises(ValueError, match=r"Forward decomposition must have direction"):
+        replace(run, decomposition_forward=backward)
 
 
 def test_minimal_result_retention_drops_optional_arrays_without_copying_solution() -> None:

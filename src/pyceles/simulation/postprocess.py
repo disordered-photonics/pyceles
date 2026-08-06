@@ -23,6 +23,7 @@ from pyceles.postprocessing.farfield import (
     FarFieldPatterns,
     PeriodicFarFieldPayload,
     PowerBalance,
+    PowerFluxDecomposition,
     compute_far_field_patterns,
     finite_beam_power_balance,
     local_absorption_cross_section_from_exciting,
@@ -270,8 +271,8 @@ def _build_channel_diagnostics(
 ) -> tuple[
     PowerBalance | None,
     CrossSectionBalance | None,
-    dict[str, float] | None,
-    dict[str, float] | None,
+    PowerFluxDecomposition | None,
+    PowerFluxDecomposition | None,
 ]:
     """Build optional power/cross-section diagnostics for one channel payload.
 
@@ -285,8 +286,8 @@ def _build_channel_diagnostics(
 
     power: PowerBalance | None = None
     cross_sections: CrossSectionBalance | None = None
-    decomposition_forward: dict[str, float] | None = None
-    decomposition_backward: dict[str, float] | None = None
+    decomposition_forward: PowerFluxDecomposition | None = None
+    decomposition_backward: PowerFluxDecomposition | None = None
 
     if isinstance(source, PlaneWave):
         # Plane-wave cross sections are physical observables rather than raw
@@ -402,8 +403,8 @@ def _assemble_channel_result(
     farfield: FarFieldPatterns,
     power: PowerBalance | None,
     cross_sections: CrossSectionBalance | None,
-    decomposition_forward: dict[str, float] | None,
-    decomposition_backward: dict[str, float] | None,
+    decomposition_forward: PowerFluxDecomposition | None,
+    decomposition_backward: PowerFluxDecomposition | None,
     periodic: PeriodicFarFieldPayload | None = None,
 ) -> ChannelResult:
     """Assemble one physical channel without assigning solve provenance."""
@@ -744,8 +745,8 @@ def run_polarizations_impl(
     mixed_periodic: PeriodicFarFieldPayload | None = None
     mixed_power: PowerBalance | None = None
     mixed_cross_sections: CrossSectionBalance | None = None
-    mixed_forward: dict[str, float] | None = None
-    mixed_backward: dict[str, float] | None = None
+    mixed_forward: PowerFluxDecomposition | None = None
+    mixed_backward: PowerFluxDecomposition | None = None
 
     if sim.config.periodic is not None:
         # Periodic diffraction orders are the canonical far-field result and

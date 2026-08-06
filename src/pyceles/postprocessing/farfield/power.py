@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 
@@ -10,6 +11,44 @@ from pyceles.core.sources import Source, ensure_finite_power_diagnostics_support
 
 from .common import integrate_periodic_alpha
 from .patterns import total_field_plane_wave_pattern
+
+
+@dataclass(frozen=True, slots=True)
+class PowerFluxDecomposition:
+    """Initial, scattered, interference, and total flux in one hemisphere."""
+
+    direction: Literal["forward", "backward"]
+    initial_power: float
+    scattered_power: float
+    interference_power: float
+
+    def __post_init__(self) -> None:
+        if self.direction not in {"forward", "backward"}:
+            raise ValueError("`direction` must be 'forward' or 'backward'.")
+        for name in (
+            "initial_power",
+            "scattered_power",
+            "interference_power",
+        ):
+            value = float(getattr(self, name))
+            if not np.isfinite(value):
+                raise ValueError(f"`{name}` must be finite. Got {value!r}.")
+            object.__setattr__(self, name, value)
+
+    @property
+    def total_power(self) -> float:
+        """Return the sum of initial, scattered, and interference powers."""
+        return float(self.initial_power + self.scattered_power + self.interference_power)
+
+    def to_mapping(self) -> dict[str, str | float]:
+        """Return the canonical serialization mapping."""
+        return {
+            "direction": self.direction,
+            "initial_power": self.initial_power,
+            "scattered_power": self.scattered_power,
+            "interference_power": self.interference_power,
+            "total_power": self.total_power,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -300,10 +339,10 @@ def pwp_power_decomposition(
     *,
     k0: float,
     k_medium: float,
-    direction: str = "forward",
+    direction: Literal["forward", "backward"] = "forward",
     source: Source | None = None,
-) -> dict[str, float]:
-    """Decompose power into initial/scattered/interference/total terms."""
+) -> PowerFluxDecomposition:
+    """Decompose one hemispherical flux into physical field contributions."""
     if source is not None:
         ensure_finite_power_diagnostics_supported(
             source,
@@ -315,12 +354,12 @@ def pwp_power_decomposition(
     p_total = pwp_power_flux(total, k0=k0, k_medium=k_medium, direction=direction)
     p_interference = p_total - p_initial - p_scattered
 
-    return {
-        "P_initial": float(p_initial),
-        "P_scattered": float(p_scattered),
-        "P_interference": float(p_interference),
-        "P_total": float(p_total),
-    }
+    return PowerFluxDecomposition(
+        direction=direction,
+        initial_power=p_initial,
+        scattered_power=p_scattered,
+        interference_power=p_interference,
+    )
 
 
 def pwp_power_flux(
@@ -328,7 +367,7 @@ def pwp_power_flux(
     *,
     k0: float,
     k_medium: float,
-    direction: str,
+    direction: Literal["forward", "backward"],
 ) -> float:
     """Power flux through one hemisphere from a TE/TM spectrum."""
     alpha = spectrum.alpha
@@ -405,6 +444,7 @@ def finite_beam_power_balance(
 
 __all__ = [
     "PowerBalance",
+    "PowerFluxDecomposition",
     "finite_beam_power_balance",
     "incident_power_from_pwp",
     "local_absorbed_power_from_exciting",
