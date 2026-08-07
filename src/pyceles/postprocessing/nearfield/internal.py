@@ -204,6 +204,108 @@ def _compute_internal_field_homogeneous_spheres(
     return e, h, inside
 
 
+def _sphere_internal_point_pairs(
+    field_points: np.ndarray,
+    positions: np.ndarray,
+    radii: np.ndarray,
+    *,
+    classification: InternalPointClassification | None,
+    particle_indices: np.ndarray | None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return flat ``(point, local-sphere)`` ownership pairs."""
+    n_points = int(field_points.shape[0])
+    n_spheres = int(positions.shape[0])
+    if n_points == 0 or n_spheres == 0:
+        empty = np.zeros((0,), dtype=np.int64)
+        return empty, empty.copy()
+
+    if classification is not None:
+        counts = np.diff(classification.point_offsets).astype(np.int64, copy=False)
+        if counts.size != classification.active_particle_indices.size:
+            raise ValueError("Invalid internal-point classification offsets.")
+        entry_ids = np.repeat(np.arange(counts.size, dtype=np.int64), counts)
+        active_global = classification.active_particle_indices.astype(np.int64, copy=False)
+        if particle_indices is None:
+            local_by_entry = active_global
+            valid_entry = (local_by_entry >= 0) & (local_by_entry < n_spheres)
+        else:
+            selected = np.asarray(particle_indices, dtype=np.int64).reshape(-1)
+            global_to_local = np.full((classification.n_particles,), -1, dtype=np.int64)
+            global_to_local[selected] = np.arange(selected.size, dtype=np.int64)
+            local_by_entry = global_to_local[active_global]
+            valid_entry = local_by_entry >= 0
+        if entry_ids.size == 0 or not np.any(valid_entry):
+            empty = np.zeros((0,), dtype=np.int64)
+            return empty, empty.copy()
+        pair_mask = valid_entry[entry_ids]
+        return (
+            classification.point_indices[pair_mask].astype(np.int64, copy=False),
+            local_by_entry[entry_ids[pair_mask]].astype(np.int64, copy=False),
+        )
+
+    from scipy.spatial import cKDTree
+
+    tree = cKDTree(positions)
+    candidate_lists = tree.query_ball_point(
+        field_points,
+        r=float(np.max(radii)),
+        return_sorted=True,
+    )
+    point_chunks: list[np.ndarray] = []
+    sphere_chunks: list[np.ndarray] = []
+    for point_index, candidates_raw in enumerate(candidate_lists):
+        candidates = np.asarray(candidates_raw, dtype=np.int64)
+        if candidates.size == 0:
+            continue
+        delta = field_points[point_index] - positions[candidates]
+        distance_squared = np.einsum("ij,ij->i", delta, delta)
+        candidates = candidates[distance_squared < radii[candidates] ** 2]
+        if candidates.size == 0:
+            continue
+        point_chunks.append(np.full(candidates.size, point_index, dtype=np.int64))
+        sphere_chunks.append(candidates)
+    if not point_chunks:
+        empty = np.zeros((0,), dtype=np.int64)
+        return empty, empty.copy()
+    return np.concatenate(point_chunks), np.concatenate(sphere_chunks)
+
+
+def _sphere_internal_material_tables(
+    *,
+    pair_spheres: np.ndarray,
+    radii: np.ndarray,
+    n_particle: np.ndarray,
+    lmax: int,
+    k: float,
+    n_medium: complex,
+    compute_dtype: np.dtype,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Build material-ratio tables for the active sphere-point pairs."""
+    active_spheres = np.unique(pair_spheres)
+    parameters = np.column_stack(
+        (
+            radii[active_spheres],
+            n_particle[active_spheres].real,
+            n_particle[active_spheres].imag,
+        )
+    )
+    unique_parameters, active_group = np.unique(parameters, axis=0, return_inverse=True)
+    active_position = np.searchsorted(active_spheres, pair_spheres)
+    pair_groups = active_group[active_position].astype(np.int32, copy=False)
+
+    ratio_m = np.zeros((unique_parameters.shape[0], lmax + 1), dtype=compute_dtype)
+    ratio_n = np.zeros_like(ratio_m)
+    group_indices = np.empty((unique_parameters.shape[0],), dtype=np.complex128)
+    for group_index, row in enumerate(unique_parameters):
+        radius = float(row[0])
+        index = complex(float(row[1]), float(row[2]))
+        ratios = sphere_internal_ratios(lmax, k, radius, index, n_medium)
+        ratio_m[group_index] = np.asarray(ratios[1], dtype=compute_dtype)
+        ratio_n[group_index] = np.asarray(ratios[2], dtype=compute_dtype)
+        group_indices[group_index] = index
+    return pair_groups, ratio_m, ratio_n, group_indices
+
+
 def _compute_internal_field_homogeneous_spheres_cupy(
     field_points: np.ndarray,
     positions: np.ndarray,
@@ -220,56 +322,67 @@ def _compute_internal_field_homogeneous_spheres_cupy(
     compute_dtype: np.dtype,
     accum_dtype: np.dtype,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """CuPy homogeneous-sphere internal field path.
-
-    The current GPU internal-field slice targets the dominant sphere case while
-    keeping layered spheres and spheroids on the established CPU reference
-    path. Mixed clusters therefore still work: sphere subsets can use CuPy
-    while the more specialized particle families retain their validated NumPy
-    kernels until a clearer hotspot justifies porting them.
-    """
+    """Compute homogeneous-sphere internal fields with batched CuPy work."""
     cupy, _ = import_cupy()
     compute_dtype_cp = (
         cupy.complex64 if compute_dtype == np.dtype(np.complex64) else cupy.complex128
     )
     accum_dtype_cp = cupy.complex64 if accum_dtype == np.dtype(np.complex64) else cupy.complex128
-    real_dtype_cp = cupy.float32 if compute_dtype == np.dtype(np.complex64) else cupy.float64
-    eps = real_dtype_cp(1e-12)
+    real_dtype = np.dtype(np.float32 if compute_dtype == np.dtype(np.complex64) else np.float64)
+    real_dtype_cp = cupy.float32 if real_dtype == np.dtype(np.float32) else cupy.float64
 
-    n_points = field_points.shape[0]
-    n_spheres = positions.shape[0]
+    n_points = int(field_points.shape[0])
+    pair_points, pair_spheres = _sphere_internal_point_pairs(
+        field_points,
+        positions,
+        radii,
+        classification=classification,
+        particle_indices=particle_indices,
+    )
+    inside = np.zeros((n_points,), dtype=bool)
+    if pair_points.size == 0:
+        empty = np.zeros((n_points, 3), dtype=accum_dtype)
+        return empty, empty.copy(), inside
+    inside[np.unique(pair_points)] = True
+
+    pair_groups, ratio_m_host, ratio_n_host, group_indices = _sphere_internal_material_tables(
+        pair_spheres=pair_spheres,
+        radii=radii,
+        n_particle=n_particle,
+        lmax=lmax,
+        k=k,
+        n_medium=n_medium,
+        compute_dtype=compute_dtype,
+    )
+    coeffs_host = np.asarray(coeffs, dtype=compute_dtype)
     e = np.zeros((n_points, 3), dtype=accum_dtype)
-    h = np.zeros((n_points, 3), dtype=accum_dtype)
-    inside = np.zeros(n_points, dtype=bool)
-    sphere_iter: Iterable[int] = range(n_spheres)
-    if show_progress:
-        sphere_iter = tqdm(sphere_iter, desc="Internal field (spheres)", leave=True)
-
-    pts_gpu = cupy.asarray(field_points, dtype=real_dtype_cp)
-    coeffs_gpu = cupy.asarray(np.asarray(coeffs, dtype=compute_dtype), dtype=compute_dtype_cp)
+    h = np.zeros_like(e)
+    has_overlap = np.unique(pair_points).size != pair_points.size
     mode_by_l = mode_indices_by_l(lmax)
+    pair_batch_size = 65_536
+    progress = (
+        tqdm(total=pair_points.size, desc="Internal field (sphere-point pairs)", unit="pair")
+        if show_progress
+        else None
+    )
 
-    for j_sphere in sphere_iter:
-        if classification is None:
-            r_full = field_points - positions[j_sphere]
-            r2_full = np.sum(r_full * r_full, axis=1)
-            idx = np.flatnonzero(r2_full < (radii[j_sphere] ** 2))
-        else:
-            particle_index = (
-                j_sphere if particle_indices is None else int(particle_indices[j_sphere])
-            )
-            idx = classification.points_for_particle(particle_index)
-        if idx.size == 0:
-            continue
+    for start in range(0, pair_points.size, pair_batch_size):
+        stop = min(pair_points.size, start + pair_batch_size)
+        point_batch = pair_points[start:stop]
+        sphere_batch = pair_spheres[start:stop]
+        group_batch = pair_groups[start:stop]
 
-        inside[idx] = True
-        idx_gpu = cupy.asarray(idx, dtype=cupy.int64)
-        center_gpu = cupy.asarray(positions[j_sphere], dtype=real_dtype_cp)
-        rvec = pts_gpu[idx_gpu] - center_gpu[None, :]
-        r2 = cupy.sum(rvec * rvec, axis=1)
-        r = cupy.sqrt(r2)
-        r_safe = cupy.where(r < eps, eps, r)
+        rvec_host = np.asarray(
+            field_points[point_batch] - positions[sphere_batch], dtype=real_dtype
+        )
+        r_host = np.linalg.norm(rvec_host.astype(np.float64, copy=False), axis=1)
+        r_safe_host = np.where(r_host < 1.0e-12, 1.0e-12, r_host)
+        k_group = k * (group_indices[group_batch] / n_medium)
+        kr_host = np.asarray(k_group * r_safe_host, dtype=compute_dtype)
 
+        rvec = cupy.asarray(rvec_host, dtype=real_dtype_cp)
+        r_safe = cupy.asarray(r_safe_host, dtype=real_dtype_cp)
+        kr = cupy.asarray(kr_host, dtype=compute_dtype_cp)
         x = rvec[:, 0]
         y = rvec[:, 1]
         z = rvec[:, 2]
@@ -277,28 +390,27 @@ def _compute_internal_field_homogeneous_spheres_cupy(
         ct = z / r_safe
         st = rho / r_safe
         phi = cupy.arctan2(y, x)
-
-        e_r = cupy.stack([st * cupy.cos(phi), st * cupy.sin(phi), ct], axis=1)
-        e_theta = cupy.stack([ct * cupy.cos(phi), ct * cupy.sin(phi), -st], axis=1)
-        e_phi = cupy.stack([-cupy.sin(phi), cupy.cos(phi), cupy.zeros_like(phi)], axis=1)
+        cos_phi = cupy.cos(phi)
+        sin_phi = cupy.sin(phi)
+        e_r = cupy.stack([st * cos_phi, st * sin_phi, ct], axis=1)
+        e_theta = cupy.stack([ct * cos_phi, ct * sin_phi, -st], axis=1)
+        e_phi = cupy.stack([-sin_phi, cos_phi, cupy.zeros_like(phi)], axis=1)
         pi_all, tau_all, p_all = spherical_functions_trigon(ct, st, lmax, xp=cupy, return_plm=True)
 
-        n_s = complex(n_particle[j_sphere])
-        k_s = k * (n_s / n_medium)
-        kr = compute_dtype_cp(k_s) * r_safe.astype(compute_dtype_cp, copy=False)
-        ratios = sphere_internal_ratios(lmax, k, radii[j_sphere], n_s, n_medium)
-        ratio_m = ratios[1]
-        ratio_n = ratios[2]
-
-        e_gpu = cupy.zeros((idx.size, 3), dtype=accum_dtype_cp)
-        h_gpu = cupy.zeros_like(e_gpu)
+        e_batch = cupy.zeros((stop - start, 3), dtype=accum_dtype_cp)
+        h_batch = cupy.zeros_like(e_batch)
+        n_s_batch = cupy.asarray(group_indices[group_batch], dtype=compute_dtype_cp)
+        minus_i = cupy.asarray(-1j, dtype=compute_dtype_cp)
         for l in range(1, lmax + 1):
-            z_l = cupy.asarray(spherical_jn(l, asnumpy(kr)), dtype=compute_dtype_cp)
+            z_l = cupy.asarray(
+                np.asarray(spherical_jn(l, kr_host), dtype=compute_dtype),
+                dtype=compute_dtype_cp,
+            )
             dz_l = cupy.asarray(
-                spherical_jn(l, asnumpy(kr), derivative=True), dtype=compute_dtype_cp
+                np.asarray(spherical_jn(l, kr_host, derivative=True), dtype=compute_dtype),
+                dtype=compute_dtype_cp,
             )
             dxxz = z_l + kr * dz_l
-
             m_vals, abs_m, n1_idx, n2_idx = mode_by_l[l - 1]
             m_all, n_all = build_internal_mode_tensors(
                 l=l,
@@ -316,16 +428,42 @@ def _compute_internal_field_homogeneous_spheres_cupy(
                 kr=kr,
                 compute_dtype=compute_dtype,
             )
-            a_int = coeffs_gpu[j_sphere, n1_idx].astype(compute_dtype_cp, copy=False) * ratio_m[l]
-            b_int = coeffs_gpu[j_sphere, n2_idx].astype(compute_dtype_cp, copy=False) * ratio_n[l]
-            e_gpu += contract_modes(a_int, m_all).astype(accum_dtype_cp, copy=False)
-            e_gpu += contract_modes(b_int, n_all).astype(accum_dtype_cp, copy=False)
-            h_gpu += (-1j * n_s) * contract_modes(a_int, n_all).astype(accum_dtype_cp, copy=False)
-            h_gpu += (-1j * n_s) * contract_modes(b_int, m_all).astype(accum_dtype_cp, copy=False)
+            m_all = m_all.astype(compute_dtype_cp, copy=False)
+            n_all = n_all.astype(compute_dtype_cp, copy=False)
 
-        e[idx] += asnumpy(e_gpu).astype(accum_dtype, copy=False)
-        h[idx] += asnumpy(h_gpu).astype(accum_dtype, copy=False)
+            # Keep small integer gathers on the host.  Some CuPy/Windows
+            # combinations can stall on tiny multidimensional index kernels.
+            a_int = cupy.asarray(
+                coeffs_host[sphere_batch[:, None], n1_idx] * ratio_m_host[group_batch, l][:, None],
+                dtype=compute_dtype_cp,
+            )
+            b_int = cupy.asarray(
+                coeffs_host[sphere_batch[:, None], n2_idx] * ratio_n_host[group_batch, l][:, None],
+                dtype=compute_dtype_cp,
+            )
+            am = cupy.einsum("bm,bmc->bc", a_int, m_all)
+            bn = cupy.einsum("bm,bmc->bc", b_int, n_all)
+            an = cupy.einsum("bm,bmc->bc", a_int, n_all)
+            bm = cupy.einsum("bm,bmc->bc", b_int, m_all)
+            e_batch += am.astype(accum_dtype_cp, copy=False)
+            e_batch += bn.astype(accum_dtype_cp, copy=False)
+            h_factor = minus_i * n_s_batch
+            h_batch += (h_factor[:, None] * an).astype(accum_dtype_cp, copy=False)
+            h_batch += (h_factor[:, None] * bm).astype(accum_dtype_cp, copy=False)
 
+        e_batch_host = asnumpy(e_batch).astype(accum_dtype, copy=False)
+        h_batch_host = asnumpy(h_batch).astype(accum_dtype, copy=False)
+        if has_overlap:
+            np.add.at(e, point_batch, e_batch_host)
+            np.add.at(h, point_batch, h_batch_host)
+        else:
+            e[point_batch] = e_batch_host
+            h[point_batch] = h_batch_host
+        if progress is not None:
+            progress.update(stop - start)
+
+    if progress is not None:
+        progress.close()
     return e, h, inside
 
 
