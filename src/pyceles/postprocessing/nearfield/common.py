@@ -73,7 +73,9 @@ def build_internal_mode_tensors(
         m_vals_arr = np.asarray(m_vals, dtype=np.int32)
         abs_m_arr = np.asarray(abs_m, dtype=np.int32)
 
-    pref = 1.0 / np.sqrt(2.0 * l * (l + 1.0))
+    real_scalar = np.float32 if np.dtype(compute_dtype) == np.dtype(np.complex64) else np.float64
+    pref = real_scalar(1.0 / np.sqrt(2.0 * l * (l + 1.0)))
+    ll = real_scalar(l * (l + 1.0))
     z_over_kr = z_l / kr
     dxxz_over_kr = dxxz / kr
 
@@ -84,8 +86,8 @@ def build_internal_mode_tensors(
     else:
         # CuPy reaches this helper through two different layouts:
         # the scattered-field batching path keeps an explicit `(sphere, batch, m)`
-        # structure, while the homogeneous-sphere internal-field path works on a
-        # single sphere's internal points and therefore sees only `(m, batch)`.
+        # structure, while radial internal-field paths work on one flat pair
+        # batch and therefore see only `(m, batch)`.
         # Handle both so the common algebra stays centralized instead of
         # duplicating near-identical tensor assembly in each GPU kernel owner.
         p_sel = p_all[l][abs_m_arr]
@@ -106,7 +108,7 @@ def build_internal_mode_tensors(
     theta_phi_m = impi[:, :, None] * e_theta[:, None, :] - tau_lm[:, :, None] * e_phi[:, None, :]
     m_all = pref * z_l[:, None, None] * theta_phi_m * eimphi[:, :, None]
 
-    radial_er = (l * (l + 1.0) * z_over_kr)[:, None] * p_lm
+    radial_er = (ll * z_over_kr)[:, None] * p_lm
     mix_theta_phi = tau_lm[:, :, None] * e_theta[:, None, :] + impi[:, :, None] * e_phi[:, None, :]
     n_all = (
         pref

@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, fields, replace
 from types import MappingProxyType
-from typing import Literal, cast, overload
+from typing import Literal, overload
 
 import numpy as np
 
@@ -648,30 +648,35 @@ class ParticleCollection(Sequence[Particle]):
         out.setflags(write=False)
         return out
 
-    def scalar_attribute(
-        self,
-        particle_indices: Sequence[int] | np.ndarray,
-        name: str,
-        *,
-        dtype: np.dtype,
-    ) -> np.ndarray:
-        """Gather one scalar archetype attribute for selected instances."""
-        selected = np.asarray(particle_indices, dtype=np.int64).reshape(-1)
-        if selected.size and (int(selected.min()) < 0 or int(selected.max()) >= len(self)):
-            raise IndexError("particle index out of range")
-        values = np.asarray(
-            [getattr(archetype, name) for archetype in self._archetypes], dtype=dtype
-        )
-        return values[self._archetype_indices[selected].astype(np.int64, copy=False)]
-
     def homogeneous_sphere_arrays(
         self,
+        particle_indices: Sequence[int] | np.ndarray | None = None,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
-        """Expose a sphere compute view without changing the storage model."""
-        if not all(isinstance(archetype, Sphere) for archetype in self._archetypes):
-            return None
-        sphere_archetypes = cast(tuple[Sphere, ...], self._archetypes)
-        archetype_ids = self._archetype_indices.astype(np.int64, copy=False)
+        """Expose a homogeneous-sphere compute view for all or selected instances."""
+        if particle_indices is None:
+            sphere_archetypes = tuple(
+                archetype for archetype in self._archetypes if isinstance(archetype, Sphere)
+            )
+            if len(sphere_archetypes) != len(self._archetypes):
+                return None
+            selected_positions = self._positions
+            inverse = self._archetype_indices
+        else:
+            selected = np.asarray(particle_indices, dtype=np.int64).reshape(-1)
+            if selected.size and (int(selected.min()) < 0 or int(selected.max()) >= len(self)):
+                raise IndexError("particle index out of range")
+            selected_positions = self._positions[selected]
+            selected_archetype_ids = self._archetype_indices[selected]
+            used_archetype_ids, inverse = np.unique(selected_archetype_ids, return_inverse=True)
+            selected_archetypes = tuple(
+                self._archetypes[int(archetype_id)] for archetype_id in used_archetype_ids
+            )
+            sphere_archetypes = tuple(
+                archetype for archetype in selected_archetypes if isinstance(archetype, Sphere)
+            )
+            if len(sphere_archetypes) != used_archetype_ids.size:
+                return None
+
         radii_by_archetype = np.asarray(
             [float(archetype.radius) for archetype in sphere_archetypes], dtype=np.float64
         )
@@ -679,9 +684,11 @@ class ParticleCollection(Sequence[Particle]):
             [complex(archetype.refractive_index) for archetype in sphere_archetypes],
             dtype=np.complex128,
         )
-        radii = radii_by_archetype[archetype_ids]
-        refractive_indices = refractive_indices_by_archetype[archetype_ids]
-        return self._positions, radii, refractive_indices
+        return (
+            selected_positions,
+            radii_by_archetype[inverse],
+            refractive_indices_by_archetype[inverse],
+        )
 
     def outer_refractive_index_batches(self) -> Iterator[np.ndarray]:
         """Yield unique outer refractive indices for validation."""

@@ -263,6 +263,28 @@ def test_array_particle_collection_owns_read_only_inputs_and_materializes_lazily
         particles.circumscribing_radii[0] = 99.0
 
 
+def test_homogeneous_sphere_arrays_support_mixed_collection_subsets():
+    particles = ParticleCollection.from_particles(
+        [
+            Sphere(position=(0.0, 0.0, 0.0), radius=10.0, refractive_index=1.5 + 0.0j),
+            LayeredSphere(
+                position=(20.0, 0.0, 0.0),
+                layer_radii=(5.0, 10.0),
+                layer_refractive_indices=(1.7 + 0.0j, 1.3 + 0.01j),
+            ),
+            Sphere(position=(40.0, 0.0, 0.0), radius=12.0, refractive_index=1.6 + 0.02j),
+        ]
+    )
+
+    assert particles.homogeneous_sphere_arrays() is None
+    sphere_arrays = particles.homogeneous_sphere_arrays(np.array([2, 0], dtype=np.int64))
+    assert sphere_arrays is not None
+    positions, radii, refractive_indices = sphere_arrays
+    np.testing.assert_array_equal(positions, np.array([[40.0, 0.0, 0.0], [0.0, 0.0, 0.0]]))
+    np.testing.assert_array_equal(radii, np.array([12.0, 10.0]))
+    np.testing.assert_array_equal(refractive_indices, np.array([1.6 + 0.02j, 1.5 + 0.0j]))
+
+
 @pytest.mark.parametrize(
     ("builder", "kwargs", "match"),
     [

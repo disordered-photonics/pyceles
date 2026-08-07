@@ -45,10 +45,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pairwise-vs-MLFMM scaling benchmark.
 
 ### Changed
-- CuPy homogeneous-sphere internal near fields now batch sphere-point pairs,
-  retain angular contractions on the device, and avoid per-sphere transfers.
-  The NumPy reference path and specialized mixed-particle fallbacks are
-  unchanged.
+- Internal-field evaluation for homogeneous and layered spheres now uses
+  pair-batched ownership on NumPy and CuPy, retains CuPy angular contractions
+  on the device, and reuses shared archetype radial data. CuPy batches remain
+  capped at 65,536 pairs but adapt to multipole order, dtype, and guarded
+  allocator headroom without changing the process-wide pool limit. NumPy
+  complex64 mode algebra stays in the requested compute precision rather than
+  being promoted by float64 angular scalars; spheroid internal fields remain
+  NumPy-only.
 - Finite near-field progress now reports one backend-independent physical-stage
   bar (`initial`, `scattered`, and, when sampled points enter particles,
   `internal`). The fused CuPy scattered-field kernel no longer emits a

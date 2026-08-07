@@ -176,10 +176,10 @@ uses available CuPy postprocessing paths by default. Current CuPy slices include
 - scattered far-field SVWF-to-PWP assembly,
 - scattered near-field,
 - dominant Gaussian/general initial-field paths,
-- homogeneous-sphere internal fields.
+- homogeneous-sphere internal fields,
+- layered-sphere internal fields with host-evaluated shell radial functions and device angular/mode contractions.
 
-Layered-sphere and spheroid internal-field cases still fall back to the
-NumPy reference implementation.
+Spheroid internal-field cases still use the NumPy reference implementation.
 
 ## Periodic workflows
 
