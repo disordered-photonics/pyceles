@@ -45,6 +45,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pairwise-vs-MLFMM scaling benchmark.
 
 ### Changed
+- Finite near-field progress now reports one backend-independent physical-stage
+  bar (`initial`, `scattered`, and, when sampled points enter particles,
+  `internal`). The fused CuPy scattered-field kernel no longer emits a
+  one-step placeholder bar. Multi-source projection reports real channel
+  progress for genuinely quadrature-based source batches, and far-field
+  conversion bars now use a descriptive label.
 - Breaking: finite-beam directional power decomposition now uses immutable
   `PowerFluxDecomposition` values with explicit field names instead of mutable
   `P_*` dictionaries. Completed channel payloads validate coefficient, RHS, and

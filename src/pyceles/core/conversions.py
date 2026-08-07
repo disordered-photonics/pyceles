@@ -265,7 +265,7 @@ def _svwf_to_pwp_common(
 
     sphere_iter: Iterable[int] = range(Ns)
     if show_progress:
-        sphere_iter = tqdm(sphere_iter, desc="PWP (SVWF->PWP)")
+        sphere_iter = tqdm(sphere_iter, desc="Far field (SVWF->PWP)")
 
     for jS in sphere_iter:
         rj = positions[jS]

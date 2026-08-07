@@ -155,7 +155,9 @@ def compute_scattered_field(
     """Evaluate the exterior scattered field from outgoing SVWF coefficients.
 
     CuPy work uses the fused point-owned RawKernel; the CPU path remains the
-    reference implementation.
+    reference implementation. Direct CuPy calls do not fabricate progress
+    subdivisions for that single fused launch; the high-level finite near-field
+    workflow reports it as the `scattered` stage instead.
     """
     backend_name = str(backend).lower()
     if backend_name == "cupy":
@@ -170,7 +172,6 @@ def compute_scattered_field(
             lut=lut,
             active_mask=active_mask,
             batch_size=batch_size,
-            show_progress=show_progress,
             compute_dtype=compute_dtype,
             accum_dtype=accum_dtype,
         )
@@ -316,7 +317,6 @@ def _compute_scattered_field_cupy(
     lut: NearFieldRadialLUT | None,
     active_mask: np.ndarray | None,
     batch_size: int,
-    show_progress: bool,
     compute_dtype: npt.DTypeLike,
     accum_dtype: npt.DTypeLike,
     compute_magnetic: bool = True,
@@ -364,27 +364,21 @@ def _compute_scattered_field_cupy(
     from .scattered_cupy import compute_scattered_field_cupy_fused
 
     # The fused evaluator is one GPU launch over all particles and points.
-    # Splitting it only to update a progress bar would add synchronization and
-    # undermine the reason for using the fused path, so expose the launch as
-    # one logical unit instead.
-    with tqdm(
-        total=1,
-        desc="Scattered field (CuPy)",
-        disable=not show_progress,
-    ) as scattered_pbar:
-        e_eval, h_eval = compute_scattered_field_cupy_fused(
-            field_points=pts_eval,
-            positions=pos,
-            coeffs=coeffs,
-            k=float(k),
-            lmax=int(lmax),
-            n_medium=complex(n_medium),
-            lut=lut,
-            compute_dtype=compute_dtype_np,
-            accum_dtype=accum_dtype_np,
-            compute_magnetic=bool(compute_magnetic),
-        )
-        scattered_pbar.update(1)
+    # Do not split it or manufacture a one-step progress bar: high-level
+    # near-field workflows report this as one physical stage, while direct
+    # low-level calls simply execute the fused launch.
+    e_eval, h_eval = compute_scattered_field_cupy_fused(
+        field_points=pts_eval,
+        positions=pos,
+        coeffs=coeffs,
+        k=float(k),
+        lmax=int(lmax),
+        n_medium=complex(n_medium),
+        lut=lut,
+        compute_dtype=compute_dtype_np,
+        accum_dtype=accum_dtype_np,
+        compute_magnetic=bool(compute_magnetic),
+    )
     if idx_eval is None:
         return e_eval, h_eval
     e = empty
@@ -419,7 +413,8 @@ def compute_scattered_electric_field(
 
     The CuPy path omits magnetic-field arithmetic and storage inside the fused
     kernel. The NumPy path evaluates the canonical full reference and discards
-    its magnetic result.
+    its magnetic result. As with the full fused CuPy evaluator, high-level
+    progress is reported by the enclosing near-field stage bar.
     """
     if str(backend).lower() == "cupy":
         e, _ = _compute_scattered_field_cupy(
@@ -433,7 +428,6 @@ def compute_scattered_electric_field(
             lut=lut,
             active_mask=active_mask,
             batch_size=batch_size,
-            show_progress=show_progress,
             compute_dtype=compute_dtype,
             accum_dtype=accum_dtype,
             compute_magnetic=False,

@@ -95,6 +95,10 @@ print(E_total.shape, H_total.shape)
 ```
 
 The `NearFieldSlice` object records the grid axes, the selected plane, and field maps for initial/scattered/internal/total components where available.
+With `show_progress=True`, the high-level finite near-field API reports these
+physical evaluation stages on one progress bar. Backend-specific low-level
+kernels may use different internal work units; fused GPU launches are not split
+solely to manufacture finer progress updates.
 
 ## HDF5 output
 

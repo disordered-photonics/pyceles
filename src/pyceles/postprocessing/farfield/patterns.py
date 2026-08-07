@@ -158,7 +158,7 @@ def _scattered_field_plane_wave_pattern_cupy(
         try:
             from tqdm.auto import tqdm
 
-            sphere_pbar = tqdm(total=Ns, desc="PWP (SVWF->PWP)")
+            sphere_pbar = tqdm(total=Ns, desc="Far field (SVWF->PWP)")
         except Exception:
             sphere_pbar = None
     else:

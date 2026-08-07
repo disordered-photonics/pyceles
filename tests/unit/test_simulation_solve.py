@@ -477,3 +477,55 @@ def test_normalize_warm_start_mapping_is_label_aligned() -> None:
             unknowns=6,
             dtype=np.dtype(np.complex128),
         )
+
+
+def test_multi_source_projection_progress_counts_channels(monkeypatch):
+    sim = _single_sphere_sim(verbose=True)
+    progress_calls: list[tuple[tuple[str, ...], str, str]] = []
+
+    def fake_tqdm(iterable, *, desc, unit):
+        values = tuple(iterable)
+        progress_calls.append((values, str(desc), str(unit)))
+        return values
+
+    class _Prepared:
+        def __init__(self) -> None:
+            self.coupling = object()
+
+        def apply_A(self, x: np.ndarray) -> np.ndarray:
+            return np.asarray(x)
+
+        def rhs_Tb(self, b: np.ndarray) -> np.ndarray:
+            return np.asarray(b)
+
+    monkeypatch.setattr(sim_solve, "tqdm", fake_tqdm)
+    monkeypatch.setattr(sim_solve, "print_startup_logo_once", lambda: None)
+    monkeypatch.setattr(sim_solve, "_source_projection_uses_angular_grid", lambda source: True)
+    monkeypatch.setattr(sim_solve, "prepare_matvec", lambda **kwargs: _Prepared())
+    monkeypatch.setattr(
+        sim_solve,
+        "project_source_to_svwf",
+        lambda positions, lmax, source, **kwargs: np.zeros(
+            (positions.shape[0], sim_solve.n_modes(lmax)), dtype=np.complex128
+        ),
+    )
+    monkeypatch.setattr(
+        sim_solve,
+        "solve_linear_system",
+        lambda A_mv, b, **kwargs: LinearSolveResult(
+            x=np.zeros_like(np.asarray(b), dtype=np.complex128),
+            info=np.zeros((2,), dtype=int),
+            residual_norm=np.zeros((2,), dtype=float),
+            relative_residual=np.zeros((2,), dtype=float),
+            iterations=np.ones((2,), dtype=int),
+            method="gmres",
+            residual_history=[None, None],
+            rhs_count=2,
+        ),
+    )
+
+    sim_solve.solve_sources_core(sim, {"left": _plane_wave(), "right": _plane_wave()})
+
+    assert progress_calls == [
+        (("left", "right"), "Source projection", "channel"),
+    ]

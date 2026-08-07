@@ -509,10 +509,10 @@ def _solve_sources_impl(
             )
 
     source_polar_angles, source_azimuthal_angles = cfg.source_angular_grids()
+    uses_source_grid = any(
+        _source_projection_uses_angular_grid(labeled_sources[label]) for label in labels
+    )
     if cfg.verbose:
-        uses_source_grid = any(
-            _source_projection_uses_angular_grid(labeled_sources[label]) for label in labels
-        )
         if uses_source_grid:
             print(
                 "Source angular grid:"
@@ -523,7 +523,10 @@ def _solve_sources_impl(
 
     initial_coeffs: dict[str, np.ndarray] = {}
     source_projection_t0 = time.perf_counter()
-    for label in labels:
+    source_labels: Iterable[str] = labels
+    if cfg.verbose and n_channels > 1 and uses_source_grid:
+        source_labels = tqdm(labels, desc="Source projection", unit="channel")
+    for label in source_labels:
         src = labeled_sources[label]
         coeff = project_source_to_svwf(
             positions,
