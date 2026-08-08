@@ -121,7 +121,7 @@ def main() -> None:
     parser.add_argument("--n-medium", type=float, default=1.0)
     parser.add_argument("--n-beta", type=int, default=3601)
     parser.add_argument("--n-alpha", type=int, default=180)
-    parser.add_argument("--dx", type=float, default=80.0, help="Near-field grid spacing.")
+    parser.add_argument("--dx", type=float, default=40.0, help="Near-field grid spacing.")
     parser.add_argument(
         "--source-model",
         choices=("planewave", "gaussian"),

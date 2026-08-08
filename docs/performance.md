@@ -143,9 +143,16 @@ Measured on a laptop with:
 - CPU: `13th Gen Intel(R) Core(TM) i7-13850HX`,
 - GPU: `NVIDIA RTX 2000 Ada Generation Laptop GPU`,
 - Python: `3.12.10`,
-- NumPy/SciPy: `2.4.2 / 1.17.1`,
+- NumPy/SciPy: `2.5.1 / 1.18.0`,
 - CuPy: `14.0.1`,
 - script: `examples/profile_pyceles_phases.py`.
+
+The finite and periodic values below were refreshed on 2026-08-08 as
+arithmetic means of two consecutive complete suite runs. Most phases varied
+by less than 5%; the largest meaningful spread was the short finite CuPy
+`complex128` near-field phase (1.63 s versus 1.40 s). Very short setup
+phases can show larger relative percentages while remaining negligible in
+absolute time.
 
 For a reproducible refresh of the supported finite and periodic cases, run the
 public suite orchestrator from a clean Python process:
@@ -155,14 +162,20 @@ python examples/profile_pyceles_benchmark_suite.py --suite all
 ```
 
 Each case gets its own output directory and subprocess, and the root
-`suite_manifest.json` records the exact commands. Use `--suite finite` or
+`suite_manifest.json` records the exact commands. The finite suite runs all
+four backend/precision rows with one far-field and near-field postprocessing
+pass per row. If `--finite-cache-mode both` is selected, each finite profile
+also measures cache-on and cache-off solves while reusing the primary solved
+result for postprocessing. The pairwise periodic cache-on cases provide the
+documented NumPy and CuPy xy/xz field maps; cache-off, direct, Rayleigh, and
+periodized-MLFMM cases remain solve-focused. Use `--suite finite` or
 `--suite periodic` for one family, `--skip-postprocessing` when only
 solve/preparation data is wanted, and `--skip-periodic-cache-off` when only
 cache-on periodic rows are needed. Every CuPy case is run to convergence. The
 slow NumPy periodic cache-off, Rayleigh, and periodized-MLFMM cases are
 one-iteration reference probes whose linear-solve time can be extrapolated
-from equivalent converged runs. `--reuse-existing` resumes a refresh without
-rerunning completed profile summaries.
+from equivalent converged runs. `--reuse-existing` resumes a refresh and
+reruns a case if its existing summary is missing a required field phase.
 
 Common benchmark parameters:
 
@@ -178,22 +191,22 @@ Solve/preparation wall times from the default suite are:
 
 | backend and dtype | solver phase |
 | --- | ---: |
-| NumPy, `complex128/complex128` | `428.2 s` |
-| NumPy, `complex64/complex128` | `357.4 s` |
-| CuPy, `complex128/complex128` | `5.52 s` |
-| CuPy, `complex64/complex128` | `0.45 s` |
+| NumPy, `complex128/complex128` | `383.3 s` |
+| NumPy, `complex64/complex128` | `321.3 s` |
+| CuPy, `complex128/complex128` | `5.55 s` |
+| CuPy, `complex64/complex128` | `0.48 s` |
 
-Postprocessing is measured only on representative paths. These measurements
-use the same profile geometry and angular/field grids; they are not repeated
-for every solver row because the field kernels do not depend on the solver
-iteration count.
+Postprocessing is measured once for every finite backend/precision row. These
+measurements use the same profile geometry and angular/field grids; cache-mode
+and solver comparisons do not repeat the field kernels because they do not
+depend on the solver iteration count.
 
 | finite backend and dtype | far field | near field |
 | --- | ---: | ---: |
-| NumPy, `complex128/complex128` | `20.9 s` | `41.8 s` |
-| NumPy, `complex64/complex128` | `18.1 s` | `33.8 s` |
-| CuPy, `complex128/complex128` | `1.81 s` | `4.13 s` |
-| CuPy, `complex64/complex128` | `0.72 s` | `2.23 s` |
+| NumPy, `complex128/complex128` | `20.57 s` | `165.96 s` |
+| NumPy, `complex64/complex128` | `19.35 s` | `132.67 s` |
+| CuPy, `complex128/complex128` | `2.03 s` | `1.52 s` |
+| CuPy, `complex64/complex128` | `0.93 s` | `1.18 s` |
 
 
 The "no preconditioner" wording refers to a regular-grid block preconditioner
@@ -261,27 +274,28 @@ Common benchmark parameters:
 
 Measured phase wall times on the same laptop/GPU are grouped by the work they
 represent. `Solve` is the complete solve phase; `prep` includes operator
-preparation and, where applicable, W-cache generation. The one-iteration rows
-are marked explicitly and are not presented as converged solves.
+and method-specific preparation, including W-cache generation or Rayleigh
+preparation where applicable. The one-iteration rows are marked explicitly
+and are not presented as converged solves.
 
 | coupling and backend | mode | prep | linear solve | solve | iterations |
 | --- | --- | ---: | ---: | ---: | ---: |
-| Pairwise, NumPy | W cache on | `120.2 s` | `598.3 s` | `718.7 s` | 160 |
-| Pairwise, CuPy | W cache on | `10.0 s` | `5.5 s` | `15.7 s` | 160 |
-| Pairwise, CuPy | W cache off | `0.03 s` | `580.8 s` | `581.0 s` | 160 |
-| Pairwise, NumPy | W cache off | `0.03 s` | `247.0 s` | `247.2 s` | 1* |
-| Periodized MLFMM, CuPy | cache off | `7.4 s` | `125.1 s` | `132.7 s` | 160 |
-| Periodized MLFMM, NumPy | cache off | `186.4 s` | `13.0 s` | `199.6 s` | 1* |
-| Rayleigh, CuPy | cache off | `0.03 s` | `47.3 s` | `47.5 s` | 160 |
-| Rayleigh, NumPy | cache off | `0.03 s` | `44.5 s` | `44.6 s` | 1* |
+| Pairwise, NumPy | W cache on | `124.5 s` | `549.9 s` | `674.4 s` | 160 |
+| Pairwise, CuPy | W cache on | `8.4 s` | `5.4 s` | `13.8 s` | 160 |
+| Pairwise, CuPy | W cache off | `0.03 s` | `602.5 s` | `602.6 s` | 160 |
+| Pairwise, NumPy | W cache off | `0.03 s` | `246.3 s` | `246.4 s` | 1* |
+| Periodized MLFMM, CuPy | cache off | `6.7 s` | `117.0 s` | `123.7 s` | 160 |
+| Periodized MLFMM, NumPy | cache off | `184.4 s` | `12.9 s` | `197.3 s` | 1* |
+| Rayleigh, CuPy | cache off | `2.7 s` | `43.0 s` | `45.7 s` | 160 |
+| Rayleigh, NumPy | cache off | `49.4 s` | `1.6 s` | `50.9 s` | 1* |
 
 The direct validation rows, with field work and the final residual check
 skipped, were:
 
 | backend | W-block generation | assembly | factorization | solve phase |
 | --- | ---: | ---: | ---: | ---: |
-| NumPy | `121.4 s` | `3.51 s` | `22.9 s` | `148.3 s` |
-| CuPy | `8.0 s` | `1.86 s` | `43.7 s` | `53.7 s` |
+| NumPy | `124.7 s` | `3.56 s` | `22.4 s` | `150.9 s` |
+| CuPy | `5.72 s` | `1.77 s` | `43.8 s` | `51.3 s` |
 
 `*` One-iteration reference probe. Extrapolating its linear-solve time is
 useful for rough planning, but preparation and convergence behavior still need
@@ -293,8 +307,8 @@ field maps:
 
 | periodic backend and dtype | xy slice | xz slice |
 | --- | ---: | ---: |
-| NumPy, `complex128/complex128` | `1.5 s` | `1318.9 s` |
-| CuPy, `complex128/complex128` | `1.5 s` | `115.7 s` |
+| NumPy, `complex128/complex128` | `1.5 s` | `1458.5 s` |
+| CuPy, `complex128/complex128` | `1.4 s` | `47.9 s` |
 
 
 The direct dense rows are validation paths, not the intended scaling route. The

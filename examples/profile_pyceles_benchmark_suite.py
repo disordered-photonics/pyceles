@@ -3,11 +3,13 @@
 The individual profiling scripts remain useful for targeted work.  This small
 orchestrator provides one reproducible command for refreshing the documented
 finite and periodic snapshots without sharing CuPy allocator state between
-cases.  Solver/preparation cases are kept separate from a small set of
-representative postprocessing cases.  Periodic NumPy cache-off is retained as
-a one-iteration reference probe: its full solve is
-impractical for the 500-particle profile geometry, but its single-iteration
-cost remains useful for extrapolation.
+cases.  Every finite backend/dtype case includes one far/near postprocessing
+run; when both cache modes are requested, the profile script reuses the
+primary solved result instead of repeating that field work.  Pairwise periodic
+W-cache-on cases likewise include the documented NumPy and CuPy field maps.
+Periodic NumPy cache-off is retained as a one-iteration reference probe: its
+full solve is impractical for the 500-particle profile geometry, but its
+single-iteration cost remains useful for extrapolation.
 """
 
 from __future__ import annotations
@@ -26,10 +28,30 @@ def _repo_root() -> Path:
 
 def _case_has_summary(case: dict[str, Any]) -> bool:
     output_dir = Path(case["output_dir"])
-    return any(
-        (output_dir / filename).is_file()
-        for filename in ("profile_summary.json", "profile_periodic_summary.json")
+    summary_name = (
+        "profile_periodic_summary.json"
+        if case["script"] == "profile_pyceles_periodic_phases.py"
+        else "profile_summary.json"
     )
+    summary_path = output_dir / summary_name
+    if not summary_path.is_file():
+        return False
+    required_phases = {str(phase) for phase in case.get("required_phases", ())}
+    if not required_phases:
+        return True
+    try:
+        payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    phases = payload.get("phases", ())
+    if not isinstance(phases, list):
+        return False
+    completed_phases = {
+        str(phase.get("phase")) for phase in phases if isinstance(phase, dict) and "phase" in phase
+    }
+    return required_phases.issubset(completed_phases)
 
 
 def _case(
@@ -39,6 +61,7 @@ def _case(
     arguments: list[str],
     output_dir: Path,
     skipped_reason: str | None = None,
+    required_phases: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     return {
         "name": name,
@@ -46,6 +69,7 @@ def _case(
         "arguments": arguments,
         "output_dir": str(output_dir),
         "skipped_reason": skipped_reason,
+        "required_phases": list(required_phases),
     }
 
 
@@ -73,6 +97,31 @@ def _field_arguments(
     return result
 
 
+def _finite_required_phases(
+    args: argparse.Namespace,
+    *,
+    include_postprocessing: bool,
+) -> tuple[str, ...]:
+    if not include_postprocessing:
+        return ()
+    phases: list[str] = []
+    if not args.skip_farfield:
+        phases.append("farfield")
+    if not args.skip_nearfield:
+        phases.append("nearfield")
+    return tuple(phases)
+
+
+def _periodic_required_phases(
+    args: argparse.Namespace,
+    *,
+    include_postprocessing: bool,
+) -> tuple[str, ...]:
+    if include_postprocessing and not args.skip_nearfield:
+        return ("nearfield_xy", "nearfield_xz")
+    return ()
+
+
 def _build_cases(args: argparse.Namespace, output_root: Path) -> list[dict[str, Any]]:
     cases: list[dict[str, Any]] = []
     if args.suite in ("finite", "all"):
@@ -91,15 +140,17 @@ def _build_cases(args: argparse.Namespace, output_root: Path) -> list[dict[str, 
                     "bicgstab",
                     "--cache-mode",
                     args.finite_cache_mode,
+                    "--dx",
+                    "40",
                     "--out-dir",
                     str(case_dir),
                 ]
-                representative = backend == "cupy" and dtype == "complex64"
+                include_postprocessing = not args.skip_postprocessing
                 command.extend(
                     _field_arguments(
                         args,
                         periodic=False,
-                        include_postprocessing=(representative and not args.skip_postprocessing),
+                        include_postprocessing=include_postprocessing,
                     )
                 )
                 cases.append(
@@ -108,6 +159,10 @@ def _build_cases(args: argparse.Namespace, output_root: Path) -> list[dict[str, 
                         script="profile_pyceles_phases.py",
                         arguments=command,
                         output_dir=case_dir,
+                        required_phases=_finite_required_phases(
+                            args,
+                            include_postprocessing=include_postprocessing,
+                        ),
                     )
                 )
 
@@ -115,7 +170,7 @@ def _build_cases(args: argparse.Namespace, output_root: Path) -> list[dict[str, 
         for backend in ("numpy", "cupy"):
             name = f"periodic_pairwise_{backend}_cache_on"
             case_dir = output_root / name
-            representative = backend == "cupy" and not args.skip_postprocessing
+            include_postprocessing = not args.skip_postprocessing
             cases.append(
                 _case(
                     name=name,
@@ -138,10 +193,14 @@ def _build_cases(args: argparse.Namespace, output_root: Path) -> list[dict[str, 
                         *_field_arguments(
                             args,
                             periodic=True,
-                            include_postprocessing=representative,
+                            include_postprocessing=include_postprocessing,
                         ),
                     ],
                     output_dir=case_dir,
+                    required_phases=_periodic_required_phases(
+                        args,
+                        include_postprocessing=include_postprocessing,
+                    ),
                 )
             )
 
@@ -345,7 +404,7 @@ def main() -> None:
     parser.add_argument(
         "--skip-postprocessing",
         action="store_true",
-        help="Skip the representative near/far postprocessing cases.",
+        help="Skip all finite far/near and periodic near-field postprocessing cases.",
     )
     parser.add_argument("--skip-nearfield", action="store_true")
     parser.add_argument("--skip-farfield", action="store_true")
