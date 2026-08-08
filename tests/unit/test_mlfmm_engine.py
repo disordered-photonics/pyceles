@@ -21,6 +21,7 @@ from pyceles.core.operators.mlfmm import (
     resolve_mlfmm_plan,
 )
 from pyceles.core.operators.mlfmm_directional import (
+    MLFMMDirectionalStructuredTransforms,
     box_outgoing_to_directional,
     directional_anterpolation,
     directional_interpolation,
@@ -61,6 +62,82 @@ def _single_level_fixture() -> tuple[np.ndarray, np.ndarray, int, float]:
     )
     radii = np.full((positions.shape[0],), 80.0, dtype=float)
     return positions, radii, 3, 2.0 * np.pi / 550.0
+
+
+def test_mlfmm_staging_uses_structured_directional_transforms(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both host hierarchy builders use the compact directional representation."""
+
+    positions, radii, lmax, k = _single_level_fixture()
+    partition = build_uniform_mlfmm_partition(
+        positions,
+        particle_circumscribing_radii=radii,
+        depth=1,
+    )
+
+    def _zero_translator(delta, *, directions, **kwargs):
+        del delta, kwargs
+        return np.zeros((np.asarray(directions).shape[0],), dtype=np.complex128)
+
+    monkeypatch.setattr(
+        "pyceles.core.operators.mlfmm._sampled_rokhlin_translator", _zero_translator
+    )
+
+    operators = build_single_level_mlfmm_operators(
+        lmax=lmax,
+        k=k,
+        positions=positions,
+        partition=partition,
+        box_order=64,
+        leaf_map_backend="cupy",
+        build_leaf_maps=False,
+    )
+
+    assert isinstance(operators.directional, MLFMMDirectionalStructuredTransforms)
+    structured_bytes = int(
+        operators.directional.fth_beta.nbytes
+        + operators.directional.fph_beta.nbytes
+        + operators.directional.m_of_scalar.nbytes
+    )
+    dense_bytes = int(
+        2
+        * operators.directional.grid.directions.shape[0]
+        * operators.directional.fth_beta.shape[1]
+        * np.dtype(np.complex128).itemsize
+    )
+    assert structured_bytes < dense_bytes // 50
+
+    multilevel_partition = build_uniform_mlfmm_partition(
+        positions,
+        particle_circumscribing_radii=radii,
+        depth=2,
+    )
+    multilevel = build_multilevel_mlfmm_operators(
+        lmax=lmax,
+        k=k,
+        positions=positions,
+        partition=multilevel_partition,
+        box_order=64,
+        leaf_map_backend="cupy",
+        build_leaf_maps=False,
+        hf_start_level=2,
+    )
+    assert all(
+        isinstance(level.directional, MLFMMDirectionalStructuredTransforms)
+        for level in multilevel.levels
+    )
+
+    numpy = build_single_level_mlfmm_operators(
+        lmax=lmax,
+        k=k,
+        positions=positions,
+        partition=partition,
+        box_order=12,
+        leaf_map_backend="numpy",
+        build_leaf_maps=False,
+    )
+    assert isinstance(numpy.directional, MLFMMDirectionalStructuredTransforms)
 
 
 def _multilevel_fixture() -> tuple[np.ndarray, np.ndarray, int, float]:

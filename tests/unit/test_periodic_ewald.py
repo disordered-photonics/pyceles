@@ -5,14 +5,20 @@ import pytest
 
 import pyceles as pcl
 from pyceles.core.periodic.ewald import (
+    EwaldShellWorkspace,
     PeriodicEwaldConvergenceError,
+    _same_plane_real_sum,
+    _same_plane_reciprocal_sum,
     _self_correction,
+    _shifted_real_sum,
+    _shifted_reciprocal_sum,
     default_ewald_eta,
     ewald_structural_constant_2d,
     ewald_structural_sums_2d,
     ewald_structural_sums_2d_batch,
     select_ewald_eta,
 )
+from pyceles.core.periodic.scalar import real_integral_sequence, scaled_real_integral_sequence
 from pyceles.core.periodic.shells import (
     accumulate_lattice_shell_series,
     make_lattice_shell_control,
@@ -242,6 +248,98 @@ def test_ewald_structural_batch_supports_high_mlfmm_closure_degree() -> None:
 
     assert values.shape == (1, 13, 25)
     assert np.all(np.isfinite(values))
+
+
+def test_reciprocal_high_closure_normalization_avoids_factorial_overflow() -> None:
+    """High MLFMM closure orders must not materialize factorial roots."""
+    k = 2.0 * np.pi / 550.0
+    lattice = pcl.RectangularLattice2D(5317.0, 5317.0)
+    workspace = EwaldShellWorkspace(
+        lattice=lattice,
+        k=k,
+        k_parallel=np.array([4.0e-4, -2.0e-4]),
+        eta=2.5e-3,
+    )
+
+    for degree in (172, 342):
+        same_plane = _same_plane_reciprocal_sum(
+            degree,
+            0,
+            k=k,
+            k_parallel=workspace.k_parallel,
+            lattice=lattice,
+            eta=workspace.eta,
+            shells=0,
+            max_shells=1,
+            c_xy=np.array([35.0, -22.0]),
+            workspace=workspace,
+        )
+        shifted = _shifted_reciprocal_sum(
+            degree,
+            0,
+            rvec=np.array([35.0, -22.0, 11.0]),
+            k=k,
+            k_parallel=workspace.k_parallel,
+            lattice=lattice,
+            eta=workspace.eta,
+            shells=0,
+            max_shells=1,
+            workspace=workspace,
+        )
+
+        assert np.isfinite(same_plane)
+        assert np.isfinite(shifted)
+
+
+def test_scaled_real_integral_sequence_matches_low_order_reference() -> None:
+    k = 2.0 * np.pi / 550.0
+    eta = 2.5e-3
+    radii = np.array([300.0, 1200.0, 5317.0], dtype=float)
+
+    for degree in (0, 1, 4, 12):
+        reference = real_integral_sequence(degree, eta, k, radii) * (0.5 * k * radii) ** (
+            degree + 1
+        )
+        actual = scaled_real_integral_sequence(degree, eta, k, radii)
+        np.testing.assert_allclose(actual, reference, rtol=2e-13, atol=0.0)
+
+
+def test_same_plane_real_sum_supports_order_342_closure() -> None:
+    k = 2.0 * np.pi / 550.0
+    lattice = pcl.RectangularLattice2D(5317.0, 5317.0)
+    workspace = EwaldShellWorkspace(
+        lattice=lattice,
+        k=k,
+        k_parallel=np.array([4.0e-4, -2.0e-4]),
+        eta=2.5e-3,
+    )
+
+    value = _same_plane_real_sum(
+        342,
+        0,
+        k=k,
+        k_parallel=workspace.k_parallel,
+        lattice=lattice,
+        eta=workspace.eta,
+        shells=1,
+        max_shells=1,
+        workspace=workspace,
+    )
+    assert np.isfinite(value)
+
+    shifted = _shifted_real_sum(
+        342,
+        0,
+        rvec=np.array([8750.0, 0.0, 8750.0]),
+        k=k,
+        k_parallel=workspace.k_parallel,
+        lattice=lattice,
+        eta=workspace.eta,
+        shells=1,
+        max_shells=1,
+        workspace=workspace,
+    )
+    assert np.isfinite(shifted)
 
 
 def test_shifted_delta_sequence_batched_matches_scalar_rows() -> None:

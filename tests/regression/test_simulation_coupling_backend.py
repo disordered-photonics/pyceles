@@ -9,6 +9,7 @@ from pyceles.core.operators import (
     MLFMMOptions,
     prepare_matvec,
 )
+from pyceles.core.operators.mlfmm_directional import MLFMMDirectionalStructuredTransforms
 from pyceles.core.particles import ParticleCollection, spheres_from_arrays
 from pyceles.simulation import Simulation, SimulationConfig
 from pyceles.simulation.solve import solve_sources_core
@@ -160,8 +161,9 @@ def test_prepare_matvec_mlfmm_internal_arrays_stay_complex128(
         assert len(coupling.single_level.receive) == 0
         assert coupling.single_level.leaf_groups[0].aggregation is not None
         assert coupling.single_level.leaf_groups[0].aggregation.dtype == np.dtype(np.complex128)
-        assert coupling.single_level.directional.Fth.dtype == np.dtype(np.complex128)
-        assert coupling.single_level.directional.Gth.dtype == np.dtype(np.complex128)
+        assert isinstance(coupling.single_level.directional, MLFMMDirectionalStructuredTransforms)
+        assert coupling.single_level.directional.fth_beta.dtype == np.dtype(np.complex128)
+        assert coupling.single_level.directional.fph_beta.dtype == np.dtype(np.complex128)
         assert next(iter(coupling.single_level.offset_diagonals.values())).dtype == np.dtype(
             np.complex128
         )
@@ -174,8 +176,9 @@ def test_prepare_matvec_mlfmm_internal_arrays_stay_complex128(
         assert coupling.multilevel.leaf_groups[0].aggregation.dtype == np.dtype(np.complex128)
         leaf_level = coupling.multilevel.leaf_level
         leaf_data = coupling.multilevel.levels[leaf_level]
-        assert leaf_data.directional.Fth.dtype == np.dtype(np.complex128)
-        assert leaf_data.directional.Gth.dtype == np.dtype(np.complex128)
+        assert isinstance(leaf_data.directional, MLFMMDirectionalStructuredTransforms)
+        assert leaf_data.directional.fth_beta.dtype == np.dtype(np.complex128)
+        assert leaf_data.directional.fph_beta.dtype == np.dtype(np.complex128)
         assert next(iter(leaf_data.offset_diagonals.values())).dtype == np.dtype(np.complex128)
 
 

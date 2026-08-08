@@ -24,12 +24,13 @@ from .base import CouplingOperator
 from .coupling_pairwise import PairwiseCouplingOperator
 from .mlfmm_directional import (
     MLFMMDirectionalInterpolation,
-    MLFMMDirectionalTransforms,
+    MLFMMDirectionalStructuredTransforms,
+    MLFMMDirectionalTransformData,
     box_outgoing_to_directional,
     directional_anterpolation,
     directional_interpolation,
     directional_to_box_regular,
-    directional_transforms,
+    structured_directional_transforms,
 )
 from .mlfmm_partition import (
     MLFMMBox,
@@ -133,7 +134,7 @@ class MLFMMSingleLevelOperators:
     box_order: int
     translator_order: int
     grid_order: int
-    directional: MLFMMDirectionalTransforms
+    directional: MLFMMDirectionalTransformData
     leaf_cell_coords: dict[int, tuple[int, int, int]]
     far_offset_batches: dict[tuple[int, int, int], tuple[np.ndarray, np.ndarray]]
     offset_diagonals: dict[tuple[int, int, int], np.ndarray]
@@ -155,7 +156,7 @@ class MLFMMLevelOperators:
     box_order: int
     translator_order: int
     grid_order: int
-    directional: MLFMMDirectionalTransforms
+    directional: MLFMMDirectionalTransformData
     far_offset_batches: dict[tuple[int, int, int], tuple[np.ndarray, np.ndarray]]
     offset_diagonals: dict[tuple[int, int, int], np.ndarray]
 
@@ -1035,6 +1036,32 @@ def _transfer_schedule_nbytes(transfers: tuple[MLFMMTransferOperators, ...]) -> 
     }
 
 
+def _directional_transform_nbytes(transforms: MLFMMDirectionalTransformData) -> int:
+    """Return persistent host bytes for one dense or structured directional payload."""
+
+    grid = transforms.grid
+    total = int(
+        np.asarray(grid.alpha, dtype=np.float64).nbytes
+        + np.asarray(grid.beta, dtype=np.float64).nbytes
+        + np.asarray(grid.beta_weights, dtype=np.float64).nbytes
+        + np.asarray(grid.directions, dtype=np.float64).nbytes
+        + np.asarray(grid.weights, dtype=np.float64).nbytes
+        + np.asarray(grid.reflection_permutation, dtype=np.int64).nbytes
+    )
+    if isinstance(transforms, MLFMMDirectionalStructuredTransforms):
+        return int(
+            total
+            + np.asarray(transforms.fth_beta, dtype=np.complex128).nbytes
+            + np.asarray(transforms.fph_beta, dtype=np.complex128).nbytes
+            + np.asarray(transforms.m_of_scalar, dtype=np.int32).nbytes
+        )
+    return int(
+        total
+        + np.asarray(transforms.Fth, dtype=np.complex128).nbytes
+        + np.asarray(transforms.Fph, dtype=np.complex128).nbytes
+    )
+
+
 def _single_level_memory_diagnostics(
     *,
     lmax: int,
@@ -1060,6 +1087,7 @@ def _single_level_memory_diagnostics(
             for diagonal in operators.offset_diagonals.values()
         )
     )
+    directional_transform_bytes = _directional_transform_nbytes(operators.directional)
     return {
         "stage": "single_level",
         "plan_summary": dict(plan_summary),
@@ -1079,15 +1107,7 @@ def _single_level_memory_diagnostics(
             "full_far_hierarchy_bytes": int(n_leaves * (8 * ndir + 2 * box_nm) * far_itemsize),
         },
         "prepared_bytes": {
-            "directional_transform_bytes": int(
-                np.asarray(operators.directional.grid.directions, dtype=float).nbytes
-                + np.asarray(operators.directional.grid.weights, dtype=float).nbytes
-                + np.asarray(
-                    operators.directional.grid.reflection_permutation, dtype=np.int64
-                ).nbytes
-                + np.asarray(operators.directional.Fth, dtype=np.complex128).nbytes
-                + np.asarray(operators.directional.Fph, dtype=np.complex128).nbytes
-            ),
+            "directional_transform_bytes": int(directional_transform_bytes),
             "same_level_offset_index_bytes": int(offset_index_bytes),
             "same_level_offset_diagonal_bytes": int(offset_diagonal_bytes),
         },
@@ -1123,14 +1143,7 @@ def _multilevel_memory_diagnostics(
         )
     )
     level_transform_bytes = int(
-        sum(
-            np.asarray(level.directional.grid.directions, dtype=float).nbytes
-            + np.asarray(level.directional.grid.weights, dtype=float).nbytes
-            + np.asarray(level.directional.grid.reflection_permutation, dtype=np.int64).nbytes
-            + np.asarray(level.directional.Fth, dtype=np.complex128).nbytes
-            + np.asarray(level.directional.Fph, dtype=np.complex128).nbytes
-            for level in operators.levels
-        )
+        sum(_directional_transform_nbytes(level.directional) for level in operators.levels)
     )
     level_offset_index_bytes = int(
         sum(
@@ -1749,10 +1762,12 @@ def build_single_level_mlfmm_operators(
     )
     shared_grid_order = max(int(shared_box_order), int(shared_translator_order))
     out_dtype = np.dtype(dtype)
-    directional = directional_transforms(int(shared_box_order), grid_order=int(shared_grid_order))
     aggregation: tuple[np.ndarray, ...]
     receive: tuple[np.ndarray, ...]
     backend = str(leaf_map_backend).strip().lower()
+    directional = structured_directional_transforms(
+        int(shared_box_order), grid_order=int(shared_grid_order)
+    )
     if backend == "numpy":
         if bool(build_leaf_maps):
             leaf_groups = _build_numpy_leaf_apply_groups_dense(
@@ -1983,7 +1998,7 @@ def build_multilevel_mlfmm_operators(
         near_neighbors_by_level.append(_coords_near_neighbors(coords_by_level[level]))
 
     levels: list[MLFMMLevelOperators] = []
-    dummy_directional = directional_transforms(1, grid_order=1)
+    dummy_directional = structured_directional_transforms(1, grid_order=1)
     level_progress = (
         tqdm(range(leaf_level + 1), desc="[MLFMM] build levels", unit="level")
         if show_progress
@@ -2054,7 +2069,7 @@ def build_multilevel_mlfmm_operators(
                     f"L{level}: directional basis order={level_box_order}",
                     refresh=True,
                 )
-            directional = directional_transforms(
+            directional = structured_directional_transforms(
                 int(level_box_order), grid_order=int(level_box_order)
             )
         if level == 0:

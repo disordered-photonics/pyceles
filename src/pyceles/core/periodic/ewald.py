@@ -18,10 +18,11 @@ from pyceles.core.spherical import (
 
 from .scalar import (
     chebyshev_shell_indices,
-    factorial_int,
-    real_integral_sequence,
+    log_factorial,
+    log_spherical_factorial_root,
     reciprocal_gamma_with_zero_mask,
     same_plane_z_tolerance,
+    scaled_real_integral_sequence,
     structural_sum_m_normalization,
 )
 from .shells import (
@@ -42,6 +43,24 @@ from .structural import (
 )
 
 Array = np.ndarray
+
+
+def _log_abs(values: Array) -> Array:
+    magnitude = np.abs(values)
+    out = np.full(magnitude.shape, -np.inf, dtype=float)
+    np.log(magnitude, out=out, where=magnitude > 0.0)
+    return out
+
+
+def _unit_phase(values: Array) -> Array:
+    return np.asarray(np.exp(1j * np.angle(np.asarray(values))), dtype=np.complex128)
+
+
+def _log_real_power(value: float | Array, exponent: int) -> Array:
+    power = int(exponent)
+    if power == 0:
+        return np.zeros_like(np.asarray(value, dtype=float), dtype=float)
+    return power * _log_abs(np.asarray(value, dtype=float))
 
 
 @dataclass(frozen=True)
@@ -670,8 +689,11 @@ def _same_plane_reciprocal_sum(
     m = int(order)
     if (l - abs(m)) % 2:
         return 0.0 + 0.0j
-    root = math.sqrt(2 * l + 1) * math.sqrt(factorial_int(l - m)) * math.sqrt(factorial_int(l + m))
-    prefactor = (1j) ** m * root / (lattice.area * float(k) * (2.0 * float(k)) ** l)
+    base_log = (
+        log_spherical_factorial_root(l, m)
+        - math.log(lattice.area * float(k))
+        - l * math.log(2.0 * float(k))
+    )
 
     ws = _ensure_workspace(
         workspace=workspace,
@@ -700,13 +722,15 @@ def _same_plane_reciprocal_sum(
         gamma_fun = ws.upper_gamma(shell, int(n_values[-1]))
         inner = np.zeros_like(gamma, dtype=np.complex128)
         for n in n_values:
-            denom = (
-                factorial_int(n) * factorial_int((l + m) // 2 - n) * factorial_int((l - m) // 2 - n)
+            log_weight = base_log - (
+                log_factorial(n) + log_factorial((l + m) // 2 - n) + log_factorial((l - m) // 2 - n)
             )
-            inner += (
-                gamma_fun[:, int(n)] * gamma ** (2 * int(n) - 1) * rho ** (l - 2 * int(n)) / denom
-            )
-        return complex(np.sum(np.exp(-1j * (kgt @ cxy)) * np.exp(1j * m * phi) * inner))
+            q = 2 * int(n) - 1
+            p = l - 2 * int(n)
+            log_abs = log_weight + _log_abs(gamma_fun[:, int(n)])
+            log_abs += q * _log_abs(gamma) + _log_real_power(rho, p)
+            inner += np.exp(log_abs) * _unit_phase(gamma_fun[:, int(n)]) * _unit_phase(gamma) ** q
+        return complex((1j) ** m * np.sum(np.exp(-1j * (kgt @ cxy)) * np.exp(1j * m * phi) * inner))
 
     acc = accumulate_lattice_shell_series(
         control=control,
@@ -714,7 +738,7 @@ def _same_plane_reciprocal_sum(
         zero=0.0 + 0.0j,
         evaluate_shell=shell_increment,
     )
-    return complex(prefactor * acc)
+    return complex(acc)
 
 
 def _same_plane_real_sum(
@@ -742,13 +766,14 @@ def _same_plane_real_sum(
         eta=float(eta),
     )
 
-    frac = (
-        -1j
-        * ((-1.0) ** ((l + m) // 2))
-        / (2.0 ** (l + 1) * math.pi * factorial_int((l - m) // 2) * factorial_int((l + m) // 2))
+    log_prefactor = (
+        log_spherical_factorial_root(l, m)
+        - (l + 1) * math.log(2.0)
+        - math.log(math.pi)
+        - log_factorial((l - m) // 2)
+        - log_factorial((l + m) // 2)
     )
-    root = math.sqrt(2 * l + 1) * math.sqrt(factorial_int(l - m)) * math.sqrt(factorial_int(l + m))
-    prefactor = frac * root
+    prefactor = -1j * ((-1.0) ** ((l + m) // 2)) * math.exp(log_prefactor)
 
     control = make_lattice_shell_control(
         shells=shells,
@@ -764,7 +789,7 @@ def _same_plane_real_sum(
         if radii.size == 0:
             return 0.0 + 0.0j
         phi = shell_data.phi_xy
-        integral = (float(k) * float(k) / 4.0) ** (l + 0.5) * real_integral_sequence(
+        scaled_integral = scaled_real_integral_sequence(
             l,
             float(eta),
             float(k),
@@ -774,9 +799,8 @@ def _same_plane_real_sum(
             np.sum(
                 shell_data.phase_xy
                 * np.exp(1j * m * (phi + math.pi))
-                / float(k)
-                * (2.0 * radii / float(k)) ** l
-                * integral
+                * scaled_integral
+                / (float(k) * radii)
             )
         )
 
@@ -840,8 +864,12 @@ def _shifted_reciprocal_sum(
         lattice=lattice,
         eta=float(eta),
     )
-    root = math.sqrt(2 * l + 1) * math.sqrt(factorial_int(l - m)) * math.sqrt(factorial_int(l + m))
-    prefactor = (-1j) ** m * root / (((-2.0) ** l) * lattice.area * float(k) * float(k))
+    base_log = (
+        log_spherical_factorial_root(l, m)
+        - l * math.log(2.0)
+        - math.log(lattice.area)
+        - 2.0 * math.log(float(k))
+    )
     min_recip_shell = ws.minimum_reciprocal_shell_for_propagating_orders(rayleigh_margin=1.0e-12)
     control = make_lattice_shell_control(
         shells=shells,
@@ -869,16 +897,17 @@ def _shifted_reciprocal_sum(
                 continue
             terms = np.zeros_like(rho, dtype=np.complex128)
             for s in s_values:
-                denom = (
-                    factorial_int(2 * int(n) - int(s))
-                    * factorial_int(int(s) - int(n))
-                    * factorial_int((l + abs(m) - int(s)) // 2)
-                    * factorial_int((l - abs(m) - int(s)) // 2)
+                log_weight = base_log - (
+                    log_factorial(2 * int(n) - int(s))
+                    + log_factorial(int(s) - int(n))
+                    + log_factorial((l + abs(m) - int(s)) // 2)
+                    + log_factorial((l - abs(m) - int(s)) // 2)
                 )
-                terms += (
-                    (-float(k) * c[2]) ** (2 * int(n) - int(s))
-                    * (rho / float(k)) ** (l - int(s))
-                    / denom
+                q = 2 * int(n) - int(s)
+                p = l - int(s)
+                z = -float(k) * c[2]
+                terms += np.sign(z) ** q * np.exp(
+                    log_weight + _log_real_power(z, q) + _log_real_power(rho / float(k), p)
                 )
             inner[:, int(n)] = terms
         delta_order = int(n_values[-1])
@@ -904,7 +933,7 @@ def _shifted_reciprocal_sum(
         zero=0.0 + 0.0j,
         evaluate_shell=shell_increment,
     )
-    return complex(prefactor * acc)
+    return complex(((-1j) ** m) * ((-1.0) ** l) * acc)
 
 
 def _shifted_real_sum(
@@ -963,14 +992,19 @@ def _shifted_real_sum(
                 plm[l, abs(m)] * np.exp(1j * m * float(phi_i)) / structural_sum_m_normalization(m)
             )
 
-        integral = (0.5) ** (l + 1.5) * real_integral_sequence(
+        scaled_integral = scaled_real_integral_sequence(
             l,
             float(eta),
             float(k),
             radii,
         )
         return complex(
-            np.sum(np.exp(1j * (shifts_xy @ kp)) * (float(k) * radii) ** l * angular * integral)
+            np.sum(
+                np.exp(1j * (shifts_xy @ kp))
+                * angular
+                * scaled_integral
+                / (math.sqrt(2.0) * float(k) * radii)
+            )
         )
 
     acc = accumulate_lattice_shell_series(
@@ -1224,31 +1258,31 @@ def ewald_structural_sums_2d_batch(
                 for m in range(-degree, degree + 1):
                     if (degree - abs(m)) % 2:
                         continue
-                    root = (
-                        np.sqrt(2 * degree + 1.0)
-                        * math.sqrt(factorial_int(degree - m))
-                        * math.sqrt(factorial_int(degree + m))
-                    )
-                    prefactor = (
-                        (1j) ** m * root / (lattice.area * float(k) * (2.0 * float(k)) ** degree)
+                    base_log = (
+                        log_spherical_factorial_root(degree, m)
+                        - math.log(lattice.area * float(k))
+                        - degree * math.log(2.0 * float(k))
                     )
                     n_vals = np.arange((degree - abs(m)) // 2 + 1, dtype=np.int64)
                     inner = np.zeros_like(gamma, dtype=np.complex128)
                     for n in n_vals:
-                        denom = (
-                            factorial_int(n)
-                            * factorial_int((degree + m) // 2 - n)
-                            * factorial_int((degree - m) // 2 - n)
+                        log_weight = base_log - (
+                            log_factorial(n)
+                            + log_factorial((degree + m) // 2 - n)
+                            + log_factorial((degree - m) // 2 - n)
                         )
+                        q = 2 * int(n) - 1
+                        p = degree - 2 * int(n)
+                        log_abs = log_weight + _log_abs(gamma_fun[:, int(n)])
+                        log_abs += q * _log_abs(gamma) + _log_real_power(rho, p)
                         inner += (
-                            gamma_fun[:, int(n)]
-                            * gamma ** (2 * int(n) - 1)
-                            * rho ** (degree - 2 * int(n))
-                            / denom
+                            np.exp(log_abs)
+                            * _unit_phase(gamma_fun[:, int(n)])
+                            * _unit_phase(gamma) ** q
                         )
                     vec = exp_m_phi[m] * inner
                     inc[same_mask, degree, m + offset] += (
-                        structural_sum_m_normalization(m) * prefactor * (phase @ vec)
+                        structural_sum_m_normalization(m) * (1j) ** m * (phase @ vec)
                     )
 
         shifted_mask = ~same_mask
@@ -1269,15 +1303,11 @@ def ewald_structural_sums_2d_batch(
             gamma_over_k = gamma / float(k)
             for degree in range(order + 1):
                 for m in range(-degree, degree + 1):
-                    root = (
-                        np.sqrt(2 * degree + 1.0)
-                        * math.sqrt(factorial_int(degree - m))
-                        * math.sqrt(factorial_int(degree + m))
-                    )
-                    prefactor = (
-                        (-1j) ** m
-                        * root
-                        / (((-2.0) ** degree) * lattice.area * float(k) * float(k))
+                    base_log = (
+                        log_spherical_factorial_root(degree, m)
+                        - degree * math.log(2.0)
+                        - math.log(lattice.area)
+                        - 2.0 * math.log(float(k))
                     )
                     n_vals = np.arange(0, degree - abs(m) + 1, dtype=np.int64)
                     if n_vals.size == 0:
@@ -1296,16 +1326,19 @@ def ewald_structural_sums_2d_batch(
                             continue
                         terms = np.zeros((cz_shifted.size, rho.size), dtype=np.complex128)
                         for s in s_vals:
-                            denom = (
-                                factorial_int(2 * int(n) - int(s))
-                                * factorial_int(int(s) - int(n))
-                                * factorial_int((degree + abs(m) - int(s)) // 2)
-                                * factorial_int((degree - abs(m) - int(s)) // 2)
+                            log_weight = base_log - (
+                                log_factorial(2 * int(n) - int(s))
+                                + log_factorial(int(s) - int(n))
+                                + log_factorial((degree + abs(m) - int(s)) // 2)
+                                + log_factorial((degree - abs(m) - int(s)) // 2)
                             )
-                            terms += (
-                                (-float(k) * cz_shifted[:, None]) ** (2 * int(n) - int(s))
-                                * (rho[None, :] / float(k)) ** (degree - int(s))
-                                / denom
+                            q = 2 * int(n) - int(s)
+                            p = degree - int(s)
+                            z = -float(k) * cz_shifted[:, None]
+                            terms += np.sign(z) ** q * np.exp(
+                                log_weight
+                                + _log_real_power(z, q)
+                                + _log_real_power(rho[None, :] / float(k), p)
                             )
                         acc += (
                             gamma_over_k[None, :] ** (2 * int(n) - 1)
@@ -1315,7 +1348,8 @@ def ewald_structural_sums_2d_batch(
                     vec = exp_m_phi[m][None, :] * acc
                     vals = (
                         structural_sum_m_normalization(m)
-                        * prefactor
+                        * ((-1j) ** m)
+                        * ((-1.0) ** degree)
                         * np.sum(
                             phase * vec,
                             axis=1,
@@ -1360,26 +1394,19 @@ def ewald_structural_sums_2d_batch(
             exp_m_phi = {m: np.exp(1j * m * phi) for m in range(-order, order + 1)}
             kz_r = float(k) * radii_valid
             for degree in range(order + 1):
-                integral = (0.5) ** (degree + 1.5) * real_integral_sequence(
+                scaled_integral = scaled_real_integral_sequence(
                     degree, float(eta), float(k), radii_valid
                 )
-                radial = phase_shell * kz_r**degree * integral
+                radial = -1j / math.sqrt(math.pi) * phase_shell * scaled_integral / kz_r
                 for m in range(-degree, degree + 1):
-                    angular = (
-                        plm[degree, abs(m), :] * exp_m_phi[m] / structural_sum_m_normalization(m)
-                    )
-                    contrib = -1j * np.sqrt(2.0 / np.pi) * radial * angular
+                    contrib = radial * plm[degree, abs(m), :] * exp_m_phi[m]
                     if (degree - abs(m)) % 2:
                         # Exact same-plane real-space terms vanish for odd
                         # degree-|m|.  Apply this per point, not per batch:
                         # regular xz/yz diagnostic slices often contain a
                         # same-z row embedded in otherwise shifted rows.
                         contrib = np.where(same_plane_points[point_idx], 0.0 + 0.0j, contrib)
-                    np.add.at(
-                        inc[:, degree, m + offset],
-                        point_idx,
-                        structural_sum_m_normalization(m) * contrib,
-                    )
+                    np.add.at(inc[:, degree, m + offset], point_idx, contrib)
         return inc
 
     real_sums = np.asarray(

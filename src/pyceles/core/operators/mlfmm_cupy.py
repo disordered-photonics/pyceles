@@ -38,7 +38,11 @@ from .mlfmm import (
     MLFMMSingleLevelOperators,
     MLFMMTransferOperators,
 )
-from .mlfmm_directional import MLFMMDirectionalTransforms, structured_directional_transforms
+from .mlfmm_directional import (
+    MLFMMDirectionalStructuredTransforms,
+    MLFMMDirectionalTransformData,
+    structured_directional_transforms,
+)
 from .mlfmm_partition import MLFMMPartition
 from .mode_metadata import (
     mode_m_table,
@@ -1263,7 +1267,7 @@ def _host_directional_grid_size(grid: Any) -> tuple[int, int, int]:
 
 
 def _directional_structured_host_view(
-    transforms: MLFMMDirectionalTransforms | CuPyHostDirectionalTransformsData,
+    transforms: MLFMMDirectionalTransformData | CuPyHostDirectionalTransformsData,
 ) -> tuple[CuPyHostDirectionalGridData, np.ndarray, np.ndarray, np.ndarray]:
     """Return compact structured factors for one host directional transform."""
 
@@ -1280,8 +1284,12 @@ def _directional_structured_host_view(
         )
         return grid, fth_beta, fph_beta, m_of_scalar
 
-    structured = structured_directional_transforms(
-        int(transforms.box_order), grid_order=int(transforms.grid.order)
+    structured = (
+        transforms
+        if isinstance(transforms, MLFMMDirectionalStructuredTransforms)
+        else structured_directional_transforms(
+            int(transforms.box_order), grid_order=int(transforms.grid.order)
+        )
     )
     grid_raw = structured.grid
     n_alpha = int(grid_raw.alpha.size)
@@ -1321,7 +1329,7 @@ def _beta_reflection_permutation(
 
 
 def _upload_directional_transforms(
-    transforms: MLFMMDirectionalTransforms | CuPyHostDirectionalTransformsData, *, cupy: Any
+    transforms: MLFMMDirectionalTransformData | CuPyHostDirectionalTransformsData, *, cupy: Any
 ) -> CuPyDirectionalTransformsData:
     grid, fth_beta, fph_beta, m_of_scalar = _directional_structured_host_view(transforms)
     n_alpha, n_beta, n_dir = _host_directional_grid_size(grid)
@@ -1536,12 +1544,16 @@ def _copy_batches_host(
 
 
 def _copy_directional_host(
-    transforms: MLFMMDirectionalTransforms,
+    transforms: MLFMMDirectionalTransformData,
 ) -> CuPyHostDirectionalTransformsData:
     """Extract separable directional factors into a compact host payload."""
 
-    structured = structured_directional_transforms(
-        int(transforms.box_order), grid_order=int(transforms.grid.order)
+    structured = (
+        transforms
+        if isinstance(transforms, MLFMMDirectionalStructuredTransforms)
+        else structured_directional_transforms(
+            int(transforms.box_order), grid_order=int(transforms.grid.order)
+        )
     )
     n_alpha = int(structured.grid.alpha.size)
     n_beta = int(structured.grid.beta.size)

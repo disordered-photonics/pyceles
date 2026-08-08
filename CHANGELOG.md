@@ -121,6 +121,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   GMRES for periodic systems, reflecting their measured convergence behavior.
 
 ### Fixed
+- High-order periodic Ewald reciprocal structural sums now evaluate their
+  factorial normalizations in log space, avoiding integer-to-float overflow
+  when large MLFMM closures are prepared.
+- High-order periodic Ewald real-space structural sums now advance a scaled
+  radial recurrence, avoiding overflow and underflow from powers that cancel
+  in the final structural coefficient.
+- CuPy MLFMM host staging now builds separable directional transforms from the
+  outset instead of materializing dense sampled-direction matrices only to
+  discard them during device upload. NumPy and CuPy MLFMM hierarchies now use
+  the same structured representation, avoiding quartic transform-memory
+  growth.
 - Independent iterative multi-RHS solves now reuse the finalized per-RHS
   diagnostics and backend-native solution columns instead of applying the
   operator again solely to rebuild the combined result.

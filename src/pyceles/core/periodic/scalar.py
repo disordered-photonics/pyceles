@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from functools import cache
 
 import numpy as np
 from scipy import special
@@ -70,6 +71,24 @@ def factorial_int(value: int | np.integer) -> int:
     return math.factorial(int(value))
 
 
+@cache
+def log_factorial(value: int | np.integer) -> float:
+    """Return ``log(value!)`` without constructing the factorial integer."""
+    return float(math.lgamma(float(int(value)) + 1.0))
+
+
+@cache
+def log_spherical_factorial_root(degree: int, order: int) -> float:
+    """Return the log of the normalized spherical factorial root."""
+    l = int(degree)
+    m = int(order)
+    if l < 0 or abs(m) > l:
+        raise ValueError(f"Expected degree >= |order| >= 0, got {(degree, order)!r}.")
+    return float(
+        0.5 * math.log(2.0 * l + 1.0) + 0.5 * log_factorial(l - m) + 0.5 * log_factorial(l + m)
+    )
+
+
 def structural_sum_m_normalization(order: int) -> float:
     """Return pyceles's scalar structural-sum normalization for azimuthal order `M`."""
     m = int(order)
@@ -94,6 +113,40 @@ def reciprocal_gamma_with_zero_mask(k: float, rho: Array) -> tuple[Array, Array]
 def reciprocal_gamma(k: float, rho: Array) -> Array:
     """Return reciprocal ``gamma = sqrt(k^2-rho^2)`` with the Ewald zero guard."""
     return reciprocal_gamma_with_zero_mask(k, rho)[0]
+
+
+def scaled_real_integral_sequence(degree: int, eta: float, k: float, radii: Array) -> Array:
+    """Return the Ewald radial recurrence with its cancelling powers folded in.
+
+    If ``I_j`` denotes the recurrence used by :func:`real_integral_sequence`,
+    this helper returns ``(k*r/2) ** (degree + 1) * I_{degree + 1}`` directly.
+    """
+    l = int(degree)
+    r = np.asarray(radii, dtype=float).reshape(-1)
+    if np.any(r <= 0.0):
+        raise ValueError("Real-space Ewald radii must be positive.")
+
+    k_f = float(k)
+    eta_f = float(eta)
+    x = k_f * r
+    alpha = k_f * k_f / (4.0 * eta_f * eta_f)
+    root_alpha = np.sqrt(alpha)
+    wofz = special.wofz(root_alpha + 1j * x / (2.0 * root_alpha))
+    exp_term = np.exp(alpha - x * x / (4.0 * alpha))
+
+    # w_j = (x / 2)^j I_j. The first two values simplify exactly.
+    w_prev2 = math.sqrt(math.pi) * exp_term * wofz.imag
+    w_prev1 = math.sqrt(math.pi) * exp_term * wofz.real
+    if l == 0:
+        return np.asarray(w_prev1, dtype=np.float64)
+
+    source = exp_term / root_alpha
+    source_ratio = x / (2.0 * alpha)
+    for idx in range(2, l + 2):
+        current = ((2.0 * idx - 3.0) / x) * w_prev1 - w_prev2 + source
+        w_prev2, w_prev1 = w_prev1, current
+        source = source * source_ratio
+    return np.asarray(w_prev1, dtype=np.float64)
 
 
 def real_integral_sequence(degree: int, eta: float, k: float, radii: Array) -> Array:

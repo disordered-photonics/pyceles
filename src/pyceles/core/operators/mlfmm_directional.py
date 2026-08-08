@@ -89,6 +89,10 @@ class MLFMMDirectionalStructuredTransforms:
     m_of_scalar: Array
 
 
+MLFMMDirectionalTransformData = MLFMMDirectionalTransforms | MLFMMDirectionalStructuredTransforms
+"""Directional transform payload accepted by the MLFMM host hierarchy."""
+
+
 @dataclass(frozen=True)
 class MLFMMDirectionalInterpolation:
     """Interpolation matrix between two sampled directional grids."""
@@ -479,10 +483,13 @@ def box_outgoing_to_directional_structured(
 
 
 def box_outgoing_to_directional(
-    transforms: MLFMMDirectionalTransforms,
+    transforms: MLFMMDirectionalTransformData,
     box_state: Array,
 ) -> tuple[Array, Array, Array, Array]:
     """Map one outgoing box SVWF state to sampled physical directional channels."""
+
+    if isinstance(transforms, MLFMMDirectionalStructuredTransforms):
+        return box_outgoing_to_directional_structured(transforms, box_state)
 
     coeffs = np.asarray(box_state, dtype=np.complex128).reshape(-1)
     nscl = transforms.Fth.shape[1]
@@ -561,13 +568,22 @@ def directional_to_box_regular_structured(
 
 
 def directional_to_box_regular(
-    transforms: MLFMMDirectionalTransforms,
+    transforms: MLFMMDirectionalTransformData,
     a_theta: Array,
     a_phi: Array,
     b_theta: Array,
     b_phi: Array,
 ) -> Array:
     """Map sampled physical directional channels to one regular box SVWF state."""
+
+    if isinstance(transforms, MLFMMDirectionalStructuredTransforms):
+        return directional_to_box_regular_structured(
+            transforms,
+            a_theta,
+            a_phi,
+            b_theta,
+            b_phi,
+        )
 
     a_theta_arr, a_phi_arr, b_theta_arr, b_phi_arr = apply_directional_reflection(
         transforms.grid.reflection_permutation,
@@ -812,6 +828,7 @@ __all__ = [
     "MLFMMDirectionalGrid",
     "MLFMMDirectionalInterpolation",
     "MLFMMDirectionalStructuredTransforms",
+    "MLFMMDirectionalTransformData",
     "MLFMMDirectionalTransforms",
     "apply_directional_reflection",
     "box_outgoing_to_directional",
