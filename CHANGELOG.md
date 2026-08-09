@@ -10,14 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Added experimental NumPy and CuPy periodized MLFMM paths for rectangular
   two-dimensional cells through `coupling_backend="mlfmm"` and
-  `PeriodicOptions(method="ewald")`. Ewald is used once on the CPU to prepare
-  sampled coarse-box lattice closures; finite non-well-separated images descend
-  through the existing hierarchy, leaving repeated applies mesh-free and
-  independent of particle-pair Ewald or Rayleigh caches. The CuPy path reuses
-  the established complex128 sampled-far traversal and one shared compute-dtype
-  exact-leaf RawKernel for central-cell and boundary-image interactions. Its
-  regular-wave leaf-center LUT remains bounded to the leaf scale even when the
-  exact image-interaction Hankel LUT spans multiple cell lengths.
+  `PeriodicOptions(method="ewald")`. Same-plane Ewald and vertically shifted
+  reciprocal structural sums prepare sampled coarse-box lattice closures;
+  finite non-well-separated images descend through the existing hierarchy,
+  leaving repeated applies mesh-free and independent of particle-pair periodic
+  caches. The CuPy path reuses the established complex128 sampled-far traversal
+  and one shared compute-dtype exact-leaf RawKernel for central-cell and
+  boundary-image interactions.
 - Added an opt-in hybrid periodic coupling method (`method="rayleigh"`) for
   NumPy and CuPy. It evaluates a particle-safe vertical near band with exact
   Ewald sums, reuses one exact periodic self block, and applies vertically far
@@ -386,6 +385,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   repeated rebuilds during MLFMM preparation.
 - Host-side directional MLFMM transforms now use the canonical normalized
   Legendre recurrence, avoiding non-finite values in shallow/high-order plans.
+- Periodic MLFMM now chooses its lattice-closure level from the near-image
+  separation margins of the actual occupied box offsets, reducing exposure to
+  unnecessarily high structural orders and ill-conditioned boundary-image
+  removal. Shifted structural tables and sampled diagonals are prepared in
+  batches, and non-finite closures fail before Krylov iteration.
+- Hybrid Rayleigh coupling and periodic in-slab near fields now scope automatic
+  Ewald preparation to the resolved exact-near vertical band, avoiding unstable
+  tall-cell probes and non-finite exact-near caches.
+- Simulation workflows now reject non-finite solver coefficients before
+  postprocessing instead of surfacing a later NaN power-balance error.
 
 ## [0.3.0] - 2026-03-12
 

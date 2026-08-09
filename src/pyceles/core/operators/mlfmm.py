@@ -211,7 +211,7 @@ class MLFMMPeriodicLeafBatch:
 
 @dataclass(frozen=True)
 class MLFMMPeriodizationPlan:
-    """Prepared Ewald closure and finite-image corrections for periodic MLFMM."""
+    """Prepared lattice closure and finite-image corrections for periodic MLFMM."""
 
     closure_level: int
     far_batches_by_level: tuple[tuple[MLFMMPeriodicFarBatch, ...], ...]
@@ -273,7 +273,7 @@ class MLFMMCouplingOperator:
     The near part stays exact on the resolved leaf partition. The far part is
     applied through either a single occupied-leaf sampled level or a multilevel
     occupied-box hierarchy, depending on the resolved stage. An optional
-    periodization plan adds a coarse Ewald-prepared lattice closure plus finite
+    periodization plan adds a prepared coarse lattice closure plus finite
     image corrections without changing the particle-local operator contract.
 
     Precision policy:

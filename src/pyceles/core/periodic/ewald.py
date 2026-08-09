@@ -280,6 +280,7 @@ def _representative_ewald_eta_offsets(
     lattice: RectangularLattice2D,
     k: float,
     max_offsets: int = 6,
+    max_vertical_offset: float | None = None,
 ) -> Array:
     """Return a compact, cheap set of offsets that stress eta stability.
 
@@ -292,6 +293,20 @@ def _representative_ewald_eta_offsets(
     ax = float(np.linalg.norm(lattice.a1))
     ay = float(np.linalg.norm(lattice.a2))
     cell = max(ax, ay, 1.0)
+    z_limit = None if max_vertical_offset is None else float(max_vertical_offset)
+    if z_limit is not None and (not np.isfinite(z_limit) or z_limit < 0.0):
+        raise ValueError(
+            "`max_vertical_offset` must be finite and nonnegative when provided. "
+            f"Got {max_vertical_offset!r}."
+        )
+
+    def bounded_offset(raw: Array) -> Array:
+        bounded = np.asarray(raw, dtype=float).reshape(3).copy()
+        if z_limit is not None:
+            bounded[2] = float(np.clip(bounded[2], -z_limit, z_limit))
+        bounded[:2] = _nearest_periodic_delta_xy(bounded[:2], lattice)
+        return bounded
+
     offsets: list[Array] = []
     ns = int(pos.shape[0])
     if ns >= 2:
@@ -301,16 +316,15 @@ def _representative_ewald_eta_offsets(
         nonzero = np.flatnonzero(dz > max(1.0e-9, 1.0e-12 * cell))
         if nonzero.size:
             iz = int(nonzero[np.argmin(dz[nonzero])])
-            raw = pos[order[iz + 1]] - pos[order[iz]]
-            dxy = _nearest_periodic_delta_xy(raw[:2], lattice)
-            _append_eta_probe_offset(offsets, np.array([dxy[0], dxy[1], raw[2]], dtype=float))
+            _append_eta_probe_offset(
+                offsets,
+                bounded_offset(pos[order[iz + 1]] - pos[order[iz]]),
+            )
 
         z_low = int(np.argmin(pos[:, 2]))
         z_high = int(np.argmax(pos[:, 2]))
         if z_low != z_high:
-            raw = pos[z_high] - pos[z_low]
-            dxy = _nearest_periodic_delta_xy(raw[:2], lattice)
-            _append_eta_probe_offset(offsets, np.array([dxy[0], dxy[1], raw[2]], dtype=float))
+            _append_eta_probe_offset(offsets, bounded_offset(pos[z_high] - pos[z_low]))
 
     # Single-particle and near-coincident periodic configurations do not expose
     # these offsets through actual pairs, but they are exactly where a too-small
@@ -318,7 +332,10 @@ def _representative_ewald_eta_offsets(
     wavelength = 2.0 * math.pi / max(float(abs(k)), 1.0e-300)
     near = max(0.02 * wavelength, 1.0e-6 * cell)
     _append_eta_probe_offset(offsets, np.array([near, 0.0, 0.0], dtype=float))
-    _append_eta_probe_offset(offsets, np.array([0.0, 0.0, near], dtype=float))
+    _append_eta_probe_offset(
+        offsets,
+        bounded_offset(np.array([0.0, 0.0, near], dtype=float)),
+    )
     return np.asarray(offsets[: int(max_offsets)], dtype=float).reshape(-1, 3)
 
 
@@ -389,6 +406,7 @@ def select_ewald_eta(
     real_shells: int | None = None,
     reciprocal_shells: int | None = None,
     stability_rtol: float = _ETA_PROBE_STABILITY_RTOL,
+    max_vertical_offset: float | None = None,
 ) -> float:
     """Choose an automatic Ewald split for this lattice and particle packing.
 
@@ -404,6 +422,7 @@ def select_ewald_eta(
         positions=positions,
         lattice=lattice,
         k=float(k),
+        max_vertical_offset=max_vertical_offset,
     )
     if offsets.size == 0:
         return float(canonical)
@@ -421,8 +440,6 @@ def select_ewald_eta(
     )
     previous_eta: float | None = None
     previous_vec: Array | None = None
-    best_eta: float | None = None
-    best_rel = math.inf
     for eta in candidates:
         vec = _eta_probe_vector(
             eta=float(eta),
@@ -440,18 +457,16 @@ def select_ewald_eta(
             continue
         if previous_vec is not None and previous_eta is not None:
             rel = _eta_probe_relative_difference(previous_vec, vec)
-            if rel < best_rel:
-                best_rel = rel
-                best_eta = float(previous_eta)
             if rel <= float(stability_rtol):
                 return float(previous_eta)
         previous_eta = float(eta)
         previous_vec = vec
-    if best_eta is not None:
-        return float(best_eta)
-    if previous_eta is not None:
-        return float(previous_eta)
-    return float(canonical)
+    raise FloatingPointError(
+        "Automatic Ewald split selection could not find two consecutive stable "
+        "eta values for this lattice and vertical extent. An explicit eta should "
+        "only be used after numerical validation; for tall periodic cells, prefer "
+        "the hybrid Rayleigh operator."
+    )
 
 
 def resolve_ewald_eta(
@@ -461,6 +476,7 @@ def resolve_ewald_eta(
     k_parallel: Array,
     positions: Array,
     lmax: int,
+    max_vertical_offset: float | None = None,
 ) -> float:
     """Return the effective Ewald split for one periodic configuration.
 
@@ -472,6 +488,13 @@ def resolve_ewald_eta(
     eta = periodic.options.eta
     if eta is not None:
         return float(eta)
+    probe_vertical_limit = max_vertical_offset
+    if probe_vertical_limit is None and periodic.options.method == "rayleigh":
+        probe_vertical_limit = (
+            float(periodic.options.rayleigh_z_cut)
+            if periodic.options.rayleigh_z_cut is not None
+            else 2.0 * math.pi / max(abs(float(k)), 1.0e-300)
+        )
     return float(
         select_ewald_eta(
             lattice=periodic.lattice,
@@ -483,6 +506,7 @@ def resolve_ewald_eta(
             max_shells=int(periodic.options.max_shells),
             real_shells=periodic.options.real_shells,
             reciprocal_shells=periodic.options.reciprocal_shells,
+            max_vertical_offset=probe_vertical_limit,
         )
     )
 
@@ -562,6 +586,7 @@ def resolve_ewald_shell_counts(
     positions: Array,
     lmax: int,
     eta: float | None = None,
+    max_vertical_offset: float | None = None,
 ) -> EwaldShellCounts:
     """Resolve fixed shell counts for accelerated non-adaptive evaluators.
 
@@ -583,6 +608,13 @@ def resolve_ewald_shell_counts(
             selected_by="explicit",
         )
 
+    probe_vertical_limit = max_vertical_offset
+    if probe_vertical_limit is None and options.method == "rayleigh":
+        probe_vertical_limit = (
+            float(options.rayleigh_z_cut)
+            if options.rayleigh_z_cut is not None
+            else 2.0 * math.pi / max(abs(float(k)), 1.0e-300)
+        )
     eta_f = float(
         eta
         if eta is not None
@@ -592,12 +624,14 @@ def resolve_ewald_shell_counts(
             k_parallel=np.asarray(k_parallel, dtype=float).reshape(2),
             positions=np.asarray(positions, dtype=float).reshape(-1, 3),
             lmax=int(lmax),
+            max_vertical_offset=probe_vertical_limit,
         )
     )
     offsets = _representative_ewald_eta_offsets(
         positions=np.asarray(positions, dtype=float).reshape(-1, 3),
         lattice=periodic.lattice,
         k=float(k),
+        max_vertical_offset=probe_vertical_limit,
     )
     if offsets.size == 0:
         fallback = max(1, min(12, max_count))
@@ -1356,17 +1390,28 @@ def ewald_structural_sums_2d_batch(
                         )
                     )
                     inc[shifted_mask, degree, m + offset] += vals
+        if not np.all(np.isfinite(inc)):
+            raise FloatingPointError(
+                "Periodic Ewald reciprocal shell produced non-finite structural "
+                f"coefficients at order={order}, shell={shell}."
+            )
         return inc
 
-    reciprocal_sums = np.asarray(
-        accumulate_lattice_shell_series(
-            control=reciprocal_control,
-            name="reciprocal_shells",
-            zero=np.zeros_like(sums),
-            evaluate_shell=reciprocal_increment,
-        ),
-        dtype=np.complex128,
-    )
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore", under="ignore"):
+        reciprocal_sums = np.asarray(
+            accumulate_lattice_shell_series(
+                control=reciprocal_control,
+                name="reciprocal_shells",
+                zero=np.zeros_like(sums),
+                evaluate_shell=reciprocal_increment,
+            ),
+            dtype=np.complex128,
+        )
+    if not np.all(np.isfinite(reciprocal_sums)):
+        raise FloatingPointError(
+            "Periodic Ewald reciprocal accumulation produced non-finite structural "
+            f"coefficients at order={order}."
+        )
 
     real_sums = np.zeros_like(sums)
     real_control = make_lattice_shell_control(
@@ -1407,19 +1452,34 @@ def ewald_structural_sums_2d_batch(
                         # same-z row embedded in otherwise shifted rows.
                         contrib = np.where(same_plane_points[point_idx], 0.0 + 0.0j, contrib)
                     np.add.at(inc[:, degree, m + offset], point_idx, contrib)
+        if not np.all(np.isfinite(inc)):
+            raise FloatingPointError(
+                "Periodic Ewald real-space shell produced non-finite structural "
+                f"coefficients at order={order}, shell={shell}."
+            )
         return inc
 
-    real_sums = np.asarray(
-        accumulate_lattice_shell_series(
-            control=real_control,
-            name="real_shells",
-            zero=np.zeros_like(sums),
-            evaluate_shell=real_increment,
-        ),
-        dtype=np.complex128,
-    )
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore", under="ignore"):
+        real_sums = np.asarray(
+            accumulate_lattice_shell_series(
+                control=real_control,
+                name="real_shells",
+                zero=np.zeros_like(sums),
+                evaluate_shell=real_increment,
+            ),
+            dtype=np.complex128,
+        )
+    if not np.all(np.isfinite(real_sums)):
+        raise FloatingPointError(
+            "Periodic Ewald real-space accumulation produced non-finite structural "
+            f"coefficients at order={order}."
+        )
 
     sums = reciprocal_sums + real_sums
+    if not np.all(np.isfinite(sums)):
+        raise FloatingPointError(
+            f"Periodic Ewald structural sum produced non-finite coefficients at order={order}."
+        )
     return np.asarray(sums, dtype=out_dtype)
 
 

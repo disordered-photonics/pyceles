@@ -26,6 +26,7 @@ from pyceles.core.operators.mlfmm_periodic import (
     _periodic_nonzero_structural_sums,
     prepare_periodized_mlfmm_coupling,
     sampled_transfer_from_structural_sums,
+    sampled_transfers_from_structural_sums,
 )
 from pyceles.core.periodic.ewald import (
     ewald_self_correction,
@@ -34,6 +35,46 @@ from pyceles.core.periodic.ewald import (
 from pyceles.core.periodic.scalar import structural_sum_m_normalization
 from pyceles.core.periodic.structural import free_space_structural_sums
 from pyceles.core.translation import RadialLUT, translation_ab5_table
+
+
+def test_batched_sampled_transfer_matches_scalar_reference() -> None:
+    degree_max = 4
+    rng = np.random.default_rng(20260809)
+    structural = rng.normal(size=(3, degree_max + 1, 2 * degree_max + 1)) + 1j * rng.normal(
+        size=(3, degree_max + 1, 2 * degree_max + 1)
+    )
+    beta = np.linspace(0.15, np.pi - 0.15, 9)
+    alpha = np.linspace(0.0, 2.0 * np.pi, 12, endpoint=False)
+    aa, bb = np.meshgrid(alpha, beta, indexing="ij")
+    directions = np.column_stack(
+        (
+            (np.sin(bb) * np.cos(aa)).reshape(-1),
+            (np.sin(bb) * np.sin(aa)).reshape(-1),
+            np.cos(bb).reshape(-1),
+        )
+    )
+    weights = np.linspace(0.5, 1.5, directions.shape[0])
+
+    actual = sampled_transfers_from_structural_sums(
+        structural,
+        directions=directions,
+        weights=weights,
+        dtype=np.dtype(np.complex128),
+        matmul_backend="numpy",
+    )
+    expected = np.stack(
+        [
+            sampled_transfer_from_structural_sums(
+                table,
+                directions=directions,
+                weights=weights,
+                dtype=np.dtype(np.complex128),
+            )
+            for table in structural
+        ],
+        axis=0,
+    )
+    np.testing.assert_allclose(actual, expected, rtol=2.0e-14, atol=2.0e-14)
 
 
 def _periodic_fixture() -> tuple[np.ndarray, np.ndarray, float, np.ndarray, pcl.PeriodicSpec]:
@@ -141,7 +182,6 @@ def test_periodic_box_closure_regularizes_lattice_equivalent_centers() -> None:
     actual_by_offset, singular_by_offset, _eta = _periodic_nonzero_structural_sums(
         max_degree=4,
         k=k,
-        positions=np.zeros((1, 3), dtype=float),
         periodic=periodic,
         k_parallel=k_parallel,
         offsets=[offset],
@@ -287,6 +327,115 @@ def test_periodized_mlfmm_converges_to_pairwise_ewald_with_near_images() -> None
     periodization_memory = memory.get("periodization")
     assert isinstance(periodization_memory, dict)
     assert periodization_memory["total_bytes"] > 0
+
+
+def test_periodic_closure_selector_handles_boundary_spanning_cell() -> None:
+    z = np.asarray([-300.0, -220.0, -80.0, -10.0, 10.0, 80.0, 220.0, 300.0])
+    xx, zz = np.meshgrid(np.asarray([-90.0, 90.0]), z, indexing="ij")
+    positions = np.column_stack((xx.reshape(-1), np.zeros(xx.size), zz.reshape(-1)))
+    radii = np.ones((positions.shape[0],), dtype=float)
+    k = 2.0 * np.pi / 550.0
+    k_parallel = np.zeros((2,), dtype=float)
+    periodic = pcl.PeriodicSpec(
+        lattice=pcl.RectangularLattice2D(210.0, 220.0),
+        options=pcl.PeriodicOptions(
+            method="ewald",
+            eta=1.0e-2,
+            real_shells=8,
+            reciprocal_shells=8,
+        ),
+    )
+    actual_operator = prepare_periodized_mlfmm_coupling(
+        lmax=1,
+        k=k,
+        positions=positions,
+        particle_circumscribing_radii=radii,
+        radial_lut=_radial_lut(positions=positions, lmax=1, k=k),
+        periodic=periodic,
+        k_parallel=k_parallel,
+        options=MLFMMOptions(
+            max_leaf_particles=1,
+            max_depth=3,
+            leaf_size_radius_factor=1.0,
+            accuracy_level=1,
+        ),
+        box_order=8,
+    )
+    rng = np.random.default_rng(20260809)
+    x = rng.normal(size=positions.shape[0] * n_modes(1)) + 1j * rng.normal(
+        size=positions.shape[0] * n_modes(1)
+    )
+    reference = _reference_periodic_operator(
+        lmax=1,
+        k=k,
+        positions=positions,
+        radii=radii,
+        periodic=periodic,
+        k_parallel=k_parallel,
+    ).apply(x)
+    actual = actual_operator.apply(x)
+
+    assert actual_operator.periodization is not None
+    assert actual_operator.periodization.closure_level == 2
+    relative_error = np.linalg.norm(actual - reference) / np.linalg.norm(reference)
+    assert relative_error < 2.0e-3
+
+
+def test_deeper_periodic_closure_matches_pairwise_ewald() -> None:
+    positions = np.column_stack(
+        (
+            np.zeros((8,), dtype=float),
+            np.zeros((8,), dtype=float),
+            np.linspace(-300.0, 300.0, 8),
+        )
+    )
+    radii = np.ones((positions.shape[0],), dtype=float)
+    lmax = 1
+    k = 2.0 * np.pi / 550.0
+    k_parallel = np.array([2.0e-4, -1.0e-4], dtype=float)
+    periodic = pcl.PeriodicSpec(
+        lattice=pcl.RectangularLattice2D(200.0, 220.0),
+        options=pcl.PeriodicOptions(
+            method="ewald",
+            eta=1.0e-2,
+            real_shells=7,
+            reciprocal_shells=7,
+        ),
+    )
+    nm = n_modes(lmax)
+    rng = np.random.default_rng(20260809)
+    x = rng.normal(size=positions.shape[0] * nm) + 1j * rng.normal(size=positions.shape[0] * nm)
+
+    actual_operator = prepare_periodized_mlfmm_coupling(
+        lmax=lmax,
+        k=k,
+        positions=positions,
+        particle_circumscribing_radii=radii,
+        radial_lut=_radial_lut(positions=positions, lmax=lmax, k=k),
+        periodic=periodic,
+        k_parallel=k_parallel,
+        options=MLFMMOptions(
+            max_leaf_particles=1,
+            max_depth=3,
+            leaf_size_radius_factor=1.0,
+            accuracy_level=1,
+        ),
+        box_order=8,
+    )
+    reference = _reference_periodic_operator(
+        lmax=lmax,
+        k=k,
+        positions=positions,
+        radii=radii,
+        periodic=periodic,
+        k_parallel=k_parallel,
+    ).apply(x)
+    actual = actual_operator.apply(x)
+
+    assert actual_operator.periodization is not None
+    assert actual_operator.periodization.closure_level == 3
+    relative_error = np.linalg.norm(actual - reference) / np.linalg.norm(reference)
+    assert relative_error < 1.0e-3
 
 
 def test_periodic_exact_leaf_apply_accumulates_into_supplied_output() -> None:

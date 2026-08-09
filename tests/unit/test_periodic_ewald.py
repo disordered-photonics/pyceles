@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 import pyceles as pcl
+import pyceles.core.periodic.ewald as ewald_module
 from pyceles.core.periodic.ewald import (
     EwaldShellWorkspace,
     PeriodicEwaldConvergenceError,
@@ -187,6 +188,46 @@ def test_batch_same_plane_rows_match_individual_evaluations() -> None:
         axis=0,
     )
     np.testing.assert_allclose(batch, expected, rtol=5e-12, atol=5e-12)
+
+
+def test_batch_ewald_fails_fast_on_nonfinite_shell(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def nonfinite_shifted_delta(
+        order: int,
+        gamma: np.ndarray,
+        cz: np.ndarray,
+        eta: float,
+        **_kwargs: object,
+    ) -> np.ndarray:
+        del eta
+        return np.full(
+            (cz.size, gamma.size, order + 1),
+            np.inf + 0.0j,
+            dtype=np.complex128,
+        )
+
+    monkeypatch.setattr(
+        ewald_module,
+        "shifted_delta_sequence_batched",
+        nonfinite_shifted_delta,
+    )
+
+    with pytest.raises(
+        FloatingPointError,
+        match=r"reciprocal shell produced non-finite.*order=2, shell=0",
+    ):
+        ewald_structural_sums_2d_batch(
+            lmax_struct=1,
+            k=2.0 * np.pi / 550.0,
+            destinations=np.array([[65.0, 32.0, 59.0]], dtype=float),
+            source=np.zeros((3,), dtype=float),
+            lattice=_lattice(),
+            k_parallel=np.array([0.0012, -0.0007], dtype=float),
+            eta=0.02,
+            real_shells=1,
+            reciprocal_shells=1,
+        )
 
 
 def test_batch_roundoff_same_plane_rows_use_same_plane_limit() -> None:

@@ -396,6 +396,7 @@ def prepare_matvec(
                     show_progress=bool(show_progress),
                     leaf_map_backend="cupy",
                     build_leaf_maps=False,
+                    closure_matmul_backend="cupy",
                 )
                 coupling = _wrap_mlfmm_cupy_coupling(
                     cpu_mlfmm,

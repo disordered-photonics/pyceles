@@ -1,16 +1,16 @@
-"""Ewald-prepared periodization of the pyceles MLFMM hierarchy.
+"""Prepared periodization of the pyceles MLFMM hierarchy.
 
-The construction closes the infinite two-dimensional lattice at the first
-sampled MLFMM interaction level.  For every relative coarse-box offset, an
-Ewald structural sum represents all nonzero lattice images that are already
-well separated at that level.  The finite set of image interactions that are
-not yet well separated is descended through the ordinary occupied hierarchy;
-well-separated descendants use the existing sampled Rokhlin translator and
-the residual leaf pairs remain exact.
+The construction closes the infinite two-dimensional lattice at the sampled
+MLFMM level with the safest near-image removal margin over the actual occupied
+box offsets.  Same-plane structural sums use Ewald evaluation, while vertically
+shifted sums use their exact reciprocal Rayleigh representation.  The finite
+set of image interactions that are not yet well separated is descended through
+the ordinary occupied hierarchy; well-separated descendants use the existing
+sampled Rokhlin translator and the residual leaf pairs remain exact.
 
 The repeated apply is therefore mesh-free and contains neither a particle-pair
-Ewald cache nor a Rayleigh particle/mode table.  Ewald is used only during
-preparation to build a small family of coarse-box periodizing diagonals.
+Ewald cache nor a particle-level Rayleigh table.  Periodic summation is used
+only during preparation to build a small family of coarse-box diagonals.
 """
 
 from __future__ import annotations
@@ -31,7 +31,8 @@ from pyceles.core.periodic.ewald import (
     ewald_structural_sums_2d_batch,
     resolve_ewald_eta,
 )
-from pyceles.core.periodic.scalar import structural_sum_m_normalization
+from pyceles.core.periodic.rayleigh import rayleigh_structural_sums_2d_batch
+from pyceles.core.periodic.scalar import same_plane_z_tolerance, structural_sum_m_normalization
 from pyceles.core.periodic.structural import free_space_structural_sums
 from pyceles.core.spherical import legendre_normalized_trigon
 from pyceles.core.translation import RadialLUT
@@ -93,10 +94,32 @@ def sampled_transfer_from_structural_sums(
     outside the existing directional hierarchy.
     """
 
+    return np.asarray(
+        sampled_transfers_from_structural_sums(
+            np.asarray(structural_sums, dtype=np.complex128)[None, ...],
+            directions=directions,
+            weights=weights,
+            dtype=dtype,
+        )[0],
+        dtype=np.dtype(dtype),
+    )
+
+
+def sampled_transfers_from_structural_sums(
+    structural_sums: Array,
+    *,
+    directions: Array,
+    weights: Array,
+    dtype: np.dtype = COMPLEX128_DTYPE,
+    matmul_backend: Literal["numpy", "cupy"] = "numpy",
+) -> Array:
+    """Evaluate sampled translators for a batch of structural tables."""
+    if matmul_backend not in {"numpy", "cupy"}:
+        raise ValueError(f"`matmul_backend` must be 'numpy' or 'cupy'. Got {matmul_backend!r}.")
     sums = np.asarray(structural_sums, dtype=np.complex128)
-    if sums.ndim != 2 or sums.shape[1] != 2 * sums.shape[0] - 1:
-        raise ValueError(f"structural_sums must have shape (L+1, 2*L+1). Got {sums.shape}.")
-    degree_max = int(sums.shape[0] - 1)
+    if sums.ndim != 3 or sums.shape[2] != 2 * sums.shape[1] - 1:
+        raise ValueError(f"structural_sums must have shape (N, L+1, 2*L+1). Got {sums.shape}.")
+    degree_max = int(sums.shape[1] - 1)
     offset = degree_max
     dirs = np.asarray(directions, dtype=float).reshape(-1, 3)
     quadrature_weights = np.asarray(weights, dtype=float).reshape(-1)
@@ -107,7 +130,10 @@ def sampled_transfer_from_structural_sums(
     st = np.sqrt(np.maximum(0.0, 1.0 - ct * ct))
     phi = np.arctan2(dirs[:, 1], dirs[:, 0])
     plm = legendre_normalized_trigon(ct, st, degree_max, xp=np)
-    transfer = np.zeros((dirs.shape[0],), dtype=np.complex128)
+    channel_count = (degree_max + 1) ** 2
+    basis = np.empty((dirs.shape[0], channel_count), dtype=np.complex128)
+    coefficients = np.empty((sums.shape[0], channel_count), dtype=np.complex128)
+    channel = 0
     for degree in range(degree_max + 1):
         degree_phase = 4.0 * np.pi * (1j**degree)
         for order in range(-degree, degree + 1):
@@ -116,13 +142,24 @@ def sampled_transfer_from_structural_sums(
                 * np.exp(1j * float(order) * phi)
                 / structural_sum_m_normalization(order)
             )
-            reflected = (
+            coefficients[:, channel] = (
                 ((-1.0) ** order)
-                * sums[degree, -order + offset]
+                * sums[:, degree, -order + offset]
                 / structural_sum_m_normalization(-order)
             )
-            transfer += degree_phase * reflected * ylm
-    return np.asarray(transfer * quadrature_weights, dtype=np.dtype(dtype))
+            basis[:, channel] = degree_phase * ylm
+            channel += 1
+    if matmul_backend == "numpy":
+        transfer = basis @ coefficients.T
+    else:
+        from pyceles._optional import import_cupy
+
+        cupy, _ = import_cupy()
+        transfer = cupy.asnumpy(cupy.asarray(basis) @ cupy.asarray(coefficients.T))
+    return np.asarray(
+        transfer.T * quadrature_weights[None, :],
+        dtype=np.dtype(dtype),
+    )
 
 
 def _finite_image_structural_sums(
@@ -294,26 +331,44 @@ def _periodic_nonzero_structural_sums(
     *,
     max_degree: int,
     k: float,
-    positions: Array,
     periodic: PeriodicSpec,
     k_parallel: Array,
     offsets: list[Offset3],
     displacements: Array,
+    matmul_backend: Literal["numpy", "cupy"] = "numpy",
 ) -> tuple[dict[Offset3, Array], dict[Offset3, LatticeIndex | None], float]:
-    """Evaluate all nonzero lattice images for coarse-box offsets in one batch."""
+    """Evaluate all nonzero lattice images for coarse-box offsets in one batch.
+
+    Same-plane offsets retain Ewald summation.  Shifted offsets use the exact
+    reciprocal Rayleigh representation, which is both faster and numerically
+    well scaled for the vertically separated boxes in a tall periodic cell.
+    """
 
     degree_max = int(max_degree)
     structural_lmax = int((degree_max + 1) // 2)
     kp = np.asarray(k_parallel, dtype=float).reshape(2)
+    deltas = np.asarray(displacements, dtype=float).reshape(-1, 3)
+    z_atol = same_plane_z_tolerance(
+        float(k),
+        coordinate_scale=float(np.max(np.abs(deltas), initial=0.0)),
+    )
+    same_plane = np.abs(deltas[:, 2]) <= z_atol
+    eta_probe_positions = np.vstack(
+        (
+            np.zeros((1, 3), dtype=float),
+            deltas[same_plane],
+        )
+    )
     eta = resolve_ewald_eta(
         periodic=periodic,
         k=float(k),
         k_parallel=kp,
-        positions=np.asarray(positions, dtype=float).reshape(-1, 3),
+        positions=eta_probe_positions,
         # The periodizer requests structural degrees set by the MLFMM box
         # order, which can be much higher than the particle lmax.  Eta
         # preflight must therefore probe the actual closure degree.
         lmax=structural_lmax,
+        max_vertical_offset=0.0,
     )
     workspace = EwaldShellWorkspace(
         lattice=periodic.lattice,
@@ -321,7 +376,6 @@ def _periodic_nonzero_structural_sums(
         k_parallel=kp,
         eta=float(eta),
     )
-    deltas = np.asarray(displacements, dtype=float).reshape(-1, 3)
     singular_images: dict[Offset3, LatticeIndex | None] = {}
     evaluation_deltas = np.array(deltas, dtype=float, copy=True)
     for index, key in enumerate(offsets):
@@ -331,21 +385,39 @@ def _periodic_nonzero_structural_sums(
             # Snap an ULP-level lattice coincidence to the exact image so the
             # Ewald real-space branch removes the singular term deterministically.
             evaluation_deltas[index] = periodic.lattice.lattice_vector(*singular)
-    raw_batch = ewald_structural_sums_2d_batch(
-        lmax_struct=structural_lmax,
-        k=float(k),
-        destinations=evaluation_deltas,
-        source=np.zeros((3,), dtype=float),
-        lattice=periodic.lattice,
-        k_parallel=kp,
-        eta=float(eta),
-        real_shells=periodic.options.real_shells,
-        reciprocal_shells=periodic.options.reciprocal_shells,
-        shell_tolerance=float(periodic.options.shell_tolerance),
-        max_shells=int(periodic.options.max_shells),
+    raw_batch = np.zeros(
+        (len(offsets), 2 * structural_lmax + 1, 4 * structural_lmax + 1),
         dtype=np.complex128,
-        workspace=workspace,
     )
+    if np.any(same_plane):
+        raw_batch[same_plane] = ewald_structural_sums_2d_batch(
+            lmax_struct=structural_lmax,
+            k=float(k),
+            destinations=evaluation_deltas[same_plane],
+            source=np.zeros((3,), dtype=float),
+            lattice=periodic.lattice,
+            k_parallel=kp,
+            eta=float(eta),
+            real_shells=periodic.options.real_shells,
+            reciprocal_shells=periodic.options.reciprocal_shells,
+            shell_tolerance=float(periodic.options.shell_tolerance),
+            max_shells=int(periodic.options.max_shells),
+            dtype=np.complex128,
+            workspace=workspace,
+        )
+    shifted = ~same_plane
+    if np.any(shifted):
+        raw_batch[shifted] = rayleigh_structural_sums_2d_batch(
+            max_degree=2 * structural_lmax,
+            k=float(k),
+            displacements=evaluation_deltas[shifted],
+            lattice=periodic.lattice,
+            k_parallel=kp,
+            tolerance=float(periodic.options.shell_tolerance),
+            max_shells=int(periodic.options.max_shells),
+            requested_half_width=None,
+            matmul_backend=matmul_backend,
+        )
     raw_order = int(raw_batch.shape[1] - 1)
     result: dict[Offset3, Array] = {}
     for index, key in enumerate(offsets):
@@ -562,41 +634,97 @@ def _descend_near_image_pairs(
     )
 
 
-def build_periodization_plan(
+def _resolve_periodic_closure_level(
+    operators: MLFMMMultilevelOperators,
+    *,
+    k: float,
+    lattice: RectangularLattice2D,
+) -> int:
+    """Choose the sampled level with the safest near-image removal margin."""
+
+    start = int(operators.hf_start_level)
+    end = int(operators.hf_end_level)
+    best_level = start
+    best_margin = -math.inf
+    for level_index in range(start, end + 1):
+        level = operators.levels[level_index]
+        half_size = float(operators.partition.root_half_size) / float(1 << level_index)
+        groups = _coarse_pair_groups(operators, closure_level=level_index)
+        margin = math.inf
+        for _offset, (_sources, _destinations, delta) in groups.items():
+            singular = _lattice_equivalent_image(delta, lattice=lattice)
+            near_indices = _near_lattice_indices_for_offset(
+                base_displacement=delta,
+                half_size=half_size,
+                lattice=lattice,
+            )
+            for p_raw, q_raw in np.asarray(near_indices, dtype=np.int64).reshape(-1, 2):
+                image = (int(p_raw), int(q_raw))
+                if image == singular:
+                    continue
+                separation = float(np.linalg.norm(delta - lattice.lattice_vector(*image)))
+                # High-order spherical Hankel coefficients become poorly scaled when
+                # their degree substantially exceeds k*r. The closure subtracts these
+                # finite near images before descending them exactly, so choose the
+                # level that maximizes the worst such margin. This is a representation-
+                # conditioning criterion, not a hardware/performance threshold.
+                margin = min(
+                    margin,
+                    abs(float(k)) * separation / float(int(level.translator_order) + 1),
+                )
+        if margin >= best_margin:
+            best_level = int(level_index)
+            best_margin = float(margin)
+    return best_level
+
+
+def _build_periodization_plan_at_level(
     *,
     k: float,
     positions: Array,
     periodic: PeriodicSpec,
     k_parallel: Array,
     operators: MLFMMMultilevelOperators,
+    closure_level: int,
+    show_progress: bool = False,
+    matmul_backend: Literal["numpy", "cupy"] = "numpy",
 ) -> MLFMMPeriodizationPlan:
-    """Build the complete Ewald closure and finite-image hierarchy correction."""
+    """Build one periodic closure candidate at an explicit sampled level."""
 
-    if periodic.options.method != "ewald":
-        raise NotImplementedError(
-            "Periodized MLFMM uses Ewald only during coarse-level "
-            "closure; set PeriodicOptions(method='ewald')."
-        )
-    closure_level = int(operators.hf_start_level)
     level = operators.levels[closure_level]
     coarse_groups = _coarse_pair_groups(operators, closure_level=closure_level)
     offsets = sorted(coarse_groups)
     displacements = np.asarray([coarse_groups[key][2] for key in offsets], dtype=float)
+    if show_progress:
+        half_size = float(operators.partition.root_half_size) / float(1 << closure_level)
+        tqdm.write(
+            "[MLFMM] periodic closure prepare "
+            f"level={closure_level} order={level.translator_order} offsets={len(offsets)} "
+            f"box_side={2.0 * half_size:.6g} lattice_min="
+            f"{min(float(periodic.lattice.ax), float(periodic.lattice.ay)):.6g}"
+        )
+    structural_started = perf_counter()
     periodic_nonzero, singular_images, eta = _periodic_nonzero_structural_sums(
         max_degree=int(level.translator_order),
         k=float(k),
-        positions=np.asarray(positions, dtype=float),
         periodic=periodic,
         k_parallel=np.asarray(k_parallel, dtype=float).reshape(2),
         offsets=offsets,
         displacements=displacements,
+        matmul_backend=matmul_backend,
     )
+    if show_progress:
+        tqdm.write(
+            "[MLFMM] periodic structural closure "
+            f"backend={matmul_backend} elapsed_s={perf_counter() - structural_started:.2f}"
+        )
 
     half_size = float(operators.partition.root_half_size) / float(1 << closure_level)
     near_by_offset: dict[Offset3, Array] = {}
     near_union: set[LatticeIndex] = set()
-    closure_batches: list[MLFMMPeriodicFarBatch] = []
-    closure_pair_count = 0
+    far_structural_tables: list[Array] = []
+    closure_indices: list[tuple[Array, Array]] = []
+    diagonal_started = perf_counter()
     for offset in offsets:
         sources, destinations, delta = coarse_groups[offset]
         near_indices = _near_lattice_indices_for_offset(
@@ -610,7 +738,7 @@ def build_periodization_plan(
         )
         far_structural = np.asarray(periodic_nonzero[offset], dtype=np.complex128).copy()
         if near_indices.size:
-            far_structural -= _finite_image_structural_sums(
+            near_structural = _finite_image_structural_sums(
                 max_degree=int(level.translator_order),
                 k=float(k),
                 base_displacement=delta,
@@ -619,14 +747,35 @@ def build_periodization_plan(
                 lattice_indices=near_indices,
                 excluded_singular_image=singular_images[offset],
             )
-        diagonal = sampled_transfer_from_structural_sums(
-            far_structural,
-            directions=level.directional.grid.directions,
-            weights=level.directional.grid.weights,
-            dtype=COMPLEX128_DTYPE,
+            far_structural -= near_structural
+        far_structural_tables.append(far_structural)
+        closure_indices.append(
+            (
+                np.asarray(sources, dtype=np.int32),
+                np.asarray(destinations, dtype=np.int32),
+            )
         )
-        source_array = np.asarray(sources, dtype=np.int32)
-        destination_array = np.asarray(destinations, dtype=np.int32)
+    stacked_far = np.stack(far_structural_tables, axis=0)
+    if not np.all(np.isfinite(stacked_far)):
+        raise FloatingPointError(
+            "Periodic MLFMM far structural remainder contains non-finite coefficients "
+            f"at closure level {closure_level}."
+        )
+    diagonals = sampled_transfers_from_structural_sums(
+        stacked_far,
+        directions=level.directional.grid.directions,
+        weights=level.directional.grid.weights,
+        dtype=COMPLEX128_DTYPE,
+        matmul_backend=matmul_backend,
+    )
+    if not np.all(np.isfinite(diagonals)):
+        raise FloatingPointError(
+            "Periodic MLFMM sampled closure contains non-finite coefficients "
+            f"at closure level {closure_level}."
+        )
+    closure_batches: list[MLFMMPeriodicFarBatch] = []
+    closure_pair_count = 0
+    for (source_array, destination_array), diagonal in zip(closure_indices, diagonals, strict=True):
         closure_pair_count += int(source_array.size)
         closure_batches.append(
             MLFMMPeriodicFarBatch(
@@ -635,7 +784,12 @@ def build_periodization_plan(
                 diagonal=np.asarray(diagonal, dtype=COMPLEX128_DTYPE),
             )
         )
+    if show_progress:
+        tqdm.write(
+            f"[MLFMM] periodic sampled diagonals elapsed_s={perf_counter() - diagonal_started:.2f}"
+        )
 
+    descent_started = perf_counter()
     far_batches, leaf_batches, descended_far_pairs, exact_particle_pairs, exact_leaf_r_max_bound = (
         _descend_near_image_pairs(
             k=float(k),
@@ -648,6 +802,10 @@ def build_periodization_plan(
             near_by_offset=near_by_offset,
         )
     )
+    if show_progress:
+        tqdm.write(
+            f"[MLFMM] periodic near-image descent elapsed_s={perf_counter() - descent_started:.2f}"
+        )
     far_mutable = [list(batches) for batches in far_batches]
     far_mutable[closure_level] = [*closure_batches, *far_mutable[closure_level]]
     combined_far = tuple(tuple(batches) for batches in far_mutable)
@@ -663,6 +821,39 @@ def build_periodization_plan(
         exact_particle_pair_count=int(exact_particle_pairs),
         exact_leaf_r_max_bound=float(exact_leaf_r_max_bound),
         ewald_eta=float(eta),
+    )
+
+
+def build_periodization_plan(
+    *,
+    k: float,
+    positions: Array,
+    periodic: PeriodicSpec,
+    k_parallel: Array,
+    operators: MLFMMMultilevelOperators,
+    show_progress: bool = False,
+    matmul_backend: Literal["numpy", "cupy"] = "numpy",
+) -> MLFMMPeriodizationPlan:
+    """Build a geometry-conditioned periodic closure and image correction."""
+
+    if periodic.options.method != "ewald":
+        raise NotImplementedError(
+            "Periodized MLFMM requires PeriodicOptions(method='ewald') as its closure policy."
+        )
+    closure_level = _resolve_periodic_closure_level(
+        operators,
+        k=float(k),
+        lattice=periodic.lattice,
+    )
+    return _build_periodization_plan_at_level(
+        k=float(k),
+        positions=positions,
+        periodic=periodic,
+        k_parallel=k_parallel,
+        operators=operators,
+        closure_level=int(closure_level),
+        show_progress=bool(show_progress),
+        matmul_backend=matmul_backend,
     )
 
 
@@ -682,15 +873,16 @@ def prepare_periodized_mlfmm_coupling(
     box_order: int | None = None,
     leaf_map_backend: Literal["numpy", "cupy"] = "numpy",
     build_leaf_maps: bool = True,
+    closure_matmul_backend: Literal["numpy", "cupy"] = "numpy",
 ) -> MLFMMCouplingOperator:
     """Prepare a periodized MLFMM coupling plan for NumPy or CuPy upload.
 
     The central cell and every finite image correction share one occupied
-    hierarchy. Ewald is evaluated only while preparing coarse periodizing
-    diagonals; repeated applications use exact leaf translations and ordinary
-    sampled MLFMM passes. ``leaf_map_backend`` and ``build_leaf_maps`` mirror
-    the finite MLFMM preparation boundary: NumPy keeps reusable leaf maps,
-    while CuPy normally requests compact on-the-fly leaf schedules only.
+    hierarchy. Periodic structural sums are evaluated only while preparing
+    coarse periodizing diagonals; repeated applications use exact leaf translations and ordinary
+    sampled MLFMM passes. ``leaf_map_backend`` and ``build_leaf_maps`` control
+    the host staging representation. ``closure_matmul_backend`` independently
+    selects the array backend for the large preparation-only contractions.
     """
 
     prepare_started = perf_counter()
@@ -715,8 +907,9 @@ def prepare_periodized_mlfmm_coupling(
         and int(resolved_options.hf_start_level) != 2
     ):
         raise NotImplementedError(
-            "Periodic MLFMM currently closes the lattice at the canonical first "
-            "sampled level 2; leave mlfmm_options.hf_start_level unset or set it to 2."
+            "Periodic MLFMM currently requires the canonical same-cell sampled "
+            "ownership to start at level 2; leave mlfmm_options.hf_start_level "
+            "unset or set it to 2. Periodic lattice closure is selected independently."
         )
     if show_progress:
         occupancies = np.asarray(
@@ -767,6 +960,8 @@ def prepare_periodized_mlfmm_coupling(
         periodic=periodic,
         k_parallel=np.asarray(k_parallel, dtype=float).reshape(2),
         operators=operators,
+        show_progress=bool(show_progress),
+        matmul_backend=closure_matmul_backend,
     )
     if show_progress:
         summary = periodization.summary()

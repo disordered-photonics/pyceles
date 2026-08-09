@@ -10,7 +10,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from functools import cache
-from typing import cast
+from typing import Literal, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -20,7 +20,7 @@ from pyceles.core.indexing import index_vswf, iter_modes, n_modes
 from pyceles.core.lattice import RectangularLattice2D
 from pyceles.core.periodic.scalar import chebyshev_shell_indices
 from pyceles.core.periodic.types import PeriodicSpec
-from pyceles.core.spherical import spherical_functions_trigon
+from pyceles.core.spherical import legendre_normalized_trigon, spherical_functions_trigon
 
 Array = np.ndarray
 # Per-batch temporary budget; persistent cache residency uses the shared
@@ -312,6 +312,139 @@ def build_rayleigh_plan(
         z_cut=float(z_cut),
         half_width=int(half_width),
     )
+
+
+def rayleigh_structural_sums_2d_batch(
+    *,
+    max_degree: int,
+    k: float,
+    displacements: npt.ArrayLike,
+    lattice: RectangularLattice2D,
+    k_parallel: npt.ArrayLike,
+    tolerance: float,
+    max_shells: int,
+    requested_half_width: int | None = None,
+    matmul_backend: Literal["numpy", "cupy"] = "numpy",
+) -> Array:
+    """Return off-plane periodic structural sums from reciprocal orders.
+
+    The shifted two-dimensional lattice sum has an absolutely convergent
+    Rayleigh representation whenever the vertical displacement is nonzero.
+    Evaluating that representation directly avoids the separately enormous
+    factors that occur in a split-Ewald shifted recurrence for tall cells.
+
+    Displacements sharing one absolute height are evaluated together as a
+    matrix product over reciprocal orders.  The result uses pyceles's dense
+    CELES-normalized structural-table layout.
+    """
+    if matmul_backend not in {"numpy", "cupy"}:
+        raise ValueError(f"`matmul_backend` must be 'numpy' or 'cupy'. Got {matmul_backend!r}.")
+    cupy = None
+    if matmul_backend == "cupy":
+        from pyceles._optional import import_cupy
+
+        cupy, _ = import_cupy()
+
+    degree_max = int(max_degree)
+    if degree_max < 0:
+        raise ValueError(f"`max_degree` must be >= 0. Got {max_degree!r}.")
+    k_f = float(k)
+    if not np.isfinite(k_f) or k_f <= 0.0:
+        raise ValueError(f"`k` must be finite and positive. Got {k!r}.")
+    delta = np.asarray(displacements, dtype=float).reshape(-1, 3)
+    if np.any(~np.isfinite(delta)):
+        raise ValueError("`displacements` must be finite.")
+    if np.any(delta[:, 2] == 0.0):
+        raise ValueError(
+            "Rayleigh structural sums require nonzero vertical displacements; "
+            "same-plane offsets must use Ewald summation."
+        )
+    kp = np.asarray(k_parallel, dtype=float).reshape(2)
+    out = np.zeros(
+        (delta.shape[0], degree_max + 1, 2 * degree_max + 1),
+        dtype=np.complex128,
+    )
+    if delta.shape[0] == 0:
+        return out
+
+    # The existing truncation envelope is parameterized by particle lmax,
+    # whose translation table reaches degree 2*lmax.  Map the explicit box
+    # degree to the smallest equivalent value.
+    envelope_lmax = max(1, (degree_max + 1) // 2)
+    prefactor = 2.0 * math.pi / (float(lattice.area) * k_f)
+    table_offset = degree_max
+    channel_count = (degree_max + 1) ** 2
+    degrees = np.empty((channel_count,), dtype=np.int32)
+    orders = np.empty((channel_count,), dtype=np.int32)
+    channel = 0
+    for degree in range(degree_max + 1):
+        for order in range(-degree, degree + 1):
+            degrees[channel] = degree
+            orders[channel] = order
+            channel += 1
+    channel_prefactors = prefactor * (-1j) ** degrees
+    reflection_parity = (-1.0) ** (degrees + np.abs(orders))
+
+    abs_heights = np.abs(delta[:, 2])
+    for height in np.unique(abs_heights):
+        height_mask = abs_heights == height
+        group_indices = np.flatnonzero(height_mask)
+        half_width = resolve_rayleigh_half_width(
+            lattice=lattice,
+            k=k_f,
+            k_parallel=kp,
+            lmax=envelope_lmax,
+            z_cut=float(height),
+            tolerance=float(tolerance),
+            max_shells=int(max_shells),
+            requested=requested_half_width,
+        )
+        wave_xy = reciprocal_modes(
+            lattice=lattice,
+            k_parallel=kp,
+            half_width=int(half_width),
+        )
+        rho = np.linalg.norm(wave_xy, axis=1)
+        gamma = _reciprocal_gamma(k_f, wave_xy)
+        alpha = np.arctan2(wave_xy[:, 1], wave_xy[:, 0])
+        st = rho / k_f
+        lateral_phase = np.exp(1j * (wave_xy @ delta[group_indices, :2].T))
+        propagation = np.exp(1j * gamma * float(height)) / gamma
+        radial_phase = propagation[:, None] * lateral_phase
+
+        plm = np.asarray(
+            legendre_normalized_trigon(gamma / k_f, st, degree_max, xp=np),
+            dtype=np.complex128,
+        )
+        angular = np.empty((channel_count, wave_xy.shape[0]), dtype=np.complex128)
+        order_phases = {
+            order: np.exp(1j * order * alpha) for order in range(-degree_max, degree_max + 1)
+        }
+        for channel_index, (degree_raw, order_raw) in enumerate(zip(degrees, orders, strict=True)):
+            degree_index = int(degree_raw)
+            order_index = int(order_raw)
+            angular[channel_index] = plm[degree_index, abs(order_index)] * order_phases[order_index]
+        contracted = (
+            angular @ radial_phase
+            if cupy is None
+            else cupy.asnumpy(cupy.asarray(angular) @ cupy.asarray(radial_phase))
+        )
+        values = contracted.T * channel_prefactors[None, :]
+        negative_height = delta[group_indices, 2] < 0.0
+        if np.any(negative_height):
+            values[negative_height] *= reflection_parity[None, :]
+        out[
+            group_indices[:, None],
+            degrees[None, :],
+            (orders + table_offset)[None, :],
+        ] = values
+
+    if not np.all(np.isfinite(out)):
+        raise FloatingPointError(
+            "Periodic Rayleigh structural evaluation produced non-finite coefficients "
+            f"at order={degree_max}."
+        )
+    return out
 
 
 def prepare_rayleigh_plan(
