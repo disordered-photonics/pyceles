@@ -182,6 +182,46 @@ def test_solve_sources_core_reuses_prepared_cache_and_broadcasts_warm_start(monk
     assert timings["solve_sources_core_s"] >= 0.0
 
 
+def test_solve_sources_core_rejects_nonfinite_solver_coefficients(monkeypatch):
+    sim = _single_sphere_sim()
+
+    class _Prepared:
+        coupling = object()
+
+        @staticmethod
+        def apply_A(x: np.ndarray) -> np.ndarray:
+            return np.asarray(x)
+
+        @staticmethod
+        def rhs_Tb(b: np.ndarray) -> np.ndarray:
+            return np.asarray(b)
+
+    monkeypatch.setattr(sim_solve, "prepare_matvec", lambda **kwargs: _Prepared())
+    monkeypatch.setattr(
+        sim_solve,
+        "project_source_to_svwf",
+        lambda positions, lmax, source, **kwargs: np.zeros(
+            (positions.shape[0], sim_solve.n_modes(lmax)), dtype=np.complex128
+        ),
+    )
+    monkeypatch.setattr(
+        sim_solve,
+        "solve_linear_system",
+        lambda *args, **kwargs: LinearSolveResult(
+            x=np.full((6,), np.nan + 0.0j, dtype=np.complex128),
+            info=1,
+            residual_norm=np.nan,
+            relative_residual=np.nan,
+            iterations=2,
+            method="gmres",
+            converged_reason="breakdown",
+        ),
+    )
+
+    with pytest.raises(FloatingPointError, match="non-finite scattering coefficients"):
+        sim_solve.solve_sources_core(sim, {"src": _plane_wave()})
+
+
 @pytest.mark.parametrize(
     ("warm_start", "match"),
     [

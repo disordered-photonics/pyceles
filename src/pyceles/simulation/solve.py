@@ -606,6 +606,12 @@ def _solve_sources_impl(
             )
         phase_timings["linear_solve_s"] = time.perf_counter() - linear_solve_t0
         x_arr = np.asarray(solver_result.x)
+        if not np.all(np.isfinite(x_arr)):
+            raise FloatingPointError(
+                "The linear solver produced non-finite scattering coefficients "
+                f"(method={solver_result.method!r}, info={solver_result.info!r}, "
+                f"reason={solver_result.converged_reason!r}). Postprocessing was not run."
+            )
         x_matrix = (
             x_arr.reshape(unknowns, 1) if n_channels == 1 else x_arr.reshape(unknowns, n_channels)
         )
