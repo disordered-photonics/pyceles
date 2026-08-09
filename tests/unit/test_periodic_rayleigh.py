@@ -20,7 +20,7 @@ from pyceles.core.operators.coupling_periodic_cupy import (
     _resolve_rayleigh_near_cache_memory_plan,
 )
 from pyceles.core.periodic import PeriodicOptions, PeriodicSpec
-from pyceles.core.periodic.ewald import periodic_ewald_block
+from pyceles.core.periodic.ewald import ewald_structural_sums_2d_batch, periodic_ewald_block
 from pyceles.core.periodic.rayleigh import (
     apply_rayleigh_far_numpy,
     apply_rayleigh_far_to_points_numpy,
@@ -29,13 +29,56 @@ from pyceles.core.periodic.rayleigh import (
     near_point_source_csr,
     rayleigh_block,
     rayleigh_near_cache_estimate,
+    rayleigh_structural_sums_2d_batch,
     resolve_rayleigh_mode_chunk_size,
     resolve_rayleigh_z_cut,
 )
 from pyceles.core.translation import translation_ab5_table
+from pyceles.postprocessing.nearfield import periodic_interior as periodic_interior_module
 from pyceles.postprocessing.nearfield.periodic_interior import (
     _periodic_local_regular_l1_coeffs,
 )
+
+
+def test_shifted_rayleigh_structural_batch_matches_ewald_reference() -> None:
+    lattice = pcl.RectangularLattice2D(900.0, 950.0)
+    k = 2.0 * np.pi / 550.0
+    k_parallel = np.asarray([1.2e-3, -0.7e-3], dtype=float)
+    displacements = np.asarray(
+        [
+            [120.0, -80.0, 250.0],
+            [-100.0, 50.0, -330.0],
+            [10.0, 15.0, 700.0],
+        ],
+        dtype=float,
+    )
+    expected = ewald_structural_sums_2d_batch(
+        lmax_struct=3,
+        k=k,
+        destinations=displacements,
+        source=np.zeros(3),
+        lattice=lattice,
+        k_parallel=k_parallel,
+        eta=2.5e-3,
+        real_shells=8,
+        reciprocal_shells=8,
+        shell_tolerance=1.0e-12,
+        max_shells=16,
+        dtype=np.complex128,
+    )
+    actual = rayleigh_structural_sums_2d_batch(
+        max_degree=6,
+        k=k,
+        displacements=displacements,
+        lattice=lattice,
+        k_parallel=k_parallel,
+        tolerance=1.0e-12,
+        max_shells=64,
+        requested_half_width=32,
+        matmul_backend="numpy",
+    )
+
+    np.testing.assert_allclose(actual, expected, rtol=2.0e-11, atol=5.0e-12)
 
 
 def test_default_rayleigh_band_is_wavelength_and_particle_safe() -> None:
@@ -342,6 +385,43 @@ def test_hybrid_interior_local_l1_matches_exact_ewald() -> None:
     actual = _periodic_local_regular_l1_coeffs(periodic=hybrid, **cast(Any, kwargs))
 
     np.testing.assert_allclose(actual, expected, rtol=2e-11, atol=2e-11)
+
+
+def test_rayleigh_nearfield_eta_preflight_uses_resolved_exact_band(monkeypatch) -> None:
+    k = 2.0 * np.pi / 550.0
+    positions = np.asarray([[0.0, 0.0, 0.0], [80.0, -30.0, 900.0]], dtype=float)
+    points = np.asarray([[20.0, 10.0, 50.0]], dtype=float)
+    coeffs = np.ones((positions.shape[0], n_modes(1)), dtype=np.complex128)
+    periodic = PeriodicSpec(
+        lattice=pcl.RectangularLattice2D(ax=900.0, ay=850.0),
+        options=PeriodicOptions(
+            method="rayleigh",
+            eta=0.002,
+            real_shells=4,
+            reciprocal_shells=6,
+            rayleigh_reciprocal_shells=12,
+        ),
+    )
+    seen: list[float | None] = []
+    original = periodic_interior_module.resolve_ewald_eta
+
+    def capture_eta(**kwargs: Any) -> float:
+        seen.append(kwargs.get("max_vertical_offset"))
+        return float(original(**kwargs))
+
+    monkeypatch.setattr(periodic_interior_module, "resolve_ewald_eta", capture_eta)
+    _periodic_local_regular_l1_coeffs(
+        points=points,
+        positions=positions,
+        coeffs=coeffs,
+        lmax=1,
+        k=k,
+        periodic=periodic,
+        k_parallel=np.zeros(2),
+        circumscribing_radii=np.full(positions.shape[0], 320.0),
+    )
+
+    assert seen == [pytest.approx(640.0)]
 
 
 def test_rayleigh_far_apply_preserves_complex64() -> None:

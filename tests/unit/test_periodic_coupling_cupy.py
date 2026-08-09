@@ -299,6 +299,46 @@ def test_periodic_cupy_rayleigh_hybrid_matches_numpy_scan_and_near_cache(
     assert gpu._rayleigh_plan_cache is not None
 
 
+def test_periodic_cupy_rayleigh_auto_eta_stays_finite_for_large_cell(
+    cupy_runtime: tuple[Any, Any],
+) -> None:
+    cp, _ = cupy_runtime
+    k = 2.0 * np.pi / 366.6666666666667
+    positions = np.asarray(
+        [[0.0, 0.0, 0.0], [125.0, -80.0, 180.0]],
+        dtype=float,
+    )
+    periodic = PeriodicSpec(
+        lattice=RectangularLattice2D(ax=3544.8765, ay=3544.8765),
+        options=PeriodicOptions(
+            method="rayleigh",
+            shell_tolerance=1.0e-8,
+            max_shells=32,
+            rayleigh_reciprocal_shells=12,
+        ),
+    )
+    gpu = CuPyPeriodicCouplingOperator(
+        lmax=2,
+        k=k,
+        positions=positions,
+        ab5=translation_ab5_table(2, dtype=np.complex64),
+        periodic=periodic,
+        k_parallel=np.zeros(2),
+        dtype=np.dtype(np.complex64),
+        cache_blocks=False,
+        circumscribing_radii=np.full(2, 100.0),
+    )
+
+    gpu.populate(show_progress=False)
+
+    assert gpu._resolved_ewald_eta is not None
+    assert gpu._resolved_ewald_eta > 2.0 * np.sqrt(np.pi / periodic.lattice.area)
+    assert gpu._self_block_gpu is not None
+    assert bool(cp.all(cp.isfinite(gpu._self_block_gpu)))
+    assert gpu._near_structural_sums_gpu is not None
+    assert bool(cp.all(cp.isfinite(gpu._near_structural_sums_gpu)))
+
+
 def test_periodic_cupy_rayleigh_interior_points_match_numpy(
     cupy_runtime: tuple[Any, Any],
 ) -> None:

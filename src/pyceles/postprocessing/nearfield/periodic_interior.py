@@ -163,6 +163,7 @@ def _periodic_local_regular_l1_coeffs(
             "`periodic.options.method` to be 'ewald' or 'rayleigh'."
         )
 
+    rayleigh_z_cut: float | None = None
     if method == "rayleigh":
         plan = prepare_rayleigh_plan(
             lmax=lmax_i,
@@ -177,7 +178,7 @@ def _periodic_local_regular_l1_coeffs(
             apply_rayleigh_far_to_points_numpy(plan, coeff_arr, pts),
             dtype=np.complex128,
         )
-        z_cut = float(plan.z_cut)
+        rayleigh_z_cut = float(plan.z_cut)
 
     batch = max(1, int(point_batch_size))
     eta = resolve_ewald_eta(
@@ -186,6 +187,7 @@ def _periodic_local_regular_l1_coeffs(
         k_parallel=k_parallel,
         positions=pos,
         lmax=lmax_i,
+        max_vertical_offset=rayleigh_z_cut,
     )
     workspace = EwaldShellWorkspace(
         lattice=periodic.lattice,
@@ -230,7 +232,13 @@ def _periodic_local_regular_l1_coeffs(
                 progress.close()
         return out
 
-    indptr, destination_indices, _source_indices = near_point_source_csr(pts, pos, z_cut)
+    if rayleigh_z_cut is None:
+        raise RuntimeError("Rayleigh near-field initialization failed.")
+    indptr, destination_indices, _source_indices = near_point_source_csr(
+        pts,
+        pos,
+        rayleigh_z_cut,
+    )
     if destination_indices.size == 0:
         return out
     total_work = sum(

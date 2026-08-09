@@ -54,6 +54,7 @@ def _resolve_eta(
     k_parallel: np.ndarray,
     positions: np.ndarray,
     lmax: int,
+    max_vertical_offset: float | None = None,
 ) -> float:
     return resolve_ewald_eta(
         periodic=periodic,
@@ -61,6 +62,7 @@ def _resolve_eta(
         k_parallel=np.asarray(k_parallel, dtype=float).reshape(2),
         positions=np.asarray(positions, dtype=float).reshape(-1, 3),
         lmax=int(lmax),
+        max_vertical_offset=max_vertical_offset,
     )
 
 
@@ -114,6 +116,7 @@ def periodic_local_regular_l1_coeffs_cupy(
         cupy=cp,
     )
 
+    rayleigh_z_cut: float | None = None
     if method == "rayleigh":
         plan = prepare_rayleigh_plan(
             lmax=int(lmax),
@@ -135,6 +138,7 @@ def periodic_local_regular_l1_coeffs_cupy(
             pos,
             plan.z_cut,
         )
+        rayleigh_z_cut = float(plan.z_cut)
         if destination_indices.size == 0:
             return np.asarray(cp.asnumpy(local_cp), dtype=np.complex128)
     else:
@@ -148,6 +152,7 @@ def periodic_local_regular_l1_coeffs_cupy(
         k_parallel=np.asarray(k_parallel, dtype=float).reshape(2),
         positions=pos,
         lmax=int(lmax),
+        max_vertical_offset=rayleigh_z_cut,
     )
 
     shell_counts = resolve_ewald_shell_counts(
@@ -157,6 +162,7 @@ def periodic_local_regular_l1_coeffs_cupy(
         positions=pos,
         lmax=int(lmax),
         eta=float(eta),
+        max_vertical_offset=rayleigh_z_cut,
     )
     real_count = int(shell_counts.real_shells)
     recip_count = int(shell_counts.reciprocal_shells)

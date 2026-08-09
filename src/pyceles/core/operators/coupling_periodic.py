@@ -88,12 +88,16 @@ class PeriodicCouplingOperator:
         if eta is not None:
             return float(eta)
         if self._resolved_ewald_eta is None:
+            rayleigh_z_cut = (
+                self._rayleigh_plan().z_cut if self.periodic.options.method == "rayleigh" else None
+            )
             self._resolved_ewald_eta = resolve_ewald_eta(
                 periodic=self.periodic,
                 k=float(self.k),
                 k_parallel=self.k_parallel,
                 positions=self.positions,
                 lmax=int(self.lmax),
+                max_vertical_offset=rayleigh_z_cut,
             )
         return float(self._resolved_ewald_eta)
 

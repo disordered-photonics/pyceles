@@ -17,6 +17,7 @@ from pyceles.core.periodic.ewald import (
     ewald_structural_constant_2d,
     ewald_structural_sums_2d,
     ewald_structural_sums_2d_batch,
+    resolve_ewald_eta,
     select_ewald_eta,
 )
 from pyceles.core.periodic.scalar import real_integral_sequence, scaled_real_integral_sequence
@@ -495,6 +496,60 @@ def test_automatic_eta_raises_unstable_large_cell_split() -> None:
 
     assert eta > 2.0 * default_ewald_eta(lattice)
     assert eta <= 0.35 * k * (1.0 + 1.0e-12)
+
+
+def test_rayleigh_eta_preflight_is_limited_to_the_exact_near_band() -> None:
+    k = 2.0 * np.pi / 366.6666666666667
+    lattice = pcl.RectangularLattice2D(ax=3544.8765, ay=3544.8765)
+    options = pcl.PeriodicOptions(
+        method="rayleigh",
+        rayleigh_z_cut=400.0,
+        shell_tolerance=1.0e-8,
+        max_shells=64,
+    )
+    periodic = pcl.PeriodicSpec(lattice=lattice, options=options)
+    near_positions = np.asarray([[0.0, 0.0, 0.0], [-300.0, 250.0, 400.0]], dtype=float)
+    tall_positions = np.asarray([[0.0, 0.0, 0.0], [-300.0, 250.0, 35_000.0]], dtype=float)
+
+    near_eta = resolve_ewald_eta(
+        periodic=periodic,
+        k=k,
+        k_parallel=np.zeros(2),
+        positions=near_positions,
+        lmax=2,
+    )
+    tall_eta = resolve_ewald_eta(
+        periodic=periodic,
+        k=k,
+        k_parallel=np.zeros(2),
+        positions=tall_positions,
+        lmax=2,
+    )
+
+    assert tall_eta == pytest.approx(near_eta, rel=0.0, abs=0.0)
+    assert tall_eta > 2.0 * default_ewald_eta(lattice)
+
+
+def test_automatic_ewald_eta_rejects_unstable_tall_cell() -> None:
+    k = 2.0 * np.pi / 366.6666666666667
+    lattice = pcl.RectangularLattice2D(ax=3544.8765, ay=3544.8765)
+    periodic = pcl.PeriodicSpec(
+        lattice=lattice,
+        options=pcl.PeriodicOptions(method="ewald", shell_tolerance=1.0e-8, max_shells=64),
+    )
+    positions = np.asarray(
+        [[0.0, 0.0, 0.0], [100.0, -80.0, 35_000.0]],
+        dtype=float,
+    )
+
+    with pytest.raises(FloatingPointError, match="prefer the hybrid Rayleigh operator"):
+        resolve_ewald_eta(
+            periodic=periodic,
+            k=k,
+            k_parallel=np.zeros(2),
+            positions=positions,
+            lmax=2,
+        )
 
 
 @pytest.mark.reference

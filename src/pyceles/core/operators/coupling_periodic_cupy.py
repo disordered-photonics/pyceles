@@ -182,17 +182,24 @@ class CuPyPeriodicCouplingOperator:
         if eta is not None:
             return float(eta)
         if self._resolved_ewald_eta is None:
+            rayleigh_z_cut = (
+                self._rayleigh_plan().z_cut if self.periodic.options.method == "rayleigh" else None
+            )
             self._resolved_ewald_eta = resolve_ewald_eta(
                 periodic=self.periodic,
                 k=float(self.k),
                 k_parallel=np.asarray(self.k_parallel, dtype=float).reshape(2),
                 positions=np.asarray(self.positions, dtype=float).reshape(-1, 3),
                 lmax=int(self.lmax),
+                max_vertical_offset=rayleigh_z_cut,
             )
         return float(self._resolved_ewald_eta)
 
     def _shell_counts(self) -> tuple[int, int]:
         if self._resolved_shell_counts is None:
+            rayleigh_z_cut = (
+                self._rayleigh_plan().z_cut if self.periodic.options.method == "rayleigh" else None
+            )
             counts = resolve_ewald_shell_counts(
                 periodic=self.periodic,
                 k=float(self.k),
@@ -200,6 +207,7 @@ class CuPyPeriodicCouplingOperator:
                 positions=np.asarray(self.positions, dtype=float).reshape(-1, 3),
                 lmax=int(self.lmax),
                 eta=self._ewald_eta(),
+                max_vertical_offset=rayleigh_z_cut,
             )
             self._resolved_shell_counts = (int(counts.real_shells), int(counts.reciprocal_shells))
         return self._resolved_shell_counts
