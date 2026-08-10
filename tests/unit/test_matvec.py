@@ -1038,6 +1038,10 @@ def test_prepare_matvec_shares_diagonal_operator_across_layered_instances():
     x = np.arange(3 * n_modes(1), dtype=float).reshape(3, n_modes(1)).astype(np.complex128)
     expected = group.T_diag[0] * x
     np.testing.assert_allclose(particle_t.apply(x.reshape(-1)), expected.reshape(-1))
+    block = np.column_stack((x.reshape(-1), (0.25 - 0.5j) * x.reshape(-1)))
+    expected_block = np.column_stack((expected.reshape(-1), (0.25 - 0.5j) * expected.reshape(-1)))
+    np.testing.assert_allclose(particle_t.apply(block), expected_block)
+    np.testing.assert_allclose(particle_t.rhs(block), expected_block)
 
 
 def test_dense_factory_receives_unique_archetypes_and_reuses_blocks():
@@ -1083,6 +1087,9 @@ def test_dense_factory_receives_unique_archetypes_and_reuses_blocks():
     x = np.arange(3 * n_modes(1), dtype=float).reshape(3, n_modes(1)).astype(np.complex128)
     expected = np.einsum("ij,gj->gi", group.T_blocks[0], x)
     np.testing.assert_allclose(particle_t.apply(x.reshape(-1)), expected.reshape(-1))
+    block = np.column_stack((x.reshape(-1), 2j * x.reshape(-1)))
+    expected_block = np.column_stack((expected.reshape(-1), 2j * expected.reshape(-1)))
+    np.testing.assert_allclose(particle_t.apply(block), expected_block)
 
 
 def test_shared_operator_maps_handle_repeated_noncontiguous_archetypes():
@@ -1114,6 +1121,12 @@ def test_shared_operator_maps_handle_repeated_noncontiguous_archetypes():
     expected[1] = group.T_diag[1] * x[1]
     expected[2] = group.T_diag[0] * x[2]
     np.testing.assert_allclose(particle_t.apply(x.reshape(-1)), expected.reshape(-1))
+    np.testing.assert_allclose(particle_t.apply(x), expected)
+    np.testing.assert_allclose(particle_t.rhs(x), expected)
+    block = np.column_stack((x.reshape(-1), (0.5 + 0.25j) * x.reshape(-1)))
+    expected_block = np.column_stack((expected.reshape(-1), (0.5 + 0.25j) * expected.reshape(-1)))
+    np.testing.assert_allclose(particle_t.apply(block), expected_block)
+    np.testing.assert_allclose(particle_t.rhs(block), expected_block)
 
 
 @pytest.mark.fake_gpu

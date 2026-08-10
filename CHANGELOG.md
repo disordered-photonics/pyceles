@@ -44,6 +44,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pairwise-vs-MLFMM scaling benchmark.
 
 ### Changed
+- NumPy particle-local T operators now preserve natural particle-shaped inputs
+  and apply true multi-RHS blocks without column-by-column adapters, matching
+  the existing CuPy block contract for diagonal and dense particle groups.
 - Internal-field evaluation for homogeneous and layered spheres now uses
   pair-batched ownership on NumPy and CuPy, retains CuPy angular contractions
   on the device, and reuses shared archetype radial data. CuPy batches remain

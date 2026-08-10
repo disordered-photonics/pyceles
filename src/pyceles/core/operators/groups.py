@@ -153,14 +153,16 @@ def _apply_shared_diagonal(values: Array, operator_indices: Array, x_subset: Arr
     rows = np.asarray(values)
     ids = np.asarray(operator_indices, dtype=np.int64)
     arr = np.asarray(x_subset)
+    trailing = (1,) * max(0, arr.ndim - 2)
     if rows.shape[0] == 1:
-        return cast(Array, rows[0] * arr)
+        return cast(Array, rows[0].reshape((1, rows.shape[1], *trailing)) * arr)
     if rows.shape[0] == ids.size and np.array_equal(ids, np.arange(ids.size)):
-        return cast(Array, rows * arr)
+        return cast(Array, rows.reshape((*rows.shape, *trailing)) * arr)
     out = np.empty_like(arr)
+    row_shape = (1, rows.shape[1], *trailing)
     for operator_index in range(rows.shape[0]):
         selected = ids == operator_index
-        out[selected] = rows[operator_index] * arr[selected]
+        out[selected] = rows[operator_index].reshape(row_shape) * arr[selected]
     return out
 
 
@@ -169,15 +171,25 @@ def _apply_shared_dense(blocks: Array, operator_indices: Array, x_subset: Array)
     block_rows = np.asarray(blocks)
     ids = np.asarray(operator_indices, dtype=np.int64)
     arr = np.asarray(x_subset)
+    if arr.ndim not in {2, 3}:
+        raise ValueError(f"Dense particle-T subsets must be 2D or 3D. Got {arr.shape}.")
+    shared_subscripts = "ij,gj->gi" if arr.ndim == 2 else "ij,gjr->gir"
+    mapped_subscripts = "gij,gj->gi" if arr.ndim == 2 else "gij,gjr->gir"
     if block_rows.shape[0] == 1:
-        return cast(Array, np.einsum("ij,gj->gi", block_rows[0], arr, optimize=True))
+        return cast(
+            Array,
+            np.einsum(shared_subscripts, block_rows[0], arr, optimize=True),
+        )
     if block_rows.shape[0] == ids.size and np.array_equal(ids, np.arange(ids.size)):
-        return cast(Array, np.einsum("gij,gj->gi", block_rows, arr, optimize=True))
+        return cast(Array, np.einsum(mapped_subscripts, block_rows, arr, optimize=True))
     out = np.empty_like(arr)
     for operator_index in range(block_rows.shape[0]):
         selected = ids == operator_index
         out[selected] = np.einsum(
-            "ij,gj->gi", block_rows[operator_index], arr[selected], optimize=True
+            shared_subscripts,
+            block_rows[operator_index],
+            arr[selected],
+            optimize=True,
         )
     return out
 

@@ -93,21 +93,51 @@ class CompositeParticleTOperator:
     def n_modes(self) -> int:
         return n_modes(self.lmax)
 
+    def _reshape_input(self, x: Array) -> tuple[Array, tuple[int, ...]]:
+        raw = np.asarray(x, dtype=self.dtype)
+        expected = self.n_particles * self.n_modes
+        if raw.ndim == 1:
+            if raw.size != expected:
+                raise ValueError(f"Input length must be {expected}. Got {raw.size}.")
+            return raw.reshape(self.n_particles, self.n_modes), raw.shape
+        elif raw.ndim == 2:
+            if raw.shape == (self.n_particles, self.n_modes):
+                return raw, raw.shape
+            elif raw.shape[0] == expected:
+                return (
+                    raw.reshape(self.n_particles, self.n_modes, raw.shape[1]),
+                    raw.shape,
+                )
+            else:
+                raise ValueError(
+                    "2D input must have shape "
+                    f"({self.n_particles}, {self.n_modes}) or ({expected}, nrhs). Got {raw.shape}."
+                )
+        elif raw.ndim == 3 and raw.shape[:2] == (self.n_particles, self.n_modes):
+            return raw, raw.shape
+        else:
+            raise ValueError(
+                "Input must have shape "
+                f"({expected},), ({self.n_particles}, {self.n_modes}), "
+                f"({expected}, nrhs), or ({self.n_particles}, {self.n_modes}, nrhs). "
+                f"Got {raw.shape}."
+            )
+
     def apply(self, x: Array) -> Array:
-        arr = np.asarray(x, dtype=self.dtype).reshape(self.n_particles, self.n_modes)
+        arr, output_shape = self._reshape_input(x)
         out = np.zeros_like(arr, dtype=self.dtype)
         for group in self.groups:
             ids = np.asarray(group.particle_indices, dtype=np.int64)
             out[ids] = group.apply_subset(arr[ids])
-        return out.reshape(self.n_particles * self.n_modes)
+        return out.reshape(output_shape)
 
     def rhs(self, b: Array) -> Array:
-        arr = np.asarray(b, dtype=self.dtype).reshape(self.n_particles, self.n_modes)
+        arr, output_shape = self._reshape_input(b)
         out = np.zeros_like(arr, dtype=self.dtype)
         for group in self.groups:
             ids = np.asarray(group.particle_indices, dtype=np.int64)
             out[ids] = group.rhs_subset(arr[ids])
-        return out.reshape(self.n_particles * self.n_modes)
+        return out.reshape(output_shape)
 
     def apply_particle_block(self, particle_index: int, block: Array) -> Array:
         i = int(particle_index)
