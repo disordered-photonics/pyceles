@@ -15,6 +15,7 @@ from pyceles.core.operators import (
     prepare_matvec,
 )
 from pyceles.core.periodic import PeriodicOptions, PeriodicSpec
+from pyceles.core.periodic.rayleigh_cupy import apply_sparse_near_coupling_cupy
 from pyceles.core.translation import translation_ab5_table
 from pyceles.postprocessing.nearfield.periodic_interior import (
     _periodic_local_regular_l1_coeffs,
@@ -297,6 +298,54 @@ def test_periodic_cupy_rayleigh_hybrid_matches_numpy_scan_and_near_cache(
     assert cache.dtype == np.dtype(dtype)
     assert gpu._self_block_gpu is not None
     assert gpu._rayleigh_plan_cache is not None
+
+
+def test_periodic_cupy_sparse_rayleigh_near_kernel_matches_dense_lmax4(
+    cupy_runtime: tuple[Any, Any],
+) -> None:
+    cp, _ = cupy_runtime
+    lmax = 4
+    nm = n_modes(lmax)
+    _cpu, gpu = _small_periodic_case(dtype=np.complex64, lmax=lmax)
+    row_ptr, input_modes, channels, values = gpu._near_sparse_contraction_device()
+    rng = np.random.default_rng(20260809)
+    sources = np.asarray([0, 1, 0], dtype=np.int32)
+    destinations = np.asarray([1, 0, 1], dtype=np.int32)
+    structural = (
+        rng.normal(size=(sources.size, 81)) + 1j * rng.normal(size=(sources.size, 81))
+    ).astype(np.complex64)
+    coefficients = (rng.normal(size=(2, nm, 2)) + 1j * rng.normal(size=(2, nm, 2))).astype(
+        np.complex64
+    )
+
+    target = cp.zeros_like(cp.asarray(coefficients))
+    apply_sparse_near_coupling_cupy(
+        target=target,
+        structural=cp.asarray(structural),
+        coefficients=cp.asarray(coefficients),
+        sources=cp.asarray(sources),
+        destinations=cp.asarray(destinations),
+        row_ptr=row_ptr,
+        input_modes=input_modes,
+        structural_channels=channels,
+        values=values,
+        cupy=cp,
+    )
+    cp.cuda.Stream.null.synchronize()
+
+    dense = gpu._near_sparse_contraction_device()
+    pointers_np, input_np, channels_np, values_np = (cp.asnumpy(item) for item in dense)
+    expected = np.zeros_like(coefficients)
+    for pair, (source, destination) in enumerate(zip(sources, destinations, strict=True)):
+        for output_mode in range(nm):
+            start = int(pointers_np[output_mode])
+            stop = int(pointers_np[output_mode + 1])
+            factors = values_np[start:stop] * structural[pair, channels_np[start:stop]]
+            expected[destination, output_mode] += np.sum(
+                factors[:, None] * coefficients[source, input_np[start:stop]], axis=0
+            )
+
+    np.testing.assert_allclose(cp.asnumpy(target), expected, rtol=5e-5, atol=8e-5)
 
 
 def test_periodic_cupy_rayleigh_auto_eta_stays_finite_for_large_cell(

@@ -32,9 +32,12 @@ from pyceles.core.periodic.rayleigh import (
     resolve_rayleigh_mode_chunk_size,
     valid_structural_indices,
 )
-from pyceles.core.periodic.rayleigh_cupy import scan_far_cupy, scatter_add_complex
+from pyceles.core.periodic.rayleigh_cupy import apply_sparse_near_coupling_cupy, scan_far_cupy
 from pyceles.core.periodic.scalar import structural_sum_m_normalization
-from pyceles.core.periodic.structural import translation_contraction_tensor
+from pyceles.core.periodic.structural import (
+    sparse_translation_contraction,
+    translation_contraction_tensor,
+)
 
 from .base import SourceBlockBatch
 
@@ -137,7 +140,9 @@ class CuPyPeriodicCouplingOperator:
         default=None, init=False, repr=False
     )
     _self_block_gpu: Any | None = field(default=None, init=False, repr=False)
-    _near_contraction_tensor_gpu: Any | None = field(default=None, init=False, repr=False)
+    _near_sparse_contraction_gpu: tuple[Any, Any, Any, Any] | None = field(
+        default=None, init=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         self.dtype = np.dtype(self.dtype)
@@ -396,25 +401,13 @@ class CuPyPeriodicCouplingOperator:
             ),
         )
 
-    def _near_apply_batch_size(self, *, total: int, n_rhs: int) -> int:
-        """Bound exact-near contraction intermediates by a predictable budget.
-
-        A three-operand ``einsum`` over every near pair can legally choose the
-        contraction ``structural @ tensor`` first.  That materializes one dense
-        ``(Nm, Nm)`` block per pair, even though the final contribution has only
-        ``Nm`` entries.  Count that block (and one equally sized library
-        workspace) explicitly so dense vertical bands cannot create multi-GiB
-        temporaries before the final scatter.
-        """
-        degrees, _orders = valid_structural_indices(int(self.lmax))
-        nm = int(self.n_modes)
-        rhs = max(1, int(n_rhs))
-        itemsize = int(self.dtype.itemsize)
-        bytes_per_pair = itemsize * (
-            int(degrees.size)  # compute-dtype cache view or host staging
-            + 2 * nm * nm  # dense block plus contraction workspace
-            + 3 * nm * rhs  # gathered source, contribution, and matmul workspace
-        )
+    def _near_apply_batch_size(self, *, total: int) -> int:
+        """Bound host-cache staging used by sparse exact-near contractions."""
+        n_structural = (2 * int(self.lmax) + 1) ** 2
+        # The fused kernel reads source coefficients and sparse contraction
+        # metadata in place, so the only pair-sized temporary is one structural
+        # cache row when host-resident cache slices are staged to the device.
+        bytes_per_pair = int(self.dtype.itemsize) * n_structural
         return self._memory_bounded_batch_size(
             total=int(total),
             bytes_per_item=int(bytes_per_pair),
@@ -446,19 +439,25 @@ class CuPyPeriodicCouplingOperator:
             self._near_sources = sources
         return self._near_destinations, self._near_sources
 
-    def _near_contraction_tensor_device(self) -> Any:
-        """Return the device tensor restricted to valid structural channels."""
-        if self._near_contraction_tensor_gpu is not None:
-            return self._near_contraction_tensor_gpu
+    def _near_sparse_contraction_device(self) -> tuple[Any, Any, Any, Any]:
+        """Return output-mode CSR data for the sparse translation contraction."""
+        cached = self._near_sparse_contraction_gpu
+        if cached is not None:
+            return cached
         cp = self._cupy()
-        degrees, orders = valid_structural_indices(int(self.lmax))
-        tensor_np = translation_contraction_tensor(
+        row_ptr, input_modes, channels, values = sparse_translation_contraction(
             lmax=int(self.lmax),
             ab5=np.asarray(self.ab5),
             dtype=self.dtype,
-        )[:, :, degrees, orders]
-        self._near_contraction_tensor_gpu = cp.asarray(tensor_np, dtype=self.dtype)
-        return self._near_contraction_tensor_gpu
+        )
+        cached = (
+            cp.asarray(row_ptr),
+            cp.asarray(input_modes),
+            cp.asarray(channels),
+            cp.asarray(values),
+        )
+        self._near_sparse_contraction_gpu = cached
+        return cached
 
     def _release_rayleigh_preparation_state(self) -> None:
         """Release Ewald-only device tables after Rayleigh cache preparation."""
@@ -466,9 +465,9 @@ class CuPyPeriodicCouplingOperator:
             return
         if self._near_structural_sums_gpu is None and self._near_structural_sums_host is None:
             return
-        # Preserve the compact tensor used by repeated near contractions, then
+        # Preserve the sparse contraction used by repeated near applies, then
         # release the full structural tensor and reciprocal/real Ewald tables.
-        self._near_contraction_tensor_device()
+        self._near_sparse_contraction_device()
         self._workspace = None
         self._contraction_tensor_gpu = None
         self._self_correction_gpu = None
@@ -532,8 +531,6 @@ class CuPyPeriodicCouplingOperator:
         total += pending("near_structural_orders", orders, np.int32)
         if self._positions_gpu is None:
             total += self.n_particles * 3 * int(np.dtype(np.float64).itemsize)
-        if self._near_contraction_tensor_gpu is None:
-            total += self.n_modes * self.n_modes * int(degrees.size) * int(self.dtype.itemsize)
         return int(total)
 
     def _near_cache_plan(self) -> RayleighNearCacheMemoryPlan:
@@ -542,6 +539,10 @@ class CuPyPeriodicCouplingOperator:
             return plan
         cp = self._cupy()
         destinations, _sources = self._near_pairs()
+        # Materialize the compact contraction metadata before taking the pool
+        # snapshot, so its actual allocation is included without estimating a
+        # dense tensor that the repeated-apply path no longer stores.
+        self._near_sparse_contraction_device()
         estimate = rayleigh_near_cache_estimate(
             pair_count=int(destinations.size),
             lmax=int(self.lmax),
@@ -731,17 +732,16 @@ class CuPyPeriodicCouplingOperator:
         if total:
             src_gpu = self._rayleigh_device_array("near_sources", sources, dtype=cp.int32)
             dst_gpu = self._rayleigh_device_array("near_destinations", destinations, dtype=cp.int32)
-            tensor = self._near_contraction_tensor_device()
-            pair_batch = self._near_apply_batch_size(
-                total=total,
-                n_rhs=int(arr.shape[2]),
+            row_ptr, input_modes, structural_channels, contraction_values = (
+                self._near_sparse_contraction_device()
             )
+            pair_batch = self._near_apply_batch_size(total=total)
             structural_staging = (
                 None
                 if sums_gpu is not None
                 else self._near_host_staging_device(
                     rows=pair_batch,
-                    width=int(tensor.shape[2]),
+                    width=(2 * int(self.lmax) + 1) ** 2,
                 )
             )
             for start in range(0, total, pair_batch):
@@ -753,23 +753,19 @@ class CuPyPeriodicCouplingOperator:
                         raise RuntimeError("Periodic host near cache is unavailable.")
                     structural = structural_staging[: stop - start]
                     structural.set(sums_host[start:stop])
-                blocks = cp.einsum(
-                    "av,ijv->aij",
-                    structural,
-                    tensor,
-                    optimize=True,
-                )
-                contribution = cp.matmul(
-                    blocks,
-                    arr[src_gpu[start:stop]],
-                )
-                scatter_add_complex(
-                    y,
-                    dst_gpu[start:stop],
-                    contribution,
+                apply_sparse_near_coupling_cupy(
+                    target=y,
+                    structural=structural,
+                    coefficients=arr,
+                    sources=src_gpu[start:stop],
+                    destinations=dst_gpu[start:stop],
+                    row_ptr=row_ptr,
+                    input_modes=input_modes,
+                    structural_channels=structural_channels,
+                    values=contraction_values,
                     cupy=cp,
                 )
-                del structural, blocks, contribution
+                del structural
 
         flat = y.reshape(self.n_particles * self.n_modes, int(arr.shape[2]))
         return flat[:, 0] if squeezed else flat

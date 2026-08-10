@@ -714,8 +714,13 @@ def test_cupy_rayleigh_release_drops_only_ewald_preparation_state(
         dtype=np.dtype(np.complex64),
         circumscribing_radii=np.asarray([40.0]),
     )
-    compact_tensor = np.ones((1, 1, 1), dtype=np.complex64)
-    monkeypatch.setattr(operator, "_near_contraction_tensor_device", lambda: compact_tensor)
+    compact_sparse = (
+        np.asarray([0, 1], dtype=np.int64),
+        np.asarray([0], dtype=np.int32),
+        np.asarray([0], dtype=np.int32),
+        np.asarray([1.0 + 0.0j], dtype=np.complex64),
+    )
+    monkeypatch.setattr(operator, "_near_sparse_contraction_device", lambda: compact_sparse)
     operator._workspace = cast(Any, object())
     operator._contraction_tensor_gpu = cast(Any, object())
     operator._self_correction_gpu = cast(Any, object())
@@ -748,7 +753,7 @@ def test_rayleigh_near_cache_memory_plan_keeps_small_cache_on_device() -> None:
 
 
 @pytest.mark.fake_gpu
-def test_cupy_near_apply_batch_accounts_for_dense_pair_blocks() -> None:
+def test_cupy_near_apply_batch_accounts_only_for_structural_staging() -> None:
     positions = np.zeros((700, 3), dtype=float)
     operator = CuPyPeriodicCouplingOperator(
         lmax=3,
@@ -771,11 +776,12 @@ def test_cupy_near_apply_batch_accounts_for_dense_pair_blocks() -> None:
         circumscribing_radii=np.full(positions.shape[0], 40.0),
     )
 
-    total = 400_000
-    batch = operator._near_apply_batch_size(total=total, n_rhs=1)
+    total = 2_000_000
+    batch = operator._near_apply_batch_size(total=total)
+    expected = (256 * 1024**2) // (((2 * operator.lmax + 1) ** 2) * operator.dtype.itemsize)
 
+    assert batch == expected
     assert 1 <= batch < total
-    assert batch < 20_000
 
 
 @pytest.mark.fake_gpu

@@ -116,6 +116,54 @@ def direct_structural_sums_2d(
     return np.asarray(sums, dtype=out_dtype)
 
 
+def sparse_translation_contraction(
+    *,
+    lmax: int,
+    ab5: Array,
+    dtype: npt.DTypeLike | None = None,
+) -> tuple[Array, Array, Array, Array]:
+    """Return output-mode CSR data for the SVWF structural contraction.
+
+    The compact periodic structural cache stores valid ``(p, m)`` channels in
+    degree-major order.  For a mode pair only ``m = m_src - m_dst`` contributes,
+    so the compact channel index is ``p**2 + p + m``.  Constructing this sparse
+    map directly avoids ever materializing the dense ``(Nm, Nm, P, M)`` tensor
+    merely to discard its structural zeros.
+    """
+    lmax_i = int(lmax)
+    nm = n_modes(lmax_i)
+    order = 2 * lmax_i
+    ab5_arr = np.asarray(ab5)
+    expected_ab5_shape = (nm, nm, order + 1)
+    if ab5_arr.shape != expected_ab5_shape:
+        raise ValueError(f"`ab5` must have shape {expected_ab5_shape}. Got {ab5_arr.shape}.")
+    out_dtype = (
+        np.dtype(dtype) if dtype is not None else np.result_type(ab5_arr.dtype, np.complex64)
+    )
+    modes = tuple(iter_modes(lmax_i))
+    row_ptr = np.zeros((nm + 1,), dtype=np.int64)
+    input_modes: list[int] = []
+    structural_channels: list[int] = []
+    values: list[complex] = []
+    for _tau_dst, _l_dst, m_dst, dst_idx in modes:
+        for _tau_src, _l_src, m_src, src_idx in modes:
+            m_delta = int(m_src - m_dst)
+            for degree in range(abs(m_delta), order + 1):
+                value = ab5_arr[dst_idx, src_idx, degree]
+                if value == 0:
+                    continue
+                input_modes.append(int(src_idx))
+                structural_channels.append(degree * degree + degree + m_delta)
+                values.append(complex(value))
+        row_ptr[int(dst_idx) + 1] = len(values)
+    return (
+        row_ptr,
+        np.asarray(input_modes, dtype=np.int32),
+        np.asarray(structural_channels, dtype=np.int32),
+        np.asarray(values, dtype=out_dtype),
+    )
+
+
 def translation_contraction_tensor(
     *,
     lmax: int,
@@ -315,5 +363,6 @@ __all__ = [
     "direct_structural_sums_2d",
     "free_space_structural_sums",
     "periodic_direct_structural_block",
+    "sparse_translation_contraction",
     "translation_contraction_tensor",
 ]

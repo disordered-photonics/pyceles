@@ -11,6 +11,7 @@ from pyceles.core.periodic.structural import (
     block_from_structural_sums,
     blocks_from_structural_sums,
     periodic_direct_structural_block,
+    sparse_translation_contraction,
     translation_contraction_tensor,
 )
 from pyceles.core.translation import translation_ab5_table
@@ -175,3 +176,27 @@ def test_batched_structural_blocks_match_single_block_assembly() -> None:
     )
 
     np.testing.assert_allclose(actual, expected, rtol=3e-15, atol=3e-15)
+
+
+@pytest.mark.parametrize("lmax", [1, 2, 3, 4, 6])
+def test_sparse_translation_contraction_matches_dense_valid_channels(lmax: int) -> None:
+    ab5 = translation_ab5_table(lmax, dtype=np.complex128)
+    dense = translation_contraction_tensor(lmax=lmax, ab5=ab5)
+    order = 2 * lmax
+    compact = np.concatenate(
+        [dense[:, :, degree, order - degree : order + degree + 1] for degree in range(order + 1)],
+        axis=2,
+    )
+    row_ptr, input_modes, channels, values = sparse_translation_contraction(
+        lmax=lmax,
+        ab5=ab5,
+        dtype=np.complex128,
+    )
+    reconstructed = np.zeros_like(compact)
+    for output_mode in range(n_modes(lmax)):
+        start = int(row_ptr[output_mode])
+        stop = int(row_ptr[output_mode + 1])
+        reconstructed[output_mode, input_modes[start:stop], channels[start:stop]] = values[
+            start:stop
+        ]
+    np.testing.assert_array_equal(reconstructed, compact)

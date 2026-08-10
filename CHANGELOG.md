@@ -154,9 +154,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now apply minimum-image distances only in x and y, retain finite z, and
   validate large periodic packings without enumerating every particle pair or
   neighboring image.
-- Bounded CuPy hybrid-Rayleigh exact-near contractions by their dense per-pair
-  intermediate size, preventing dense vertical bands from materializing
-  multi-gigabyte temporary block tensors during matrix-free applies.
+- CuPy hybrid-Rayleigh repeated applies now contract exact-near structural
+  coefficients through the sparse SVWF translation pattern in one fused
+  kernel. This avoids materializing a dense mode-by-mode block for every near
+  pair and makes the saved structural cache, rather than transient contraction
+  tensors, the dominant exact-near memory cost.
 - Streamed periodic source-block batches directly into dense operators,
   removing private cache swapping and the full temporary W-block cache from
   direct solves.

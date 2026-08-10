@@ -285,6 +285,130 @@ def scatter_add_complex(target: Any, indices: Any, values: Any, *, cupy: Any) ->
     )
 
 
+@cache
+def _sparse_near_kernel_source(dtype_name: str) -> tuple[str, str]:
+    scalar, complex_type, suffix, _, _ = _cuda_types(dtype_name)
+    kernel_name = f"pyceles_rayleigh_sparse_near_{suffix}"
+    source = f"""
+#include <cupy/complex.cuh>
+extern "C" __global__
+void {kernel_name}(
+    const long long n_pairs,
+    const long long n_modes,
+    const long long n_structural,
+    const long long n_rhs,
+    const int* sources,
+    const int* destinations,
+    const {complex_type}* structural,
+    const long long* row_ptr,
+    const int* input_modes,
+    const int* structural_channels,
+    const {complex_type}* coefficients,
+    const {complex_type}* values,
+    {scalar}* output)
+{{
+    const long long flat = (long long)blockDim.x * blockIdx.x + threadIdx.x;
+    const long long total = n_pairs * n_modes * n_rhs;
+    if (flat >= total) return;
+    const long long rhs = flat % n_rhs;
+    const long long mode_lane = flat / n_rhs;
+    const long long output_mode = mode_lane % n_modes;
+    const long long pair = mode_lane / n_modes;
+    const long long source = (long long)sources[pair];
+    {complex_type} accumulator = {complex_type}(0.0, 0.0);
+    for (long long entry = row_ptr[output_mode]; entry < row_ptr[output_mode + 1]; ++entry) {{
+        const long long input_mode = (long long)input_modes[entry];
+        const long long structural_channel = (long long)structural_channels[entry];
+        const {complex_type} incident = coefficients[
+            (source * n_modes + input_mode) * n_rhs + rhs
+        ];
+        accumulator += structural[pair * n_structural + structural_channel]
+            * values[entry] * incident;
+    }}
+    const long long destination = (long long)destinations[pair];
+    const long long output_index = (
+        (destination * n_modes + output_mode) * n_rhs + rhs
+    ) * 2;
+    atomicAdd(output + output_index, ({scalar})accumulator.real());
+    atomicAdd(output + output_index + 1, ({scalar})accumulator.imag());
+}}
+"""
+    return kernel_name, source
+
+
+@cache
+def _sparse_near_kernel(dtype_name: str) -> Any:
+    cp, _ = import_cupy()
+    name, source = _sparse_near_kernel_source(dtype_name)
+    return cp.RawKernel(source, name)
+
+
+def apply_sparse_near_coupling_cupy(
+    *,
+    target: Any,
+    structural: Any,
+    coefficients: Any,
+    sources: Any,
+    destinations: Any,
+    row_ptr: Any,
+    input_modes: Any,
+    structural_channels: Any,
+    values: Any,
+    cupy: Any,
+) -> None:
+    """Accumulate sparse exact-near translation contractions on device."""
+    dtype = np.dtype(target.dtype)
+    if dtype not in {np.dtype(np.complex64), np.dtype(np.complex128)}:
+        raise TypeError(f"Unsupported Rayleigh sparse-near dtype {dtype!r}.")
+    output = cupy.asarray(target, dtype=dtype)
+    structure = cupy.ascontiguousarray(cupy.asarray(structural, dtype=dtype))
+    coeff = cupy.ascontiguousarray(cupy.asarray(coefficients, dtype=dtype))
+    if output.ndim != 3 or coeff.ndim != 3 or structure.ndim != 2:
+        raise ValueError("Sparse Rayleigh near inputs must have ranks 3, 3, and 2.")
+    if output.shape != coeff.shape:
+        raise ValueError("Sparse Rayleigh target and coefficient blocks must have equal shapes.")
+    source = cupy.asarray(sources, dtype=cupy.int32).reshape(-1)
+    destination = cupy.asarray(destinations, dtype=cupy.int32).reshape(-1)
+    if int(source.size) != int(destination.size) or int(source.size) != int(structure.shape[0]):
+        raise ValueError("Sparse Rayleigh pair arrays must have equal lengths.")
+    pointers = cupy.asarray(row_ptr, dtype=cupy.int64).reshape(-1)
+    in_modes = cupy.asarray(input_modes, dtype=cupy.int32).reshape(-1)
+    channels = cupy.asarray(structural_channels, dtype=cupy.int32).reshape(-1)
+    factors = cupy.asarray(values, dtype=dtype).reshape(-1)
+    if not (int(in_modes.size) == int(channels.size) == int(factors.size)):
+        raise ValueError("Sparse Rayleigh contraction arrays must have equal lengths.")
+    _n_particles, n_modes, n_rhs = (int(value) for value in output.shape)
+    if int(pointers.size) != n_modes + 1:
+        raise ValueError("Sparse Rayleigh row pointers must cover every output mode.")
+    total = int(source.size) * n_modes * n_rhs
+    if total == 0:
+        return
+    scalar_dtype = cupy.float32 if dtype == np.dtype(np.complex64) else cupy.float64
+    output_scalar = output.view(scalar_dtype).reshape(-1)
+    threads = 128
+    blocks = (total + threads - 1) // threads
+    kernel = _sparse_near_kernel(dtype.name)
+    kernel(
+        (blocks,),
+        (threads,),
+        (
+            np.int64(source.size),
+            np.int64(n_modes),
+            np.int64(structure.shape[1]),
+            np.int64(n_rhs),
+            source,
+            destination,
+            structure,
+            pointers,
+            in_modes,
+            channels,
+            coeff,
+            factors,
+            output_scalar,
+        ),
+    )
+
+
 def scan_far_cupy(
     *,
     source_amplitudes: Any,
@@ -472,6 +596,7 @@ def apply_rayleigh_far_to_points_cupy(
 
 __all__ = [
     "apply_rayleigh_far_to_points_cupy",
+    "apply_sparse_near_coupling_cupy",
     "scan_far_cupy",
     "scan_far_to_points_cupy",
     "scatter_add_complex",
