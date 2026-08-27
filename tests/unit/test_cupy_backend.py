@@ -35,6 +35,7 @@ from pyceles.core.particles import Particle, ParticleCollection, spheres_from_ar
 from pyceles.core.translation import RadialLUT
 from pyceles.io import far_field_intensity
 from pyceles.postprocessing.farfield import (
+    compute_far_field_patterns,
     local_absorbed_power_from_exciting,
     local_absorption_cross_section_from_exciting,
     local_power_balance_from_exciting,
@@ -696,6 +697,45 @@ def test_cupy_public_solve_sources_does_not_retain_backend_handoff() -> None:
 
     assert not hasattr(solved.solver_result, "backend_x")
     assert not hasattr(sim, "_solve_backend_handoffs")
+
+
+@pytest.mark.parametrize("dtype", (np.complex64, np.complex128))
+def test_cupy_angular_spectrum_farfield_uses_canonical_wavevector_grid(dtype) -> None:
+    """CuPy far-field grids remain combinable with angular-spectrum sources."""
+    wavelength = 550.0
+    k = 2.0 * np.pi / wavelength
+    alpha = np.linspace(0.0, 2.0 * np.pi, 7, endpoint=False)
+    beta = np.linspace(0.0, np.pi, 9)
+    source = pcl.GaussianBeam(
+        wavelength=wavelength,
+        medium_n=1.0 + 0j,
+        polarization="TE",
+        beam_width=2000.0,
+    )
+
+    patterns = compute_far_field_patterns(
+        np.array([[0.0, 0.0, 0.0]], dtype=float),
+        np.zeros((1, n_modes(1)), dtype=dtype),
+        k=k,
+        lmax=1,
+        polar_angles=beta,
+        azimuthal_angles=alpha,
+        source=source,
+        backend="cupy",
+        dtype=dtype,
+    )
+
+    expected_kx = k * np.sin(beta[None, :]) * np.cos(alpha[:, None])
+    expected_ky = k * np.sin(beta[None, :]) * np.sin(alpha[:, None])
+    expected_kz = np.broadcast_to(k * np.cos(beta), expected_kx.shape)
+    assert patterns.initial is not None
+    assert patterns.total is not None
+    np.testing.assert_array_equal(patterns.scattered.kx, expected_kx)
+    np.testing.assert_array_equal(patterns.scattered.ky, expected_ky)
+    np.testing.assert_array_equal(patterns.scattered.kz, expected_kz)
+    np.testing.assert_array_equal(patterns.initial.kx, patterns.scattered.kx)
+    np.testing.assert_array_equal(patterns.initial.ky, patterns.scattered.ky)
+    np.testing.assert_array_equal(patterns.initial.kz, patterns.scattered.kz)
 
 
 @pytest.mark.parametrize("collect_stream_stats", [False, True])

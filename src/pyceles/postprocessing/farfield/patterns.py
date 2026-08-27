@@ -154,6 +154,15 @@ def _scattered_field_plane_wave_pattern_cupy(
     pwp_te_coeff = cupy.zeros((Na, Nb), dtype=complex_dtype)
     pwp_tm_coeff = cupy.zeros((Na, Nb), dtype=complex_dtype)
 
+    # Keep public coordinate metadata in NumPy's canonical double precision.
+    # The device phase calculation intentionally remains in the requested
+    # compute precision, but exposing its rounded coordinates would make a
+    # CuPy spectrum differ from the equivalent source spectrum on the same
+    # angular grid.
+    kx_host = k * np.sin(beta_np[None, :]) * np.cos(alpha_np[:, None])
+    ky_host = k * np.sin(beta_np[None, :]) * np.sin(alpha_np[:, None])
+    kz_host = np.broadcast_to(k * np.cos(beta_np), (Na, Nb))
+
     if show_progress:
         try:
             from tqdm.auto import tqdm
@@ -196,9 +205,9 @@ def _scattered_field_plane_wave_pattern_cupy(
     return PlaneWaveSpectrum(
         alpha_np,
         beta_np,
-        asnumpy(kx),
-        asnumpy(ky),
-        asnumpy(kz),
+        kx_host,
+        ky_host,
+        kz_host,
         asnumpy(pwp_te_coeff).astype(ctype, copy=False),
         asnumpy(pwp_tm_coeff).astype(ctype, copy=False),
     )
