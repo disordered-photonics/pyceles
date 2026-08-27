@@ -78,6 +78,56 @@ def _random_uniform_sphere_particles(*, n_particles: int, seed: int = 4) -> Part
     )
 
 
+@pytest.mark.parametrize(
+    ("lmax", "compute_dtype"),
+    (
+        (2, np.complex64),  # 16 modes in one 32-thread block
+        (3, np.complex64),  # common 30-mode case in one 32-thread block
+        (2, np.complex128),
+        (4, np.complex128),  # 48 modes in two 32-thread blocks
+        (5, np.complex64),  # 70 modes in two 64-thread blocks
+    ),
+)
+def test_cupy_pairwise_partial_mode_tiles_match_numpy(
+    lmax: int, compute_dtype: type[np.complexfloating[Any, Any]]
+) -> None:
+    """Keep helper lanes alive through cooperative setup for partial tiles."""
+
+    particles = _small_cluster_particles()
+    kwargs: dict[str, Any] = dict(
+        lmax=lmax,
+        k=2.0 * np.pi / 550.0,
+        particles=particles,
+        n_medium=1.0 + 0j,
+        radial_lut_dr=0.5,
+        cache_translation_blocks=False,
+        operator_dtype=compute_dtype,
+        coupling_backend="pairwise",
+    )
+    prepared_numpy = prepare_matvec(**kwargs, backend="numpy")
+    prepared_cupy = prepare_matvec(**kwargs, backend="cupy")
+    rng = np.random.default_rng(20260827)
+    x = np.asarray(
+        rng.standard_normal(len(particles) * n_modes(lmax))
+        + 1j * rng.standard_normal(len(particles) * n_modes(lmax)),
+        dtype=compute_dtype,
+    )
+    reference = np.asarray(prepared_numpy.apply_W(x), dtype=np.complex128)
+    actual = np.asarray(asnumpy(prepared_cupy.apply_W(x)), dtype=np.complex128)
+    tolerance = 2.0e-5 if compute_dtype == np.complex64 else 1.0e-12
+    np.testing.assert_allclose(actual, reference, rtol=tolerance, atol=tolerance)
+
+    x_block = np.column_stack((x, (0.5 + 0.25j) * x))
+    reference_block = np.column_stack(
+        [
+            np.asarray(prepared_numpy.apply_W(x_block[:, column]), dtype=np.complex128)
+            for column in range(x_block.shape[1])
+        ]
+    )
+    actual_block = np.asarray(asnumpy(prepared_cupy.apply_W(x_block)), dtype=np.complex128)
+    np.testing.assert_allclose(actual_block, reference_block, rtol=tolerance, atol=tolerance)
+
+
 def _plane_wave_source(wavelength: float, n_medium: complex) -> pcl.PlaneWave:
     return pcl.PlaneWave(
         wavelength=wavelength,

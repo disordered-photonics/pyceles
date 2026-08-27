@@ -142,9 +142,12 @@ def _translation_matvec_raw_kernel(lmax: int, dtype_str: str):
         {complex_type}* wx
     ) {{
         const int n1 = blockIdx.x * blockDim.x + threadIdx.x;
-        if (n1 >= nmodes) {{
-            return;
-        }}
+        // Keep out-of-range mode lanes in the block. Shared radial/Legendre/
+        // phase tables are filled cooperatively with threadIdx.x strides of
+        // blockDim.x, so helper lanes in a partial final mode tile must remain
+        // alive even though they do no mode-dependent work. Keeping every lane
+        // alive also makes the block-wide synchronization structure uniform.
+        const bool active_mode = n1 < nmodes;
         __shared__ {real_type} re_h_shared[{n_orders}];
         __shared__ {real_type} im_h_shared[{n_orders}];
         __shared__ {real_type} p_pdm_shared[{n_p_pdm}];
@@ -157,7 +160,7 @@ def _translation_matvec_raw_kernel(lmax: int, dtype_str: str):
         __shared__ {real_type} st_shared;
         __shared__ {real_type} phi_shared;
 
-        const int m1 = mode_m[n1];
+        const int m1 = active_mode ? mode_m[n1] : 0;
 
         for (int rhs = blockIdx.z; rhs < nrhs; rhs += gridDim.z) {{
             for (int s1 = blockIdx.y; s1 < ns; s1 += gridDim.y) {{
@@ -217,6 +220,7 @@ def _translation_matvec_raw_kernel(lmax: int, dtype_str: str):
                     }}
                     __syncthreads();
 
+                    if (active_mode) {{
                     for (int n2 = 0; n2 < nmodes; ++n2) {{
                         // We intentionally read x[s2, n2] directly from global memory.
                         // Profiling on the 5k-particle c64 benchmark showed that
@@ -254,11 +258,14 @@ def _translation_matvec_raw_kernel(lmax: int, dtype_str: str):
                             im_incr += re_phase * im_x_tmp + im_phase * re_x_tmp;
                         }}
                     }}
+                    }}
                     __syncthreads();
                 }}
 
-                const int y_idx = ((s1 * nmodes + n1) * nrhs) + rhs;
-                wx[y_idx] = {complex_type}(re_incr, im_incr);
+                if (active_mode) {{
+                    const int y_idx = ((s1 * nmodes + n1) * nrhs) + rhs;
+                    wx[y_idx] = {complex_type}(re_incr, im_incr);
+                }}
             }}
         }}
     }}
