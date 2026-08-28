@@ -166,7 +166,12 @@ def resolve_rayleigh_half_width(
         raise ValueError(f"`max_shells` must be positive. Got {max_shells!r}.")
     k_f = float(k)
     kp = np.asarray(k_parallel, dtype=float).reshape(2)
-    power = max(1, 2 * int(lmax) - 1)
+    lmax_i = int(lmax)
+    if lmax_i < 0:
+        raise ValueError(f"`lmax` must be non-negative. Got {lmax!r}.")
+    degree_max = 2 * lmax_i
+    prefactor = 2.0 * math.pi / (float(lattice.area) * k_f)
+    power = max(1, degree_max - 1)
     for shell in range(cap + 1):
         idx = np.asarray(chebyshev_shell_indices(shell), dtype=np.int64)
         q = (
@@ -178,11 +183,26 @@ def resolve_rayleigh_half_width(
         gamma = _reciprocal_gamma(k_f, q)
         if np.any(np.imag(gamma) <= 0.0):
             continue
+        # A Rayleigh structural term contains a normalized associated-Legendre
+        # factor evaluated at the complex angle of each evanescent order. At
+        # high structural degree this factor can exceed the old radial-power
+        # proxy by many orders of magnitude. Bound the same degree range used
+        # by the evaluator, together with its scalar prefactor and 1/gamma
+        # decay. Keep the historical power proxy as a conservative fallback
+        # for the asymptotic polynomial growth.
+        angular = legendre_normalized_trigon(
+            gamma / k_f,
+            rho / k_f,
+            degree_max,
+            xp=np,
+        )
+        angular_bound = np.max(np.abs(np.asarray(angular)), axis=(0, 1))
         scaled = np.maximum(1.0, rho / k_f)
         envelope = (
-            np.exp(-np.imag(gamma) * float(z_cut))
-            * scaled**power
-            / np.maximum(np.abs(gamma / k_f), 1.0e-14)
+            prefactor
+            * np.exp(-np.imag(gamma) * float(z_cut))
+            * np.maximum(angular_bound, scaled**power)
+            / np.maximum(np.abs(gamma), 1.0e-14)
         )
         shell_small = float(idx.shape[0]) * float(np.max(envelope, initial=0.0)) <= tol
         if shell_small:

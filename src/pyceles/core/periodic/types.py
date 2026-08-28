@@ -34,12 +34,13 @@ class PeriodicOptions:
     upward/downward scans. The default half-band is one medium wavelength and
     is enlarged to twice the largest circumscribing radius when necessary.
     ``rayleigh_reciprocal_shells`` fixes the reciprocal square half-width; when
-    it is ``None``, an evanescent-envelope heuristic uses the same
-    ``shell_tolerance`` and ``max_shells`` controls as Ewald accumulation.
-    Reciprocal work is chunked automatically from a bounded temporary-memory
-    budget rather than exposed as a user-facing tuning knob. In-slab periodic
-    near-field evaluation reuses this exact-near/Rayleigh-far policy for
-    source-point coupling.
+    it is ``None``, an evanescent-envelope estimate uses the normalized
+    associated-Legendre growth at the complex evanescent angle, together with
+    the structural prefactor and the same ``shell_tolerance`` and
+    ``max_shells`` controls as Ewald accumulation. Reciprocal work is chunked
+    automatically from a bounded temporary-memory budget rather than exposed
+    as a user-facing tuning knob. In-slab periodic near-field evaluation
+    reuses this exact-near/Rayleigh-far policy for source-point coupling.
 
     ``output_bmax`` controls optional evanescent diffraction orders in periodic
     output bases. ``None`` means propagating orders only for far-field power

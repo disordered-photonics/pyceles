@@ -30,6 +30,7 @@ from pyceles.core.periodic.rayleigh import (
     rayleigh_block,
     rayleigh_near_cache_estimate,
     rayleigh_structural_sums_2d_batch,
+    resolve_rayleigh_half_width,
     resolve_rayleigh_mode_chunk_size,
     resolve_rayleigh_z_cut,
 )
@@ -201,6 +202,89 @@ def test_rayleigh_workspace_chunk_is_a_memory_aware_upper_bound() -> None:
         )
         == 7
     )
+
+
+@pytest.mark.parametrize(
+    ("angle_deg", "lmax", "z_cut", "max_degree", "max_shells", "reference_width"),
+    [
+        (0.0, 26, 2186.8097898, 52, 64, 64),
+        (25.0, 26, 2186.8097898, 52, 64, 64),
+        # Accuracy-6 production MLFMM uses closure order 59, mapping to
+        # structural lmax=30 for the adaptive Rayleigh envelope.
+        (0.0, 30, 2186.8097898, 59, 64, 64),
+        (25.0, 30, 2186.8097898, 59, 64, 64),
+        (0.0, 4, 366.6666667, 8, 128, 96),
+        (25.0, 4, 366.6666667, 8, 128, 96),
+    ],
+)
+def test_rayleigh_half_width_accounts_for_complex_angular_growth(
+    angle_deg: float,
+    lmax: int,
+    z_cut: float,
+    max_degree: int,
+    max_shells: int,
+    reference_width: int,
+) -> None:
+    """Adaptive windows resolve closure and particle-level degrees."""
+
+    lattice = pcl.RectangularLattice2D(3544.8765, 3544.8765)
+    k = 2.0 * np.pi * 1.5 / 550.0
+    angle = np.deg2rad(float(angle_deg))
+    k_parallel = np.asarray([k * np.sin(angle), 0.0])
+    width = resolve_rayleigh_half_width(
+        lattice=lattice,
+        k=k,
+        k_parallel=k_parallel,
+        lmax=int(lmax),
+        z_cut=float(z_cut),
+        tolerance=1.0e-8,
+        max_shells=int(max_shells),
+        requested=None,
+    )
+
+    displacement = np.asarray([[0.0, 0.0, float(z_cut)]])
+    selected = rayleigh_structural_sums_2d_batch(
+        max_degree=int(max_degree),
+        k=k,
+        displacements=displacement,
+        lattice=lattice,
+        k_parallel=k_parallel,
+        tolerance=1.0e-8,
+        max_shells=max(int(max_shells), int(reference_width)),
+        requested_half_width=int(width),
+    )
+    reference = rayleigh_structural_sums_2d_batch(
+        max_degree=int(max_degree),
+        k=k,
+        displacements=displacement,
+        lattice=lattice,
+        tolerance=1.0e-8,
+        k_parallel=k_parallel,
+        max_shells=max(int(max_shells), int(reference_width)),
+        requested_half_width=int(reference_width),
+    )
+    relative_error = np.linalg.norm(selected - reference) / np.linalg.norm(reference)
+
+    # The original radial-power heuristic selected h=16 for the degree-52
+    # production closure. The complex-angle envelope must remain accurate not
+    # only there but also for the shorter particle-level exact-near band and
+    # for oblique incidence.
+    assert width < reference_width
+    assert relative_error < 1.0e-8
+
+
+def test_rayleigh_half_width_rejects_negative_lmax() -> None:
+    with pytest.raises(ValueError, match=r"lmax.*non-negative"):
+        resolve_rayleigh_half_width(
+            lattice=pcl.RectangularLattice2D(900.0, 900.0),
+            k=2.0 * np.pi / 550.0,
+            k_parallel=np.zeros(2),
+            lmax=-1,
+            z_cut=550.0,
+            tolerance=1.0e-8,
+            max_shells=32,
+            requested=None,
+        )
 
 
 def test_rayleigh_plan_rejects_exact_wood_anomaly() -> None:
