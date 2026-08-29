@@ -16,6 +16,7 @@ only during preparation to build a small family of coarse-box diagonals.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import replace
 from time import perf_counter
 from typing import Literal
@@ -336,12 +337,16 @@ def _periodic_nonzero_structural_sums(
     offsets: list[Offset3],
     displacements: Array,
     matmul_backend: Literal["numpy", "cupy"] = "numpy",
+    excluded_lattice_indices: Sequence[Array] | None = None,
 ) -> tuple[dict[Offset3, Array], dict[Offset3, LatticeIndex | None], float]:
     """Evaluate all nonzero lattice images for coarse-box offsets in one batch.
 
-    Same-plane offsets retain Ewald summation.  Shifted offsets use the exact
+    Same-plane offsets retain Ewald summation.  When exclusions are supplied,
+    same-plane tables use the stable excluded-image rearrangement: selected
+    real-space images are omitted before accumulation and their local Ewald
+    complements are applied directly.  Shifted offsets use the exact
     reciprocal Rayleigh representation, which is both faster and numerically
-    well scaled for the vertically separated boxes in a tall periodic cell.
+    well scaled for vertically separated boxes in a tall periodic cell.
     """
 
     degree_max = int(max_degree)
@@ -404,6 +409,11 @@ def _periodic_nonzero_structural_sums(
             max_shells=int(periodic.options.max_shells),
             dtype=np.complex128,
             workspace=workspace,
+            excluded_lattice_indices=(
+                None
+                if excluded_lattice_indices is None
+                else [excluded_lattice_indices[int(index)] for index in np.flatnonzero(same_plane)]
+            ),
         )
     shifted = ~same_plane
     if np.any(shifted):
@@ -695,8 +705,39 @@ def _build_periodization_plan_at_level(
     coarse_groups = _coarse_pair_groups(operators, closure_level=closure_level)
     offsets = sorted(coarse_groups)
     displacements = np.asarray([coarse_groups[key][2] for key in offsets], dtype=float)
+    half_size = float(operators.partition.root_half_size) / float(1 << closure_level)
+    near_by_offset: dict[Offset3, Array] = {}
+    near_union: set[LatticeIndex] = set()
+    excluded_by_offset: dict[Offset3, Array] = {}
+    stable_same_plane_by_offset: dict[Offset3, bool] = {}
+    same_plane_atol = same_plane_z_tolerance(
+        float(k),
+        coordinate_scale=float(np.max(np.abs(displacements), initial=0.0)),
+    )
+    for offset in offsets:
+        _sources, _destinations, delta = coarse_groups[offset]
+        near_indices = _near_lattice_indices_for_offset(
+            base_displacement=delta,
+            half_size=half_size,
+            lattice=periodic.lattice,
+        )
+        near_by_offset[offset] = near_indices
+        near_union.update(
+            (int(p), int(q)) for p, q in np.asarray(near_indices, dtype=np.int64).reshape(-1, 2)
+        )
+        same_plane = abs(float(delta[2])) <= same_plane_atol
+        if same_plane:
+            # The central free-space term is still removed by the periodizer
+            # after the Ewald table is formed.  Only descended noncentral
+            # images use the stable complement, because extending this
+            # experimental path to the central term changes the established
+            # self/central-image regularization and is not yet validated.
+            excluded = np.asarray(near_indices, dtype=np.int32).reshape(-1, 2)
+        else:
+            excluded = np.zeros((0, 2), dtype=np.int32)
+        excluded_by_offset[offset] = excluded
+        stable_same_plane_by_offset[offset] = bool(same_plane and near_indices.size)
     if show_progress:
-        half_size = float(operators.partition.root_half_size) / float(1 << closure_level)
         tqdm.write(
             "[MLFMM] periodic closure prepare "
             f"level={closure_level} order={level.translator_order} offsets={len(offsets)} "
@@ -712,6 +753,7 @@ def _build_periodization_plan_at_level(
         offsets=offsets,
         displacements=displacements,
         matmul_backend=matmul_backend,
+        excluded_lattice_indices=[excluded_by_offset[offset] for offset in offsets],
     )
     if show_progress:
         tqdm.write(
@@ -719,25 +761,14 @@ def _build_periodization_plan_at_level(
             f"backend={matmul_backend} elapsed_s={perf_counter() - structural_started:.2f}"
         )
 
-    half_size = float(operators.partition.root_half_size) / float(1 << closure_level)
-    near_by_offset: dict[Offset3, Array] = {}
-    near_union: set[LatticeIndex] = set()
     far_structural_tables: list[Array] = []
     closure_indices: list[tuple[Array, Array]] = []
     diagonal_started = perf_counter()
     for offset in offsets:
         sources, destinations, delta = coarse_groups[offset]
-        near_indices = _near_lattice_indices_for_offset(
-            base_displacement=delta,
-            half_size=half_size,
-            lattice=periodic.lattice,
-        )
-        near_by_offset[offset] = near_indices
-        near_union.update(
-            (int(p), int(q)) for p, q in np.asarray(near_indices, dtype=np.int64).reshape(-1, 2)
-        )
         far_structural = np.asarray(periodic_nonzero[offset], dtype=np.complex128).copy()
-        if near_indices.size:
+        if not stable_same_plane_by_offset[offset]:
+            near_indices = near_by_offset[offset]
             near_structural = _finite_image_structural_sums(
                 max_degree=int(level.translator_order),
                 k=float(k),

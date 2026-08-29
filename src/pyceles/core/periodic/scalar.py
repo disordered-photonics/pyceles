@@ -149,6 +149,122 @@ def scaled_real_integral_sequence(degree: int, eta: float, k: float, radii: Arra
     return np.asarray(w_prev1, dtype=np.float64)
 
 
+def stable_free_space_minus_real_sequence(
+    max_degree: int,
+    eta: float,
+    k: float,
+    radii: Array,
+    *,
+    tail_steps: int = 24,
+    direct_condition_limit: float = 1.0e6,
+) -> Array:
+    """Evaluate ``h_l^(1)(k*r) - R_l(r)`` without catastrophic cancellation.
+
+    A direct ``h-R`` subtraction is most accurate while it is well conditioned.
+    When the two terms become nearly equal, this routine switches degree by
+    degree to a minimal-solution recurrence for the complement.  The stable
+    recurrence is evolved as the complement-to-Hankel ratio; its roundoff
+    homogeneous component appears as a high-order plateau and is removed before
+    reconstructing the small complement.
+
+    ``tail_steps`` controls the auxiliary high-order tail used to identify that
+    plateau. ``direct_condition_limit`` is the largest estimated subtraction
+    condition number for which the direct result is retained.  The helper is
+    intended for Ewald preparation, not as a general spherical-Hankel evaluator.
+    """
+    degree_max = int(max_degree)
+    if degree_max < 0:
+        raise ValueError(f"`max_degree` must be >= 0. Got {max_degree!r}.")
+    tail = int(tail_steps)
+    if tail < 4:
+        raise ValueError(f"`tail_steps` must be >= 4. Got {tail_steps!r}.")
+    condition_limit = float(direct_condition_limit)
+    if not np.isfinite(condition_limit) or condition_limit <= 1.0:
+        raise ValueError(
+            "`direct_condition_limit` must be finite and greater than one. "
+            f"Got {direct_condition_limit!r}."
+        )
+    r = np.asarray(radii, dtype=float).reshape(-1)
+    if np.any(r <= 0.0):
+        raise ValueError("Real-space Ewald radii must be positive.")
+    k_f = float(k)
+    eta_f = float(eta)
+    if not np.isfinite(k_f) or k_f <= 0.0:
+        raise ValueError(f"`k` must be finite and positive. Got {k!r}.")
+    if not np.isfinite(eta_f) or eta_f <= 0.0:
+        raise ValueError(f"`eta` must be finite and positive. Got {eta!r}.")
+
+    x = k_f * r
+    alpha = k_f * k_f / (4.0 * eta_f * eta_f)
+    root_alpha = math.sqrt(alpha)
+    wofz = special.wofz(root_alpha + 1j * x / (2.0 * root_alpha))
+    exp_term = np.exp(alpha - x * x / (4.0 * alpha))
+    source_base = exp_term / root_alpha
+    source_ratio = x / (2.0 * alpha)
+
+    w0 = math.sqrt(math.pi) * exp_term * wofz.imag
+    w1 = math.sqrt(math.pi) * exp_term * wofz.real
+    w2 = w1 / x - w0 + source_base
+
+    stop = degree_max + tail
+    hankel = np.empty((stop + 1, r.size), dtype=np.complex128)
+    for degree in range(stop + 1):
+        hankel[degree] = special.spherical_jn(degree, x) + 1j * special.spherical_yn(degree, x)
+    if not np.all(np.isfinite(hankel)):
+        raise FloatingPointError(
+            "Stable same-plane Ewald complements require finite auxiliary "
+            f"Hankel values through degree {stop}."
+        )
+
+    ratios = np.empty_like(hankel)
+    ratios[0] = (hankel[0] + 1j * w1 / (math.sqrt(math.pi) * x)) / hankel[0]
+    if stop == 0:
+        return np.asarray(hankel[:1] * (ratios[:1] - ratios[0]), dtype=np.complex128)
+    ratios[1] = (hankel[1] + 1j * w2 / (math.sqrt(math.pi) * x)) / hankel[1]
+    for degree in range(2, stop + 1):
+        hankel_ratio = hankel[degree - 2] / hankel[degree]
+        forcing = (
+            1j
+            * source_base
+            * source_ratio ** (degree - 1)
+            / (math.sqrt(math.pi) * x * hankel[degree])
+        )
+        ratios[degree] = (
+            ratios[degree - 1] + hankel_ratio * (ratios[degree - 1] - ratios[degree - 2]) + forcing
+        )
+
+    plateau = ratios[stop]
+    stable = np.asarray(
+        hankel[: degree_max + 1] * (ratios[: degree_max + 1] - plateau),
+        dtype=np.complex128,
+    )
+
+    # Retain ordinary direct arithmetic wherever its own subtraction condition
+    # is benign.  This preserves the validated low-order path and avoids asking
+    # the minimal-solution recurrence to improve a result that was already safe.
+    direct = np.empty_like(stable)
+    real_terms = np.empty_like(stable)
+    scaled_prev2 = w0
+    scaled_prev1 = w1
+    for degree in range(degree_max + 1):
+        if degree == 0:
+            scaled = scaled_prev1
+        else:
+            idx = degree + 1
+            source = source_base * source_ratio ** (idx - 2)
+            scaled = ((2.0 * idx - 3.0) / x) * scaled_prev1 - scaled_prev2 + source
+            scaled_prev2, scaled_prev1 = scaled_prev1, scaled
+        real_terms[degree] = -1j * scaled / (math.sqrt(math.pi) * x)
+        direct[degree] = hankel[degree] - real_terms[degree]
+
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        condition = (np.abs(hankel[: degree_max + 1]) + np.abs(real_terms)) / np.maximum(
+            np.abs(direct), np.finfo(float).tiny
+        )
+    use_direct = np.isfinite(direct) & np.isfinite(condition) & (condition <= condition_limit)
+    return np.asarray(np.where(use_direct, direct, stable), dtype=np.complex128)
+
+
 def real_integral_sequence(degree: int, eta: float, k: float, radii: Array) -> Array:
     """Evaluate the real-space integral sequence used by Ewald summands."""
     l = int(degree)
