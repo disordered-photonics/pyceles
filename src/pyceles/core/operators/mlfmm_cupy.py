@@ -4593,12 +4593,59 @@ def _launch_leaf_otf_receive_contract(
     )
 
 
+def _leaf_otf_receive_shared_bytes(full_order: int, threads: int) -> int:
+    """Return static shared-memory bytes for the fused leaf receive kernel."""
+
+    order = int(full_order)
+    thread_count = int(threads)
+    if order < 0:
+        raise ValueError(f"full_order must be >= 0. Got {full_order!r}.")
+    if thread_count < 32 or thread_count % 32:
+        raise ValueError(
+            f"threads must be a positive whole-warp count of at least 32. Got {threads!r}."
+        )
+    n_orders = 2 * order + 1
+    n_p_pdm = n_orders * (n_orders + 1) // 2
+    n_phase = 2 * n_orders - 1
+    # Four scalar geometry values, radial tables, triangular P_l^m table,
+    # azimuthal phase tables, ct/st powers, and one complex reduction slot per
+    # thread. All entries are doubles.
+    doubles = 4 + 2 * n_orders + n_p_pdm + 2 * n_phase + 2 * n_orders + 2 * thread_count
+    return int(doubles * np.dtype(np.float64).itemsize)
+
+
+def _leaf_otf_receive_threads(
+    *,
+    full_order: int,
+    max_threads_per_block: int,
+    shared_mem_per_block: int,
+) -> int:
+    """Choose the widest whole-warp leaf-receive block that fits static shared memory."""
+
+    max_threads = int(max_threads_per_block)
+    shared_limit = int(shared_mem_per_block)
+    for threads in (256, 128, 64, 32):
+        if threads > max_threads:
+            continue
+        if _leaf_otf_receive_shared_bytes(int(full_order), threads) <= shared_limit:
+            return threads
+    minimum = _leaf_otf_receive_shared_bytes(int(full_order), 32)
+    raise ValueError(
+        "Fused CuPy MLFMM leaf receive exceeds the device static shared-memory limit "
+        f"even with one warp: order={int(full_order)}, required={minimum} bytes, "
+        f"available={shared_limit} bytes."
+    )
+
+
 @cache
-def _leaf_otf_receive_fused_raw_kernel(full_order: int) -> Any:
+def _leaf_otf_receive_fused_raw_kernel(full_order: int, threads: int) -> Any:
     """Return a RawKernel for receive-side leaf translations without pair-block scratch."""
 
     cupy, _ = import_cupy()
     order = int(full_order)
+    reduction_threads = int(threads)
+    if reduction_threads < 32 or reduction_threads % 32:
+        raise ValueError("leaf receive kernel threads must be a whole-warp count >= 32")
     n_orders = 2 * order + 1
     n_p_pdm = n_orders * (n_orders + 1) // 2
     n_phase = 2 * n_orders - 1
@@ -4696,8 +4743,8 @@ def _leaf_otf_receive_fused_raw_kernel(full_order: int) -> Any:
         __shared__ double sin_mphi_shared[{n_phase}];
         __shared__ double ct_pow_shared[{n_orders}];
         __shared__ double st_pow_shared[{n_orders}];
-        __shared__ double partial_re[256];
-        __shared__ double partial_im[256];
+        __shared__ double partial_re[{reduction_threads}];
+        __shared__ double partial_im[{reduction_threads}];
 
         for (int pair_idx = blockIdx.x; pair_idx < n_pairs; pair_idx += gridDim.x) {{
             const int leaf_row = pair_idx / occupancy;
@@ -4852,11 +4899,16 @@ def _launch_leaf_otf_receive_fused(
     n_pairs = int(count * int(occupancy))
     n_outputs = int(nmodes) * int(nrhs)
     n_tiles = max(1, (n_outputs + 31) // 32)
-    kernel = _leaf_otf_receive_fused_raw_kernel(int(tables.full_order))
     props = cupy.cuda.runtime.getDeviceProperties(cupy.cuda.runtime.getDevice())
     max_grid_pairs = int(props["maxGridSize"][0])
     max_threads = int(props["maxThreadsPerBlock"])
-    threads = 256 if max_threads >= 256 else 128 if max_threads >= 128 else 64
+    shared_limit = int(props["sharedMemPerBlock"])
+    threads = _leaf_otf_receive_threads(
+        full_order=int(tables.full_order),
+        max_threads_per_block=max_threads,
+        shared_mem_per_block=shared_limit,
+    )
+    kernel = _leaf_otf_receive_fused_raw_kernel(int(tables.full_order), int(threads))
     blocks_x = max(1, min(max_grid_pairs, n_pairs))
     kernel(
         (blocks_x, n_tiles),

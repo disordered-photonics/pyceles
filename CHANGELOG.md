@@ -364,6 +364,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   kernel and lookup-table uploads (instead of only casting the final near
   output), restoring the intended mixed-precision speedup while keeping
   sampled-far interactions on `complex128`.
+- CuPy on-the-fly MLFMM leaf receive now selects a whole-warp reduction width
+  that fits the device shared-memory limit, allowing higher-order translations
+  to run without a static shared-memory launch failure when a smaller block
+  fits.
 - Plane-wave cross sections now report physical local dissipation by default:
   `cross_sections["C_abs"]` is now `C_abs_local`, while
   `C_abs_raw_diff = C_ext_raw - C_sca_raw` and `Delta_closure` remain exposed

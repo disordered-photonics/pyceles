@@ -20,6 +20,10 @@ from pyceles.core.operators.mlfmm import (
     prepare_mlfmm_coupling,
     resolve_mlfmm_plan,
 )
+from pyceles.core.operators.mlfmm_cupy import (
+    _leaf_otf_receive_shared_bytes,
+    _leaf_otf_receive_threads,
+)
 from pyceles.core.operators.mlfmm_directional import (
     MLFMMDirectionalStructuredTransforms,
     box_outgoing_to_directional,
@@ -1081,3 +1085,31 @@ def test_multilevel_downward_transfer_matches_exact_recenter_oracle(transfer_sca
         exact_child_state
     )
     assert rel < 0.50
+
+
+def test_leaf_receive_shared_memory_falls_back_to_two_warps_at_order_50() -> None:
+    """The production additive-order-16 case fits by shrinking reduction scratch only."""
+
+    limit = 0xC000
+    assert _leaf_otf_receive_shared_bytes(50, 256) == 0xCA48
+    assert _leaf_otf_receive_shared_bytes(50, 128) == 0xC248
+    assert _leaf_otf_receive_shared_bytes(50, 64) == 0xBE48
+    assert (
+        _leaf_otf_receive_threads(
+            full_order=50,
+            max_threads_per_block=1024,
+            shared_mem_per_block=limit,
+        )
+        == 64
+    )
+
+
+def test_leaf_receive_shared_memory_rejects_order_above_static_limit() -> None:
+    """Fail before launch when even one warp cannot fit the static translation tables."""
+
+    with pytest.raises(ValueError, match="static shared-memory limit"):
+        _leaf_otf_receive_threads(
+            full_order=51,
+            max_threads_per_block=1024,
+            shared_mem_per_block=0xC000,
+        )
