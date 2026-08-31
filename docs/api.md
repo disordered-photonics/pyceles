@@ -136,12 +136,6 @@ Experimental periodic workflows use:
   - `shell_tolerance` and `max_shells`: shared Ewald/Rayleigh automatic
     shell-truncation policy. Reciprocal work chunks are selected internally from
     a bounded temporary-memory budget.
-- `SimulationConfig(coupling_backend="mlfmm", operator_backend=...)` can be
-  combined experimentally with `PeriodicOptions(method="ewald")` on NumPy or
-  CuPy. Ewald prepares the periodizing coarse-box operators on the CPU;
-  repeated coupling applications use the mesh-free MLFMM hierarchy rather than
-  the pairwise Ewald path. Other periodic summation methods are not combined
-  with periodized MLFMM.
 - `pyceles.core.periodic.rayleigh_report`
 - `pyceles.core.periodic.rayleigh_threshold_scales`
 - `pyceles.core.periodic.suggest_safe_period_scales`

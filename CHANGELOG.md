@@ -8,15 +8,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Added experimental NumPy and CuPy periodized MLFMM paths for rectangular
-  two-dimensional cells through `coupling_backend="mlfmm"` and
-  `PeriodicOptions(method="ewald")`. Same-plane Ewald and vertically shifted
-  reciprocal structural sums prepare sampled coarse-box lattice closures;
-  finite non-well-separated images descend through the existing hierarchy,
-  leaving repeated applies mesh-free and independent of particle-pair periodic
-  caches. The CuPy path reuses the established complex128 sampled-far traversal
-  and one shared compute-dtype exact-leaf RawKernel for central-cell and
-  boundary-image interactions.
 - Added an opt-in hybrid periodic coupling method (`method="rayleigh"`) for
   NumPy and CuPy. It evaluates a particle-safe vertical near band with exact
   Ewald sums, reuses one exact periodic self block, and applies vertically far
@@ -144,11 +135,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   generalized-incomplete-gamma series. NumPy reuses cached upper-gamma shell
   coefficients, while the fused CuPy kernel evaluates the same short Horner
   expansion in-place without extra Ewald passes or host fallback.
-- Tightened periodized MLFMM ownership and memory use: residual-image Hankel
-  tables are now bounded by the leaf pairs that are actually evaluated, NumPy
-  accumulates periodic exact-leaf corrections into the existing near result,
-  and CuPy staging avoids full temporary complex LUT copies and repeated launch
-  setup across boundary-image batches.
 - Fixed high-order periodic Ewald structural batches exposed by MLFMM closure
   preparation so large factorial values are converted with scalar square roots
   rather than NumPy object-ufunc dispatch.
@@ -198,11 +184,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   assumed to fit merely because the memory pool has enough aggregate cached
   bytes. Under pressure, stale cached blocks are trimmed and source chunks are
   bounded by fresh allocation headroom, avoiding later-iteration Linux OOMs.
+
+### Removed
+- Removed the experimental periodized MLFMM path. Finite MLFMM remains
+  available for nonperiodic clusters; periodic workloads use the pairwise
+  Ewald or hybrid Rayleigh coupling paths.
+
+### Changed
 - Reduced CuPy MLFMM directional-transform upload and resident memory by using
   separable alpha/beta factors instead of dense sampled-direction matrices, so
   larger multilevel runs avoid avoidable out-of-memory failures.
-
-### Changed
 - Reduced hybrid-Rayleigh exact-near cache memory by storing converged
   structural sums in the selected compute dtype. CuPy now estimates the full
   compact cache before allocation, applies the same guarded device-memory

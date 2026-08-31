@@ -49,19 +49,12 @@ Current tested scope:
 - NumPy and CuPy `complex64`/`complex128` periodic Ewald paths,
 - opt-in NumPy/CuPy hybrid exact-near/Rayleigh-far repeated applies for
   vertically extended cells,
-- experimental periodized MLFMM using an Ewald-prepared coarse-box closure,
 - selected local-SVWF near-field workflows for homogeneous spheres,
 - direct dense validation paths for controlled cases.
 
-Periodized MLFMM is available on NumPy and CuPy with Ewald periodicity. The
-canonical hierarchy and periodizing closure are still prepared on the CPU;
-CuPy uploads the sampled M2L batches and explicit boundary-image leaf schedule
-for repeated device-side application. The method remains subject to the usual
-MLFMM interpolation/truncation error and can retain substantial exact
-boundary-image work for tight cells.
-
 Other periodic limitations include:
 
+- periodized MLFMM coupling (finite MLFMM remains available for nonperiodic clusters),
 - non-rectangular lattices,
 - reduced-cell local sources,
 - mixed-precision periodic production runs,

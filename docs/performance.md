@@ -95,40 +95,6 @@ Current implementation details:
   fall back to generic dense assembly through repeated matrix-free applies,
 - the octree policy is uniform-depth rather than adaptive.
 
-### Periodized MLFMM (experimental)
-
-NumPy and CuPy can periodize the MLFMM hierarchy for rectangular
-two-dimensional cells:
-
-```python
-import pyceles as pcl
-
-config = pcl.SimulationConfig(
-    periodic=pcl.PeriodicSpec(
-        lattice=pcl.RectangularLattice2D(ax, ay),
-        options=pcl.PeriodicOptions(method="ewald"),
-    ),
-    coupling_backend="mlfmm",
-    operator_backend="cupy",  # or "numpy"
-)
-```
-
-Ewald prepares the lattice closure once; repeated applies reuse the ordinary
-MLFMM hierarchy and finite image corrections. CuPy follows the same precision
-policy as finite MLFMM: sampled box translations remain complex128, while
-central and explicit boundary-image leaf interactions use the requested
-compute dtype through the same fused exact-leaf kernel and radial LUT. The GPU
-path does not evaluate Ewald sums during Krylov applications and does not
-retain particle-pair periodic translation blocks. The exact image Hankel LUT
-may span several cell lengths, but the separate regular-wave leaf-center LUT
-is deliberately sliced to the occupied leaf radius rather than duplicating
-that long range on host and device.
-
-The path remains experimental. Tune MLFMM accuracy and periodic Ewald options
-together when comparing it with pairwise periodic Ewald, and inspect the
-periodization diagnostics for the number of exact residual image pairs in
-tight cells.
-
 A previous rotation-translation-rotation coupling idea was explored as an
 alternative translation backend. After matching the formulas to the shipped
 CELES-compatible conventions, the experimental implementation reproduced
@@ -167,13 +133,13 @@ four backend/precision rows with one far-field and near-field postprocessing
 pass per row. If `--finite-cache-mode both` is selected, each finite profile
 also measures cache-on and cache-off solves while reusing the primary solved
 result for postprocessing. The pairwise periodic cache-on cases provide the
-documented NumPy and CuPy xy/xz field maps; cache-off, direct, Rayleigh, and
-periodized-MLFMM cases remain solve-focused. Use `--suite finite` or
+  documented NumPy and CuPy xy/xz field maps; cache-off, direct, and Rayleigh
+  cases remain solve-focused. Use `--suite finite` or
 `--suite periodic` for one family, `--skip-postprocessing` when only
 solve/preparation data is wanted, and `--skip-periodic-cache-off` when only
 cache-on periodic rows are needed. Every CuPy case is run to convergence. The
-slow NumPy periodic cache-off, Rayleigh, and periodized-MLFMM cases are
-one-iteration reference probes whose linear-solve time can be extrapolated
+  slow NumPy periodic cache-off and Rayleigh cases are one-iteration reference
+  probes whose linear-solve time can be extrapolated
 from equivalent converged runs. `--reuse-existing` resumes a refresh and
 reruns a case if its existing summary is missing a required field phase.
 
@@ -284,8 +250,6 @@ and are not presented as converged solves.
 | Pairwise, CuPy | W cache on | `8.4 s` | `5.4 s` | `13.8 s` | 160 |
 | Pairwise, CuPy | W cache off | `0.03 s` | `602.5 s` | `602.6 s` | 160 |
 | Pairwise, NumPy | W cache off | `0.03 s` | `246.3 s` | `246.4 s` | 1* |
-| Periodized MLFMM, CuPy | cache off | `6.7 s` | `117.0 s` | `123.7 s` | 160 |
-| Periodized MLFMM, NumPy | cache off | `184.4 s` | `12.9 s` | `197.3 s` | 1* |
 | Rayleigh, CuPy | cache off | `2.7 s` | `43.0 s` | `45.7 s` | 160 |
 | Rayleigh, NumPy | cache off | `49.4 s` | `1.6 s` | `50.9 s` | 1* |
 

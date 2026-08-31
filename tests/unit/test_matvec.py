@@ -1166,3 +1166,37 @@ def test_cupy_group_wrappers_preserve_shared_operator_maps(monkeypatch):
         np.asarray(dense_group.apply_subset(x)),
         np.einsum("gij,gj->gi", blocks[operator_indices], x),
     )
+
+
+def test_prepare_matvec_rejects_unknown_coupling_before_cupy_import(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_import() -> None:
+        raise AssertionError("CuPy import must not run for an invalid coupling backend")
+
+    monkeypatch.setattr("pyceles.core.operators.prepare.import_cupy", fail_import)
+    particle = Sphere(position=(0.0, 0.0, 0.0), radius=20.0, refractive_index=1.5)
+
+    with pytest.raises(ValueError, match="Unknown coupling backend"):
+        prepare_matvec(
+            lmax=1,
+            k=2.0 * np.pi / 550.0,
+            particles=[particle],
+            radial_lut_dr=1.0,
+            coupling_backend="invalid",  # type: ignore[arg-type]
+            backend="cupy",
+        )
+
+
+def test_prepare_matvec_normalizes_numpy_backend_name() -> None:
+    particle = Sphere(position=(0.0, 0.0, 0.0), radius=20.0, refractive_index=1.5)
+    prepared = prepare_matvec(
+        lmax=1,
+        k=2.0 * np.pi / 550.0,
+        particles=[particle],
+        radial_lut_dr=1.0,
+        coupling_backend="PAIRWISE",  # type: ignore[arg-type]
+        backend="NUMPY",  # type: ignore[arg-type]
+    )
+
+    assert isinstance(prepared.coupling, PairwiseCouplingOperator)

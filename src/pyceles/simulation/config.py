@@ -150,9 +150,10 @@ class SimulationConfig:
       postprocessing where accelerated kernels exist.
     - Stage-specific postprocessing kernels may still fall back to the NumPy
       reference implementation when no accelerated path has shipped yet.
-    - For `coupling_backend="mlfmm"`, `compute_dtype="complex64"` applies to
-      exact-near interactions while sampled-far MLFMM operators stay on
-      `complex128`.
+    - For finite `coupling_backend="mlfmm"`, `compute_dtype="complex64"`
+      applies to exact-near interactions while sampled-far MLFMM operators
+      stay on `complex128`. Periodic systems use the pairwise Ewald/Rayleigh
+      coupling path.
 
     Geometry / physics policy:
     - the current homogeneous-medium solver path assumes real `n_medium`
@@ -248,18 +249,24 @@ class SimulationConfig:
             raise ValueError(
                 f"`solver_method` must be one of {sorted(allowed)}. Got {self.solver_method!r}."
             )
+        object.__setattr__(self, "solver_method", method)
+
         backend = str(self.operator_backend).lower()
         if backend not in {"numpy", "cupy"}:
             raise ValueError(
                 "`operator_backend` must be one of {'numpy', 'cupy'}. "
                 f"Got {self.operator_backend!r}."
             )
+        object.__setattr__(self, "operator_backend", backend)
+
         coupling_backend = str(self.coupling_backend).lower()
         if coupling_backend not in {"pairwise", "mlfmm"}:
             raise ValueError(
                 "`coupling_backend` must be one of {'pairwise', 'mlfmm'}. "
                 f"Got {self.coupling_backend!r}."
             )
+        object.__setattr__(self, "coupling_backend", coupling_backend)
+
         if self.periodic is not None:
             if not isinstance(self.periodic, PeriodicSpec):
                 raise TypeError(
@@ -267,15 +274,10 @@ class SimulationConfig:
                     f"Got {type(self.periodic).__name__}."
                 )
             if coupling_backend == "mlfmm":
-                if self.periodic.options.method != "ewald":
-                    raise NotImplementedError(
-                        "Periodic MLFMM currently requires "
-                        "PeriodicOptions(method='ewald') for coarse-level periodizing closure."
-                    )
-                if bool(self.cache_translation_blocks):
-                    raise NotImplementedError(
-                        "Periodic MLFMM does not cache exact lattice-image leaf blocks."
-                    )
+                raise NotImplementedError(
+                    "Periodic MLFMM is not implemented. Use coupling_backend='pairwise' "
+                    "with the periodic Rayleigh/Ewald operator."
+                )
             if backend == "cupy" and self.periodic.options.method not in {"ewald", "rayleigh"}:
                 raise NotImplementedError(
                     "CuPy periodic workflows currently support Ewald or Rayleigh coupling."
@@ -286,6 +288,8 @@ class SimulationConfig:
                 "`postprocessing_backend` must be one of {'inherit', 'numpy', 'cupy'}. "
                 f"Got {self.postprocessing_backend!r}."
             )
+        object.__setattr__(self, "postprocessing_backend", post_backend)
+
         if backend == "cupy" and bool(self.cache_translation_blocks) and self.periodic is None:
             raise ValueError(
                 "`cache_translation_blocks=True` is not supported with finite `operator_backend='cupy'`. "

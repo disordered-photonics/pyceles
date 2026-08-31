@@ -33,7 +33,6 @@ from .groups import (
 )
 from .mlfmm import MLFMMCouplingOperator, MLFMMOptions, prepare_mlfmm_coupling
 from .mlfmm_cupy import CuPyMLFMMHostCachePolicy, prepare_mlfmm_cupy_coupling
-from .mlfmm_periodic import prepare_periodized_mlfmm_coupling
 from .single_body import CompositeParticleTOperator, ParticleTOperator, build_T_mode_diagonal
 from .single_body_cupy import wrap_particle_t_groups_cupy
 
@@ -61,7 +60,7 @@ def _wrap_mlfmm_cupy_coupling(
     *,
     options: MLFMMOptions,
 ) -> CouplingOperator:
-    """Upload one CPU-built finite or periodized MLFMM plan consistently."""
+    """Upload one CPU-built finite MLFMM plan consistently."""
 
     return cast(
         CouplingOperator,
@@ -233,15 +232,23 @@ def prepare_matvec(
     positions = part.positions
     circumscribing_radii = part.circumscribing_radii
     coupling_name = str(coupling_backend).lower()
+    if coupling_name not in {"pairwise", "mlfmm"}:
+        raise ValueError(
+            f"Unknown coupling backend '{coupling_backend}'. Use 'pairwise' or 'mlfmm'."
+        )
+    backend_name = str(backend).lower()
+    if backend_name not in {"numpy", "cupy"}:
+        raise ValueError(f"Unknown operator backend '{backend}'. Use 'numpy' or 'cupy'.")
+
     op_dtype = np.dtype(operator_dtype)
     k_f = float(k)
     periodic_spec = periodic
     k_parallel_arr: np.ndarray | None = None
     if periodic_spec is not None:
-        if coupling_name == "mlfmm" and periodic_spec.options.method != "ewald":
+        if coupling_name == "mlfmm":
             raise NotImplementedError(
-                "Periodic MLFMM currently requires PeriodicOptions(method='ewald') "
-                "for the coarse-level periodizing closure."
+                "Periodic MLFMM is not implemented. Use coupling_backend='pairwise' "
+                "with the periodic Rayleigh/Ewald operator."
             )
         if k_parallel is None:
             raise ValueError("`k_parallel` is required when preparing a periodic operator.")
@@ -264,7 +271,6 @@ def prepare_matvec(
             dtype=op_dtype if lut_dtype is None else np.dtype(lut_dtype),
         )
 
-    backend_name = backend
     particle_t: ParticleTOperator
     coupling: CouplingOperator
     if backend_name == "numpy":
@@ -279,37 +285,18 @@ def prepare_matvec(
         if periodic_spec is not None:
             if k_parallel_arr is None:
                 raise RuntimeError("Internal error: periodic k_parallel was not normalized.")
-            if coupling_name == "pairwise":
-                ab5 = translation_ab5_table(int(lmax), dtype=op_dtype)
-                coupling = PeriodicCouplingOperator(
-                    lmax=int(lmax),
-                    k=k_f,
-                    positions=positions,
-                    ab5=ab5,
-                    periodic=periodic_spec,
-                    k_parallel=k_parallel_arr,
-                    dtype=op_dtype,
-                    cache_blocks=bool(cache_translation_blocks),
-                    circumscribing_radii=circumscribing_radii,
-                )
-            elif coupling_name == "mlfmm":
-                coupling = prepare_periodized_mlfmm_coupling(
-                    lmax=int(lmax),
-                    k=k_f,
-                    positions=positions,
-                    particle_circumscribing_radii=circumscribing_radii,
-                    radial_lut=make_radial_lut(np.dtype(np.complex128)),
-                    periodic=periodic_spec,
-                    k_parallel=k_parallel_arr,
-                    options=mlfmm_options,
-                    dtype=op_dtype,
-                    cache_translation_blocks=bool(cache_translation_blocks),
-                    show_progress=bool(show_progress),
-                )
-            else:
-                raise ValueError(
-                    f"Unknown coupling backend '{coupling_backend}'. Use 'pairwise' or 'mlfmm'."
-                )
+            ab5 = translation_ab5_table(int(lmax), dtype=op_dtype)
+            coupling = PeriodicCouplingOperator(
+                lmax=int(lmax),
+                k=k_f,
+                positions=positions,
+                ab5=ab5,
+                periodic=periodic_spec,
+                k_parallel=k_parallel_arr,
+                dtype=op_dtype,
+                cache_blocks=bool(cache_translation_blocks),
+                circumscribing_radii=circumscribing_radii,
+            )
         elif coupling_name == "pairwise":
             lut = make_radial_lut()
             ab5 = translation_ab5_table(int(lmax), dtype=op_dtype)
@@ -336,10 +323,6 @@ def prepare_matvec(
                 cache_translation_blocks=bool(cache_translation_blocks),
                 show_progress=bool(show_progress),
                 leaf_map_backend="numpy",
-            )
-        else:
-            raise ValueError(
-                f"Unknown coupling backend '{coupling_backend}'. Use 'pairwise' or 'mlfmm'."
             )
     elif backend_name == "cupy":
         import_cupy()
@@ -378,46 +361,21 @@ def prepare_matvec(
         if periodic_spec is not None:
             if k_parallel_arr is None:
                 raise RuntimeError("Internal error: periodic k_parallel was not normalized.")
-            if coupling_name == "mlfmm":
-                resolved_mlfmm_options = (
-                    _CUPY_MLFMM_DEFAULT_OPTIONS if mlfmm_options is None else mlfmm_options
-                )
-                cpu_mlfmm = prepare_periodized_mlfmm_coupling(
+            ab5 = translation_ab5_table(int(lmax), dtype=op_dtype)
+            coupling = cast(
+                CouplingOperator,
+                CuPyPeriodicCouplingOperator(
                     lmax=int(lmax),
                     k=k_f,
                     positions=positions,
-                    particle_circumscribing_radii=circumscribing_radii,
-                    radial_lut=make_radial_lut(np.dtype(np.complex128)),
+                    ab5=ab5,
                     periodic=periodic_spec,
                     k_parallel=k_parallel_arr,
-                    options=resolved_mlfmm_options,
                     dtype=op_dtype,
-                    cache_translation_blocks=bool(cache_translation_blocks),
-                    show_progress=bool(show_progress),
-                    leaf_map_backend="cupy",
-                    build_leaf_maps=False,
-                    closure_matmul_backend="cupy",
-                )
-                coupling = _wrap_mlfmm_cupy_coupling(
-                    cpu_mlfmm,
-                    options=resolved_mlfmm_options,
-                )
-            else:
-                ab5 = translation_ab5_table(int(lmax), dtype=op_dtype)
-                coupling = cast(
-                    CouplingOperator,
-                    CuPyPeriodicCouplingOperator(
-                        lmax=int(lmax),
-                        k=k_f,
-                        positions=positions,
-                        ab5=ab5,
-                        periodic=periodic_spec,
-                        k_parallel=k_parallel_arr,
-                        dtype=op_dtype,
-                        cache_blocks=bool(cache_translation_blocks),
-                        circumscribing_radii=circumscribing_radii,
-                    ),
-                )
+                    cache_blocks=bool(cache_translation_blocks),
+                    circumscribing_radii=circumscribing_radii,
+                ),
+            )
         elif coupling_name == "pairwise":
             lut = make_radial_lut()
             ab5 = translation_ab5_table(int(lmax), dtype=op_dtype)
@@ -472,12 +430,6 @@ def prepare_matvec(
                     cast(MLFMMCouplingOperator, cpu_mlfmm),
                     options=resolved_mlfmm_options,
                 )
-        else:
-            raise ValueError(
-                f"Unknown coupling backend '{coupling_backend}'. Use 'pairwise' or 'mlfmm'."
-            )
-    else:
-        raise ValueError(f"Unknown operator backend '{backend}'. Use 'numpy' or 'cupy'.")
 
     return PreparedOperator(
         lmax=int(lmax),

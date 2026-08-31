@@ -111,6 +111,22 @@ def test_simulation_config_rejects_unknown_coupling_backend() -> None:
         SimulationConfig(coupling_backend="fmm", verbose=False)  # type: ignore[arg-type]
 
 
+def test_simulation_config_canonicalizes_backend_and_solver_names() -> None:
+    cfg = SimulationConfig(
+        solver_method="GMRES",  # type: ignore[arg-type]
+        operator_backend="NUMPY",  # type: ignore[arg-type]
+        coupling_backend="PAIRWISE",  # type: ignore[arg-type]
+        postprocessing_backend="INHERIT",  # type: ignore[arg-type]
+        verbose=False,
+    )
+
+    assert cfg.solver_method == "gmres"
+    assert cfg.operator_backend == "numpy"
+    assert cfg.coupling_backend == "pairwise"
+    assert cfg.postprocessing_backend == "inherit"
+    assert cfg.resolved_postprocessing_backend() == "numpy"
+
+
 def test_simulation_config_accepts_cupy_mlfmm_combination() -> None:
     cfg = SimulationConfig(
         operator_backend="cupy",

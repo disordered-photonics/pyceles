@@ -296,13 +296,10 @@ def _build_cases(args: argparse.Namespace, output_root: Path) -> list[dict[str, 
                     )
                 )
 
-        for coupling, method, skip_flag in (
-            ("mlfmm", "ewald", args.skip_periodized_mlfmm),
-            ("pairwise", "rayleigh", args.skip_rayleigh),
-        ):
-            if skip_flag:
-                continue
-            method_name = "periodized_mlfmm" if coupling == "mlfmm" else "rayleigh"
+        if not args.skip_rayleigh:
+            coupling = "pairwise"
+            method = "rayleigh"
+            method_name = "rayleigh"
             name = f"periodic_{method_name}_cupy"
             case_dir = output_root / name
             cases.append(
@@ -395,12 +392,11 @@ def main() -> None:
         "--numpy-advanced-maxiter",
         type=int,
         default=1,
-        help="Iteration count for the slow NumPy Rayleigh/periodized-MLFMM probes.",
+        help="Iteration count for the slow NumPy Rayleigh probe.",
     )
     parser.add_argument("--skip-periodic-cache-off", action="store_true")
     parser.add_argument("--skip-direct", action="store_true")
     parser.add_argument("--skip-rayleigh", action="store_true")
-    parser.add_argument("--skip-periodized-mlfmm", action="store_true")
     parser.add_argument(
         "--skip-postprocessing",
         action="store_true",

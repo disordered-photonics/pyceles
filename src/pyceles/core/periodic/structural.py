@@ -23,7 +23,7 @@ def free_space_structural_sums(
     """Return scalar outgoing-wave structural constants for one displacement.
 
     This is the nonperiodic primitive shared by direct lattice validation and
-    periodized MLFMM preparation.  The table follows the same pyceles
+    periodic Ewald preparation.  The table follows the same pyceles
     normalization and centered-order layout as the periodic Ewald routines,
     but its maximum spherical degree is explicit rather than inferred from a
     particle ``lmax``.

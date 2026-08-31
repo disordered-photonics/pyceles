@@ -144,59 +144,44 @@ def test_periodic_config_accepts_cupy_rayleigh_method() -> None:
     assert cfg.periodic == spec
 
 
-def test_periodic_config_accepts_numpy_ewald_mlfmm_combination() -> None:
-    spec = pcl.PeriodicSpec(lattice=pcl.RectangularLattice2D(300.0, 400.0))
-    cfg = SimulationConfig(
-        periodic=spec,
-        coupling_backend="mlfmm",
-        operator_backend="numpy",
-        verbose=False,
+def test_prepare_matvec_rejects_periodic_mlfmm_before_backend_setup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_import() -> None:
+        raise AssertionError("CuPy import must not run for rejected periodic MLFMM")
+
+    monkeypatch.setattr("pyceles.core.operators.prepare.import_cupy", fail_import)
+    periodic = pcl.PeriodicSpec(
+        lattice=pcl.RectangularLattice2D(300.0, 400.0),
+        options=pcl.PeriodicOptions(method="rayleigh"),
     )
 
-    assert cfg.coupling_backend == "mlfmm"
-
-
-def test_periodic_config_accepts_cupy_ewald_mlfmm_combination() -> None:
-    spec = pcl.PeriodicSpec(lattice=pcl.RectangularLattice2D(300.0, 400.0))
-    cfg = SimulationConfig(
-        periodic=spec,
-        coupling_backend="mlfmm",
-        operator_backend="cupy",
-        verbose=False,
-    )
-
-    assert cfg.coupling_backend == "mlfmm"
-    assert cfg.operator_backend == "cupy"
+    with pytest.raises(NotImplementedError, match="Periodic MLFMM is not implemented"):
+        prepare_matvec(
+            lmax=1,
+            k=2.0 * np.pi / 550.0,
+            particles=[_sphere()],
+            radial_lut_dr=1.0,
+            coupling_backend="mlfmm",
+            periodic=periodic,
+            k_parallel=np.zeros(2),
+            backend="cupy",
+        )
 
 
 @pytest.mark.parametrize("backend", ["numpy", "cupy"])
-def test_periodic_config_rejects_rayleigh_mlfmm_combination(
+def test_periodic_config_rejects_mlfmm_backend(
     backend: Literal["numpy", "cupy"],
 ) -> None:
     spec = pcl.PeriodicSpec(
         lattice=pcl.RectangularLattice2D(300.0, 400.0),
         options=pcl.PeriodicOptions(method="rayleigh"),
     )
-    with pytest.raises(NotImplementedError, match="method='ewald'"):
+    with pytest.raises(NotImplementedError, match="Periodic MLFMM is not implemented"):
         SimulationConfig(
             periodic=spec,
             coupling_backend="mlfmm",
             operator_backend=backend,
-            verbose=False,
-        )
-
-
-@pytest.mark.parametrize("backend", ["numpy", "cupy"])
-def test_periodic_config_rejects_mlfmm_translation_block_cache(
-    backend: Literal["numpy", "cupy"],
-) -> None:
-    spec = pcl.PeriodicSpec(lattice=pcl.RectangularLattice2D(300.0, 400.0))
-    with pytest.raises(NotImplementedError, match="does not cache"):
-        SimulationConfig(
-            periodic=spec,
-            coupling_backend="mlfmm",
-            operator_backend=backend,
-            cache_translation_blocks=True,
             verbose=False,
         )
 

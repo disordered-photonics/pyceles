@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import math
-from typing import Any
 
 import numpy as np
 import pytest
-from scipy import special
 
 import pyceles as pcl
 import pyceles.core.periodic.ewald as ewald_module
@@ -28,7 +26,6 @@ from pyceles.core.periodic.ewald import (
 from pyceles.core.periodic.scalar import (
     real_integral_sequence,
     scaled_real_integral_sequence,
-    stable_free_space_minus_real_sequence,
 )
 from pyceles.core.periodic.shells import (
     accumulate_lattice_shell_series,
@@ -353,78 +350,6 @@ def test_scaled_real_integral_sequence_matches_low_order_reference() -> None:
         )
         actual = scaled_real_integral_sequence(degree, eta, k, radii)
         np.testing.assert_allclose(actual, reference, rtol=2e-13, atol=0.0)
-
-
-def test_stable_same_plane_complement_handles_production_order() -> None:
-    """The excluded-image complement remains small at a production closure order."""
-    k = 2.0 * np.pi * 1.5 / 550.0
-    complement = stable_free_space_minus_real_sequence(
-        60,
-        0.002000017603891719,
-        k,
-        np.asarray([1358.0]),
-    )[:, 0]
-
-    # This is a high-precision oracle for kr ~= 23.27.  Directly subtracting
-    # the free and real terms at degree 59 instead returns a spurious O(1e5)
-    # value because each term is O(1e15).
-    np.testing.assert_allclose(
-        complement[59],
-        -2.42353085740642e-10j,
-        # The reference is tiny, so an absolute bound is more meaningful than
-        # accepting a several-per-mille relative discrepancy.
-        rtol=0.0,
-        atol=1.0e-12,
-    )
-    assert np.max(np.abs(complement[52:])) < 1.0e-8
-
-
-def test_stable_same_plane_complement_covers_level5_separation() -> None:
-    """The complement remains bounded at the smaller native level-5 image distance."""
-    k = 2.0 * np.pi * 1.5 / 550.0
-    complement = stable_free_space_minus_real_sequence(
-        36,
-        0.002000017603891719,
-        k,
-        np.asarray([264.6618153]),
-    )[:, 0]
-
-    # High-precision reference values at k*r ~= 4.535.  The high-degree
-    # complement is physically tiny; the important guard is that the stable
-    # path does not resurrect the enormous outgoing-Hankel solution.
-    np.testing.assert_allclose(
-        complement[8],
-        0.0029781340293510068 + 0.03222253067198863j,
-        rtol=5.0e-6,
-        atol=1.0e-12,
-    )
-    np.testing.assert_allclose(
-        complement[16],
-        3.761532304881045e-9 + 1.3215754857821666e-9j,
-        rtol=3.0e-7,
-        atol=1.0e-15,
-    )
-    assert np.max(np.abs(complement[24:])) < 1.0e-12
-
-
-def test_stable_same_plane_complement_prefers_direct_when_well_conditioned() -> None:
-    """Safe low-order entries retain direct Ewald arithmetic to roundoff."""
-    k = 2.0 * np.pi * 1.5 / 550.0
-    radius = np.asarray([2000.0])
-    actual = stable_free_space_minus_real_sequence(20, 0.002000017603891719, k, radius)[:, 0]
-
-    direct = np.empty_like(actual)
-    x = float(k * radius[0])
-    for degree in range(actual.size):
-        hankel = special.spherical_jn(degree, x) + 1j * special.spherical_yn(degree, x)
-        real_term = (
-            -1j
-            * scaled_real_integral_sequence(degree, 0.002000017603891719, k, radius)[0]
-            / (np.sqrt(np.pi) * x)
-        )
-        direct[degree] = hankel - real_term
-
-    np.testing.assert_allclose(actual, direct, rtol=2.0e-13, atol=2.0e-13)
 
 
 def test_same_plane_real_sum_supports_order_342_closure() -> None:
@@ -907,45 +832,3 @@ def test_near_coplanar_structural_sum_has_smooth_same_plane_limit() -> None:
                 rtol=2e-11,
                 atol=2e-11,
             )
-
-
-def test_excluded_same_plane_images_match_posthoc_removal_at_low_order() -> None:
-    """The excluded-image rearrangement preserves the ordinary Ewald result."""
-    k = 2.0 * np.pi / 550.0
-    lattice = pcl.RectangularLattice2D(200.0, 220.0)
-    destination = np.asarray([[50.0, 0.0, 0.0]], dtype=float)
-    k_parallel = np.asarray([2.0e-4, -1.0e-4], dtype=float)
-    common: dict[str, Any] = dict(
-        lmax_struct=4,
-        k=k,
-        destinations=destination,
-        source=np.zeros(3, dtype=float),
-        lattice=lattice,
-        k_parallel=k_parallel,
-        eta=1.0e-2,
-        real_shells=7,
-        reciprocal_shells=7,
-        max_shells=7,
-        dtype=np.complex128,
-    )
-    ordinary = ewald_structural_sums_2d_batch(**common)[0]
-    excluded = np.asarray([[0, 0], [-1, 0]], dtype=np.int32)
-    rearranged = ewald_structural_sums_2d_batch(
-        **common,
-        excluded_lattice_indices=[excluded],
-    )[0]
-
-    expected = ordinary.copy()
-    for p, q in excluded:
-        shift = lattice.lattice_vector(int(p), int(q))
-        expected -= np.exp(1j * float(np.dot(k_parallel, shift[:2]))) * direct_structural_sums_2d(
-            lmax=4,
-            k=k,
-            destination=destination[0] - shift,
-            source=np.zeros(3, dtype=float),
-            lattice=lattice,
-            k_parallel=k_parallel,
-            window=0,
-        )
-
-    np.testing.assert_allclose(rearranged, expected, rtol=2.0e-11, atol=2.0e-8)

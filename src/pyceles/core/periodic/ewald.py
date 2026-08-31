@@ -23,7 +23,6 @@ from .scalar import (
     reciprocal_gamma_with_zero_mask,
     same_plane_z_tolerance,
     scaled_real_integral_sequence,
-    stable_free_space_minus_real_sequence,
     structural_sum_m_normalization,
 )
 from .shells import (
@@ -76,7 +75,6 @@ class _ReciprocalShellData:
 
 @dataclass(frozen=True)
 class _RealShellData:
-    lattice_indices: Array
     shifts: Array
     shifts_xy: Array
     phase_xy: Array
@@ -128,7 +126,7 @@ class EwaldShellWorkspace:
         cached = self._real_shell_cache.get(int(shell))
         if cached is not None:
             return cached
-        lattice_indices = np.asarray(chebyshev_shell_indices(int(shell)), dtype=np.int32)
+        lattice_indices = chebyshev_shell_indices(int(shell))
         shifts = np.asarray(
             [p * self.lattice.a1 + q * self.lattice.a2 for p, q in lattice_indices],
             dtype=float,
@@ -138,7 +136,6 @@ class EwaldShellWorkspace:
         radii_xy = np.linalg.norm(shifts_xy, axis=1)
         phi_xy = np.arctan2(shifts_xy[:, 1], shifts_xy[:, 0])
         data = _RealShellData(
-            lattice_indices=lattice_indices,
             shifts=np.asarray(shifts, dtype=float),
             shifts_xy=np.asarray(shifts_xy, dtype=float),
             phase_xy=np.asarray(phase_xy, dtype=np.complex128),
@@ -1062,85 +1059,6 @@ def _shifted_real_sum(
     return complex(-1j * math.sqrt(2.0 / math.pi) * acc)
 
 
-def _same_plane_excluded_image_complement(
-    *,
-    max_degree: int,
-    k: float,
-    k_parallel: Array,
-    lattice: RectangularLattice2D,
-    eta: float,
-    displacement: Array,
-    lattice_index: tuple[int, int],
-) -> Array:
-    """Return one stable same-plane excluded-image complement table.
-
-    The table includes the Bloch phase of ``lattice_index``.  Its radial rows
-    are evaluated directly as ``h_l^(1)(k*r) - R_l(r)`` by the stabilized
-    scalar recurrence, rather than by subtracting the two large tables.
-    """
-    degree_max = int(max_degree)
-    base = np.asarray(displacement, dtype=float).reshape(3)
-    shift = lattice.lattice_vector(int(lattice_index[0]), int(lattice_index[1]))
-    image_displacement = base - shift
-    radius = float(np.linalg.norm(image_displacement))
-    out = np.zeros((degree_max + 1, 2 * degree_max + 1), dtype=np.complex128)
-    if radius == 0.0:
-        return out
-    ct = float(image_displacement[2] / radius)
-    if abs(ct) > 1024.0 * np.finfo(float).eps:
-        raise ValueError("Excluded-image Ewald complements require same-plane images.")
-    st = float(np.sqrt(max(0.0, 1.0 - ct * ct)))
-    phi = float(np.arctan2(image_displacement[1], image_displacement[0]))
-    plm = legendre_normalized_trigon_scalar(ct, st, max(1, degree_max))
-    radius_array = np.asarray([radius], dtype=float)
-    complement = stable_free_space_minus_real_sequence(
-        degree_max,
-        float(eta),
-        float(k),
-        radius_array,
-    )[:, 0]
-    phase = complex(
-        np.exp(
-            1j
-            * float(
-                np.dot(
-                    np.asarray(k_parallel, dtype=float).reshape(2),
-                    np.asarray(shift[:2], dtype=float),
-                )
-            )
-        )
-    )
-    offset = degree_max
-    for degree in range(degree_max + 1):
-        radial = phase * complement[degree]
-        for order in range(-degree, degree + 1):
-            if (degree - abs(order)) % 2:
-                continue
-            out[degree, order + offset] = (
-                radial * plm[degree, abs(order)] * np.exp(1j * int(order) * phi)
-            )
-    return out
-
-
-def _normalize_excluded_lattice_indices(
-    excluded_lattice_indices: Sequence[Array] | None,
-    *,
-    n_points: int,
-) -> tuple[frozenset[tuple[int, int]], ...]:
-    if excluded_lattice_indices is None:
-        return tuple(frozenset() for _ in range(int(n_points)))
-    if len(excluded_lattice_indices) != int(n_points):
-        raise ValueError(
-            "`excluded_lattice_indices` must contain one (p, q) collection "
-            f"per destination. Got {len(excluded_lattice_indices)} for {n_points} destinations."
-        )
-    normalized: list[frozenset[tuple[int, int]]] = []
-    for values in excluded_lattice_indices:
-        pairs = np.asarray(values, dtype=np.int64).reshape(-1, 2)
-        normalized.append(frozenset((int(p), int(q)) for p, q in pairs))
-    return tuple(normalized)
-
-
 def ewald_structural_constant_2d(
     degree: int,
     order: int,
@@ -1317,27 +1235,18 @@ def ewald_structural_sums_2d_batch(
     max_shells: int = 32,
     dtype: npt.DTypeLike = np.complex128,
     workspace: EwaldShellWorkspace | None = None,
-    excluded_lattice_indices: Sequence[Array] | None = None,
 ) -> Array:
     """Evaluate batched pyceles-normalized scalar structural sums.
 
     This helper owns the vectorized CPU reference implementation used by
     periodic in-slab near-field evaluation. Keeping it in ``core.periodic``
     makes the same structural-sum contract available to future accelerated
-    backends without tying it to one postprocessing module.  For same-plane
-    destinations, ``excluded_lattice_indices`` enables the stable Ewald
-    rearrangement used by periodized MLFMM: selected real-space images are
-    omitted before accumulation and their free-space complements are applied
-    without subtracting large nearly equal tables afterward.
+    backends without tying it to one postprocessing module.
     """
     out_dtype = np.dtype(dtype)
     dest = np.asarray(destinations, dtype=float).reshape(-1, 3)
     source_arr = np.asarray(source, dtype=float).reshape(3)
     n_points = int(dest.shape[0])
-    excluded_sets = _normalize_excluded_lattice_indices(
-        excluded_lattice_indices,
-        n_points=n_points,
-    )
     order = 2 * int(lmax_struct)
     if order < 0:
         raise ValueError(f"`lmax_struct` must be >= 0. Got {lmax_struct!r}.")
@@ -1362,10 +1271,6 @@ def ewald_structural_sums_2d_batch(
         c = np.asarray(c, dtype=float).copy()
         c[same_plane_points, 2] = 0.0
         cz = np.asarray(c[:, 2], dtype=float)
-    if any(values for values in excluded_sets) and np.any(~same_plane_points):
-        raise ValueError(
-            "`excluded_lattice_indices` is supported only for same-plane destinations."
-        )
 
     reciprocal_sums = np.zeros_like(sums)
     max_same_n = max(0, order // 2)
@@ -1533,20 +1438,6 @@ def ewald_structural_sums_2d_batch(
         mask = radii > 0.0
         if np.any(mask):
             point_idx, shell_idx = np.nonzero(mask)
-            if excluded_lattice_indices is not None:
-                keep = np.fromiter(
-                    (
-                        tuple(int(value) for value in shell_data.lattice_indices[sidx])
-                        not in excluded_sets[pidx]
-                        for pidx, sidx in zip(point_idx, shell_idx, strict=True)
-                    ),
-                    dtype=bool,
-                    count=point_idx.size,
-                )
-                point_idx = point_idx[keep]
-                shell_idx = shell_idx[keep]
-                if point_idx.size == 0:
-                    return inc
             shifted_valid = shifted[point_idx, shell_idx, :]
             radii_valid = radii[point_idx, shell_idx]
             ct = shifted_valid[:, 2] / radii_valid
@@ -1588,28 +1479,6 @@ def ewald_structural_sums_2d_batch(
             dtype=np.complex128,
         )
 
-    if excluded_lattice_indices is not None:
-        for point_index, image_indices in enumerate(excluded_sets):
-            if not image_indices:
-                continue
-            base_displacement = dest[point_index] - source_arr
-            for lattice_index in image_indices:
-                image_displacement = base_displacement - ws.lattice.lattice_vector(*lattice_index)
-                if float(np.linalg.norm(image_displacement)) == 0.0:
-                    # The Ewald real-space branch already omits a singular
-                    # image.  Its self regularization is handled by the
-                    # caller, so there is no finite complement to add here.
-                    continue
-                complement = _same_plane_excluded_image_complement(
-                    max_degree=order,
-                    k=float(k),
-                    k_parallel=k_parallel,
-                    lattice=lattice,
-                    eta=float(eta),
-                    displacement=base_displacement,
-                    lattice_index=lattice_index,
-                )
-                real_sums[point_index] -= complement
     if not np.all(np.isfinite(real_sums)):
         raise FloatingPointError(
             "Periodic Ewald real-space accumulation produced non-finite structural "

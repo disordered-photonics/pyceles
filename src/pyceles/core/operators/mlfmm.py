@@ -190,91 +190,13 @@ class MLFMMMultilevelOperators:
     leaf_apply_mode: MLFMMLeafApplyMode = "dense"
 
 
-@dataclass(frozen=True)
-class MLFMMPeriodicFarBatch:
-    """One directed periodic M2L batch at a shared hierarchy level."""
-
-    source_indices: np.ndarray
-    destination_indices: np.ndarray
-    diagonal: np.ndarray
-
-
-@dataclass(frozen=True)
-class MLFMMPeriodicLeafBatch:
-    """Directed exact leaf-pair batches for one explicit lattice image."""
-
-    source_leaf_indices: np.ndarray
-    destination_leaf_indices: np.ndarray
-    lattice_shift: np.ndarray
-    bloch_phase: complex
-
-
-@dataclass(frozen=True)
-class MLFMMPeriodizationPlan:
-    """Prepared lattice closure and finite-image corrections for periodic MLFMM."""
-
-    closure_level: int
-    far_batches_by_level: tuple[tuple[MLFMMPeriodicFarBatch, ...], ...]
-    leaf_batches: tuple[MLFMMPeriodicLeafBatch, ...]
-    periodic_offset_count: int
-    near_image_count: int
-    sampled_far_box_pair_count: int
-    exact_leaf_box_pair_count: int
-    exact_particle_pair_count: int
-    exact_leaf_r_max_bound: float
-    ewald_eta: float
-
-    def summary(self) -> dict[str, int | float]:
-        """Return compact periodization diagnostics for profiling and tests."""
-
-        return {
-            "closure_level": int(self.closure_level),
-            "periodic_offset_count": int(self.periodic_offset_count),
-            "near_image_count": int(self.near_image_count),
-            "sampled_far_box_pair_count": int(self.sampled_far_box_pair_count),
-            "exact_leaf_box_pair_count": int(self.exact_leaf_box_pair_count),
-            "exact_particle_pair_count": int(self.exact_particle_pair_count),
-            "exact_leaf_r_max_bound": float(self.exact_leaf_r_max_bound),
-            "ewald_eta": float(self.ewald_eta),
-        }
-
-    def memory_summary(self) -> dict[str, int]:
-        """Return persistent bytes owned by the periodic correction plan."""
-
-        far_index_bytes = 0
-        far_diagonal_bytes = 0
-        for batches in self.far_batches_by_level:
-            for batch in batches:
-                far_index_bytes += int(
-                    batch.source_indices.nbytes + batch.destination_indices.nbytes
-                )
-                far_diagonal_bytes += int(batch.diagonal.nbytes)
-        leaf_index_bytes = 0
-        leaf_shift_bytes = 0
-        for leaf_batch in self.leaf_batches:
-            leaf_index_bytes += int(
-                leaf_batch.source_leaf_indices.nbytes + leaf_batch.destination_leaf_indices.nbytes
-            )
-            leaf_shift_bytes += int(leaf_batch.lattice_shift.nbytes)
-        total = int(far_index_bytes + far_diagonal_bytes + leaf_index_bytes + leaf_shift_bytes)
-        return {
-            "far_batch_index_bytes": int(far_index_bytes),
-            "far_diagonal_bytes": int(far_diagonal_bytes),
-            "leaf_batch_index_bytes": int(leaf_index_bytes),
-            "leaf_shift_bytes": int(leaf_shift_bytes),
-            "total_bytes": total,
-        }
-
-
 @dataclass
 class MLFMMCouplingOperator:
     """Prepared NumPy MLFMM coupling operator with structured stage metadata.
 
     The near part stays exact on the resolved leaf partition. The far part is
     applied through either a single occupied-leaf sampled level or a multilevel
-    occupied-box hierarchy, depending on the resolved stage. An optional
-    periodization plan adds a prepared coarse lattice closure plus finite
-    image corrections without changing the particle-local operator contract.
+    occupied-box hierarchy, depending on the resolved stage.
 
     Precision policy:
     - `near_dtype` follows the requested operator compute precision.
@@ -293,7 +215,6 @@ class MLFMMCouplingOperator:
     cache_translation_blocks: bool = False
     single_level: MLFMMSingleLevelOperators | None = None
     multilevel: MLFMMMultilevelOperators | None = None
-    periodization: MLFMMPeriodizationPlan | None = None
     _exact_block_cache: dict[tuple[int, int], np.ndarray] | None = None
 
     def __post_init__(self) -> None:
@@ -303,13 +224,6 @@ class MLFMMCouplingOperator:
             raise ValueError("multilevel operators are required for multilevel MLFMM coupling.")
         if self.resolved_plan.stage == "direct":
             raise ValueError("MLFMMCouplingOperator is not used for the direct stage.")
-        if self.periodization is not None and self.resolved_plan.stage != "multilevel":
-            raise ValueError("Periodic MLFMM requires the multilevel apply pipeline.")
-        if self.periodization is not None and self.multilevel is not None:
-            if len(self.periodization.far_batches_by_level) != len(self.multilevel.levels):
-                raise ValueError("Periodic MLFMM far-batch levels do not match the hierarchy.")
-            if not 0 <= int(self.periodization.closure_level) < len(self.multilevel.levels):
-                raise ValueError("Periodic MLFMM closure level lies outside the hierarchy.")
         if np.dtype(self.far_dtype) != np.dtype(np.complex128):
             raise ValueError(
                 "MLFMM sampled-far path requires `far_dtype=complex128` for stability."
@@ -353,7 +267,6 @@ class MLFMMCouplingOperator:
                 near_dtype=near_dtype,
                 far_dtype=far_dtype,
                 block_cache=self._exact_block_cache,
-                periodization=self.periodization,
             )
             y_total = np.asarray(y_near, dtype=far_dtype) + np.asarray(y_far, dtype=far_dtype)
             return np.asarray(y_total, dtype=self.dtype)
@@ -455,9 +368,6 @@ class MLFMMCouplingOperator:
                         for level in levels
                     ],
                 },
-                "periodization": None
-                if self.periodization is None
-                else self.periodization.summary(),
             }
         raise RuntimeError(f"Unsupported MLFMM stage {self.resolved_plan.stage!r}.")
 
@@ -479,7 +389,7 @@ class MLFMMCouplingOperator:
         if stage == "multilevel":
             if self.multilevel is None:
                 raise RuntimeError("Internal error: multilevel operators are missing.")
-            diagnostics = _multilevel_memory_diagnostics(
+            return _multilevel_memory_diagnostics(
                 lmax=int(self.lmax),
                 n_particles=int(self.positions.shape[0]),
                 near_dtype=np.dtype(self.near_dtype),
@@ -487,12 +397,6 @@ class MLFMMCouplingOperator:
                 plan_summary=self.plan_summary(),
                 operators=self.multilevel,
             )
-            if self.periodization is not None:
-                diagnostics["periodization"] = {
-                    **self.periodization.summary(),
-                    **self.periodization.memory_summary(),
-                }
-            return diagnostics
         raise RuntimeError(f"Unsupported MLFMM stage {self.resolved_plan.stage!r}.")
 
 
@@ -1655,71 +1559,6 @@ def _populate_exact_leaf_near_cache(
                     )
 
 
-def _exact_periodic_leaf_near_apply(
-    *,
-    lmax: int,
-    k: float,
-    positions: np.ndarray,
-    x: np.ndarray,
-    partition: MLFMMPartition,
-    batches: tuple[MLFMMPeriodicLeafBatch, ...],
-    radial_lut: RadialLUT | None,
-    dtype: np.dtype,
-    out: np.ndarray | None = None,
-) -> np.ndarray:
-    """Accumulate directed exact leaf interactions from explicit lattice images."""
-
-    nm = int(n_modes(int(lmax)))
-    pos = np.asarray(positions, dtype=float).reshape(-1, 3)
-    arr = np.asarray(x, dtype=dtype).reshape(pos.shape[0], nm)
-    if out is None:
-        y = np.zeros_like(arr, dtype=dtype)
-    else:
-        y = np.asarray(out)
-        if np.dtype(y.dtype) != np.dtype(dtype):
-            raise ValueError(
-                "Periodic exact-leaf output dtype must match the near-field compute dtype: "
-                f"{np.dtype(y.dtype)!r} vs {np.dtype(dtype)!r}."
-            )
-        if y.size != arr.size:
-            raise ValueError(
-                "Periodic exact-leaf output must match the particle-mode state size: "
-                f"{y.size} vs {arr.size}."
-            )
-        if not bool(y.flags.writeable):
-            raise ValueError("Periodic exact-leaf output must be writable.")
-        y = y.reshape(arr.shape)
-    if not batches:
-        return y.reshape(-1)
-    ab5 = translation_ab5_table(int(lmax), dtype=np.complex128)
-    leaves = partition.leaves
-    for batch in batches:
-        shift = np.asarray(batch.lattice_shift, dtype=float).reshape(3)
-        phase = np.asarray(batch.bloch_phase, dtype=dtype).item()
-        source_leaf_indices = np.asarray(batch.source_leaf_indices).reshape(-1)
-        destination_leaf_indices = np.asarray(batch.destination_leaf_indices).reshape(-1)
-        if source_leaf_indices.size != destination_leaf_indices.size:
-            raise ValueError("Periodic leaf batch source/destination sizes must match.")
-        for source_leaf_index, destination_leaf_index in zip(
-            source_leaf_indices, destination_leaf_indices, strict=True
-        ):
-            source_particles = leaves[int(source_leaf_index)].particle_indices
-            destination_particles = leaves[int(destination_leaf_index)].particle_indices
-            for destination in destination_particles:
-                destination_i = int(destination)
-                for source in source_particles:
-                    source_i = int(source)
-                    block = translation_block(
-                        int(lmax),
-                        float(k),
-                        np.asarray(pos[destination_i] - pos[source_i] - shift, dtype=float),
-                        ab5=ab5,
-                        radial_lut=radial_lut,
-                    )
-                    y[destination_i] += phase * np.asarray(block, dtype=dtype) @ arr[source_i]
-    return y.reshape(-1)
-
-
 def build_single_level_mlfmm_operators(
     *,
     lmax: int,
@@ -2261,7 +2100,6 @@ def apply_multilevel_mlfmm(
     near_dtype: np.dtype | type[np.complexfloating] | type[np.complex128] | None = None,
     far_dtype: np.dtype | type[np.complexfloating] | type[np.complex128] | None = None,
     block_cache: dict[tuple[int, int], np.ndarray] | None = None,
-    periodization: MLFMMPeriodizationPlan | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Apply exact leaf-near interactions and multilevel sampled far interactions.
 
@@ -2290,18 +2128,6 @@ def apply_multilevel_mlfmm(
         dtype=near_out_dtype,
         block_cache=block_cache,
     )
-    if periodization is not None:
-        y_near = _exact_periodic_leaf_near_apply(
-            lmax=int(lmax),
-            k=float(k),
-            positions=np.asarray(positions, dtype=float),
-            x=np.asarray(x, dtype=near_out_dtype),
-            partition=operators.partition,
-            batches=periodization.leaf_batches,
-            radial_lut=radial_lut,
-            dtype=near_out_dtype,
-            out=y_near,
-        )
     outgoing = [
         np.zeros(
             (level.coords.shape[0], 4, level.directional.grid.directions.shape[0]),
@@ -2375,17 +2201,6 @@ def apply_multilevel_mlfmm(
                 outgoing[level_idx][src_idx] * level.offset_diagonals[offset][None, None, :]
             )
             np.add.at(incoming[level_idx], dst_idx, translated)
-
-    if periodization is not None:
-        for level_idx, batches in enumerate(periodization.far_batches_by_level):
-            for batch in batches:
-                source_indices = np.asarray(batch.source_indices)
-                destination_indices = np.asarray(batch.destination_indices)
-                translated = (
-                    outgoing[level_idx][source_indices]
-                    * np.asarray(batch.diagonal, dtype=far_out_dtype)[None, None, :]
-                )
-                np.add.at(incoming[level_idx], destination_indices, translated)
 
     # Downward transfer mirrors the same convention change in the opposite
     # direction. The parent local samples first receive the child-center phase
@@ -2616,9 +2431,6 @@ __all__ = [
     "MLFMMLevelOperators",
     "MLFMMMultilevelOperators",
     "MLFMMOptions",
-    "MLFMMPeriodicFarBatch",
-    "MLFMMPeriodicLeafBatch",
-    "MLFMMPeriodizationPlan",
     "MLFMMResolvedPlan",
     "MLFMMSingleLevelOperators",
     "MLFMMStage",
