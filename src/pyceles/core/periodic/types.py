@@ -16,16 +16,19 @@ class PeriodicOptions:
     """Numerical policy for periodic coupling and output evaluation.
 
     ``eta`` is an inverse-length Ewald splitting parameter. Leaving it as
-    ``None`` selects pyceles's automatic Ewald split: the canonical 2D
-    rectangular-lattice value ``sqrt(pi / area)`` is used when stable, and is
-    increased only when a cheap geometry-aware structural-sum preflight finds
-    it unsafe. Set a numeric ``eta`` to force an expert/manual split.
+    ``None`` selects pyceles's deterministic safety policy: the canonical 2D
+    rectangular-lattice value ``sqrt(pi / area)`` is tested first, then the
+    value is increased along a fixed wavelength-scaled ladder only when a
+    compact structural-sum preflight finds the finite-shell representation
+    unstable. Set a numeric ``eta`` to force an expert/manual split after
+    validating that split for the intended geometry and shell cap.
     ``real_shells`` and ``reciprocal_shells`` are optional explicit
     Chebyshev-index shell truncation counts. Leaving either as ``None``
     enables adaptive shell accumulation with ``shell_tolerance`` and ``max_shells``
     (used as a safety cap, not as an accuracy target). Accelerated evaluators
-    that cannot adapt without host/device synchronization may resolve these
-    options once to fixed shell counts using the same tolerance.
+    that cannot adapt without host/device synchronization resolve these
+    options once to the smallest fixed counts that agree with a max-shell
+    reference at the requested tolerance.
 
     ``method="rayleigh"`` enables the hybrid repeated-apply operator: the
     translationally invariant periodic self block and all non-self pairs with

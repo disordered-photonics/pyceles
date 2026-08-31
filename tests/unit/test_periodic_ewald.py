@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import numpy as np
@@ -8,6 +9,7 @@ from scipy import special
 
 import pyceles as pcl
 import pyceles.core.periodic.ewald as ewald_module
+from pyceles.core.periodic import plane_wave_k_parallel
 from pyceles.core.periodic.ewald import (
     EwaldShellWorkspace,
     PeriodicEwaldConvergenceError,
@@ -577,6 +579,49 @@ def test_automatic_eta_raises_unstable_large_cell_split() -> None:
     assert eta <= 0.35 * k * (1.0 + 1.0e-12)
 
 
+def test_oblique_eta_selection_uses_adaptive_shell_tolerance() -> None:
+    """Oblique Bloch phases must not be rejected by a hidden low-shell probe."""
+
+    lattice = pcl.RectangularLattice2D(ax=3544.8765, ay=3544.8765)
+    k = 2.0 * np.pi / 366.6666666666667
+    source = pcl.PlaneWave(
+        wavelength=550.0,
+        medium_n=1.5,
+        polarization="TE",
+        polar_angle=math.radians(25.0),
+        azimuthal_angle=0.0,
+    )
+    periodic = pcl.PeriodicSpec(
+        lattice=lattice,
+        options=pcl.PeriodicOptions(
+            method="rayleigh",
+            shell_tolerance=1.0e-8,
+            max_shells=64,
+        ),
+    )
+    # These offsets reproduce the near-plane and clipped far-z probes of the
+    # 10-um production crop without loading its large geometry file.
+    positions = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [-201.856832, 521.510926, 0.0019],
+            [1644.7113, -981.1352, 35_000.0],
+        ],
+        dtype=float,
+    )
+
+    eta = resolve_ewald_eta(
+        periodic=periodic,
+        k=k,
+        k_parallel=plane_wave_k_parallel(source),
+        positions=positions,
+        lmax=4,
+        max_vertical_offset=366.6666667,
+    )
+
+    assert eta == pytest.approx(4.0 * default_ewald_eta(lattice), rel=0.0, abs=1.0e-15)
+
+
 def test_rayleigh_eta_preflight_is_limited_to_the_exact_near_band() -> None:
     k = 2.0 * np.pi / 366.6666666666667
     lattice = pcl.RectangularLattice2D(ax=3544.8765, ay=3544.8765)
@@ -746,7 +791,7 @@ def test_resolve_ewald_shell_counts_honors_explicit_options():
 def test_resolve_ewald_shell_counts_returns_bounded_probe_counts():
     from pyceles.core.lattice import RectangularLattice2D
     from pyceles.core.periodic import PeriodicOptions, PeriodicSpec
-    from pyceles.core.periodic.ewald import resolve_ewald_eta, resolve_ewald_shell_counts
+    from pyceles.core.periodic.ewald import resolve_ewald_shell_counts
 
     lattice = RectangularLattice2D(ax=3600.0, ay=3600.0)
     spec = PeriodicSpec(
@@ -754,7 +799,7 @@ def test_resolve_ewald_shell_counts_returns_bounded_probe_counts():
     )
     positions = np.asarray([[0.0, 0.0, 0.0], [120.0, 0.0, 200.0], [300.0, 50.0, 900.0]])
     k = 2 * np.pi / 550.0
-    eta = resolve_ewald_eta(periodic=spec, k=k, k_parallel=np.zeros(2), positions=positions, lmax=3)
+    eta = 1.4e-3
     counts = resolve_ewald_shell_counts(
         periodic=spec,
         k=k,
@@ -765,7 +810,65 @@ def test_resolve_ewald_shell_counts_returns_bounded_probe_counts():
     )
     assert 0 <= counts.real_shells <= 8
     assert 0 <= counts.reciprocal_shells <= 8
-    assert counts.selected_by in {"probe", "fallback", "max_shells_reference_failed"}
+    assert counts.selected_by in {
+        "probe",
+        "max_shells_fallback",
+    }
+
+
+def test_shell_count_fallback_uses_configured_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A degenerate probe must not reintroduce a hidden fixed shell count."""
+
+    from pyceles.core.periodic import PeriodicOptions, PeriodicSpec
+    from pyceles.core.periodic.ewald import resolve_ewald_shell_counts
+
+    lattice = pcl.RectangularLattice2D(ax=3600.0, ay=3600.0)
+    spec = PeriodicSpec(
+        lattice=lattice,
+        options=PeriodicOptions(max_shells=16, shell_tolerance=1.0e-8),
+    )
+    monkeypatch.setattr(
+        ewald_module, "_representative_ewald_eta_offsets", lambda **_: np.empty((0, 3))
+    )
+
+    counts = resolve_ewald_shell_counts(
+        periodic=spec,
+        k=2.0 * np.pi / 550.0,
+        k_parallel=np.zeros(2),
+        positions=np.asarray([[0.0, 0.0, 0.0]]),
+        lmax=2,
+        eta=1.0e-3,
+    )
+
+    assert counts.real_shells == 16
+    assert counts.reciprocal_shells == 16
+    assert counts.selected_by == "max_shells_fallback"
+
+
+def test_shell_count_reference_failure_is_not_silently_accepted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fixed GPU counts must not hide a non-finite max-shell reference."""
+
+    from pyceles.core.periodic import PeriodicOptions, PeriodicSpec
+    from pyceles.core.periodic.ewald import resolve_ewald_shell_counts
+
+    lattice = pcl.RectangularLattice2D(ax=3600.0, ay=3600.0)
+    spec = PeriodicSpec(
+        lattice=lattice,
+        options=PeriodicOptions(max_shells=16, shell_tolerance=1.0e-8),
+    )
+    monkeypatch.setattr(ewald_module, "_reference_shell_probe_vector", lambda **_: None)
+
+    with pytest.raises(ewald_module.PeriodicEwaldConvergenceError, match="max-shell reference"):
+        resolve_ewald_shell_counts(
+            periodic=spec,
+            k=2.0 * np.pi / 550.0,
+            k_parallel=np.zeros(2),
+            positions=np.asarray([[0.0, 0.0, 0.0]]),
+            lmax=2,
+            eta=1.0e-3,
+        )
 
 
 def test_near_coplanar_structural_sum_has_smooth_same_plane_limit() -> None:

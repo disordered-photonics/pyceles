@@ -234,10 +234,12 @@ class EwaldShellCounts:
 def _candidate_ewald_etas(
     *, canonical_eta: float, k: float, max_steps: int = 16
 ) -> tuple[float, ...]:
-    """Return the intentionally bounded eta ladder used by the automatic selector.
+    """Return the bounded eta ladder used by the automatic safety preflight.
 
-    The selector is a stability preflight, not an optimizer.  Keep the ladder
-    finite and k-scaled so that ``eta=None`` remains a cheap default.
+    The ladder is deterministic and ordered from the canonical split towards
+    a wavelength-scaled ceiling.  The selector is a stability check, not an
+    optimizer: it returns the first candidate whose tolerance-controlled
+    structural sum agrees with the next candidate.
     """
     canonical = float(canonical_eta)
     if not np.isfinite(canonical) or canonical <= 0.0:
@@ -348,8 +350,8 @@ def _eta_probe_vector(
     k: float,
     lattice: RectangularLattice2D,
     k_parallel: Array,
-    real_shells: int,
-    reciprocal_shells: int,
+    real_shells: int | None,
+    reciprocal_shells: int | None,
     shell_tolerance: float,
     max_shells: int,
 ) -> Array | None:
@@ -369,8 +371,8 @@ def _eta_probe_vector(
                 lattice=lattice,
                 k_parallel=k_parallel,
                 eta=float(eta),
-                real_shells=int(real_shells),
-                reciprocal_shells=int(reciprocal_shells),
+                real_shells=None if real_shells is None else int(real_shells),
+                reciprocal_shells=None if reciprocal_shells is None else int(reciprocal_shells),
                 shell_tolerance=float(shell_tolerance),
                 max_shells=int(max_shells),
                 dtype=np.complex128,
@@ -412,8 +414,11 @@ def select_ewald_eta(
     """Choose an automatic Ewald split for this lattice and particle packing.
 
     The selector starts from the canonical ``sqrt(pi / area)`` value and raises
-    eta only when a cheap structural-sum preflight shows that the current value
-    is unstable against the next geometric candidate.
+    eta only when a bounded, tolerance-controlled structural-sum preflight
+    shows that the current value is unstable against the next geometric
+    candidate.  When shell counts are omitted, each candidate is accumulated
+    adaptively up to ``max_shells``; comparing converged candidates avoids the
+    eta-dependent truncation artifact caused by a hidden low-shell probe.
     """
     canonical = default_ewald_eta(lattice)
     candidates = _candidate_ewald_etas(canonical_eta=canonical, k=float(k))
@@ -427,18 +432,14 @@ def select_ewald_eta(
     )
     if offsets.size == 0:
         return float(canonical)
-    # Keep the preflight intentionally cheap: low-order structural sums are
-    # sufficient to catch the catastrophic eta regimes seen in large cells.
+    # Keep the preflight bounded and low-order.  With omitted shell counts, use
+    # the same adaptive, tolerance-controlled accumulation as the NumPy
+    # reference path; ``max_shells`` is only a convergence cap.  Explicit shell
+    # counts remain honored because they are an expert request to test that
+    # particular fixed truncation.
     lmax_probe = max(1, min(int(lmax), 2))
-    probe_real = int(real_shells) if real_shells is not None else min(12, max(1, int(max_shells)))
-    probe_recip = (
-        int(reciprocal_shells)
-        if reciprocal_shells is not None
-        else min(
-            12,
-            max(1, int(max_shells)),
-        )
-    )
+    probe_real = None if real_shells is None else int(real_shells)
+    probe_recip = None if reciprocal_shells is None else int(reciprocal_shells)
     previous_eta: float | None = None
     previous_vec: Array | None = None
     for eta in candidates:
@@ -455,6 +456,11 @@ def select_ewald_eta(
             max_shells=int(max_shells),
         )
         if vec is None:
+            # A failed candidate is an unresolved point on the ladder; do not
+            # compare a later value against a non-adjacent eta and call that
+            # pair stable.
+            previous_eta = None
+            previous_vec = None
             continue
         if previous_vec is not None and previous_eta is not None:
             rel = _eta_probe_relative_difference(previous_vec, vec)
@@ -464,7 +470,8 @@ def select_ewald_eta(
         previous_vec = vec
     raise FloatingPointError(
         "Automatic Ewald split selection could not find two consecutive stable "
-        "eta values for this lattice and vertical extent. An explicit eta should "
+        f"eta values within max_shells={int(max_shells)} and "
+        f"shell_tolerance={float(shell_tolerance):.3e}. An explicit eta should "
         "only be used after numerical validation; for tall periodic cells, prefer "
         "the hybrid Rayleigh operator."
     )
@@ -592,11 +599,12 @@ def resolve_ewald_shell_counts(
     """Resolve fixed shell counts for accelerated non-adaptive evaluators.
 
     Explicit user counts are honored exactly.  If either count is unset, this
-    helper performs a cheap one-shot probe on representative offsets and compares
+    helper performs a bounded one-shot probe on representative offsets and compares
     fixed shell truncations to the ``max_shells`` reference using
     ``periodic.options.shell_tolerance``.  This centralizes the policy needed by
     CuPy paths without changing the NumPy reference path, which can still use
-    adaptive accumulation directly.
+    adaptive accumulation directly.  A non-finite reference is reported as a
+    convergence error rather than silently returning an unvalidated fixed cap.
     """
     options = periodic.options
     max_count = int(options.max_shells)
@@ -635,13 +643,17 @@ def resolve_ewald_shell_counts(
         max_vertical_offset=probe_vertical_limit,
     )
     if offsets.size == 0:
-        fallback = max(1, min(12, max_count))
+        # The representative probe normally contains at least the synthetic
+        # near-self offsets.  If a caller supplies a degenerate geometry and
+        # no probe can be formed, retain the configured cap rather than
+        # silently introducing a second shell-count policy.
+        fallback = max_count
         return EwaldShellCounts(
             real_shells=max(0, int(options.real_shells)) if explicit_real else fallback,
             reciprocal_shells=max(0, int(options.reciprocal_shells))
             if explicit_recip
             else fallback,
-            selected_by="fallback",
+            selected_by="max_shells_fallback",
         )
 
     lmax_probe = max(1, min(int(lmax), 2))
@@ -656,13 +668,12 @@ def resolve_ewald_shell_counts(
         max_shells=max_count,
     )
     if reference is None:
-        fallback = max_count
-        return EwaldShellCounts(
-            real_shells=max(0, int(options.real_shells)) if explicit_real else fallback,
-            reciprocal_shells=max(0, int(options.reciprocal_shells))
-            if explicit_recip
-            else fallback,
-            selected_by="max_shells_reference_failed",
+        raise PeriodicEwaldConvergenceError(
+            "Periodic Ewald max-shell reference was non-finite for fixed shell "
+            f"resolution (eta={eta_f:.6g}, max_shells={max_count}, "
+            f"shell_tolerance={float(options.shell_tolerance):.3e}). "
+            "Increase `max_shells` or validate an explicit eta/shell split "
+            "before using an accelerated evaluator."
         )
 
     real_count = (
@@ -1938,5 +1949,4 @@ __all__ = [
     "periodic_ewald_block",
     "resolve_ewald_eta",
     "resolve_ewald_shell_counts",
-    "select_ewald_eta",
 ]
