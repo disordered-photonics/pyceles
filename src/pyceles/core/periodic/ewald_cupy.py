@@ -821,6 +821,7 @@ def ewald_structural_sums_2d_fixed_cupy(
     *,
     relative_source_minus_destination: Any,
     lmax_struct: int,
+    structural_order: int | None = None,
     workspace: CupyEwaldShellWorkspace,
     real_shell_count: int,
     reciprocal_shell_count: int,
@@ -853,7 +854,15 @@ def ewald_structural_sums_2d_fixed_cupy(
     eta = float(workspace.eta)
     c = cp.asarray(relative_source_minus_destination, dtype=cp.float64).reshape(-1, 3)
     n_pairs = int(c.shape[0])
-    order = 2 * int(lmax_struct)
+    maximum_order = 2 * int(lmax_struct)
+    if maximum_order < 0:
+        raise ValueError(f"`lmax_struct` must be >= 0. Got {lmax_struct!r}.")
+    order = maximum_order if structural_order is None else int(structural_order)
+    if order < 0 or order > maximum_order:
+        raise ValueError(
+            "`structural_order` must lie between 0 and 2*lmax_struct. "
+            f"Got structural_order={structural_order!r}, lmax_struct={lmax_struct!r}."
+        )
     offset = order
     sums = cp.zeros((n_pairs, order + 1, 2 * order + 1), dtype=cp.complex128)
     if n_pairs == 0:

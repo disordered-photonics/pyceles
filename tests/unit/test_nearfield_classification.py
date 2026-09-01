@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any, cast
+
 import numpy as np
 
 from pyceles.core.particles import ParticleCollection, Sphere
@@ -54,3 +56,68 @@ def test_internal_point_classification_excludes_index_matched_particles() -> Non
     assert not classification.inside_any[0]
     assert classification.active_particle_indices.size == 0
     assert classification.point_indices.size == 0
+
+
+def test_periodic_internal_classifier_wraps_reference_cell_images() -> None:
+    from pyceles.postprocessing.nearfield.classification import (
+        _classify_periodic_internal_points_reference,
+        classify_periodic_internal_points,
+    )
+
+    particles = ParticleCollection.from_archetypes(
+        positions=np.asarray([[0.0, 0.0, 0.0], [3.0, 0.0, 0.0]]),
+        archetypes=[Sphere(position=(0.0, 0.0, 0.0), radius=0.6, refractive_index=1.5 + 0.0j)],
+        archetype_indices=np.zeros(2, dtype=np.uint8),
+    )
+    points = np.asarray(
+        [
+            [10.2, 0.0, 0.0],
+            [-6.8, 0.0, 0.0],
+            [1.5, 0.0, 0.0],
+        ]
+    )
+    kwargs = dict(
+        points=points,
+        particles=particles,
+        lattice_ax=10.0,
+        lattice_ay=9.0,
+        k_parallel=np.asarray([0.13, -0.07]),
+        n_medium=1.0 + 0.0j,
+    )
+
+    actual = classify_periodic_internal_points(**cast(Any, kwargs))
+    expected = _classify_periodic_internal_points_reference(**cast(Any, kwargs))
+
+    np.testing.assert_array_equal(actual[0].inside_any, expected[0].inside_any)
+    np.testing.assert_array_equal(
+        actual[0].active_particle_indices,
+        expected[0].active_particle_indices,
+    )
+    np.testing.assert_array_equal(actual[0].point_offsets, expected[0].point_offsets)
+    np.testing.assert_array_equal(actual[0].point_indices, expected[0].point_indices)
+    np.testing.assert_allclose(actual[1], expected[1])
+    np.testing.assert_allclose(actual[2], expected[2])
+
+
+def test_periodic_internal_classifier_falls_back_for_large_particles() -> None:
+    from pyceles.postprocessing.nearfield.classification import (
+        _classify_periodic_internal_points_tree,
+    )
+
+    particles = ParticleCollection.from_archetypes(
+        positions=np.asarray([[0.0, 0.0, 0.0]]),
+        archetypes=[Sphere(position=(0.0, 0.0, 0.0), radius=5.1, refractive_index=1.5 + 0.0j)],
+        archetype_indices=np.zeros(1, dtype=np.uint8),
+    )
+
+    assert (
+        _classify_periodic_internal_points_tree(
+            points=np.asarray([[0.0, 0.0, 0.0]]),
+            particles=particles,
+            lattice_ax=10.0,
+            lattice_ay=12.0,
+            k_parallel=np.zeros(2),
+            n_medium=1.0 + 0.0j,
+        )
+        is None
+    )

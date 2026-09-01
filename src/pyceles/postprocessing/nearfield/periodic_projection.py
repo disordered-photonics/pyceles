@@ -56,6 +56,71 @@ def l1_projection_data(lmax: int) -> tuple[int, int, np.ndarray, np.ndarray]:
     return lmax_struct, m_offset, kernel, row_idx_arr
 
 
+@cache
+def l1_compact_projection_data(
+    lmax: int,
+) -> tuple[int, int, np.ndarray, np.ndarray, np.ndarray]:
+    """Return the exact structural channels needed for point-local ``l=1`` fields.
+
+    A destination mode with ``l=1`` coupled to source modes through ``lmax`` can
+    require translation degree at most ``lmax + 1``.  The ordinary periodic
+    coupling tables round structural order up to ``2*lmax_struct``; for even
+    particle ``lmax`` that computes one entire unused degree.  This compact
+    representation keeps only valid ``(p,m)`` channels through the exact limit.
+    """
+    lmax_i = int(lmax)
+    if lmax_i < 1:
+        raise ValueError(f"`lmax` must be >= 1. Got {lmax!r}.")
+    lmax_struct, dense_offset, dense_kernel, _row_idx = l1_projection_data(lmax_i)
+    structural_order = lmax_i + 1
+    degrees: list[int] = []
+    orders: list[int] = []
+    for degree in range(structural_order + 1):
+        for order_m in range(-degree, degree + 1):
+            degrees.append(degree)
+            orders.append(order_m)
+    degree_array = np.asarray(degrees, dtype=np.int32)
+    order_array = np.asarray(orders, dtype=np.int32)
+    compact_kernel = np.ascontiguousarray(
+        dense_kernel[:, :, order_array + int(dense_offset), degree_array],
+        dtype=np.complex128,
+    )
+    dense_order_columns = order_array + int(structural_order)
+    for value in (degree_array, dense_order_columns, compact_kernel):
+        value.setflags(write=False)
+    return (
+        int(lmax_struct),
+        int(structural_order),
+        degree_array,
+        dense_order_columns,
+        compact_kernel,
+    )
+
+
+def reduce_compact_structural_sums_to_l1(
+    structural_sums: np.ndarray,
+    coeffs: np.ndarray,
+    *,
+    degree_indices: np.ndarray,
+    order_indices: np.ndarray,
+    kernel: np.ndarray,
+) -> np.ndarray:
+    """Contract exact valid structural channels into local ``l=1`` coefficients."""
+    sums = np.asarray(structural_sums)
+    compact = sums[:, degree_indices, order_indices]
+    src_coeffs = np.asarray(coeffs).reshape(-1)
+    dtype = np.result_type(compact.dtype, kernel.dtype, src_coeffs.dtype, np.complex64)
+    return np.asarray(
+        np.einsum(
+            "nk,rck,c->nr",
+            np.asarray(compact, dtype=dtype),
+            np.asarray(kernel, dtype=dtype),
+            np.asarray(src_coeffs, dtype=dtype),
+            optimize=True,
+        )
+    )
+
+
 def reduce_structural_sums_to_l1(
     structural_sums: np.ndarray,
     coeffs: np.ndarray,
@@ -72,4 +137,9 @@ def reduce_structural_sums_to_l1(
     )
 
 
-__all__ = ["l1_projection_data", "reduce_structural_sums_to_l1"]
+__all__ = [
+    "l1_compact_projection_data",
+    "l1_projection_data",
+    "reduce_compact_structural_sums_to_l1",
+    "reduce_structural_sums_to_l1",
+]

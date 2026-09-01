@@ -1223,6 +1223,7 @@ def ewald_structural_sums_2d(
 def ewald_structural_sums_2d_batch(
     *,
     lmax_struct: int,
+    structural_order: int | None = None,
     k: float,
     destinations: Array,
     source: Array,
@@ -1247,9 +1248,15 @@ def ewald_structural_sums_2d_batch(
     dest = np.asarray(destinations, dtype=float).reshape(-1, 3)
     source_arr = np.asarray(source, dtype=float).reshape(3)
     n_points = int(dest.shape[0])
-    order = 2 * int(lmax_struct)
-    if order < 0:
+    maximum_order = 2 * int(lmax_struct)
+    if maximum_order < 0:
         raise ValueError(f"`lmax_struct` must be >= 0. Got {lmax_struct!r}.")
+    order = maximum_order if structural_order is None else int(structural_order)
+    if order < 0 or order > maximum_order:
+        raise ValueError(
+            "`structural_order` must lie between 0 and 2*lmax_struct. "
+            f"Got structural_order={structural_order!r}, lmax_struct={lmax_struct!r}."
+        )
     offset = order
     sums = np.zeros((n_points, order + 1, 2 * order + 1), dtype=np.complex128)
     if n_points == 0:
