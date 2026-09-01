@@ -832,3 +832,71 @@ def test_near_coplanar_structural_sum_has_smooth_same_plane_limit() -> None:
                 rtol=2e-11,
                 atol=2e-11,
             )
+
+
+def test_ewald_policy_preflights_are_memoized(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Repeated operator/postprocess policy queries should reuse scalar probe results."""
+    ewald_module._select_ewald_eta_from_offsets_cached.cache_clear()
+    ewald_module._resolve_ewald_shell_counts_from_offsets_cached.cache_clear()
+    lattice = pcl.RectangularLattice2D(ax=3600.0, ay=3600.0)
+    periodic = pcl.PeriodicSpec(
+        lattice=lattice,
+        options=pcl.PeriodicOptions(method="rayleigh", shell_tolerance=1.0e-8, max_shells=16),
+    )
+    positions = np.asarray([[0.0, 0.0, 0.0], [130.0, -75.0, 240.0], [90.0, 30.0, 700.0]])
+    k = 2.0 * np.pi / 550.0
+    kp = np.asarray([0.0002, -0.0001])
+
+    eta_calls = 0
+    original_eta_probe = ewald_module._eta_probe_vector
+
+    def counted_eta_probe(**kwargs):
+        nonlocal eta_calls
+        eta_calls += 1
+        return original_eta_probe(**kwargs)
+
+    monkeypatch.setattr(ewald_module, "_eta_probe_vector", counted_eta_probe)
+    eta_first = resolve_ewald_eta(
+        periodic=periodic,
+        k=k,
+        k_parallel=kp,
+        positions=positions,
+        lmax=3,
+        max_vertical_offset=400.0,
+    )
+    first_eta_calls = eta_calls
+    assert first_eta_calls > 0
+    eta_second = resolve_ewald_eta(
+        periodic=periodic,
+        k=k,
+        k_parallel=kp,
+        positions=positions.copy(),
+        lmax=3,
+        max_vertical_offset=400.0,
+    )
+    assert eta_second == eta_first
+    assert eta_calls == first_eta_calls
+
+    # Shell selection uses the same compact offset key and is cached independently.
+    counts_first = ewald_module.resolve_ewald_shell_counts(
+        periodic=periodic,
+        k=k,
+        k_parallel=kp,
+        positions=positions,
+        lmax=3,
+        eta=eta_first,
+        max_vertical_offset=400.0,
+    )
+    calls_after_counts = eta_calls
+    assert calls_after_counts > first_eta_calls
+    counts_second = ewald_module.resolve_ewald_shell_counts(
+        periodic=periodic,
+        k=k,
+        k_parallel=kp,
+        positions=positions.copy(),
+        lmax=3,
+        eta=eta_first,
+        max_vertical_offset=400.0,
+    )
+    assert counts_second == counts_first
+    assert eta_calls == calls_after_counts

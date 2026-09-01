@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from functools import cache
+from functools import cache, lru_cache
 from typing import Literal, cast
 
 import numpy as np
@@ -138,26 +138,18 @@ def _reciprocal_gamma(k: float, q: Array) -> Array:
     return np.asarray(gamma, dtype=np.complex128)
 
 
-def resolve_rayleigh_half_width(
+@lru_cache(maxsize=64)
+def _resolve_rayleigh_half_width_cached(
     *,
     lattice: RectangularLattice2D,
     k: float,
-    k_parallel: npt.ArrayLike,
+    k_parallel: tuple[float, float],
     lmax: int,
     z_cut: float,
     tolerance: float,
     max_shells: int,
-    requested: int | None,
 ) -> int:
-    """Choose a reciprocal half-width from a conservative evanescent envelope."""
-    if requested is not None:
-        value = int(requested)
-        if value != requested or value < 0:
-            raise ValueError(
-                "`rayleigh_reciprocal_shells` must be a non-negative integer or None. "
-                f"Got {requested!r}."
-            )
-        return value
+    """Choose an automatic reciprocal half-width from scalar policy inputs."""
     tol = float(tolerance)
     if not np.isfinite(tol) or tol <= 0.0:
         raise ValueError(f"`shell_tolerance` must be finite and positive. Got {tolerance!r}.")
@@ -165,7 +157,7 @@ def resolve_rayleigh_half_width(
     if cap <= 0:
         raise ValueError(f"`max_shells` must be positive. Got {max_shells!r}.")
     k_f = float(k)
-    kp = np.asarray(k_parallel, dtype=float).reshape(2)
+    kp = np.asarray(k_parallel, dtype=float)
     lmax_i = int(lmax)
     if lmax_i < 0:
         raise ValueError(f"`lmax` must be non-negative. Got {lmax!r}.")
@@ -211,6 +203,43 @@ def resolve_rayleigh_half_width(
         "Rayleigh reciprocal truncation did not reach the requested tolerance "
         f"{tol:g} by shell {cap}. Increase `max_shells`, enlarge "
         "`rayleigh_z_cut`, or set `rayleigh_reciprocal_shells` explicitly."
+    )
+
+
+def resolve_rayleigh_half_width(
+    *,
+    lattice: RectangularLattice2D,
+    k: float,
+    k_parallel: npt.ArrayLike,
+    lmax: int,
+    z_cut: float,
+    tolerance: float,
+    max_shells: int,
+    requested: int | None,
+) -> int:
+    """Choose a reciprocal half-width from a conservative evanescent envelope.
+
+    Automatic choices are memoized from the scalar periodic policy, allowing
+    repeated operator/postprocessing preparation to share the same validated
+    aperture without retaining a Rayleigh plan.
+    """
+    if requested is not None:
+        value = int(requested)
+        if value != requested or value < 0:
+            raise ValueError(
+                "`rayleigh_reciprocal_shells` must be a non-negative integer or None. "
+                f"Got {requested!r}."
+            )
+        return value
+    kp = np.asarray(k_parallel, dtype=float).reshape(2)
+    return _resolve_rayleigh_half_width_cached(
+        lattice=lattice,
+        k=float(k),
+        k_parallel=(float(kp[0]), float(kp[1])),
+        lmax=int(lmax),
+        z_cut=float(z_cut),
+        tolerance=float(tolerance),
+        max_shells=int(max_shells),
     )
 
 
@@ -643,6 +672,29 @@ def apply_rayleigh_far_numpy(plan: RayleighPlan, x: npt.ArrayLike) -> Array:
     return cast(Array, y[:, :, 0] if squeezed else y)
 
 
+def _cartesian_xy_z_layout(
+    points: npt.ArrayLike,
+) -> tuple[Array, Array, Array, Array] | None:
+    """Return compact XY/Z maps when points form a complete Cartesian product."""
+    pts = np.asarray(points, dtype=float).reshape(-1, 3)
+    n_points = int(pts.shape[0])
+    if n_points < 2:
+        return None
+    xy, xy_inverse = np.unique(pts[:, :2], axis=0, return_inverse=True)
+    z, z_inverse = np.unique(pts[:, 2], return_inverse=True)
+    if int(xy.shape[0]) * int(z.size) != n_points:
+        return None
+    keys = z_inverse.astype(np.int64, copy=False) * int(xy.shape[0]) + xy_inverse
+    if int(np.unique(keys).size) != n_points:
+        return None
+    return (
+        np.asarray(xy, dtype=float),
+        np.asarray(z, dtype=float),
+        xy_inverse.astype(np.int64, copy=False),
+        z_inverse.astype(np.int64, copy=False),
+    )
+
+
 def apply_rayleigh_far_to_points_numpy(
     plan: RayleighPlan,
     coeffs: npt.ArrayLike,
@@ -650,9 +702,10 @@ def apply_rayleigh_far_to_points_numpy(
 ) -> Array:
     """Return far-source point-local regular ``l=1`` coefficients.
 
-    Source particles and observation points use distinct z-sorted grids. Only
-    sources with ``|z_point-z_source| > plan.z_cut`` participate; callers add
-    exact Ewald contributions for the complementary source-point pairs.
+    Complete Cartesian ``XY x Z`` point sets share the same compact
+    factorization as the CuPy path: one delayed scan on unique z values, one
+    lateral phase table on unique xy values, and a dense matrix product for
+    recombination. Arbitrary point clouds retain the point-wise reference path.
     """
     coeff_raw = np.asarray(coeffs)
     squeezed = coeff_raw.ndim == 2
@@ -668,12 +721,75 @@ def apply_rayleigh_far_to_points_numpy(
         raise ValueError("Rayleigh coefficient mode count does not match the plan.")
 
     pts = np.asarray(points, dtype=float).reshape(-1, 3)
+    n_points = int(pts.shape[0])
     n_rhs = int(coeff_arr.shape[2])
-    if pts.shape[0] == 0:
+    if n_points == 0:
         empty = np.zeros((0, 6, n_rhs), dtype=plan.source_tables.dtype)
         return empty[:, :, 0] if squeezed else empty
 
-    destination_index_dtype = _compact_particle_index_dtype(pts.shape[0])
+    coeff_sorted = np.asarray(coeff_arr[plan.sort_order], dtype=plan.source_tables.dtype)
+    l1_indices = np.asarray(
+        [index_vswf(1, m, tau, plan.lmax) for tau in (1, 2) for m in (-1, 0, 1)],
+        dtype=np.int64,
+    )
+    destination_l1 = np.take(plan.destination_tables, l1_indices, axis=-1)
+
+    layout = _cartesian_xy_z_layout(pts)
+    if layout is not None:
+        xy_unique, z_unique, xy_inverse, z_inverse = layout
+        n_xy = int(xy_unique.shape[0])
+        n_z = int(z_unique.size)
+        y_grid = np.zeros((n_z, n_xy, 6, n_rhs), dtype=plan.source_tables.dtype)
+        chunk = resolve_rayleigh_mode_chunk_size(
+            n_modes_reciprocal=plan.n_modes_reciprocal,
+            n_particles=coeff_arr.shape[0],
+            n_destinations=max(1, 4 * n_z),
+            n_phase_rows=n_xy,
+            n_rhs=n_rhs,
+            dtype=coeff_sorted.dtype,
+        )
+        for start in range(0, plan.n_modes_reciprocal, chunk):
+            stop = min(plan.n_modes_reciprocal, start + chunk)
+            q_count = int(stop - start)
+            source_phase = plan.sorted_xy_phase[:, start:stop]
+            destination_phase = np.exp(1j * (xy_unique @ plan.reciprocal_xy[start:stop].T)).astype(
+                plan.source_tables.dtype, copy=False
+            )
+            gamma = plan.gamma[start:stop]
+            weight = plan.weights[start:stop]
+            for direction, upward in ((0, True), (1, False)):
+                source = np.einsum(
+                    "qpm,amr->aqpr",
+                    plan.source_tables[direction, start:stop],
+                    coeff_sorted,
+                    optimize=True,
+                )
+                source *= np.conjugate(source_phase)[:, :, None, None]
+                incoming = _scan_far_to_destinations_numpy(
+                    source_amplitudes=source,
+                    source_z=plan.sorted_z,
+                    destination_z=z_unique,
+                    gamma=gamma,
+                    z_cut=plan.z_cut,
+                    upward=upward,
+                )
+                projected = np.einsum(
+                    "qpm,zqpr->zqmr",
+                    destination_l1[direction, start:stop],
+                    incoming,
+                    optimize=True,
+                )
+                projected *= weight[None, :, None, None]
+                projected_rows = np.ascontiguousarray(projected.transpose(0, 2, 3, 1)).reshape(
+                    n_z * 6 * n_rhs, q_count
+                )
+                contribution = projected_rows @ destination_phase.T
+                y_grid += contribution.reshape(n_z, 6, n_rhs, n_xy).transpose(0, 3, 1, 2)
+                del source, incoming, projected, projected_rows, contribution
+        y = y_grid[z_inverse, xy_inverse]
+        return cast(Array, y[:, :, 0] if squeezed else y)
+
+    destination_index_dtype = _compact_particle_index_dtype(n_points)
     destination_order = np.argsort(pts[:, 2], kind="stable").astype(
         destination_index_dtype, copy=False
     )
@@ -682,19 +798,14 @@ def apply_rayleigh_far_to_points_numpy(
         destination_order.size, dtype=destination_index_dtype
     )
     pts_sorted = pts[destination_order]
-    coeff_sorted = np.asarray(coeff_arr[plan.sort_order], dtype=plan.source_tables.dtype)
-    y_sorted = np.zeros((pts.shape[0], 6, n_rhs), dtype=plan.source_tables.dtype)
+    y_sorted = np.zeros((n_points, 6, n_rhs), dtype=plan.source_tables.dtype)
     chunk = resolve_rayleigh_mode_chunk_size(
         n_modes_reciprocal=plan.n_modes_reciprocal,
         n_particles=coeff_arr.shape[0],
-        n_destinations=pts.shape[0],
-        n_phase_rows=pts.shape[0],
+        n_destinations=n_points,
+        n_phase_rows=n_points,
         n_rhs=n_rhs,
         dtype=coeff_sorted.dtype,
-    )
-    l1_indices = np.asarray(
-        [index_vswf(1, m, tau, plan.lmax) for tau in (1, 2) for m in (-1, 0, 1)],
-        dtype=np.int64,
     )
     for start in range(0, plan.n_modes_reciprocal, chunk):
         stop = min(plan.n_modes_reciprocal, start + chunk)
@@ -722,11 +833,7 @@ def apply_rayleigh_far_to_points_numpy(
             )
             y_sorted += np.einsum(
                 "qpm,dqpr,dq,q->dmr",
-                np.take(
-                    plan.destination_tables[direction, start:stop],
-                    l1_indices,
-                    axis=-1,
-                ),
+                destination_l1[direction, start:stop],
                 incoming,
                 destination_phase,
                 weight,

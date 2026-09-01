@@ -20,6 +20,7 @@ from pyceles.core.operators.coupling_periodic_cupy import (
     _resolve_rayleigh_near_cache_memory_plan,
 )
 from pyceles.core.periodic import PeriodicOptions, PeriodicSpec
+from pyceles.core.periodic import rayleigh as rayleigh_module
 from pyceles.core.periodic.ewald import ewald_structural_sums_2d_batch, periodic_ewald_block
 from pyceles.core.periodic.rayleigh import (
     apply_rayleigh_far_numpy,
@@ -271,6 +272,28 @@ def test_rayleigh_half_width_accounts_for_complex_angular_growth(
     # for oblique incidence.
     assert width < reference_width
     assert relative_error < 1.0e-8
+
+
+def test_automatic_rayleigh_half_width_is_memoized() -> None:
+    rayleigh_module._resolve_rayleigh_half_width_cached.cache_clear()
+    kwargs: dict[str, Any] = dict(
+        lattice=pcl.RectangularLattice2D(3544.8765, 3544.8765),
+        k=2.0 * np.pi * 1.5 / 550.0,
+        k_parallel=np.asarray([0.0002, -0.0001]),
+        lmax=4,
+        z_cut=366.6666667,
+        tolerance=1.0e-8,
+        max_shells=64,
+        requested=None,
+    )
+
+    first = resolve_rayleigh_half_width(**kwargs)
+    info_after_first = rayleigh_module._resolve_rayleigh_half_width_cached.cache_info()
+    second = resolve_rayleigh_half_width(**kwargs)
+    info_after_second = rayleigh_module._resolve_rayleigh_half_width_cached.cache_info()
+
+    assert second == first
+    assert info_after_second.hits == info_after_first.hits + 1
 
 
 def test_rayleigh_half_width_rejects_negative_lmax() -> None:
@@ -1002,3 +1025,38 @@ def test_prepare_matvec_passes_particle_radii_to_default_rayleigh_band() -> None
 
     assert isinstance(prepared.coupling, PeriodicCouplingOperator)
     assert prepared.coupling._rayleigh_plan().z_cut == pytest.approx(wavelength)
+
+
+def test_rayleigh_cartesian_numpy_path_matches_pointwise_fallback() -> None:
+    lmax = 2
+    k = 2.0 * np.pi / 550.0
+    positions = np.asarray([[0.0, 0.0, 0.0], [170.0, -80.0, 140.0], [-90.0, 60.0, 820.0]])
+    xy = np.asarray([[20.0, 10.0], [-30.0, 40.0], [55.0, -25.0]])
+    z = np.asarray([-420.0, 500.0, 900.0])
+    points = np.asarray([[x, y, zz] for zz in z for x, y in xy], dtype=float)
+    points = points[[5, 0, 7, 2, 8, 1, 3, 6, 4]]
+    rng = np.random.default_rng(20260901)
+    coeffs = rng.normal(size=(positions.shape[0], n_modes(lmax))) + 1j * rng.normal(
+        size=(positions.shape[0], n_modes(lmax))
+    )
+    plan = build_rayleigh_plan(
+        lmax=lmax,
+        k=k,
+        positions=positions,
+        lattice=pcl.RectangularLattice2D(ax=900.0, ay=850.0),
+        k_parallel=np.asarray([0.0002, -0.0001]),
+        z_cut=300.0,
+        half_width=8,
+        dtype=np.complex128,
+    )
+
+    fast = apply_rayleigh_far_to_points_numpy(plan, coeffs, points)
+    # Duplicating one point breaks the Cartesian-product uniqueness condition and
+    # forces the generic pointwise path without changing the first n outputs.
+    fallback = apply_rayleigh_far_to_points_numpy(
+        plan,
+        coeffs,
+        np.vstack([points, points[0]]),
+    )[: points.shape[0]]
+
+    np.testing.assert_allclose(fast, fallback, rtol=2e-12, atol=2e-12)

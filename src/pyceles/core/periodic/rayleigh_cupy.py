@@ -9,7 +9,11 @@ import numpy as np
 
 from pyceles._optional import import_cupy
 from pyceles.core.indexing import index_vswf
-from pyceles.core.periodic.rayleigh import RayleighPlan, resolve_rayleigh_mode_chunk_size
+from pyceles.core.periodic.rayleigh import (
+    RayleighPlan,
+    _cartesian_xy_z_layout,
+    resolve_rayleigh_mode_chunk_size,
+)
 
 
 def _cuda_types(dtype_name: str) -> tuple[str, str, str, str, str]:
@@ -494,29 +498,6 @@ def scan_far_to_points_cupy(
         ),
     )
     return out
-
-
-def _cartesian_xy_z_layout(
-    points: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
-    """Return compact XY/Z maps when points form a complete Cartesian product."""
-    pts = np.asarray(points, dtype=float).reshape(-1, 3)
-    n_points = int(pts.shape[0])
-    if n_points < 2:
-        return None
-    xy, xy_inverse = np.unique(pts[:, :2], axis=0, return_inverse=True)
-    z, z_inverse = np.unique(pts[:, 2], return_inverse=True)
-    if int(xy.shape[0]) * int(z.size) != n_points:
-        return None
-    keys = z_inverse.astype(np.int64, copy=False) * int(xy.shape[0]) + xy_inverse
-    if int(np.unique(keys).size) != n_points:
-        return None
-    return (
-        np.asarray(xy, dtype=float),
-        np.asarray(z, dtype=float),
-        xy_inverse.astype(np.int64, copy=False),
-        z_inverse.astype(np.int64, copy=False),
-    )
 
 
 def apply_rayleigh_far_to_points_cupy(

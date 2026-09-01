@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
+from functools import lru_cache
 
 import numpy as np
 import numpy.typing as npt
@@ -394,46 +395,41 @@ def _eta_probe_relative_difference(a: Array, b: Array) -> float:
     return float(np.max(diff / scale))
 
 
-def select_ewald_eta(
+_EWALD_POLICY_CACHE_SIZE = 64
+
+
+def _probe_offsets_key(offsets: Array) -> tuple[tuple[float, float, float], ...]:
+    """Return a small immutable key for the representative Ewald probes."""
+    arr = np.asarray(offsets, dtype=float).reshape(-1, 3)
+    return tuple((float(row[0]), float(row[1]), float(row[2])) for row in arr)
+
+
+@lru_cache(maxsize=_EWALD_POLICY_CACHE_SIZE)
+def _select_ewald_eta_from_offsets_cached(
     *,
     lattice: RectangularLattice2D,
     k: float,
-    k_parallel: Array,
-    positions: Array,
+    k_parallel: tuple[float, float],
+    offsets_key: tuple[tuple[float, float, float], ...],
     lmax: int,
-    shell_tolerance: float = 1.0e-10,
-    max_shells: int = 32,
-    real_shells: int | None = None,
-    reciprocal_shells: int | None = None,
-    stability_rtol: float = _ETA_PROBE_STABILITY_RTOL,
-    max_vertical_offset: float | None = None,
+    shell_tolerance: float,
+    max_shells: int,
+    real_shells: int | None,
+    reciprocal_shells: int | None,
+    stability_rtol: float,
 ) -> float:
-    """Choose an automatic Ewald split for this lattice and particle packing.
-
-    The selector starts from the canonical ``sqrt(pi / area)`` value and raises
-    eta only when a bounded, tolerance-controlled structural-sum preflight
-    shows that the current value is unstable against the next geometric
-    candidate.  When shell counts are omitted, each candidate is accumulated
-    adaptively up to ``max_shells``; comparing converged candidates avoids the
-    eta-dependent truncation artifact caused by a hidden low-shell probe.
-    """
+    """Run the expensive eta probe for one compact deterministic probe set."""
     canonical = default_ewald_eta(lattice)
     candidates = _candidate_ewald_etas(canonical_eta=canonical, k=float(k))
-    if len(candidates) == 1:
+    if len(candidates) == 1 or not offsets_key:
         return float(canonical)
-    offsets = _representative_ewald_eta_offsets(
-        positions=positions,
-        lattice=lattice,
-        k=float(k),
-        max_vertical_offset=max_vertical_offset,
-    )
-    if offsets.size == 0:
-        return float(canonical)
-    # Keep the preflight bounded and low-order.  With omitted shell counts, use
+    offsets = np.asarray(offsets_key, dtype=float).reshape(-1, 3)
+    kp = np.asarray(k_parallel, dtype=float)
+    # Keep the preflight bounded and low-order. With omitted shell counts, use
     # the same adaptive, tolerance-controlled accumulation as the NumPy
-    # reference path; ``max_shells`` is only a convergence cap.  Explicit shell
-    # counts remain honored because they are an expert request to test that
-    # particular fixed truncation.
+    # reference path; ``max_shells`` is only a convergence cap. Explicit shell
+    # counts remain honored because they request that particular fixed
+    # truncation.
     lmax_probe = max(1, min(int(lmax), 2))
     probe_real = None if real_shells is None else int(real_shells)
     probe_recip = None if reciprocal_shells is None else int(reciprocal_shells)
@@ -446,7 +442,7 @@ def select_ewald_eta(
             lmax_struct=lmax_probe,
             k=float(k),
             lattice=lattice,
-            k_parallel=k_parallel,
+            k_parallel=kp,
             real_shells=probe_real,
             reciprocal_shells=probe_recip,
             shell_tolerance=float(shell_tolerance),
@@ -471,6 +467,56 @@ def select_ewald_eta(
         f"shell_tolerance={float(shell_tolerance):.3e}. An explicit eta should "
         "only be used after numerical validation; for tall periodic cells, prefer "
         "the hybrid Rayleigh operator."
+    )
+
+
+def select_ewald_eta(
+    *,
+    lattice: RectangularLattice2D,
+    k: float,
+    k_parallel: Array,
+    positions: Array,
+    lmax: int,
+    shell_tolerance: float = 1.0e-10,
+    max_shells: int = 32,
+    real_shells: int | None = None,
+    reciprocal_shells: int | None = None,
+    stability_rtol: float = _ETA_PROBE_STABILITY_RTOL,
+    max_vertical_offset: float | None = None,
+) -> float:
+    """Choose an automatic Ewald split for this lattice and particle packing.
+
+    The expensive structural preflight is memoized by its compact set of
+    representative offsets and scalar numerical policy. Repeated operator and
+    postprocessing preparation for the same physical configuration therefore
+    shares the already-validated split without retaining a large workspace.
+    """
+    canonical = default_ewald_eta(lattice)
+    candidates = _candidate_ewald_etas(canonical_eta=canonical, k=float(k))
+    if len(candidates) == 1:
+        return float(canonical)
+    offsets = _representative_ewald_eta_offsets(
+        positions=positions,
+        lattice=lattice,
+        k=float(k),
+        max_vertical_offset=max_vertical_offset,
+    )
+    if offsets.size == 0:
+        return float(canonical)
+    kp = np.asarray(k_parallel, dtype=float).reshape(2)
+    return float(
+        _select_ewald_eta_from_offsets_cached(
+            lattice=lattice,
+            k=float(k),
+            k_parallel=(float(kp[0]), float(kp[1])),
+            offsets_key=_probe_offsets_key(offsets),
+            lmax=int(lmax),
+            shell_tolerance=float(shell_tolerance),
+            max_shells=int(max_shells),
+            real_shells=None if real_shells is None else int(real_shells),
+            reciprocal_shells=None if reciprocal_shells is None else int(reciprocal_shells),
+            stability_rtol=float(stability_rtol),
+        )
     )
 
 
@@ -583,6 +629,100 @@ def _select_one_shell_count(
     return int(max_shells)
 
 
+@lru_cache(maxsize=_EWALD_POLICY_CACHE_SIZE)
+def _resolve_ewald_shell_counts_from_offsets_cached(
+    *,
+    lattice: RectangularLattice2D,
+    k: float,
+    k_parallel: tuple[float, float],
+    offsets_key: tuple[tuple[float, float, float], ...],
+    lmax: int,
+    eta: float,
+    shell_tolerance: float,
+    max_shells: int,
+    real_shells: int | None,
+    reciprocal_shells: int | None,
+) -> EwaldShellCounts:
+    """Resolve fixed shell counts for one compact deterministic probe set."""
+    if real_shells is not None and reciprocal_shells is not None:
+        return EwaldShellCounts(
+            real_shells=max(0, int(real_shells)),
+            reciprocal_shells=max(0, int(reciprocal_shells)),
+            selected_by="explicit",
+        )
+    max_count = int(max_shells)
+    if not offsets_key:
+        return EwaldShellCounts(
+            real_shells=max(0, int(real_shells)) if real_shells is not None else max_count,
+            reciprocal_shells=(
+                max(0, int(reciprocal_shells)) if reciprocal_shells is not None else max_count
+            ),
+            selected_by="max_shells_fallback",
+        )
+    offsets = np.asarray(offsets_key, dtype=float).reshape(-1, 3)
+    kp = np.asarray(k_parallel, dtype=float)
+    lmax_probe = max(1, min(int(lmax), 2))
+    reference = _reference_shell_probe_vector(
+        eta=float(eta),
+        offsets=offsets,
+        lmax_struct=lmax_probe,
+        k=float(k),
+        lattice=lattice,
+        k_parallel=kp,
+        shell_tolerance=float(shell_tolerance),
+        max_shells=max_count,
+    )
+    if reference is None:
+        raise PeriodicEwaldConvergenceError(
+            "Periodic Ewald max-shell reference was non-finite for fixed shell "
+            f"resolution (eta={float(eta):.6g}, max_shells={max_count}, "
+            f"shell_tolerance={float(shell_tolerance):.3e}). "
+            "Increase `max_shells` or validate an explicit eta/shell split "
+            "before using an accelerated evaluator."
+        )
+    real_count = (
+        max(0, int(real_shells))
+        if real_shells is not None
+        else _select_one_shell_count(
+            eta=float(eta),
+            offsets=offsets,
+            lmax_struct=lmax_probe,
+            k=float(k),
+            lattice=lattice,
+            k_parallel=kp,
+            shell_tolerance=float(shell_tolerance),
+            max_shells=max_count,
+            reference=reference,
+            which="real",
+            fixed_other=(
+                max_count if reciprocal_shells is None else max(0, int(reciprocal_shells))
+            ),
+        )
+    )
+    reciprocal_count = (
+        max(0, int(reciprocal_shells))
+        if reciprocal_shells is not None
+        else _select_one_shell_count(
+            eta=float(eta),
+            offsets=offsets,
+            lmax_struct=lmax_probe,
+            k=float(k),
+            lattice=lattice,
+            k_parallel=kp,
+            shell_tolerance=float(shell_tolerance),
+            max_shells=max_count,
+            reference=reference,
+            which="reciprocal",
+            fixed_other=max_count if real_shells is None else max(0, int(real_shells)),
+        )
+    )
+    return EwaldShellCounts(
+        real_shells=int(real_count),
+        reciprocal_shells=int(reciprocal_count),
+        selected_by="probe",
+    )
+
+
 def resolve_ewald_shell_counts(
     *,
     periodic,
@@ -595,16 +735,12 @@ def resolve_ewald_shell_counts(
 ) -> EwaldShellCounts:
     """Resolve fixed shell counts for accelerated non-adaptive evaluators.
 
-    Explicit user counts are honored exactly.  If either count is unset, this
-    helper performs a bounded one-shot probe on representative offsets and compares
-    fixed shell truncations to the ``max_shells`` reference using
-    ``periodic.options.shell_tolerance``.  This centralizes the policy needed by
-    CuPy paths without changing the NumPy reference path, which can still use
-    adaptive accumulation directly.  A non-finite reference is reported as a
-    convergence error rather than silently returning an unvalidated fixed cap.
+    The expensive max-shell comparison is memoized from the same compact
+    representative offsets used by eta selection. This lets a prepared
+    periodic operator and subsequent postprocessing share the numerical-policy
+    decision without sharing any large Ewald or device workspace.
     """
     options = periodic.options
-    max_count = int(options.max_shells)
     explicit_real = options.real_shells is not None
     explicit_recip = options.reciprocal_shells is not None
     if explicit_real and explicit_recip:
@@ -621,96 +757,39 @@ def resolve_ewald_shell_counts(
             if options.rayleigh_z_cut is not None
             else 2.0 * math.pi / max(abs(float(k)), 1.0e-300)
         )
+    kp = np.asarray(k_parallel, dtype=float).reshape(2)
+    pos = np.asarray(positions, dtype=float).reshape(-1, 3)
     eta_f = float(
         eta
         if eta is not None
         else resolve_ewald_eta(
             periodic=periodic,
             k=float(k),
-            k_parallel=np.asarray(k_parallel, dtype=float).reshape(2),
-            positions=np.asarray(positions, dtype=float).reshape(-1, 3),
+            k_parallel=kp,
+            positions=pos,
             lmax=int(lmax),
             max_vertical_offset=probe_vertical_limit,
         )
     )
     offsets = _representative_ewald_eta_offsets(
-        positions=np.asarray(positions, dtype=float).reshape(-1, 3),
+        positions=pos,
         lattice=periodic.lattice,
         k=float(k),
         max_vertical_offset=probe_vertical_limit,
     )
-    if offsets.size == 0:
-        # The representative probe normally contains at least the synthetic
-        # near-self offsets.  If a caller supplies a degenerate geometry and
-        # no probe can be formed, retain the configured cap rather than
-        # silently introducing a second shell-count policy.
-        fallback = max_count
-        return EwaldShellCounts(
-            real_shells=max(0, int(options.real_shells)) if explicit_real else fallback,
-            reciprocal_shells=max(0, int(options.reciprocal_shells))
-            if explicit_recip
-            else fallback,
-            selected_by="max_shells_fallback",
-        )
-
-    lmax_probe = max(1, min(int(lmax), 2))
-    reference = _reference_shell_probe_vector(
-        eta=eta_f,
-        offsets=offsets,
-        lmax_struct=lmax_probe,
-        k=float(k),
+    return _resolve_ewald_shell_counts_from_offsets_cached(
         lattice=periodic.lattice,
-        k_parallel=np.asarray(k_parallel, dtype=float).reshape(2),
+        k=float(k),
+        k_parallel=(float(kp[0]), float(kp[1])),
+        offsets_key=_probe_offsets_key(offsets),
+        lmax=int(lmax),
+        eta=float(eta_f),
         shell_tolerance=float(options.shell_tolerance),
-        max_shells=max_count,
-    )
-    if reference is None:
-        raise PeriodicEwaldConvergenceError(
-            "Periodic Ewald max-shell reference was non-finite for fixed shell "
-            f"resolution (eta={eta_f:.6g}, max_shells={max_count}, "
-            f"shell_tolerance={float(options.shell_tolerance):.3e}). "
-            "Increase `max_shells` or validate an explicit eta/shell split "
-            "before using an accelerated evaluator."
-        )
-
-    real_count = (
-        max(0, int(options.real_shells))
-        if explicit_real
-        else _select_one_shell_count(
-            eta=eta_f,
-            offsets=offsets,
-            lmax_struct=lmax_probe,
-            k=float(k),
-            lattice=periodic.lattice,
-            k_parallel=np.asarray(k_parallel, dtype=float).reshape(2),
-            shell_tolerance=float(options.shell_tolerance),
-            max_shells=max_count,
-            reference=reference,
-            which="real",
-            fixed_other=max_count if not explicit_recip else max(0, int(options.reciprocal_shells)),
-        )
-    )
-    reciprocal_count = (
-        max(0, int(options.reciprocal_shells))
-        if explicit_recip
-        else _select_one_shell_count(
-            eta=eta_f,
-            offsets=offsets,
-            lmax_struct=lmax_probe,
-            k=float(k),
-            lattice=periodic.lattice,
-            k_parallel=np.asarray(k_parallel, dtype=float).reshape(2),
-            shell_tolerance=float(options.shell_tolerance),
-            max_shells=max_count,
-            reference=reference,
-            which="reciprocal",
-            fixed_other=max_count if not explicit_real else max(0, int(options.real_shells)),
-        )
-    )
-    return EwaldShellCounts(
-        real_shells=int(real_count),
-        reciprocal_shells=int(reciprocal_count),
-        selected_by="probe",
+        max_shells=int(options.max_shells),
+        real_shells=None if options.real_shells is None else int(options.real_shells),
+        reciprocal_shells=None
+        if options.reciprocal_shells is None
+        else int(options.reciprocal_shells),
     )
 
 
