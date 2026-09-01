@@ -836,9 +836,13 @@ def ewald_structural_sums_2d_fixed_cupy(
         ``source - destination``.  This sign convention matches the NumPy
         structural-sum batch helper and the periodic near-field evaluator.
     lmax_struct:
-        Structural multipole order.  Coupling blocks use the particle ``lmax``;
-        local-field projection may pass a smaller order selected by the output
-        projection kernel.
+        Historical structural-table capacity.  Without ``structural_order``
+        the evaluator computes scalar degrees through ``2*lmax_struct``.
+    structural_order:
+        Optional exact maximum scalar degree, bounded by the capacity above.
+        This lets point-local ``l=1`` projection stop at
+        ``p = lmax_source + 1`` even when that degree is odd; no physical
+        coefficient is rounded or truncated by the capacity convention.
     workspace:
         Device workspace owning the lattice, wavenumber, Ewald splitting
         parameter, and all tables derived from them.

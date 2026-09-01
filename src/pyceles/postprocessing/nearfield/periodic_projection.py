@@ -10,12 +10,43 @@ from pyceles.core.indexing import iter_modes, n_modes
 from pyceles.core.translation import translation_ab5_table
 
 
+def _l1_required_structural_order(lmax: int) -> int:
+    """Return the exact scalar-translation degree needed for local ``l=1`` output.
+
+    SVWF translation coefficients obey the Wigner-3j triangle rule
+    ``p <= l_src + l_dst``.  Point-centered field reconstruction needs only
+    ``l_dst = 1``, hence sources truncated at ``lmax`` require exactly
+    ``p <= lmax + 1``.
+    """
+    lmax_i = int(lmax)
+    if lmax_i < 1:
+        raise ValueError(f"`lmax` must be >= 1. Got {lmax!r}.")
+    return lmax_i + 1
+
+
+def _ewald_capacity_lmax(structural_order: int) -> int:
+    """Return the legacy Ewald capacity whose ``2*lmax`` covers ``order``.
+
+    Generic periodic coupling historically parameterizes scalar structural
+    tables by a particle-like ``lmax_struct`` and therefore allocates through
+    ``2*lmax_struct``.  Odd requested orders need the next even capacity; this
+    helper makes that storage convention explicit rather than looking like a
+    numerical rounding operation.
+    """
+    order = int(structural_order)
+    if order < 0:
+        raise ValueError(f"`structural_order` must be >= 0. Got {structural_order!r}.")
+    return (order + 1) // 2
+
+
 @cache
 def l1_projection_data(lmax: int) -> tuple[int, int, np.ndarray, np.ndarray]:
-    """Precompute the minimal contraction tensor for local `l=1` fields.
+    """Precompute the dense reference contraction tensor for local ``l=1`` fields.
 
     The returned kernel contracts periodic structural sums directly into the
-    six destination `l=1` modes, avoiding full translation-block construction.
+    six destination ``l=1`` modes, avoiding full translation-block construction.
+    Its rectangular storage follows the historical even Ewald capacity; the
+    production compact helper below removes any unused capacity degree.
     """
 
     lmax_i = int(lmax)
@@ -38,10 +69,14 @@ def l1_projection_data(lmax: int) -> tuple[int, int, np.ndarray, np.ndarray]:
         dtype=np.complex128,
     )
     ab5_l1 = np.asarray(ab5[row_idx_arr, :, :], dtype=np.complex128)
-    max_degree = int(lmax_i + 1)
-    lmax_struct = int((max_degree + 1) // 2)
+    required_order = _l1_required_structural_order(lmax_i)
+    lmax_struct = _ewald_capacity_lmax(required_order)
+    # This dense helper is retained as a reference representation.  Its
+    # historical Ewald-shaped storage has an even maximum order, so an odd
+    # required order (for example p<=5 at lmax=4) owns one unused capacity row.
+    # The production compact path below evaluates only ``required_order``.
     structural_order = 2 * lmax_struct
-    p_count = max_degree + 1
+    p_count = required_order + 1
     m_offset = structural_order
     kernel = np.zeros(
         (ab5_l1.shape[0], nm, 2 * structural_order + 1, p_count),
@@ -72,7 +107,7 @@ def l1_compact_projection_data(
     if lmax_i < 1:
         raise ValueError(f"`lmax` must be >= 1. Got {lmax!r}.")
     lmax_struct, dense_offset, dense_kernel, _row_idx = l1_projection_data(lmax_i)
-    structural_order = lmax_i + 1
+    structural_order = _l1_required_structural_order(lmax_i)
     degrees: list[int] = []
     orders: list[int] = []
     for degree in range(structural_order + 1):

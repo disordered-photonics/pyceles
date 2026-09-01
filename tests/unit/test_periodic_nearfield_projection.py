@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from pyceles.core.indexing import n_modes
+from pyceles.core.translation import translation_ab5_table
 from pyceles.postprocessing.nearfield.periodic_interior_cupy import (
     _periodic_near_pair_batch_size_for_workspace,
     _periodic_near_pair_workspace_bytes_per_pair,
@@ -59,6 +60,15 @@ def test_compact_l1_projection_matches_dense_reference(lmax: int) -> None:
         kernel=compact_kernel,
     )
     np.testing.assert_allclose(got, want, rtol=5e-13, atol=5e-13)
+
+
+@pytest.mark.parametrize("lmax", [2, 3, 4, 5, 8])
+def test_l1_translation_has_no_support_above_triangle_limit(lmax: int) -> None:
+    """The compact p<=lmax+1 cutoff follows the exact Wigner triangle rule."""
+    _lmax_struct, _offset, _kernel, l1_rows = l1_projection_data(lmax)
+    ab5 = translation_ab5_table(lmax, dtype=np.complex128)
+    unsupported = np.asarray(ab5[l1_rows, :, lmax + 2 :])
+    np.testing.assert_array_equal(unsupported, np.zeros_like(unsupported))
 
 
 @pytest.mark.parametrize("compute_dtype", [np.complex64, np.complex128])

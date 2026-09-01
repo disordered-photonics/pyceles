@@ -567,6 +567,12 @@ def apply_rayleigh_far_to_points_cupy(
         [index_vswf(1, m, tau, plan.lmax) for tau in (1, 2) for m in (-1, 0, 1)],
         dtype=cupy.int64,
     )
+    # The six destination l=1 rows are invariant across point batches and
+    # reciprocal chunks. Gather them once instead of allocating one take()
+    # result for every direction/chunk pair below.
+    destination_l1_tables = cupy.ascontiguousarray(
+        cupy.take(destination_tables, l1_indices, axis=-1)
+    )
 
     layout = _cartesian_xy_z_layout(pts_np)
     if layout is not None:
@@ -612,11 +618,7 @@ def apply_rayleigh_far_to_points_cupy(
                     upward=upward,
                     cupy=cupy,
                 )
-                destination_l1 = cupy.take(
-                    destination_tables[direction, start:stop],
-                    l1_indices,
-                    axis=-1,
-                )
+                destination_l1 = destination_l1_tables[direction, start:stop]
                 projected = cupy.einsum(
                     "qpm,zqpr->zqmr",
                     destination_l1,
@@ -672,11 +674,7 @@ def apply_rayleigh_far_to_points_cupy(
                 upward=upward,
                 cupy=cupy,
             )
-            destination_l1 = cupy.take(
-                destination_tables[direction, start:stop],
-                l1_indices,
-                axis=-1,
-            )
+            destination_l1 = destination_l1_tables[direction, start:stop]
             y_sorted += cupy.einsum(
                 "qpm,dqpr,dq,q->dmr",
                 destination_l1,

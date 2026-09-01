@@ -1243,6 +1243,13 @@ def ewald_structural_sums_2d_batch(
     periodic in-slab near-field evaluation. Keeping it in ``core.periodic``
     makes the same structural-sum contract available to future accelerated
     backends without tying it to one postprocessing module.
+
+    ``lmax_struct`` is the historical *capacity* parameter: without an
+    override the table extends through scalar degree ``2*lmax_struct``.
+    ``structural_order`` may select any smaller exact maximum degree.  This is
+    useful for point-local ``l=1`` projection, whose Wigner-3j triangle rule
+    only requires ``p <= lmax_source + 1`` and can therefore end at an odd
+    degree.  The override changes neither normalization nor retained entries.
     """
     out_dtype = np.dtype(dtype)
     dest = np.asarray(destinations, dtype=float).reshape(-1, 3)
