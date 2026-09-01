@@ -496,6 +496,29 @@ def scan_far_to_points_cupy(
     return out
 
 
+def _cartesian_xy_z_layout(
+    points: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
+    """Return compact XY/Z maps when points form a complete Cartesian product."""
+    pts = np.asarray(points, dtype=float).reshape(-1, 3)
+    n_points = int(pts.shape[0])
+    if n_points < 2:
+        return None
+    xy, xy_inverse = np.unique(pts[:, :2], axis=0, return_inverse=True)
+    z, z_inverse = np.unique(pts[:, 2], return_inverse=True)
+    if int(xy.shape[0]) * int(z.size) != n_points:
+        return None
+    keys = z_inverse.astype(np.int64, copy=False) * int(xy.shape[0]) + xy_inverse
+    if int(np.unique(keys).size) != n_points:
+        return None
+    return (
+        np.asarray(xy, dtype=float),
+        np.asarray(z, dtype=float),
+        xy_inverse.astype(np.int64, copy=False),
+        z_inverse.astype(np.int64, copy=False),
+    )
+
+
 def apply_rayleigh_far_to_points_cupy(
     plan: RayleighPlan,
     coeffs: Any,
@@ -503,7 +526,13 @@ def apply_rayleigh_far_to_points_cupy(
     *,
     cupy: Any,
 ) -> Any:
-    """Return far-source point-local regular ``l=1`` coefficients on the GPU."""
+    """Return far-source point-local regular ``l=1`` coefficients on the GPU.
+
+    Complete Cartesian ``XY x Z`` point sets use a compact path: the delayed
+    Rayleigh scan is evaluated only on unique z coordinates, lateral phases
+    only on unique xy coordinates, and the two are recombined with GEMM.
+    Arbitrary point clouds retain the original point-wise implementation.
+    """
     coeff_raw = cupy.asarray(coeffs)
     squeezed = int(coeff_raw.ndim) == 2
     if squeezed:
@@ -525,10 +554,6 @@ def apply_rayleigh_far_to_points_cupy(
         empty = cupy.zeros((0, 6, n_rhs), dtype=dtype)
         return empty[:, :, 0] if squeezed else empty
 
-    destination_order = np.argsort(pts_np[:, 2], kind="stable").astype(np.int64, copy=False)
-    destination_inverse = np.empty_like(destination_order)
-    destination_inverse[destination_order] = np.arange(n_points, dtype=np.int64)
-    pts_sorted = cupy.asarray(pts_np[destination_order], dtype=cupy.float64)
     reciprocal = cupy.asarray(plan.reciprocal_xy, dtype=cupy.float64)
     source_order = cupy.asarray(plan.sort_order, dtype=cupy.int64)
     coeff_sorted = cupy.asarray(coeff_arr[source_order], dtype=dtype)
@@ -538,6 +563,82 @@ def apply_rayleigh_far_to_points_cupy(
     gamma_all = cupy.asarray(plan.gamma, dtype=cupy.complex128)
     weights = cupy.asarray(plan.weights, dtype=dtype)
     source_z = cupy.asarray(plan.sorted_z, dtype=cupy.float64)
+    l1_indices = cupy.asarray(
+        [index_vswf(1, m, tau, plan.lmax) for tau in (1, 2) for m in (-1, 0, 1)],
+        dtype=cupy.int64,
+    )
+
+    layout = _cartesian_xy_z_layout(pts_np)
+    if layout is not None:
+        xy_unique, z_unique, xy_inverse, z_inverse = layout
+        n_xy = int(xy_unique.shape[0])
+        n_z = int(z_unique.size)
+        xy_cp = cupy.asarray(xy_unique, dtype=cupy.float64)
+        z_cp = cupy.asarray(z_unique, dtype=cupy.float64)
+        y_grid = cupy.zeros((n_z, n_xy, 6, n_rhs), dtype=dtype)
+        # Account for both the two-polarization incoming scan and the projected
+        # six-mode table when sizing a reciprocal chunk.
+        chunk = resolve_rayleigh_mode_chunk_size(
+            n_modes_reciprocal=plan.n_modes_reciprocal,
+            n_particles=int(coeff_arr.shape[0]),
+            n_destinations=max(1, 4 * n_z),
+            n_phase_rows=n_xy,
+            n_rhs=n_rhs,
+            dtype=dtype,
+        )
+        for start in range(0, plan.n_modes_reciprocal, chunk):
+            stop = min(plan.n_modes_reciprocal, start + chunk)
+            q_count = int(stop - start)
+            source_phase = source_phase_all[:, start:stop]
+            destination_phase = cupy.exp(1j * (xy_cp @ reciprocal[start:stop].T)).astype(
+                dtype, copy=False
+            )
+            gamma = gamma_all[start:stop]
+            weight = weights[start:stop]
+            for direction, upward in ((0, True), (1, False)):
+                source = cupy.einsum(
+                    "qpm,amr->aqpr",
+                    source_tables[direction, start:stop],
+                    coeff_sorted,
+                    optimize=True,
+                )
+                source *= cupy.conjugate(source_phase)[:, :, None, None]
+                incoming = scan_far_to_points_cupy(
+                    source_amplitudes=source,
+                    source_z=source_z,
+                    destination_z=z_cp,
+                    gamma=gamma,
+                    z_cut=float(plan.z_cut),
+                    upward=upward,
+                    cupy=cupy,
+                )
+                destination_l1 = cupy.take(
+                    destination_tables[direction, start:stop],
+                    l1_indices,
+                    axis=-1,
+                )
+                projected = cupy.einsum(
+                    "qpm,zqpr->zqmr",
+                    destination_l1,
+                    incoming,
+                    optimize=True,
+                )
+                projected *= weight[None, :, None, None]
+                projected_rows = cupy.ascontiguousarray(projected.transpose(0, 2, 3, 1)).reshape(
+                    n_z * 6 * n_rhs, q_count
+                )
+                contribution = projected_rows @ destination_phase.T
+                y_grid += contribution.reshape(n_z, 6, n_rhs, n_xy).transpose(0, 3, 1, 2)
+                del source, incoming, projected, projected_rows, contribution
+        z_inverse_cp = cupy.asarray(z_inverse, dtype=cupy.int64)
+        xy_inverse_cp = cupy.asarray(xy_inverse, dtype=cupy.int64)
+        y = y_grid[z_inverse_cp, xy_inverse_cp]
+        return y[:, :, 0] if squeezed else y
+
+    destination_order = np.argsort(pts_np[:, 2], kind="stable").astype(np.int64, copy=False)
+    destination_inverse = np.empty_like(destination_order)
+    destination_inverse[destination_order] = np.arange(n_points, dtype=np.int64)
+    pts_sorted = cupy.asarray(pts_np[destination_order], dtype=cupy.float64)
     y_sorted = cupy.zeros((n_points, 6, n_rhs), dtype=dtype)
     chunk = resolve_rayleigh_mode_chunk_size(
         n_modes_reciprocal=plan.n_modes_reciprocal,
@@ -546,10 +647,6 @@ def apply_rayleigh_far_to_points_cupy(
         n_phase_rows=n_points,
         n_rhs=n_rhs,
         dtype=dtype,
-    )
-    l1_indices = cupy.asarray(
-        [index_vswf(1, m, tau, plan.lmax) for tau in (1, 2) for m in (-1, 0, 1)],
-        dtype=cupy.int64,
     )
     for start in range(0, plan.n_modes_reciprocal, chunk):
         stop = min(plan.n_modes_reciprocal, start + chunk)

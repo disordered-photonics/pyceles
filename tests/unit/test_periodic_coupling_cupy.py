@@ -15,7 +15,11 @@ from pyceles.core.operators import (
     prepare_matvec,
 )
 from pyceles.core.periodic import PeriodicOptions, PeriodicSpec
-from pyceles.core.periodic.rayleigh_cupy import apply_sparse_near_coupling_cupy
+from pyceles.core.periodic.rayleigh import build_rayleigh_plan
+from pyceles.core.periodic.rayleigh_cupy import (
+    apply_rayleigh_far_to_points_cupy,
+    apply_sparse_near_coupling_cupy,
+)
 from pyceles.core.translation import translation_ab5_table
 from pyceles.postprocessing.nearfield.periodic_interior import (
     _periodic_local_regular_l1_coeffs,
@@ -388,8 +392,20 @@ def test_periodic_cupy_rayleigh_auto_eta_stays_finite_for_large_cell(
     assert bool(cp.all(cp.isfinite(gpu._near_structural_sums_gpu)))
 
 
+@pytest.mark.parametrize(
+    ("compute_dtype", "accum_dtype", "rtol", "atol"),
+    [
+        (np.complex128, np.complex128, 2e-9, 2e-10),
+        (np.complex64, np.complex128, 5e-5, 5e-6),
+        (np.complex64, np.complex64, 5e-5, 5e-6),
+    ],
+)
 def test_periodic_cupy_rayleigh_interior_points_match_numpy(
     cupy_runtime: tuple[Any, Any],
+    compute_dtype: type[np.complexfloating[Any, Any]],
+    accum_dtype: type[np.complexfloating[Any, Any]],
+    rtol: float,
+    atol: float,
 ) -> None:
     cp, _ = cupy_runtime
     lmax = 2
@@ -409,9 +425,10 @@ def test_periodic_cupy_rayleigh_interior_points_match_numpy(
         ]
     )
     rng = np.random.default_rng(20260728)
-    coeffs = rng.normal(size=(positions.shape[0], n_modes(lmax))) + 1j * rng.normal(
-        size=(positions.shape[0], n_modes(lmax))
-    )
+    coeffs = (
+        rng.normal(size=(positions.shape[0], n_modes(lmax)))
+        + 1j * rng.normal(size=(positions.shape[0], n_modes(lmax)))
+    ).astype(compute_dtype)
     periodic = PeriodicSpec(
         lattice=RectangularLattice2D(ax=900.0, ay=850.0),
         options=PeriodicOptions(
@@ -435,7 +452,47 @@ def test_periodic_cupy_rayleigh_interior_points_match_numpy(
     )
 
     expected = _periodic_local_regular_l1_coeffs(**cast(Any, kwargs))
-    actual = periodic_local_regular_l1_coeffs_cupy(**cast(Any, kwargs))
+    actual = periodic_local_regular_l1_coeffs_cupy(
+        **cast(Any, kwargs),
+        compute_dtype=compute_dtype,
+        accum_dtype=accum_dtype,
+    )
     cp.cuda.Stream.null.synchronize()
 
-    np.testing.assert_allclose(actual, expected, rtol=2e-9, atol=2e-10)
+    np.testing.assert_allclose(actual, expected, rtol=rtol, atol=atol)
+
+
+def test_periodic_cupy_rayleigh_cartesian_points_match_numpy(
+    cupy_runtime: tuple[Any, Any],
+) -> None:
+    cp, _ = cupy_runtime
+    lmax = 2
+    k = 2.0 * np.pi / 550.0
+    positions = np.asarray([[0.0, 0.0, 0.0], [170.0, -80.0, 140.0], [-90.0, 60.0, 820.0]])
+    xy = np.asarray([[20.0, 10.0], [-30.0, 40.0], [55.0, -25.0]])
+    z = np.asarray([-420.0, 500.0, 900.0])
+    points = np.asarray([[x, y, zz] for zz in z for x, y in xy], dtype=float)
+    points = points[[5, 0, 7, 2, 8, 1, 3, 6, 4]]
+    rng = np.random.default_rng(20260901)
+    coeffs = (
+        rng.normal(size=(positions.shape[0], n_modes(lmax)))
+        + 1j * rng.normal(size=(positions.shape[0], n_modes(lmax)))
+    ).astype(np.complex64)
+    plan = build_rayleigh_plan(
+        lmax=lmax,
+        k=k,
+        positions=positions,
+        lattice=RectangularLattice2D(ax=900.0, ay=850.0),
+        k_parallel=np.asarray([0.0002, -0.0001]),
+        z_cut=300.0,
+        half_width=8,
+        dtype=np.complex64,
+    )
+
+    from pyceles.core.periodic.rayleigh import apply_rayleigh_far_to_points_numpy
+
+    expected = apply_rayleigh_far_to_points_numpy(plan, coeffs, points)
+    actual = apply_rayleigh_far_to_points_cupy(plan, coeffs, points, cupy=cp)
+    cp.cuda.Stream.null.synchronize()
+
+    np.testing.assert_allclose(cp.asnumpy(actual), expected, rtol=4e-5, atol=4e-6)

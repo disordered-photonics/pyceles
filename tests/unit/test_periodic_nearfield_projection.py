@@ -114,3 +114,26 @@ def test_ewald_structural_order_truncation_matches_full_table() -> None:
                 rtol=2e-11,
                 atol=2e-11,
             )
+
+
+def test_cartesian_xy_z_layout_detects_complete_grid() -> None:
+    from pyceles.core.periodic.rayleigh_cupy import _cartesian_xy_z_layout
+
+    xy = np.asarray([[0.0, 0.0], [1.0, 0.0], [0.0, 2.0]])
+    z = np.asarray([-1.0, 3.0, 7.0, 9.0])
+    points = np.asarray([[x, y, zz] for zz in z for x, y in xy], dtype=float)
+    order = np.asarray([7, 0, 10, 3, 5, 1, 11, 4, 8, 2, 9, 6])
+    points = points[order]
+
+    layout = _cartesian_xy_z_layout(points)
+    assert layout is not None
+    unique_xy, unique_z, xy_inverse, z_inverse = layout
+    reconstructed = np.column_stack([unique_xy[xy_inverse], unique_z[z_inverse]])
+    np.testing.assert_allclose(reconstructed, points)
+
+
+def test_cartesian_xy_z_layout_rejects_incomplete_product() -> None:
+    from pyceles.core.periodic.rayleigh_cupy import _cartesian_xy_z_layout
+
+    points = np.asarray([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
+    assert _cartesian_xy_z_layout(points) is None
