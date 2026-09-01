@@ -355,6 +355,7 @@ def main() -> None:
             maxiter=cfg.solver_maxiter,
             direct_max_n=cfg.solver_direct_max_n,
             dtype=np.dtype(cfg.compute_dtype),
+            accum_dtype=np.dtype(cfg.accum_dtype),
             backend=operator_backend,
             show_progress=not args.quiet,
             synchronize_gpu=operator_backend == "cupy",

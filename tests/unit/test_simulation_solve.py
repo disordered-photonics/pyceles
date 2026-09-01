@@ -110,8 +110,14 @@ def test_assemble_dense_operator_via_matvec_builds_dense_columns():
     assert timings["dense_operator_assembly_s"] >= 0.0
 
 
-def test_solve_sources_core_reuses_prepared_cache_and_broadcasts_warm_start(monkeypatch):
-    sim = _single_sphere_sim()
+@pytest.mark.parametrize(
+    ("compute_dtype", "accum_dtype"),
+    [("complex128", "complex128"), ("complex64", "complex64")],
+)
+def test_solve_sources_core_reuses_prepared_cache_and_broadcasts_warm_start(
+    monkeypatch, compute_dtype, accum_dtype
+):
+    sim = _single_sphere_sim(compute_dtype=compute_dtype, accum_dtype=accum_dtype)
     warm_start = np.arange(6, dtype=np.complex128).reshape(1, 6)
     prepare_calls = {"count": 0}
     recorded: dict[str, object] = {}
@@ -143,6 +149,7 @@ def test_solve_sources_core_reuses_prepared_cache_and_broadcasts_warm_start(monk
         recorded["b_shape"] = np.asarray(b).shape
         recorded["x0"] = kwargs["x0"]
         recorded["preconditioner"] = kwargs["preconditioner"]
+        recorded["accum_dtype"] = kwargs["accum_dtype"]
         return LinearSolveResult(
             x=np.zeros_like(np.asarray(b), dtype=np.complex128),
             info=np.zeros((2,), dtype=int),
@@ -169,6 +176,7 @@ def test_solve_sources_core_reuses_prepared_cache_and_broadcasts_warm_start(monk
         np.repeat(warm_start.reshape(-1, 1), 2, axis=1),
     )
     assert recorded["preconditioner"] is None
+    assert np.dtype(cast(Any, recorded["accum_dtype"])) == np.dtype(accum_dtype)
     assert out0.coeffs["first"].shape == (1, 6)
     assert out0.coeffs["second"].shape == (1, 6)
     assert out1.rhs["first"].shape == (1, 6)

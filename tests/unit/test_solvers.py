@@ -366,6 +366,48 @@ def test_solve_linear_system_direct_can_skip_final_residual_with_lu_only():
 
 
 @pytest.mark.fake_gpu
+def test_solve_linear_system_forwards_accum_dtype_to_native_cupy_bicgstab(monkeypatch):
+    monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
+    seen: dict[str, object] = {}
+    real_native = solvers.bicgstab_cupy_native
+
+    def _capture_native(*args: Any, **kwargs: Any):
+        seen["accum_dtype"] = kwargs.get("accum_dtype")
+        return real_native(*args, **kwargs)
+
+    monkeypatch.setattr(solvers, "bicgstab_cupy_native", _capture_native)
+    b = np.array([1.0 + 0j, 2.0 + 0j], dtype=np.complex64)
+    out = solve_linear_system(
+        lambda x: np.asarray(x),
+        b,
+        method="bicgstab",
+        backend="cupy",
+        dtype=np.complex64,
+        accum_dtype=np.complex64,
+        rtol=1e-6,
+        maxiter=4,
+        show_progress=False,
+    )
+
+    assert int(out.info) == 0
+    assert np.dtype(cast(Any, seen["accum_dtype"])) == np.dtype(np.complex64)
+
+
+@pytest.mark.fake_gpu
+def test_cupy_solver_rejects_accumulation_downcast(monkeypatch):
+    monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
+    b = np.array([1.0 + 0j, 2.0 + 0j], dtype=np.complex128)
+    with pytest.raises(ValueError, match=r"accum_dtype.*at least as precise"):
+        solvers.bicgstab_cupy(
+            lambda x: np.asarray(x),
+            b,
+            accum_dtype=np.complex64,
+            maxiter=4,
+            show_progress=False,
+        )
+
+
+@pytest.mark.fake_gpu
 def test_solve_linear_system_cupy_backend_supports_bicgstab(monkeypatch):
     monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
     b = np.array([1.0 + 0j, 2.0 + 0j])
@@ -614,6 +656,49 @@ def test_bicgstab_cupy_matches_gmres_on_toy_system(monkeypatch):
     assert int(out_g.info) == 0
     assert int(out_b.info) == 0
     np.testing.assert_allclose(np.asarray(out_b.x), np.asarray(out_g.x), atol=1e-8, rtol=1e-8)
+
+
+@pytest.mark.fake_gpu
+def test_bicgstab_cupy_separates_recursive_and_true_residual_histories(monkeypatch):
+    monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
+    b = np.asarray([1.0 + 0.0j, -0.5 + 0.0j], dtype=np.complex128)
+    out = solvers.bicgstab_cupy(
+        lambda x: np.asarray(x),
+        b,
+        rtol=1e-12,
+        maxiter=4,
+        show_progress=False,
+        compute_final_residual=True,
+    )
+
+    assert int(out.info) == 0
+    assert out.residual_history is not None
+    assert out.true_residual_history is not None
+    assert len(np.asarray(out.residual_history)) >= 2
+    assert len(np.asarray(out.true_residual_history)) >= 2
+    assert out.block_metadata is not None
+    assert out.block_metadata["residual_history_kind"] == "bicgstab_recursive_residual"
+    # Identity reaches the s-step convergence branch: one recurrence matvec plus
+    # one independent physical residual gate.
+    assert out.block_metadata["operator_applications"] == 2
+
+
+@pytest.mark.fake_gpu
+def test_bicgstab_cupy_explicit_zero_warm_start_avoids_initial_matvec(monkeypatch):
+    monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
+    b = np.asarray([1.0 + 0.0j, -0.5 + 0.0j], dtype=np.complex128)
+    out = solvers.bicgstab_cupy(
+        lambda x: np.asarray(x),
+        b,
+        x0=np.zeros_like(b),
+        rtol=1e-12,
+        maxiter=4,
+        show_progress=False,
+    )
+
+    assert int(out.info) == 0
+    assert out.block_metadata is not None
+    assert out.block_metadata["operator_applications"] == 2
 
 
 @pytest.mark.fake_gpu

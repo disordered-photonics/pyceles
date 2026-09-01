@@ -50,7 +50,13 @@ class CuPyBlockGMRESNativeResult:
 
 @dataclass(frozen=True)
 class CuPyBiCGSTABNativeResult:
-    """Result payload for native CuPy BiCGSTAB solves."""
+    """Result payload for native CuPy BiCGSTAB solves.
+
+    ``residual_history`` stores the inexpensive recursive residual norm.
+    ``true_history`` stores only independently evaluated physical residuals.
+    Keeping the channels separate avoids presenting finite-precision recurrence
+    drift as a true-residual history.
+    """
 
     x: Any
     info: int
@@ -58,13 +64,31 @@ class CuPyBiCGSTABNativeResult:
     residual_norm: float
     relative_residual: float
     converged_reason: str
+    residual_history: np.ndarray
     true_history: np.ndarray
+    operator_applications: int
+    preconditioner_applications: int
 
 
 def _dtype_complex(dtype: npt.DTypeLike, *, name: str) -> np.dtype:
     out = np.dtype(dtype)
     if out.kind != "c":
         raise TypeError(f"`{name}` must be a complex dtype. Got {out}.")
+    return out
+
+
+def _resolve_accum_dtype(operator_dtype: np.dtype, accum_dtype: npt.DTypeLike | None) -> np.dtype:
+    """Resolve accumulation precision without allowing a silent downcast."""
+
+    out = _dtype_complex(
+        accum_dtype if accum_dtype is not None else np.result_type(operator_dtype, np.complex128),
+        name="accum_dtype",
+    )
+    if out.itemsize < operator_dtype.itemsize:
+        raise ValueError(
+            f"`accum_dtype` ({out.name}) must be at least as precise as "
+            f"`operator_dtype` ({operator_dtype.name})."
+        )
     return out
 
 
@@ -295,10 +319,7 @@ def gmres_cupy_native(
         operator_dtype if operator_dtype is not None else np.result_type(b_dtype, np.complex64),
         name="operator_dtype",
     )
-    acc_dtype = _dtype_complex(
-        accum_dtype if accum_dtype is not None else np.result_type(op_dtype, np.complex128),
-        name="accum_dtype",
-    )
+    acc_dtype = _resolve_accum_dtype(op_dtype, accum_dtype)
     b_vec = _as_device_vector(b, cupy=cupy, dtype=op_dtype, name="b")
     n = int(b_vec.size)
     restart_n = min(max(1, int(restart)), max(1, n))
@@ -631,10 +652,7 @@ def fgmres_cupy_native(
         operator_dtype if operator_dtype is not None else np.result_type(b_dtype, np.complex64),
         name="operator_dtype",
     )
-    acc_dtype = _dtype_complex(
-        accum_dtype if accum_dtype is not None else np.result_type(op_dtype, np.complex128),
-        name="accum_dtype",
-    )
+    acc_dtype = _resolve_accum_dtype(op_dtype, accum_dtype)
     b_vec = _as_device_vector(b, cupy=cupy, dtype=op_dtype, name="b")
     n = int(b_vec.size)
     restart_n = min(max(1, int(restart)), max(1, n))
@@ -947,10 +965,7 @@ def lgmres_cupy_native(
         operator_dtype if operator_dtype is not None else np.result_type(b_dtype, np.complex64),
         name="operator_dtype",
     )
-    acc_dtype = _dtype_complex(
-        accum_dtype if accum_dtype is not None else np.result_type(op_dtype, np.complex128),
-        name="accum_dtype",
-    )
+    acc_dtype = _resolve_accum_dtype(op_dtype, accum_dtype)
     b_vec = _as_device_vector(b, cupy=cupy, dtype=op_dtype, name="b")
     n = int(b_vec.size)
     restart_n = min(max(1, int(restart)), max(1, n))
@@ -1235,14 +1250,22 @@ def bicgstab_cupy_native(
     operator_dtype: npt.DTypeLike | None = None,
     accum_dtype: npt.DTypeLike | None = None,
     callback: Callable[[float], None] | None = None,
+    callback_true: Callable[[float], None] | None = None,
     breakdown_tol: float = 1e-30,
     compute_final_residual: bool = True,
 ) -> CuPyBiCGSTABNativeResult:
     """Run right-preconditioned BiCGSTAB fully on CuPy arrays.
 
-    The update order follows the canonical stabilized BiCG recursion used in
-    PETSc's BCGS implementation:
-    ``rho, beta, p, v, alpha, s, t, omega, x, r``.
+    The update order follows the canonical stabilized BiCG recurrence used by
+    PETSc.  Recursive residuals are cheap and are reported every iteration,
+    but they are not labelled as physical residuals: when the recurrence first
+    meets the requested tolerance, an independently evaluated ``b - A @ x``
+    gates convergence.  If finite-precision drift makes that gate fail, the
+    recurrence is restarted from the true residual rather than returning a
+    false convergence result.
+
+    Vector recurrences are updated in place where dependencies permit.  This
+    avoids several Krylov-sized temporaries per iteration on the CuPy backend.
     """
     b_dtype_obj = getattr(b, "dtype", None)
     b_dtype = np.dtype(np.asarray(b).dtype if b_dtype_obj is None else b_dtype_obj)
@@ -1250,34 +1273,61 @@ def bicgstab_cupy_native(
         operator_dtype if operator_dtype is not None else np.result_type(b_dtype, np.complex64),
         name="operator_dtype",
     )
-    acc_dtype = _dtype_complex(
-        accum_dtype if accum_dtype is not None else np.result_type(op_dtype, np.complex128),
-        name="accum_dtype",
-    )
+    acc_dtype = _resolve_accum_dtype(op_dtype, accum_dtype)
     b_vec = _as_device_vector(b, cupy=cupy, dtype=op_dtype, name="b")
     n = int(b_vec.size)
     maxiter_total = int(maxiter) if maxiter is not None else n * 10
+    if n == 0:
+        return CuPyBiCGSTABNativeResult(
+            x=cupy.asarray(b_vec, dtype=op_dtype),
+            info=0,
+            iterations=0,
+            residual_norm=0.0,
+            relative_residual=0.0,
+            converged_reason="converged",
+            residual_history=np.asarray([0.0], dtype=float),
+            true_history=np.asarray([0.0], dtype=float),
+            operator_applications=0,
+            preconditioner_applications=0,
+        )
     if maxiter_total < 1:
         raise ValueError("`maxiter` must be >= 1 when provided.")
+    if float(rtol) < 0.0 or float(atol) < 0.0:
+        raise ValueError("`rtol` and `atol` must be non-negative.")
+
     x_vec = (
         cupy.zeros_like(b_vec, dtype=op_dtype)
         if x0 is None
-        else _as_device_vector(x0, cupy=cupy, dtype=op_dtype, name="x0")
+        else _as_device_vector(x0, cupy=cupy, dtype=op_dtype, name="x0").copy()
     )
     if int(x_vec.size) != n:
         raise ValueError(f"`x0` size {int(x_vec.size)} does not match `b` size {n}.")
+    # An explicitly supplied zero warm start has the same exact residual as
+    # the implicit cold start. Avoid spending a production matvec merely to
+    # rediscover ``A @ 0 == 0``; nonzero warm starts still get an independent
+    # physical residual evaluation below.
     x0_is_zero = x0 is None
-    if not x0_is_zero and n > 0:
+    if x0 is not None:
         x0_is_zero = bool(float(cupy.max(cupy.abs(x_vec))) == 0.0)
 
-    def _apply(op: Callable[[Any], Any], vec: Any) -> Any:
+    operator_applications = 0
+    preconditioner_applications = 0
+
+    def _apply(vec: Any) -> Any:
+        nonlocal operator_applications
+        operator_applications += 1
         return _as_device_vector(
-            op(cupy.asarray(vec, dtype=op_dtype)), cupy=cupy, dtype=op_dtype, name="op(x)"
+            A_mv(cupy.asarray(vec, dtype=op_dtype)),
+            cupy=cupy,
+            dtype=op_dtype,
+            name="op(x)",
         )
 
     def _apply_minv(vec: Any) -> Any:
+        nonlocal preconditioner_applications
         if preconditioner is None:
             return cupy.asarray(vec, dtype=op_dtype)
+        preconditioner_applications += 1
         return _as_device_vector(
             preconditioner(cupy.asarray(vec, dtype=op_dtype)),
             cupy=cupy,
@@ -1286,25 +1336,24 @@ def bicgstab_cupy_native(
         )
 
     def _true_residual_stats(x_curr: Any) -> tuple[float, float, Any]:
-        r_true = b_vec - _apply(A_mv, x_curr)
+        r_true = b_vec - _apply(x_curr)
         abs_norm = _norm(r_true, cupy=cupy, accum_dtype=acc_dtype)
-        rel_norm = abs_norm / b_norm if b_norm > 0 else abs_norm
+        rel_norm = abs_norm / b_norm if b_norm > 0.0 else abs_norm
         return abs_norm, rel_norm, r_true
 
     b_norm = _norm(b_vec, cupy=cupy, accum_dtype=acc_dtype)
     target_abs = max(float(atol), float(rtol) * b_norm)
     breakdown_tol_f = float(max(0.0, breakdown_tol))
+    residual_hist: list[float] = []
     true_hist: list[float] = []
-    iterations = 0
-    info = maxiter_total
-    converged_reason = "maxiter_reached"
 
     if x0_is_zero:
-        r_vec = cupy.asarray(b_vec, dtype=op_dtype)
+        r_vec = cupy.asarray(b_vec, dtype=op_dtype).copy()
         residual_norm = float(b_norm)
-        relative_residual = 1.0 if b_norm > 0 else 0.0
+        relative_residual = 1.0 if b_norm > 0.0 else 0.0
     else:
         residual_norm, relative_residual, r_vec = _true_residual_stats(x_vec)
+    residual_hist.append(relative_residual)
     true_hist.append(relative_residual)
     if residual_norm <= target_abs:
         return CuPyBiCGSTABNativeResult(
@@ -1314,17 +1363,37 @@ def bicgstab_cupy_native(
             residual_norm=float(residual_norm),
             relative_residual=float(relative_residual),
             converged_reason="converged",
+            residual_history=np.asarray(residual_hist, dtype=float),
             true_history=np.asarray(true_hist, dtype=float),
+            operator_applications=operator_applications,
+            preconditioner_applications=preconditioner_applications,
         )
 
-    r_hat = cupy.asarray(r_vec, dtype=op_dtype)
-    # `p_vec` and `v_vec` are initialized during the first iteration. Avoid
-    # allocating full placeholders before the first matrix-free apply.
+    r_hat = cupy.asarray(r_vec, dtype=op_dtype).copy()
     p_vec: Any | None = None
     v_vec: Any | None = None
     rho_old = cupy.asarray(1.0 + 0.0j, dtype=acc_dtype)
     alpha = cupy.asarray(1.0 + 0.0j, dtype=acc_dtype)
     omega = cupy.asarray(1.0 + 0.0j, dtype=acc_dtype)
+    recurrence_fresh = True
+    iterations = 0
+    info = maxiter_total
+    converged_reason = "maxiter_reached"
+
+    def _record_recursive(norm_abs: float) -> float:
+        rel = norm_abs / b_norm if b_norm > 0.0 else norm_abs
+        residual_hist.append(rel)
+        if callback is not None:
+            callback(rel)
+        return rel
+
+    def _true_gate() -> tuple[bool, Any]:
+        nonlocal residual_norm, relative_residual
+        residual_norm, relative_residual, r_true = _true_residual_stats(x_vec)
+        true_hist.append(relative_residual)
+        if callback_true is not None:
+            callback_true(relative_residual)
+        return bool(np.isfinite(residual_norm) and residual_norm <= target_abs), r_true
 
     for k in range(maxiter_total):
         rho = _dot(r_hat, r_vec, cupy=cupy, accum_dtype=acc_dtype)
@@ -1334,8 +1403,9 @@ def bicgstab_cupy_native(
             converged_reason = "breakdown_rho"
             break
 
-        if k == 0:
-            p_vec = cupy.asarray(r_vec, dtype=op_dtype)
+        if recurrence_fresh:
+            p_vec = cupy.asarray(r_vec, dtype=op_dtype).copy()
+            recurrence_fresh = False
         else:
             if p_vec is None or v_vec is None:
                 raise RuntimeError("Internal CuPy BiCGSTAB error: missing recurrence state.")
@@ -1345,15 +1415,16 @@ def bicgstab_cupy_native(
                 converged_reason = "breakdown_omega"
                 break
             beta = (rho / rho_old) * (alpha / omega)
-            p_vec = r_vec + cupy.asarray(beta, dtype=op_dtype) * (
-                p_vec - cupy.asarray(omega, dtype=op_dtype) * v_vec
-            )
-            # The previous iteration's A*p is needed only for the recurrence
-            # above. Drop it before the next matrix-free operator application.
+            beta_op = cupy.asarray(beta, dtype=op_dtype)
+            omega_op = cupy.asarray(omega, dtype=op_dtype)
+            # p <- r + beta * (p - omega*v), in place to avoid two n-vectors.
+            p_vec -= omega_op * v_vec
+            p_vec *= beta_op
+            p_vec += r_vec
             v_vec = None
 
         phat = _apply_minv(p_vec)
-        v_vec = _apply(A_mv, phat)
+        v_vec = _apply(phat)
         d1 = _dot(r_hat, v_vec, cupy=cupy, accum_dtype=acc_dtype)
         if float(cupy.abs(d1)) <= breakdown_tol_f:
             iterations = k + 1
@@ -1362,22 +1433,38 @@ def bicgstab_cupy_native(
             break
 
         alpha = rho / d1
-        s_vec = r_vec - cupy.asarray(alpha, dtype=op_dtype) * v_vec
+        alpha_op = cupy.asarray(alpha, dtype=op_dtype)
+        s_vec = cupy.asarray(r_vec, dtype=op_dtype).copy()
+        s_vec -= alpha_op * v_vec
         s_norm = _norm(s_vec, cupy=cupy, accum_dtype=acc_dtype)
         if s_norm <= target_abs:
-            x_vec = x_vec + cupy.asarray(alpha, dtype=op_dtype) * phat
-            residual_norm = float(s_norm)
-            relative_residual = residual_norm / b_norm if b_norm > 0 else residual_norm
+            x_vec += alpha_op * phat
             iterations = k + 1
-            true_hist.append(relative_residual)
-            if callback is not None:
-                callback(relative_residual)
-            info = 0
-            converged_reason = "converged"
-            break
+            _record_recursive(s_norm)
+            if not compute_final_residual:
+                residual_norm = float(s_norm)
+                relative_residual = residual_hist[-1]
+                info = 0
+                converged_reason = "converged_recursive"
+                break
+            converged, r_true = _true_gate()
+            if converged:
+                info = 0
+                converged_reason = "converged"
+                break
+            # Reliable restart after a false recursive convergence gate.
+            r_vec = cupy.asarray(r_true, dtype=op_dtype)
+            r_hat = cupy.asarray(r_true, dtype=op_dtype).copy()
+            p_vec = None
+            v_vec = None
+            rho_old = cupy.asarray(1.0 + 0.0j, dtype=acc_dtype)
+            alpha = cupy.asarray(1.0 + 0.0j, dtype=acc_dtype)
+            omega = cupy.asarray(1.0 + 0.0j, dtype=acc_dtype)
+            recurrence_fresh = True
+            continue
 
         shat = _apply_minv(s_vec)
-        t_vec = _apply(A_mv, shat)
+        t_vec = _apply(shat)
         tt = _dot(t_vec, t_vec, cupy=cupy, accum_dtype=acc_dtype)
         if float(cupy.abs(tt)) <= breakdown_tol_f:
             iterations = k + 1
@@ -1386,55 +1473,59 @@ def bicgstab_cupy_native(
             break
 
         omega = _dot(t_vec, s_vec, cupy=cupy, accum_dtype=acc_dtype) / tt
-        x_vec = (
-            x_vec
-            + cupy.asarray(alpha, dtype=op_dtype) * phat
-            + cupy.asarray(omega, dtype=op_dtype) * shat
-        )
-        r_vec = s_vec - cupy.asarray(omega, dtype=op_dtype) * t_vec
+        omega_op = cupy.asarray(omega, dtype=op_dtype)
+        x_vec += alpha_op * phat
+        x_vec += omega_op * shat
+        # Reuse s as the next residual instead of allocating s - omega*t.
+        s_vec -= omega_op * t_vec
+        r_vec = s_vec
         residual_norm = _norm(r_vec, cupy=cupy, accum_dtype=acc_dtype)
-        relative_residual = residual_norm / b_norm if b_norm > 0 else residual_norm
-        # These temporaries are not part of the BiCGSTAB recurrence carried to
-        # the next iteration.  Releasing the Python references here avoids
-        # carrying stale Krylov-sized vectors into the next A*p application,
-        # which is important for memory-tight CuPy matrix-free operators.
+        relative_residual = _record_recursive(residual_norm)
+        iterations = k + 1
+
+        # Release non-recurrence temporaries before the next matrix-free apply.
         phat = None
         shat = None
-        s_vec = None
         t_vec = None
-        iterations = k + 1
-        true_hist.append(relative_residual)
-        if callback is not None:
-            callback(relative_residual)
+
         if residual_norm <= target_abs:
-            info = 0
-            converged_reason = "converged"
-            break
+            if not compute_final_residual:
+                info = 0
+                converged_reason = "converged_recursive"
+                break
+            converged, r_true = _true_gate()
+            if converged:
+                info = 0
+                converged_reason = "converged"
+                break
+            r_vec = cupy.asarray(r_true, dtype=op_dtype)
+            r_hat = cupy.asarray(r_true, dtype=op_dtype).copy()
+            p_vec = None
+            v_vec = None
+            rho_old = cupy.asarray(1.0 + 0.0j, dtype=acc_dtype)
+            alpha = cupy.asarray(1.0 + 0.0j, dtype=acc_dtype)
+            omega = cupy.asarray(1.0 + 0.0j, dtype=acc_dtype)
+            recurrence_fresh = True
+            continue
+
         if float(cupy.abs(omega)) <= breakdown_tol_f:
-            iterations = k + 1
             info = k + 1
             converged_reason = "breakdown_omega"
             break
-
         rho_old = rho
         info = iterations
     else:
-        if bool(compute_final_residual):
-            residual_norm, relative_residual, _ = _true_residual_stats(x_vec)
-        else:
-            residual_norm = float("nan")
-            relative_residual = float("nan")
         info = maxiter_total
         converged_reason = "maxiter_reached"
-        return CuPyBiCGSTABNativeResult(
-            x=x_vec,
-            info=int(info),
-            iterations=int(maxiter_total),
-            residual_norm=float(residual_norm),
-            relative_residual=float(relative_residual),
-            converged_reason=str(converged_reason),
-            true_history=np.asarray(true_hist, dtype=float),
-        )
+
+    if compute_final_residual and info != 0:
+        residual_norm, relative_residual, _ = _true_residual_stats(x_vec)
+        true_hist.append(relative_residual)
+        if callback_true is not None:
+            callback_true(relative_residual)
+    elif not compute_final_residual and info != 0:
+        residual_norm = float("nan")
+        relative_residual = float("nan")
 
     return CuPyBiCGSTABNativeResult(
         x=x_vec,
@@ -1443,7 +1534,10 @@ def bicgstab_cupy_native(
         residual_norm=float(residual_norm),
         relative_residual=float(relative_residual),
         converged_reason=str(converged_reason),
+        residual_history=np.asarray(residual_hist, dtype=float),
         true_history=np.asarray(true_hist, dtype=float),
+        operator_applications=int(operator_applications),
+        preconditioner_applications=int(preconditioner_applications),
     )
 
 
@@ -1481,10 +1575,7 @@ def block_gmres_cupy_native(
         operator_dtype if operator_dtype is not None else np.result_type(b_dtype, np.complex64),
         name="operator_dtype",
     )
-    acc_dtype = _dtype_complex(
-        accum_dtype if accum_dtype is not None else np.result_type(op_dtype, np.complex128),
-        name="accum_dtype",
-    )
+    acc_dtype = _resolve_accum_dtype(op_dtype, accum_dtype)
     b_mat = _as_device_matrix(b, cupy=cupy, dtype=op_dtype, name="b")
     n = int(b_mat.shape[0])
     p = int(b_mat.shape[1])

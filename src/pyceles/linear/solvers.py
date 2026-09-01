@@ -30,6 +30,7 @@ from tqdm.auto import tqdm
 from pyceles._optional import asnumpy, import_cupy
 
 from .krylov_cupy import (
+    _resolve_accum_dtype,
     bicgstab_cupy_native,
     block_gmres_cupy_native,
     fgmres_cupy_native,
@@ -652,6 +653,7 @@ def gmres_cupy_block(
     atol: float = 0.0,
     restart: int = 30,
     maxiter: int | None = None,
+    accum_dtype: npt.DTypeLike | None = None,
     block_batch_size: int | None = None,
     deflation_tol: float | None = None,
     callback: Callable[[BlockKrylovCallbackPayload], None] | None = None,
@@ -680,6 +682,7 @@ def gmres_cupy_block(
     if nrhs < 1:
         raise ValueError("`b` must contain at least one RHS column for block-GMRES.")
     op_dtype = np.dtype(np.result_type(b_mat.dtype, np.complex64))
+    block_accum_dtype = _resolve_accum_dtype(op_dtype, accum_dtype)
     x0_mat = None if x0 is None else np.asarray(x0, dtype=op_dtype)
     if x0_mat is not None and x0_mat.shape != b_mat.shape:
         raise ValueError(f"`x0` must match `b` shape {b_mat.shape}. Got {x0_mat.shape}.")
@@ -723,7 +726,7 @@ def gmres_cupy_block(
         b_comp_gpu, basis_gpu, dmeta = _deflate_rhs_block_cupy(
             b_gpu,
             cupy=cupy,
-            accum_dtype=np.dtype(np.result_type(op_dtype, np.complex128)),
+            accum_dtype=block_accum_dtype,
             deflation_tol=deflation_tol,
         )
         eff_rhs = int(b_comp_gpu.shape[1])
@@ -805,6 +808,7 @@ def gmres_cupy_block(
             restart=restart,
             maxiter=maxiter_total,
             operator_dtype=op_dtype,
+            accum_dtype=accum_dtype,
             callback=_inner_cb
             if (show_progress and progress_mode == "preconditioned") or callback
             else None,
@@ -1048,6 +1052,7 @@ def gmres_cupy(
     atol: float = 0.0,
     restart: int = 50,
     maxiter: int | None = None,
+    accum_dtype: npt.DTypeLike | None = None,
     callback: Callable[[float], None] | None = None,
     callback_true: Callable[[float], None] | None = None,
     monitor: Literal["preconditioned", "true", "both"] = "preconditioned",
@@ -1101,6 +1106,7 @@ def gmres_cupy(
             restart=restart,
             maxiter=maxiter_total,
             operator_dtype=op_dtype,
+            accum_dtype=accum_dtype,
             callback=native_callback,
             restart_callback=native_restart_callback,
             record_preconditioned_history=monitor_mode in {"preconditioned", "both"},
@@ -1140,6 +1146,7 @@ def fgmres_cupy(
     atol: float = 0.0,
     restart: int = 50,
     maxiter: int | None = None,
+    accum_dtype: npt.DTypeLike | None = None,
     callback: Callable[[float], None] | None = None,
     callback_true: Callable[[float], None] | None = None,
     monitor: Literal["preconditioned", "true", "both"] = "preconditioned",
@@ -1193,6 +1200,7 @@ def fgmres_cupy(
             restart=restart,
             maxiter=maxiter_total,
             operator_dtype=op_dtype,
+            accum_dtype=accum_dtype,
             callback=native_callback,
             restart_callback=native_restart_callback,
             record_preconditioned_history=monitor_mode in {"preconditioned", "both"},
@@ -1232,6 +1240,7 @@ def lgmres_cupy(
     atol: float = 0.0,
     restart: int = 30,
     maxiter: int | None = None,
+    accum_dtype: npt.DTypeLike | None = None,
     outer_k: int = 3,
     store_outer_av: bool = True,
     callback: Callable[[float], None] | None = None,
@@ -1290,6 +1299,7 @@ def lgmres_cupy(
             outer_k=int(outer_k),
             store_outer_av=bool(store_outer_av),
             operator_dtype=op_dtype,
+            accum_dtype=accum_dtype,
             callback=native_callback,
             restart_callback=native_restart_callback,
             record_preconditioned_history=monitor_mode in {"preconditioned", "both"},
@@ -1328,15 +1338,18 @@ def bicgstab_cupy(
     rtol: float = 1e-6,
     atol: float = 0.0,
     maxiter: int | None = None,
+    accum_dtype: npt.DTypeLike | None = None,
     callback: Callable[[float], None] | None = None,
+    callback_true: Callable[[float], None] | None = None,
     show_progress: bool = True,
     compute_final_residual: bool = True,
 ) -> LinearSolveResult:
     """Solve Ax=b via native CuPy BiCGSTAB.
 
-    This path keeps BiCGSTAB state vectors on device and reports true-residual
-    progress each iteration. It is intentionally lighter than restarted GMRES
-    because it does not store an explicit Krylov basis.
+    This path keeps BiCGSTAB state vectors on device. ``callback`` receives
+    the inexpensive recursive residual, while ``callback_true`` receives only
+    independently evaluated physical residuals. A true residual gates reported
+    convergence when ``compute_final_residual=True``.
     """
 
     cupy, _ = import_cupy()
@@ -1354,14 +1367,18 @@ def bicgstab_cupy(
         "bicgstab[cupy]",
         show_progress=show_progress,
         target_rel=float(rtol),
-        residual_label="true_rel_res",
+        residual_label="recursive_rel_res",
         max_iters=maxiter_total,
     )
 
-    def _native_callback(true_rel: float) -> None:
-        progress_update(float(true_rel))
+    def _native_callback(recursive_rel: float) -> None:
+        progress_update(float(recursive_rel))
         if callback is not None:
-            callback(float(true_rel))
+            callback(float(recursive_rel))
+
+    def _native_callback_true(true_rel: float) -> None:
+        if callback_true is not None:
+            callback_true(float(true_rel))
 
     native = bicgstab_cupy_native(
         A_mv,
@@ -1373,7 +1390,9 @@ def bicgstab_cupy(
         atol=atol,
         maxiter=maxiter_total,
         operator_dtype=op_dtype,
+        accum_dtype=accum_dtype,
         callback=_native_callback if (show_progress or callback is not None) else None,
+        callback_true=_native_callback_true if callback_true is not None else None,
         compute_final_residual=bool(compute_final_residual),
     )
     _record_backend_solution(native.x)
@@ -1393,6 +1412,7 @@ def bicgstab_cupy(
         )
     progress_close()
 
+    recursive_hist = np.asarray(native.residual_history, dtype=float)
     true_hist = np.asarray(native.true_history, dtype=float)
     return LinearSolveResult(
         x=x_np,
@@ -1401,11 +1421,16 @@ def bicgstab_cupy(
         relative_residual=relative_residual,
         iterations=int(native.iterations),
         method="bicgstab[cupy]",
-        residual_history=true_hist,
+        residual_history=recursive_hist,
         rhs_count=1,
         preconditioned_residual_history=None,
         true_residual_history=true_hist,
         converged_reason=str(native.converged_reason),
+        block_metadata={
+            "residual_history_kind": "bicgstab_recursive_residual",
+            "operator_applications": int(native.operator_applications),
+            "preconditioner_applications": int(native.preconditioner_applications),
+        },
     )
 
 
@@ -1864,6 +1889,7 @@ def solve_linear_system(
     lgmres_store_outer_av: bool = True,
     direct_max_n: int = 15000,
     dtype: npt.DTypeLike = np.complex128,
+    accum_dtype: npt.DTypeLike | None = None,
     backend: Literal["numpy", "cupy"] = "numpy",
     show_progress: bool = True,
     compute_final_residual: bool = True,
@@ -1900,6 +1926,10 @@ def solve_linear_system(
     gmres_block_batch_size, gmres_block_deflation_tol, gmres_block_reorthogonalize:
         CuPy-native block GMRES controls used when `backend='cupy'`,
         `method='gmres'`, and `b` is 2D.
+    accum_dtype:
+        Optional accumulation dtype for native CuPy Krylov reductions and small
+        projected systems. When omitted, native solvers retain their robust
+        default (complex128 accumulation).
     lgmres_outer_k, lgmres_store_outer_av:
         CuPy-native LGMRES recycle controls. ``lgmres_outer_k`` is the number
         of correction directions retained across restart cycles; enabling
@@ -1974,6 +2004,7 @@ def solve_linear_system(
             atol=atol,
             restart=restart,
             maxiter=maxiter,
+            accum_dtype=accum_dtype,
             block_batch_size=gmres_block_batch_size,
             deflation_tol=gmres_block_deflation_tol,
             monitor=gmres_monitor,
@@ -2017,6 +2048,7 @@ def solve_linear_system(
                     lgmres_store_outer_av=lgmres_store_outer_av,
                     direct_max_n=direct_max_n,
                     dtype=dtype,
+                    accum_dtype=accum_dtype,
                     backend=backend_name,
                     show_progress=show_progress,
                     compute_final_residual=compute_final_residual,
@@ -2047,6 +2079,7 @@ def solve_linear_system(
                 atol=atol,
                 restart=restart,
                 maxiter=maxiter,
+                accum_dtype=accum_dtype,
                 monitor=gmres_monitor,
                 progress_residual=gmres_progress_residual,
                 orthogonalization=gmres_orthogonalization,
@@ -2079,6 +2112,7 @@ def solve_linear_system(
             atol=atol,
             restart=restart,
             maxiter=maxiter,
+            accum_dtype=accum_dtype,
             monitor=gmres_monitor,
             progress_residual=gmres_progress_residual,
             orthogonalization=gmres_orthogonalization,
@@ -2097,6 +2131,7 @@ def solve_linear_system(
                 rtol=rtol,
                 atol=atol,
                 maxiter=maxiter,
+                accum_dtype=accum_dtype,
                 show_progress=show_progress,
                 compute_final_residual=compute_final_residual,
             )
@@ -2122,6 +2157,7 @@ def solve_linear_system(
                 atol=atol,
                 restart=restart,
                 maxiter=maxiter,
+                accum_dtype=accum_dtype,
                 outer_k=lgmres_outer_k,
                 store_outer_av=lgmres_store_outer_av,
                 monitor=gmres_monitor,

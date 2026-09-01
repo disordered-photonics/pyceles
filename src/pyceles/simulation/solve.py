@@ -600,6 +600,7 @@ def _solve_sources_impl(
                 maxiter=int(cfg.solver_maxiter),
                 direct_max_n=int(cfg.solver_direct_max_n),
                 dtype=compute_dtype,
+                accum_dtype=accum_dtype,
                 backend=operator_backend,
                 show_progress=bool(cfg.verbose),
                 compute_final_residual=compute_final_residual,
