@@ -462,6 +462,105 @@ def test_periodic_cupy_rayleigh_interior_points_match_numpy(
     np.testing.assert_allclose(actual, expected, rtol=rtol, atol=atol)
 
 
+def test_periodic_cupy_rayleigh_repeated_horizontal_plane_matches_numpy(
+    cupy_runtime: tuple[Any, Any],
+) -> None:
+    """The plane-factorized near band remains CPU-parity accurate in c64."""
+    cp, _ = cupy_runtime
+    lmax = 2
+    k = 2.0 * np.pi / 550.0
+    positions = np.asarray(
+        [[0.0, 0.0, 0.0], [170.0, -80.0, 140.0], [-90.0, 60.0, 820.0]],
+        dtype=float,
+    )
+    xy = np.asarray([-80.0, 10.0, 90.0])
+    xx, yy = np.meshgrid(xy, xy, indexing="xy")
+    points = np.column_stack((xx.reshape(-1), yy.reshape(-1), np.full(9, 50.0)))
+    rng = np.random.default_rng(20260903)
+    coeffs = (
+        rng.normal(size=(positions.shape[0], n_modes(lmax)))
+        + 1j * rng.normal(size=(positions.shape[0], n_modes(lmax)))
+    ).astype(np.complex64)
+    periodic = PeriodicSpec(
+        lattice=RectangularLattice2D(ax=900.0, ay=850.0),
+        options=PeriodicOptions(
+            method="rayleigh",
+            eta=0.002,
+            real_shells=5,
+            reciprocal_shells=8,
+            rayleigh_z_cut=300.0,
+            rayleigh_reciprocal_shells=16,
+        ),
+    )
+    kwargs = dict(
+        points=points,
+        positions=positions,
+        coeffs=coeffs,
+        lmax=lmax,
+        k=k,
+        periodic=periodic,
+        k_parallel=np.asarray([0.0003, -0.0002]),
+        circumscribing_radii=np.full(positions.shape[0], 40.0),
+    )
+    expected = _periodic_local_regular_l1_coeffs(**cast(Any, kwargs))
+    actual = periodic_local_regular_l1_coeffs_cupy(
+        **cast(Any, kwargs),
+        compute_dtype=np.complex64,
+        accum_dtype=np.complex128,
+    )
+    cp.cuda.Stream.null.synchronize()
+
+    np.testing.assert_allclose(actual, expected, rtol=6e-5, atol=8e-6)
+
+
+def test_periodic_cupy_ewald_repeated_horizontal_plane_matches_numpy(
+    cupy_runtime: tuple[Any, Any],
+) -> None:
+    """The same shifted-plane factorization is valid for pure Ewald fields."""
+    cp, _ = cupy_runtime
+    lmax = 2
+    k = 2.0 * np.pi / 550.0
+    positions = np.asarray(
+        [[0.0, 0.0, 0.0], [170.0, -80.0, 140.0], [-90.0, 60.0, 820.0]],
+        dtype=float,
+    )
+    xy = np.asarray([-80.0, 10.0, 90.0])
+    xx, yy = np.meshgrid(xy, xy, indexing="xy")
+    points = np.column_stack((xx.reshape(-1), yy.reshape(-1), np.full(9, 50.0)))
+    rng = np.random.default_rng(20260904)
+    coeffs = (
+        rng.normal(size=(positions.shape[0], n_modes(lmax)))
+        + 1j * rng.normal(size=(positions.shape[0], n_modes(lmax)))
+    ).astype(np.complex64)
+    periodic = PeriodicSpec(
+        lattice=RectangularLattice2D(ax=900.0, ay=850.0),
+        options=PeriodicOptions(
+            method="ewald",
+            eta=0.002,
+            real_shells=5,
+            reciprocal_shells=8,
+        ),
+    )
+    kwargs = dict(
+        points=points,
+        positions=positions,
+        coeffs=coeffs,
+        lmax=lmax,
+        k=k,
+        periodic=periodic,
+        k_parallel=np.asarray([0.0003, -0.0002]),
+    )
+    expected = _periodic_local_regular_l1_coeffs(**cast(Any, kwargs))
+    actual = periodic_local_regular_l1_coeffs_cupy(
+        **cast(Any, kwargs),
+        compute_dtype=np.complex64,
+        accum_dtype=np.complex128,
+    )
+    cp.cuda.Stream.null.synchronize()
+
+    np.testing.assert_allclose(actual, expected, rtol=6e-5, atol=8e-6)
+
+
 def test_periodic_cupy_rayleigh_cartesian_points_match_numpy(
     cupy_runtime: tuple[Any, Any],
 ) -> None:

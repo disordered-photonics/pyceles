@@ -686,18 +686,15 @@ extern "C" __global__ void pyceles_ewald_shifted_reciprocal_structural_c128(
                     complex<double> acc(0.0, 0.0);
                     const int n_max = l - abs_m;
                     for (int n = 0; n <= n_max; ++n) {
-                        complex<double> terms_acc(0.0, 0.0);
+                        double terms_acc = 0.0;
                         const int s_stop = min(n_max, 2 * n);
-                        for (int s_val = n; s_val <= s_stop; ++s_val) {
-                            if (((s_val - n_max) & 1) != 0) {
-                                continue;
-                            }
+                        const int s_start = ((n - n_max) & 1) == 0 ? n : n + 1;
+                        for (int s_val = s_start; s_val <= s_stop; s_val += 2) {
                             const long long denominator_idx =
                                 ((long long)entry * (order + 1) + n) * (order + 1) + s_val;
-                            const double term = cz_powers[2 * n - s_val]
+                            terms_acc += cz_powers[2 * n - s_val]
                                 * rho_powers[term_idx * (order + 1) + (l - s_val)]
                                 * inverse_denominator[denominator_idx];
-                            terms_acc += complex<double>(term, 0.0);
                         }
                         acc += gamma_powers[term_idx * (order + 1) + n]
                             * delta[n]
@@ -729,6 +726,140 @@ extern "C" __global__ void pyceles_ewald_shifted_reciprocal_structural_c128(
 }
 """
 
+_SHIFTED_RECIPROCAL_COMPACT_TERMS_CUDA_SOURCE = r"""
+
+extern "C" __global__ void pyceles_ewald_shifted_reciprocal_compact_terms_c128(
+    const long long n_sources,
+    const int order,
+    const long long n_terms,
+    const double* source_positions,
+    const double plane_z,
+    const double* kgt,
+    const complex<double>* azimuth,
+    const complex<double>* gamma,
+    const complex<double>* xarg,
+    const unsigned char* rayleigh_zero,
+    const complex<double>* root_x,
+    const double* rho_powers,
+    const complex<double>* gamma_powers,
+    const complex<double>* prefactor,
+    const double* inverse_denominator,
+    const complex<double>* upper_gamma,
+    const int upper_gamma_stride,
+    complex<double>* compact_terms,
+    const double k,
+    const double eta,
+    const double* quadrature,
+    const int terms,
+    const double h,
+    const double H
+) {
+    const long long source = (long long)blockIdx.x;
+    const int tid = (int)threadIdx.x;
+    if (source >= n_sources || order < 0 || order > PYCELES_SHIFTED_MAX_ORDER) {
+        return;
+    }
+    const bool has_term = tid < n_terms;
+
+    extern __shared__ double cz_powers[];
+    const double cz = source_positions[3 * source + 2] - plane_z;
+    if (tid == 0) {
+        cz_powers[0] = 1.0;
+        const double cz_base = -k * cz;
+        for (int exponent = 1; exponent <= order; ++exponent) {
+            cz_powers[exponent] = cz_powers[exponent - 1] * cz_base;
+        }
+    }
+    __syncthreads();
+    if (!has_term) {
+        return;
+    }
+
+    const double cx = source_positions[3 * source + 0];
+    const double cy = source_positions[3 * source + 1];
+    const double kx = kgt[2 * tid + 0];
+    const double ky = kgt[2 * tid + 1];
+    const double phase_angle = -(cx * kx + cy * ky);
+    double sin_phase;
+    double cos_phase;
+    sincos(phase_angle, &sin_phase, &cos_phase);
+    const complex<double> source_phase(cos_phase, sin_phase);
+
+    const bool series_height_eligible =
+        fabs(eta * cz) <= PYCELES_SHIFTED_SERIES_ETA_Z_LIMIT;
+    complex<double> delta[PYCELES_SHIFTED_MAX_ORDER + 1];
+    _pyceles_shifted_delta_sequence(
+        order,
+        gamma[tid],
+        xarg[tid],
+        root_x[tid],
+        cz,
+        series_height_eligible,
+        rayleigh_zero[tid] != 0,
+        upper_gamma + (long long)tid * upper_gamma_stride,
+        quadrature,
+        terms,
+        h,
+        H,
+        delta
+    );
+
+    const int width = 2 * order + 1;
+    const int compact_width = (order + 1) * (order + 1);
+    const long long output_base =
+        ((source * n_terms + (long long)tid) * (long long)compact_width);
+
+    for (int l = 0; l <= order; ++l) {
+        for (int m = -l; m <= l; ++m) {
+            const int entry = l * width + (m + order);
+            const int compact_entry = l * l + (m + l);
+            const int abs_m = m < 0 ? -m : m;
+            const int n_max = l - abs_m;
+            complex<double> acc(0.0, 0.0);
+            for (int n = 0; n <= n_max; ++n) {
+                double terms_acc = 0.0;
+                const int s_stop = min(n_max, 2 * n);
+                const int s_start = ((n - n_max) & 1) == 0 ? n : n + 1;
+                for (int s_val = s_start; s_val <= s_stop; s_val += 2) {
+                    const long long denominator_idx =
+                        ((long long)entry * (order + 1) + n) * (order + 1) + s_val;
+                    terms_acc += cz_powers[2 * n - s_val]
+                        * rho_powers[(long long)tid * (order + 1) + (l - s_val)]
+                        * inverse_denominator[denominator_idx];
+                }
+                acc += gamma_powers[(long long)tid * (order + 1) + n]
+                    * delta[n]
+                    * terms_acc;
+            }
+            compact_terms[output_base + compact_entry] = prefactor[entry]
+                * source_phase
+                * azimuth[(long long)tid * width + (m + order)]
+                * acc;
+        }
+    }
+}
+"""
+
+
+@cache
+def _shifted_reciprocal_compact_terms_raw_kernel(max_order: int) -> Any:
+    cp, _ = import_cupy()
+    order = int(max_order)
+    source = (
+        _WTRAP_DEVICE_CUDA_SOURCE
+        + _EWALD_DEVICE_CONSTANTS
+        + f"\n#define PYCELES_SHIFTED_MAX_ORDER {order}\n"
+        + f"#define PYCELES_SHIFTED_SERIES_TERMS {_SHIFTED_DELTA_SERIES_TERMS}\n"
+        + (
+            "#define PYCELES_SHIFTED_SERIES_SCALED_LIMIT "
+            f"{_SHIFTED_DELTA_SERIES_SCALED_LIMIT:.17g}\n"
+        )
+        + (f"#define PYCELES_SHIFTED_SERIES_ETA_Z_LIMIT {_SHIFTED_DELTA_SERIES_ETA_Z_LIMIT:.17g}\n")
+        + _SHIFTED_RECIPROCAL_STRUCTURAL_CUDA_SOURCE
+        + _SHIFTED_RECIPROCAL_COMPACT_TERMS_CUDA_SOURCE
+    )
+    return cp.RawKernel(source, "pyceles_ewald_shifted_reciprocal_compact_terms_c128")
+
 
 @cache
 def _shifted_reciprocal_structural_raw_kernel(max_order: int) -> Any:
@@ -747,6 +878,116 @@ def _shifted_reciprocal_structural_raw_kernel(max_order: int) -> Any:
         + _SHIFTED_RECIPROCAL_STRUCTURAL_CUDA_SOURCE
     )
     return cp.RawKernel(source, "pyceles_ewald_shifted_reciprocal_structural_c128")
+
+
+def _shifted_reciprocal_compact_terms_cupy(
+    *,
+    source_positions: Any,
+    plane_z: float,
+    workspace: CupyEwaldShellWorkspace,
+    reciprocal_shell_count: int,
+    order: int,
+    term_start: int = 0,
+    term_stop: int | None = None,
+) -> Any:
+    """Return per-source/per-reciprocal-term compact shifted Ewald channels.
+
+    Unlike :func:`ewald_structural_sums_2d_fixed_cupy`, this helper deliberately
+    does *not* sum reciprocal orders or apply a destination lateral phase.  For
+    destinations on one horizontal plane those operations are separable, so a
+    near-field caller can evaluate the expensive shifted multipole recurrence
+    once per source/order and synthesize arbitrarily many lateral points with a
+    matrix product.  Only valid ``(l,m)`` channels are materialized, ordered as
+    ``l*l + (m+l)``.
+
+    The sources must have nonzero vertical offset from ``plane_z``; same-plane
+    reciprocal terms use a different analytic formula and remain on the generic
+    structural path.
+    """
+    cp = workspace.cupy
+    order_i = int(order)
+    if order_i < 0:
+        raise ValueError(f"`order` must be >= 0. Got {order!r}.")
+    sources = cp.ascontiguousarray(cp.asarray(source_positions, dtype=cp.float64).reshape(-1, 3))
+    n_sources = int(sources.shape[0])
+    reciprocal_terms = workspace.reciprocal_terms(int(reciprocal_shell_count))
+    if reciprocal_terms.has_rayleigh_zero:
+        raise ValueError(
+            "shifted reciprocal integrals are singular at a Rayleigh/Wood anomaly; "
+            "move away from the anomaly or use the same-plane formula."
+        )
+    total_terms = int(reciprocal_terms.rho.shape[0])
+    start = max(0, int(term_start))
+    stop = total_terms if term_stop is None else min(total_terms, int(term_stop))
+    if stop < start:
+        raise ValueError(f"Expected term_stop >= term_start; got {start} and {stop}.")
+    n_terms = stop - start
+    compact_width = (order_i + 1) ** 2
+    out = cp.empty((n_sources, n_terms, compact_width), dtype=cp.complex128)
+    if n_sources == 0 or n_terms == 0:
+        return out
+    if n_terms > 128:
+        raise ValueError(
+            "The compact shifted reciprocal kernel accepts at most 128 terms per launch; "
+            f"got {n_terms}. Chunk the reciprocal range before calling it."
+        )
+
+    shifted_tables = workspace.shifted_reciprocal_tables(
+        int(reciprocal_shell_count),
+        order_i,
+    )
+    upper_stride = order_i + _SHIFTED_DELTA_SERIES_TERMS + 1
+    upper_gamma = workspace.upper_gamma_terms(
+        int(reciprocal_shell_count),
+        upper_stride - 1,
+    )
+    terms = int(_DEFAULT_WOFZ_TERMS)
+    h = math.sqrt(math.pi / float(terms + 1))
+    quadrature = _wtrap_quadrature_table_cupy(int(cp.cuda.runtime.getDevice()), terms)
+    # RawKernel arguments are pointers, not strided array views.  Materialize
+    # contiguous term slices so chunks after the first retain the same term
+    # indexing as the full reciprocal tables.
+    kgt = cp.ascontiguousarray(reciprocal_terms.kgt[start:stop])
+    azimuth = cp.ascontiguousarray(shifted_tables.azimuth[start:stop])
+    gamma = cp.ascontiguousarray(reciprocal_terms.gamma[start:stop])
+    xarg = cp.ascontiguousarray(reciprocal_terms.xarg[start:stop])
+    rayleigh_zero = cp.ascontiguousarray(reciprocal_terms.rayleigh_zero[start:stop])
+    root_x = cp.ascontiguousarray(shifted_tables.root_x[start:stop])
+    rho_powers = cp.ascontiguousarray(shifted_tables.rho_powers[start:stop])
+    gamma_powers = cp.ascontiguousarray(shifted_tables.gamma_powers[start:stop])
+    upper_gamma_chunk = cp.ascontiguousarray(upper_gamma[start:stop])
+    _shifted_reciprocal_compact_terms_raw_kernel(order_i)(
+        (n_sources,),
+        (128,),
+        (
+            np.int64(n_sources),
+            np.int32(order_i),
+            np.int64(n_terms),
+            sources,
+            np.float64(float(plane_z)),
+            kgt,
+            azimuth,
+            gamma,
+            xarg,
+            rayleigh_zero,
+            root_x,
+            rho_powers,
+            gamma_powers,
+            shifted_tables.prefactor,
+            shifted_tables.inverse_denominator,
+            upper_gamma_chunk,
+            np.int32(upper_stride),
+            out,
+            np.float64(float(workspace.k)),
+            np.float64(float(workspace.eta)),
+            quadrature,
+            np.int32(terms),
+            np.float64(h),
+            np.float64(math.pi / h),
+        ),
+        shared_mem=(order_i + 1) * np.dtype(np.float64).itemsize,
+    )
+    return out
 
 
 def _add_shifted_reciprocal_structural_sums_cupy(
@@ -826,6 +1067,7 @@ def ewald_structural_sums_2d_fixed_cupy(
     real_shell_count: int,
     reciprocal_shell_count: int,
     coordinate_scale: float = 0.0,
+    include_shifted_reciprocal: bool = True,
 ) -> Any:
     """Evaluate scalar periodic Ewald tables for source/destination pairs.
 
@@ -887,7 +1129,7 @@ def ewald_structural_sums_2d_fixed_cupy(
     if n_same:
         max_same_n = max(0, order // 2)
         max_gamma_index = max_same_n
-        if n_same < n_pairs:
+        if n_same < n_pairs and include_shifted_reciprocal:
             max_gamma_index = max(max_gamma_index, int(order) + _SHIFTED_DELTA_SERIES_TERMS)
         reciprocal_terms = workspace.reciprocal_terms(int(reciprocal_shell_count))
         gamma_fun_all = workspace.upper_gamma_terms(
@@ -937,7 +1179,7 @@ def ewald_structural_sums_2d_fixed_cupy(
                     vals = structural_sum_m_normalization(m) * prefactor * (phase_same @ vec)
                     sums[same_idx, degree, m + offset] = sums[same_idx, degree, m + offset] + vals
 
-    if n_same < n_pairs:
+    if n_same < n_pairs and include_shifted_reciprocal:
         _add_shifted_reciprocal_structural_sums_cupy(
             c=c,
             same_plane=same_plane,

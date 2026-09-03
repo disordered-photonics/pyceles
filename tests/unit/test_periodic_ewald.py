@@ -900,3 +900,120 @@ def test_ewald_policy_preflights_are_memoized(monkeypatch: pytest.MonkeyPatch) -
     )
     assert counts_second == counts_first
     assert eta_calls == calls_after_counts
+
+
+def test_shifted_reciprocal_plane_factorization_matches_scalar_reference() -> None:
+    """Off-plane reciprocal Ewald sums factor exactly into source/destination phases."""
+    from pyceles.core.periodic.scalar import (
+        log_factorial,
+        log_spherical_factorial_root,
+        structural_sum_m_normalization,
+    )
+
+    k = 2.0 * np.pi / 550.0
+    kp = np.array([0.0012, -0.0007], dtype=float)
+    lattice = _lattice()
+    eta = 0.02
+    shells = 2
+    source = np.array([31.0, -47.0, 63.0], dtype=float)
+    plane_z = -19.0
+    workspace = EwaldShellWorkspace(
+        lattice=lattice,
+        k=float(k),
+        k_parallel=kp,
+        eta=float(eta),
+    )
+    destinations = np.array(
+        [
+            [0.0, 0.0, plane_z],
+            [17.0, -23.0, plane_z],
+            [-81.0, 54.0, plane_z],
+        ],
+        dtype=float,
+    )
+
+    for degree, order_m in ((2, 1), (3, -1)):
+        amplitudes: list[np.ndarray] = []
+        wavevectors: list[np.ndarray] = []
+        base_log = (
+            log_spherical_factorial_root(degree, order_m)
+            - degree * math.log(2.0)
+            - math.log(lattice.area)
+            - 2.0 * math.log(float(k))
+        )
+        cz = float(source[2] - plane_z)
+        z_scaled = -float(k) * cz
+        for shell in range(shells + 1):
+            data = workspace.reciprocal_shell(shell)
+            n_values = np.arange(0, degree - abs(order_m) + 1, dtype=np.int64)
+            inner = np.zeros((data.rho.size, n_values.size), dtype=np.complex128)
+            for n in n_values:
+                s_values = np.arange(
+                    int(n),
+                    min(degree - abs(order_m), 2 * int(n)) + 1,
+                    dtype=np.int64,
+                )
+                parity = (degree - abs(order_m)) & 1
+                s_values = s_values[(s_values & 1) == parity]
+                for s_value in s_values:
+                    log_weight = base_log - (
+                        log_factorial(2 * int(n) - int(s_value))
+                        + log_factorial(int(s_value) - int(n))
+                        + log_factorial((degree + abs(order_m) - int(s_value)) // 2)
+                        + log_factorial((degree - abs(order_m) - int(s_value)) // 2)
+                    )
+                    q_power = 2 * int(n) - int(s_value)
+                    rho_power = degree - int(s_value)
+                    inner[:, int(n)] += (
+                        z_scaled**q_power * (data.rho / float(k)) ** rho_power * np.exp(log_weight)
+                    )
+
+            def upper_gamma_provider(max_index: int, shell: int = shell) -> np.ndarray:
+                return workspace.upper_gamma(shell, max_index)
+
+            delta = shifted_delta_sequence(
+                int(n_values[-1]),
+                data.gamma,
+                cz,
+                eta,
+                upper_gamma_provider=upper_gamma_provider,
+                series_exclusion=data.rayleigh_zero,
+            )
+            radial = np.sum(
+                (data.gamma / float(k))[:, None] ** (2 * n_values - 1) * delta * inner,
+                axis=1,
+            )
+            source_phase = np.exp(-1j * (data.kgt @ source[:2]))
+            term_values = (
+                structural_sum_m_normalization(order_m)
+                * ((-1j) ** order_m)
+                * ((-1.0) ** degree)
+                * source_phase
+                * np.exp(1j * order_m * data.phi)
+                * radial
+            )
+            amplitudes.append(term_values)
+            wavevectors.append(data.kgt)
+
+        amplitude = np.concatenate(amplitudes)
+        kgt = np.concatenate(wavevectors, axis=0)
+        factored = np.exp(1j * (destinations[:, :2] @ kgt.T)) @ amplitude
+        reference = np.asarray(
+            [
+                structural_sum_m_normalization(order_m)
+                * _shifted_reciprocal_sum(
+                    degree,
+                    order_m,
+                    rvec=destination - source,
+                    k=float(k),
+                    k_parallel=kp,
+                    lattice=lattice,
+                    eta=float(eta),
+                    shells=shells,
+                    workspace=workspace,
+                )
+                for destination in destinations
+            ],
+            dtype=np.complex128,
+        )
+        np.testing.assert_allclose(factored, reference, rtol=2.0e-13, atol=2.0e-13)

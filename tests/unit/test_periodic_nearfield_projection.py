@@ -71,16 +71,16 @@ def test_l1_translation_has_no_support_above_triangle_limit(lmax: int) -> None:
     np.testing.assert_array_equal(unsupported, np.zeros_like(unsupported))
 
 
-@pytest.mark.parametrize("compute_dtype", [np.complex64, np.complex128])
-def test_periodic_near_pair_batch_planner_respects_budget(compute_dtype: Any) -> None:
+@pytest.mark.parametrize("projection_dtype", [np.complex64, np.complex128])
+def test_periodic_near_pair_batch_planner_respects_budget(projection_dtype: Any) -> None:
     per_pair = _periodic_near_pair_workspace_bytes_per_pair(
         lmax=4,
-        compute_dtype=np.dtype(compute_dtype),
+        projection_dtype=np.dtype(projection_dtype),
     )
     batch = _periodic_near_pair_batch_size_for_workspace(
         total_pairs=1_000_000,
         lmax=4,
-        compute_dtype=np.dtype(compute_dtype),
+        projection_dtype=np.dtype(projection_dtype),
         workspace_bytes=100 * per_pair,
     )
     assert batch == 100
@@ -90,7 +90,7 @@ def test_periodic_near_pair_batch_planner_caps_large_workspaces() -> None:
     batch = _periodic_near_pair_batch_size_for_workspace(
         total_pairs=1_000_000,
         lmax=4,
-        compute_dtype=np.dtype(np.complex64),
+        projection_dtype=np.dtype(np.complex64),
         workspace_bytes=10**12,
     )
     assert batch == 65_536
@@ -147,3 +147,16 @@ def test_cartesian_xy_z_layout_rejects_incomplete_product() -> None:
 
     points = np.asarray([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
     assert _cartesian_xy_z_layout(points) is None
+
+
+def test_shifted_plane_source_reduction_commutes_with_lateral_synthesis() -> None:
+    """Source reduction may precede destination Fourier synthesis exactly."""
+    rng = np.random.default_rng(20260903)
+    phase = rng.normal(size=(11, 7)) + 1j * rng.normal(size=(11, 7))
+    projected = rng.normal(size=(5, 7, 6)) + 1j * rng.normal(size=(5, 7, 6))
+
+    per_source = np.einsum("dt,str->sdr", phase, projected, optimize=True)
+    reference = np.sum(per_source, axis=0, dtype=np.complex128)
+    reduced_first = phase @ np.sum(projected, axis=0, dtype=np.complex128)
+
+    np.testing.assert_allclose(reduced_first, reference, rtol=2e-15, atol=2e-15)

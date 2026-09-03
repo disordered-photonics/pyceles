@@ -113,3 +113,35 @@ def test_fixed_cupy_ewald_rejects_shifted_exact_rayleigh_zero() -> None:
             real_shell_count=1,
             reciprocal_shell_count=1,
         )
+
+
+def test_fixed_cupy_ewald_can_skip_shifted_reciprocal_but_keep_real_space(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shifted_calls = 0
+    real_calls = 0
+
+    def add_shifted(**_: Any) -> None:
+        nonlocal shifted_calls
+        shifted_calls += 1
+
+    def add_real(**_: Any) -> None:
+        nonlocal real_calls
+        real_calls += 1
+
+    workspace = _workspace()
+    monkeypatch.setattr(ewald_cupy, "_add_shifted_reciprocal_structural_sums_cupy", add_shifted)
+    monkeypatch.setattr(ewald_cupy, "_add_real_space_structural_sums_cupy", add_real)
+
+    got = ewald_cupy.ewald_structural_sums_2d_fixed_cupy(
+        relative_source_minus_destination=np.asarray([[20.0, -15.0, 10.0]], dtype=float),
+        lmax_struct=1,
+        workspace=workspace,
+        real_shell_count=1,
+        reciprocal_shell_count=1,
+        include_shifted_reciprocal=False,
+    )
+
+    assert got.shape == (1, 3, 5)
+    assert shifted_calls == 0
+    assert real_calls == 1

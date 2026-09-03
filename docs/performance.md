@@ -377,6 +377,19 @@ compelling option.
   Ewald work for the near pairs. Dense same-height field maps can therefore
   remain expensive even when the solve itself benefits strongly from Rayleigh.
 
+For repeated horizontal destination planes, the CuPy in-slab evaluator also
+recognizes shared z coordinates and reuses the source-side reciprocal
+calculation before applying the destination phases. This is an automatic,
+exact dispatch decision; there is no user-facing switch. Mixed-z arrays (for
+example, a vertical cross-section) are grouped internally when they contain
+enough points per plane, while small or irregular groups use the generic exact
+pair path. When several planes are needed, pass the complete point cloud to
+one `compute_periodic_near_field` call whenever practical. Calling the helper
+once per line or stripe repeats setup and transfer work and can be much slower,
+even when each individual stripe qualifies for the plane optimization. The
+optimization applies to in-slab periodic near fields; it does not change the
+periodic solver matvec or the exterior Rayleigh-order evaluator.
+
 ### Periodic output basis
 
 Periodic observable output uses an explicit diffraction-order basis.
