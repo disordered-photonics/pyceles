@@ -6,7 +6,8 @@ finite and periodic snapshots without sharing CuPy allocator state between
 cases.  Every finite backend/dtype case includes one far/near postprocessing
 run; when both cache modes are requested, the profile script reuses the
 primary solved result instead of repeating that field work.  Pairwise periodic
-W-cache-on cases likewise include the documented NumPy and CuPy field maps.
+W-cache-on cases likewise include the documented NumPy and CuPy exterior-xy,
+interior-xy, and xz field maps.
 Periodic NumPy cache-off is retained as a one-iteration reference probe: its
 full solve is impractical for the 500-particle profile geometry, but its
 single-iteration cost remains useful for extrapolation.
@@ -97,6 +98,15 @@ def _field_arguments(
     return result
 
 
+def _periodic_precision_arguments(args: argparse.Namespace) -> list[str]:
+    return [
+        "--compute-dtype",
+        str(args.periodic_compute_dtype),
+        "--accum-dtype",
+        str(args.periodic_accum_dtype),
+    ]
+
+
 def _finite_required_phases(
     args: argparse.Namespace,
     *,
@@ -118,7 +128,7 @@ def _periodic_required_phases(
     include_postprocessing: bool,
 ) -> tuple[str, ...]:
     if include_postprocessing and not args.skip_nearfield:
-        return ("nearfield_xy", "nearfield_xz")
+        return ("nearfield_xy", "nearfield_xy_interior", "nearfield_xz")
     return ()
 
 
@@ -167,6 +177,7 @@ def _build_cases(args: argparse.Namespace, output_root: Path) -> list[dict[str, 
                 )
 
     if args.suite in ("periodic", "all"):
+        periodic_precision = _periodic_precision_arguments(args)
         for backend in ("numpy", "cupy"):
             name = f"periodic_pairwise_{backend}_cache_on"
             case_dir = output_root / name
@@ -180,6 +191,7 @@ def _build_cases(args: argparse.Namespace, output_root: Path) -> list[dict[str, 
                         "pairwise",
                         "--operator-backend",
                         backend,
+                        *periodic_precision,
                         "--periodic-method",
                         "ewald",
                         "--cache-mode",
@@ -219,6 +231,7 @@ def _build_cases(args: argparse.Namespace, output_root: Path) -> list[dict[str, 
                                 "pairwise",
                                 "--operator-backend",
                                 backend,
+                                *periodic_precision,
                                 "--periodic-method",
                                 "ewald",
                                 "--cache-mode",
@@ -249,6 +262,7 @@ def _build_cases(args: argparse.Namespace, output_root: Path) -> list[dict[str, 
                                 "pairwise",
                                 "--operator-backend",
                                 backend,
+                                *periodic_precision,
                                 "--periodic-method",
                                 "ewald",
                                 "--cache-mode",
@@ -281,6 +295,7 @@ def _build_cases(args: argparse.Namespace, output_root: Path) -> list[dict[str, 
                             "pairwise",
                             "--operator-backend",
                             backend,
+                            *periodic_precision,
                             "--periodic-method",
                             "ewald",
                             "--cache-mode",
@@ -311,6 +326,7 @@ def _build_cases(args: argparse.Namespace, output_root: Path) -> list[dict[str, 
                         coupling,
                         "--operator-backend",
                         "cupy",
+                        *periodic_precision,
                         "--periodic-method",
                         method,
                         "--cache-mode",
@@ -341,6 +357,7 @@ def _build_cases(args: argparse.Namespace, output_root: Path) -> list[dict[str, 
                         coupling,
                         "--operator-backend",
                         "numpy",
+                        *periodic_precision,
                         "--periodic-method",
                         method,
                         "--cache-mode",
@@ -382,6 +399,18 @@ def main() -> None:
         help="Translation-cache mode for the finite-cluster profiles.",
     )
     parser.add_argument("--periodic-maxiter", type=int, default=800)
+    parser.add_argument(
+        "--periodic-compute-dtype",
+        choices=("complex64", "complex128"),
+        default="complex128",
+        help="Compute dtype for all periodic profile cases.",
+    )
+    parser.add_argument(
+        "--periodic-accum-dtype",
+        choices=("complex64", "complex128"),
+        default="complex128",
+        help="Accumulation dtype for all periodic profile cases.",
+    )
     parser.add_argument(
         "--numpy-cache-off-maxiter",
         type=int,

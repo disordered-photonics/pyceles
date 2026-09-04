@@ -113,8 +113,8 @@ Measured on a laptop with:
 - CuPy: `14.0.1`,
 - script: `examples/profile_pyceles_phases.py`.
 
-The finite and periodic values below were refreshed on 2026-08-08 as
-arithmetic means of two consecutive complete suite runs. Most phases varied
+The finite values below were refreshed on 2026-08-08 as arithmetic means of two
+consecutive complete suite runs. Most phases varied
 by less than 5%; the largest meaningful spread was the short finite CuPy
 `complex128` near-field phase (1.63 s versus 1.40 s). Very short setup
 phases can show larger relative percentages while remaining negligible in
@@ -133,13 +133,13 @@ four backend/precision rows with one far-field and near-field postprocessing
 pass per row. If `--finite-cache-mode both` is selected, each finite profile
 also measures cache-on and cache-off solves while reusing the primary solved
 result for postprocessing. The pairwise periodic cache-on cases provide the
-  documented NumPy and CuPy xy/xz field maps; cache-off, direct, and Rayleigh
-  cases remain solve-focused. Use `--suite finite` or
+documented NumPy and CuPy xy, interior-xy, and xz field maps; cache-off, direct,
+and Rayleigh cases remain solve-focused. Use `--suite finite` or
 `--suite periodic` for one family, `--skip-postprocessing` when only
 solve/preparation data is wanted, and `--skip-periodic-cache-off` when only
 cache-on periodic rows are needed. Every CuPy case is run to convergence. The
-  slow NumPy periodic cache-off and Rayleigh cases are one-iteration reference
-  probes whose linear-solve time can be extrapolated
+slow NumPy periodic cache-off and Rayleigh cases are one-iteration reference
+probes whose linear-solve time can be extrapolated
 from equivalent converged runs. `--reuse-existing` resumes a refresh and
 reruns a case if its existing summary is missing a required field phase.
 
@@ -222,73 +222,87 @@ often beneficial when repeating solves in the same process.
 
 ## Periodic benchmark snapshot
 
-Use `examples/profile_pyceles_periodic_phases.py` for the rectangular-cell
-periodic profile. The script places the 500 prototype spheres from
-`examples/sphere_parameters.txt` into a non-overlapping 3000 nm square periodic
-cell, solves one normally incident plane-wave RHS, and optionally computes
-periodic xy/xz near-field slices.
+Use `examples/profile_pyceles_benchmark_suite.py --suite periodic` to refresh
+this complete supported snapshot. The two complete runs below were completed
+on 2026-09-04 with `complex128/complex128` and `complex64/complex128` profile
+precision, respectively:
 
-Common benchmark parameters:
+To refresh a different precision policy, pass
+`--periodic-compute-dtype` and `--periodic-accum-dtype`; keep the resulting rows
+together as one complete suite snapshot rather than mixing runs.
 
-- geometry: `N=500`, `lmax=3`, homogeneous medium, 3000 nm periodic square cell,
-- source: plane wave, `wavelength=550`, `n_medium=1.0`, TE, normal incidence,
-- source projection: analytic plane-wave RHS,
-- solver: `gmres`, `rtol=1e-4`, `maxiter=800`,
-- periodic options: automatic `eta`, adaptive shell counts,
-  `shell_tolerance=1e-10`,
-- precision: currently `complex128/complex128`.
+```powershell
+python examples/profile_pyceles_benchmark_suite.py --suite periodic --periodic-maxiter 800
+```
 
-Measured phase wall times on the same laptop/GPU are grouped by the work they
-represent. `Solve` is the complete solve phase; `prep` includes operator
-and method-specific preparation, including W-cache generation or Rayleigh
-preparation where applicable. The one-iteration rows are marked explicitly
-and are not presented as converged solves.
+- 500 prototype spheres from `examples/sphere_parameters.txt` in a 3000 nm
+  square cell, `lmax=3`, wavelength 550 nm, homogeneous medium `n=1.0`;
+- normally incident TE plane wave with analytic source projection;
+- GMRES `rtol=1e-4`, `maxiter=800`, automatic eta and adaptive Ewald shells;
+- CuPy postprocessing at `dx=30 nm` for exterior-xy, slab-interior-xy, and
+  vertical xz maps.
 
-| coupling and backend | mode | prep | linear solve | solve | iterations |
+`prep` includes method-specific preparation (including W-cache or Rayleigh
+construction), and `solve` is the complete profiled solve phase. One-iteration
+rows are reference probes, not converged solves.
+
+| backend and dtype | coupling mode | prep | linear solve | solve | iterations |
 | --- | --- | ---: | ---: | ---: | ---: |
-| Pairwise, NumPy | W cache on | `124.5 s` | `549.9 s` | `674.4 s` | 160 |
-| Pairwise, CuPy | W cache on | `8.4 s` | `5.4 s` | `13.8 s` | 160 |
-| Pairwise, CuPy | W cache off | `0.03 s` | `602.5 s` | `602.6 s` | 160 |
-| Pairwise, NumPy | W cache off | `0.03 s` | `246.3 s` | `246.4 s` | 1* |
-| Rayleigh, CuPy | cache off | `2.7 s` | `43.0 s` | `45.7 s` | 160 |
-| Rayleigh, NumPy | cache off | `49.4 s` | `1.6 s` | `50.9 s` | 1* |
+| NumPy, `complex128/complex128` | Pairwise, W cache on | `147.18 s` | `520.74 s` | `671.34 s` | 160 |
+| CuPy, `complex128/complex128` | Pairwise, W cache on | `8.38 s` | `5.10 s` | `13.73 s` | 160 |
+| CuPy, `complex128/complex128` | Pairwise, W cache off | `0.06 s` | `529.48 s` | `532.95 s` | 160 |
+| NumPy, `complex128/complex128` | Pairwise, W cache off | `0.03 s` | `285.93 s` | `429.74 s` | 1* |
+| CuPy, `complex128/complex128` | Rayleigh, cache off | `2.50 s` | `11.31 s` | `14.09 s` | 160 |
+| NumPy, `complex128/complex128` | Rayleigh, cache off | `58.72 s` | `1.44 s` | `61.08 s` | 1* |
+| NumPy, `complex64/complex128` | Pairwise, W cache on | `148.90 s` | `537.60 s` | `689.76 s` | 160 |
+| CuPy, `complex64/complex128` | Pairwise, W cache on | `6.73 s` | `4.45 s` | `11.57 s` | 160 |
+| CuPy, `complex64/complex128` | Pairwise, W cache off | `0.06 s` | `524.36 s` | `527.81 s` | 160 |
+| NumPy, `complex64/complex128` | Pairwise, W cache off | `0.03 s` | `285.82 s` | `430.03 s` | 1* |
+| CuPy, `complex64/complex128` | Rayleigh, cache off | `2.57 s` | `5.22 s` | `8.03 s` | 160 |
+| NumPy, `complex64/complex128` | Rayleigh, cache off | `57.74 s` | `1.09 s` | `59.53 s` | 1* |
 
-The direct validation rows, with field work and the final residual check
-skipped, were:
+All 160-step GMRES rows reached approximately `9.35e-5`; the two precision
+policies agree to the displayed residual and power-balance precision. Here
+`complex64/complex128` stores periodic translation data and performs its
+contractions in complex64, while the cancellation-sensitive scalar Ewald sum
+remains complex128. That scalar work dominates NumPy Ewald preparation and the
+cache-off pairwise probe, so those phases should not be expected to speed up
+and can be slightly slower than `complex128/complex128` because of ordinary
+host/runtime variability. Compute-dtype-sensitive phases can still benefit once
+that structural work is amortized: in this snapshot the complex64 direct
+assembly/factorization and Rayleigh repeated apply are faster. This differs from
+the finite pairwise case, where more of the hot path changes dtype; CuPy still
+benefits where c64 device kernels dominate. The rows are a paired snapshot, not
+a promise of ordering for short or host-bound phases.
 
-| backend | W-block generation | assembly | factorization | solve phase |
+Direct dense validation (field work and final residual check skipped):
+
+| backend and dtype | W-block generation | assembly | factorization | solve phase |
 | --- | ---: | ---: | ---: | ---: |
-| NumPy | `124.7 s` | `3.56 s` | `22.4 s` | `150.9 s` |
-| CuPy | `5.72 s` | `1.77 s` | `43.8 s` | `51.3 s` |
+| NumPy, `complex128/complex128` | `147.23 s` | `3.51 s` | `20.07 s` | `318.34 s` |
+| CuPy, `complex128/complex128` | `5.36 s` | `2.18 s` | `43.75 s` | `54.81 s` |
+| NumPy, `complex64/complex128` | `147.22 s` | `2.09 s` | `10.59 s` | `305.05 s` |
+| CuPy, `complex64/complex128` | `4.53 s` | `0.27 s` | `1.74 s` | `10.07 s` |
 
 `*` One-iteration reference probe. Extrapolating its linear-solve time is
 useful for rough planning, but preparation and convergence behavior still need
 to be measured separately.
 
-Periodic postprocessing is also kept separate from the solve table. The
-periodic profiles measured the following representative pairwise W-cache-on
-field maps:
+The pairwise cache-on postprocessing phases use the primary solved result and
+are independent of Krylov convergence:
 
-| periodic backend and dtype | xy slice | xz slice |
-| --- | ---: | ---: |
-| NumPy, `complex128/complex128` | `1.5 s` | `1458.5 s` |
-| CuPy, `complex128/complex128` | `1.4 s` | `47.9 s` |
+| backend and dtype | exterior xy | interior xy | vertical xz |
+| --- | ---: | ---: | ---: |
+| NumPy, `complex128/complex128` | `1.40 s` | `1515.71 s` | `1624.09 s` |
+| CuPy, `complex128/complex128` | `1.37 s` | `11.49 s` | `10.02 s` |
+| NumPy, `complex64/complex128` | `1.38 s` | `1481.91 s` | `1600.28 s` |
+| CuPy, `complex64/complex128` | `1.40 s` | `7.75 s` | `9.69 s` |
 
-
-The direct dense rows are validation paths, not the intended scaling route. The
-source-streamed assembler discards each periodic W-block batch after writing
-its columns into `A`, avoiding a second dense-matrix-sized temporary cache. The
-cache-off periodic path is memory-light, but it recomputes periodic Ewald work
-on every Krylov matvec. For large periodic runs, explicit W-block caching is
-currently the practical path when memory permits. On CuPy, the cache-on path
-now stores the accepted dense cache as one contiguous device matrix and applies
-it with a single GEMV/GEMM per matvec instead of repeating source-block
-contractions. The NumPy cache-on path retains its source-block cache because
-converting its Python block dictionary would temporarily duplicate a
-dense-matrix-sized allocation. Profiling shows that the
-cache-off cost is dominated by shifted-reciprocal Ewald arithmetic rather than
-the final tensor contraction, so direct-to-output fusion is not presently a
-compelling option.
+The interior plane is the occupied-slab midpoint (`z=1488.49 nm`; 872 of
+10,201 pixels are inside particles for this seed) and is saved as
+`nearfield_xy_interior_total.npz`. The direct rows are validation paths rather
+than a production scaling route; cache-off remains memory-light but recomputes
+periodic Ewald work on every Krylov matvec.
 
 ## Periodic optimization notes
 
@@ -334,9 +348,9 @@ compelling option.
   `O(N Q)` lateral phase table and `O(K (2*lmax+1)^2)` compact exact-near
   structural cache. These are part of the Rayleigh repeated-apply design, not a
   leaked dense W matrix. Structural sums are accumulated in complex128 and then
-  stored once in the selected compute dtype; a complex64 cache therefore uses
-  half the persistent bytes of a complex128 cache without changing the current
-  complex64 matvec arithmetic. Time preparation separately from warmed
+  contracted and stored once in the selected compute dtype; a complex64 cache
+  therefore uses half the persistent bytes of a complex128 cache and performs
+  its repeated contractions in complex64. Time preparation separately from warmed
   matvecs: the first direct `apply()` includes any preparation that has not
   already been requested through `populate_coupling()`.
 - Before allocating a CuPy exact-near cache, pyceles estimates its compact byte

@@ -4,7 +4,8 @@
 This script is the periodic counterpart of ``profile_pyceles_phases.py``.  It
 uses the 500 sphere radii and refractive indices from ``examples/sphere_parameters.txt``
 exactly once, places them into a random non-overlapping periodic cube, and
-profiles the periodic solve plus optional near-field xy/xz maps.
+profiles the periodic solve plus optional near-field exterior-xy, interior-xy,
+and xz maps.
 
 The default periodic cube side is chosen to keep the particle filling fraction
 roughly comparable to the finite CELES example cluster.  The original cluster's
@@ -15,8 +16,11 @@ sphere-inclusive extents are approximately
 Using the largest of these as the diameter of an equivalent sphere gives a
 volume-matched cube side of 2878.29 nm, rounded to 3000 nm.
 
-Near-field maps are plotted with a resolution of 30 nm, to create maps with a
-comparable number of pixels to the non-periodic example configuration.
+Near-field maps are evaluated with a resolution of 30 nm, to create maps with a
+comparable number of pixels to the non-periodic example configuration.  The
+profile includes both an exterior xy plane (above the particle slab) and an
+interior xy plane (at the midpoint of the occupied slab), in addition to the
+vertical xz map.
 """
 
 from __future__ import annotations
@@ -387,14 +391,43 @@ def _default_xy_nearfield_z(geom: GeneratedGeometry) -> float:
     return top_surface + 2.0 * rmax
 
 
+def _xy_slab_bounds(geom: GeneratedGeometry) -> tuple[float, float]:
+    """Return the finite z interval occupied by the generated particle slab."""
+    z_positions = np.asarray(geom.positions[:, 2], dtype=float)
+    radii = np.asarray(geom.radii, dtype=float)
+    z_lower = z_positions - radii
+    z_upper = z_positions + radii
+    zmin = float(np.min(z_lower))
+    zmax = float(np.max(z_upper))
+    if not np.isfinite(zmin) or not np.isfinite(zmax) or not zmin < zmax:
+        raise ValueError(f"Generated geometry has invalid z slab bounds: {zmin!r}, {zmax!r}.")
+    return zmin, zmax
+
+
+def _default_xy_interior_nearfield_z(geom: GeneratedGeometry) -> float:
+    """Choose a reproducible horizontal plane strictly inside the particle slab."""
+    zmin, zmax = _xy_slab_bounds(geom)
+    return 0.5 * (zmin + zmax)
+
+
+def _resolve_xy_interior_nearfield_z(geom: GeneratedGeometry, requested_z: float | None) -> float:
+    value = _default_xy_interior_nearfield_z(geom) if requested_z is None else float(requested_z)
+    zmin, zmax = _xy_slab_bounds(geom)
+    if not zmin < value < zmax:
+        raise ValueError(
+            "The interior xy plane must lie strictly inside the occupied particle slab: "
+            f"z={value:g} nm, bounds=({zmin:g}, {zmax:g}) nm."
+        )
+    return value
+
+
 def _nearfield_z_extent(
     geom: GeneratedGeometry, *, excess_nm: float | None = None
 ) -> tuple[float, float]:
+    zmin, zmax = _xy_slab_bounds(geom)
     rmax = float(np.max(geom.radii))
     excess = 2.0 * rmax if excess_nm is None else float(excess_nm)
-    zmin = float(np.min(geom.positions[:, 2] - geom.radii)) - excess
-    zmax = float(np.max(geom.positions[:, 2] + geom.radii)) + excess
-    return zmin, zmax
+    return zmin - excess, zmax + excess
 
 
 def _field_bmax_for_evanescent_decay(*, k: float, distance_nm: float, decay: float) -> float:
@@ -444,12 +477,13 @@ def _resolved_field_bmax(
 def _save_nearfield_npz(path: Path, nf_slice: Any, field_bmax: float) -> dict[str, Any]:
     e_total = np.asarray(nf_slice.field_maps["total"][0], dtype=np.complex128)
     h_total = np.asarray(nf_slice.field_maps["total"][1], dtype=np.complex128)
+    inside = np.asarray(nf_slice.inside, dtype=bool)
     intensity = np.sum(np.abs(e_total) ** 2, axis=-1)
     np.savez_compressed(
         path,
         axis_0=np.asarray(nf_slice.axis_0, dtype=float),
         axis_1=np.asarray(nf_slice.axis_1, dtype=float),
-        inside=np.asarray(nf_slice.inside, dtype=bool),
+        inside=inside,
         E_total=e_total,
         H_total=h_total,
         intensity=intensity,
@@ -463,6 +497,8 @@ def _save_nearfield_npz(path: Path, nf_slice: Any, field_bmax: float) -> dict[st
         "intensity_min": float(np.nanmin(intensity)),
         "intensity_max": float(np.nanmax(intensity)),
         "intensity_mean": float(np.nanmean(intensity)),
+        "inside_count": int(np.count_nonzero(inside)),
+        "inside_fraction": float(np.count_nonzero(inside) / max(inside.size, 1)),
         "field_bmax": float(field_bmax),
     }
 
@@ -623,6 +659,16 @@ def main() -> None:
     parser.add_argument("--field-evanescent-decay", type=float, default=8.0)
     parser.add_argument("--nearfield-excess-nm", type=float, default=None)
     parser.add_argument("--nearfield-z-nm", type=float, default=None)
+    parser.add_argument(
+        "--nearfield-interior-z-nm",
+        type=float,
+        default=None,
+        help=(
+            "Interior horizontal xy-plane z coordinate in nm. By default, use the "
+            "midpoint of the occupied particle slab; the value must lie strictly "
+            "inside that slab."
+        ),
+    )
     parser.add_argument("--skip-nearfield", action="store_true")
     parser.add_argument("--skip-final-residual-check", action="store_true")
     parser.add_argument("--top-n", type=int, default=80)
@@ -775,6 +821,7 @@ def main() -> None:
             if args.nearfield_z_nm is not None
             else _default_xy_nearfield_z(geom)
         )
+        xy_interior_z = _resolve_xy_interior_nearfield_z(geom, args.nearfield_interior_z_nm)
         zmin, zmax = _nearfield_z_extent(geom, excess_nm=args.nearfield_excess_nm)
         side = float(args.side_nm)
         nearfield_payload = {
@@ -814,6 +861,36 @@ def main() -> None:
         nearfield_payload["maps"]["xy"] = _save_nearfield_npz(
             out_dir / "nearfield_xy_total.npz", nf_xy, field_bmax
         ) | {"summary": xy_summary, "z_nm": float(xy_z)}
+
+        if not args.quiet:
+            print("Profiling phase: nearfield_xy_interior")
+        nf_xy_interior, xy_interior_summary = _profile_phase(
+            phase="nearfield_xy_interior",
+            out_dir=out_dir,
+            top_n=int(args.top_n),
+            fn=lambda: pcl.compute_periodic_near_field_slice(
+                run=primary_run,
+                plane="z",
+                plane_value=float(xy_interior_z),
+                axis_0_min=-0.5 * side,
+                axis_0_max=0.5 * side,
+                axis_1_min=-0.5 * side,
+                axis_1_max=0.5 * side,
+                dx=float(args.dx),
+                field_bmax=float(field_bmax),
+                center_pixel_policy="none",
+                show_progress=not bool(args.quiet),
+            ),
+            synchronize_gpu=primary_run.config.resolved_postprocessing_backend() == "cupy",
+            cuda_profiler_api=bool(
+                args.cuda_profiler_api
+                and primary_run.config.resolved_postprocessing_backend() == "cupy"
+            ),
+        )
+        phases.append(xy_interior_summary)
+        nearfield_payload["maps"]["xy_interior"] = _save_nearfield_npz(
+            out_dir / "nearfield_xy_interior_total.npz", nf_xy_interior, field_bmax
+        ) | {"summary": xy_interior_summary, "z_nm": float(xy_interior_z)}
 
         if not args.quiet:
             print("Profiling phase: nearfield_xz")
@@ -885,6 +962,11 @@ def main() -> None:
             "output_bmax": None if args.output_bmax is None else float(args.output_bmax),
             "field_bmax": None if args.field_bmax is None else float(args.field_bmax),
             "field_evanescent_decay": float(args.field_evanescent_decay),
+            "nearfield_interior_z_nm": (
+                None
+                if args.nearfield_interior_z_nm is None
+                else float(args.nearfield_interior_z_nm)
+            ),
             "skip_nearfield": bool(args.skip_nearfield),
             "skip_final_residual_check": bool(args.skip_final_residual_check),
             "cuda_profiler_api": bool(args.cuda_profiler_api),
