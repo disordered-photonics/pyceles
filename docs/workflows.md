@@ -391,6 +391,7 @@ def M_inv_mv(v):
     # Replace this identity with the desired approximate inverse.
     return v
 
+
 cfg = pcl.SimulationConfig(
     solver_method="gmres",
     solver_preconditioner=M_inv_mv,

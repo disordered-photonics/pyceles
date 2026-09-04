@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-05
+
 ### Added
 - Added an opt-in hybrid periodic coupling method (`method="rayleigh"`) for
   NumPy and CuPy. It evaluates a particle-safe vertical near band with exact

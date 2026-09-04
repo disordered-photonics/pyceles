@@ -1,7 +1,8 @@
 # Installation
 
-pyceles currently targets Python 3.12 and uses a `src/`-layout package with
-project metadata in `pyproject.toml`.
+pyceles requires Python 3.12 or newer and uses a `src/`-layout package with
+project metadata in `pyproject.toml`. The current release metadata lists
+CPython 3.12, 3.13, and 3.14.
 
 ## Development checkout
 

@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=70", "wheel"]
+requires = ["setuptools>=84", "wheel>=0.48"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyceles"
-version = "0.4.0"
+version = "0.5.0"
 description = "Reference implementation of CELES-style many-particle T-matrix scattering with NumPy and CuPy backends."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -19,6 +19,8 @@ classifiers = [
   "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
   "Topic :: Scientific/Engineering :: Physics",
   "Operating System :: OS Independent",
 ]
@@ -28,32 +30,32 @@ dependencies = [
   "scipy~=1.18",
   "matplotlib~=3.11",
   "h5py~=3.16",
-  "tqdm~=4.69",
+  "tqdm~=4.70",
 ]
 
 [project.optional-dependencies]
 # Exact contributor-tool pins intentionally mirror the isolated pre-commit
 # environments. Runtime requirements above remain library-friendly ranges.
 dev = [
-  "numpy==2.5.1",
-  "scipy==1.18.0",
-  "scipy-stubs==1.18.0.1",
+  "numpy==2.5.2",
+  "scipy==1.18.1",
+  "scipy-stubs==1.18.1.0",
   "matplotlib==3.11.1",
   "h5py==3.16.0",
-  "tqdm==4.69.1",
-  "types-tqdm==4.69.0.20260724",
+  "tqdm==4.70.0",
+  "types-tqdm==4.70.0.20260827",
   "pytest==9.1.1",
-  "ruff==0.16.0",
-  "pre-commit==4.6.1",
+  "ruff==0.16.5",
+  "pre-commit==4.6.2",
   "nbstripout==0.9.1",
-  "mypy==2.3.0",
+  "mypy==2.3.1",
 ]
 notebooks = [
   "jupyter",
   "ipykernel",
 ]
 cupy = [
-  "cupy>=14.1.1",
+  "cupy>=14.2.0",
 ]
 
 [tool.setuptools]
