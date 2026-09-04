@@ -44,7 +44,8 @@ class PeriodicCouplingOperator:
     ``dtype`` controls stored coefficients and the public coupling output;
     ``accum_dtype`` controls sensitive Rayleigh scan recurrences. Generic
     Ewald structural sums retain their established complex128 reference
-    arithmetic before conversion at the operator boundary.
+    arithmetic, while the translation contraction and stored blocks use the
+    requested operator dtype.
     """
 
     lmax: int
@@ -126,7 +127,7 @@ class PeriodicCouplingOperator:
             tensor = translation_contraction_tensor(
                 lmax=int(self.lmax),
                 ab5=self.ab5,
-                dtype=np.result_type(self.ab5.dtype, self.dtype, np.complex64),
+                dtype=self.dtype,
             )
             self._structural_contraction_tensor = tensor
         return tensor

@@ -36,7 +36,13 @@ from pyceles.core.periodic.special import (
     shifted_delta_sequence_batched,
     upper_incomplete_gamma_int_or_halfint,
 )
-from pyceles.core.periodic.structural import direct_structural_sums_2d
+from pyceles.core.periodic.structural import (
+    apply_structural_sums_to_vector,
+    blocks_from_structural_sums,
+    direct_structural_sums_2d,
+    translation_contraction_tensor,
+)
+from pyceles.core.translation import translation_ab5_table
 
 
 def _lattice() -> pcl.RectangularLattice2D:
@@ -195,6 +201,59 @@ def test_batch_same_plane_rows_match_individual_evaluations() -> None:
         axis=0,
     )
     np.testing.assert_allclose(batch, expected, rtol=5e-12, atol=5e-12)
+
+
+def test_periodic_structural_contraction_honors_complex64_compute_dtype() -> None:
+    """c64/c128 contracts the completed c128 Ewald table in c64 arithmetic."""
+    rng = np.random.default_rng(42)
+    lmax = 1
+    nm = 6
+    order = 2 * lmax
+    sums = rng.normal(size=(3, order + 1, 2 * order + 1)) + 1j * rng.normal(
+        size=(3, order + 1, 2 * order + 1)
+    )
+    ab5 = translation_ab5_table(lmax, dtype=np.complex128)
+    tensor = translation_contraction_tensor(lmax=lmax, ab5=ab5, dtype=np.complex64)
+    actual = blocks_from_structural_sums(
+        lmax=lmax,
+        structural_sums=np.asarray(sums, dtype=np.complex128),
+        ab5=ab5,
+        dtype=np.complex64,
+        contraction_tensor=tensor,
+    )
+    expected = np.asarray(
+        np.einsum(
+            "dpm,ijpm->dij",
+            np.asarray(sums, dtype=np.complex64),
+            tensor,
+            optimize=True,
+        ),
+        dtype=np.complex64,
+    )
+    assert actual.dtype == np.dtype(np.complex64)
+    np.testing.assert_array_equal(actual, expected)
+
+    vector = rng.normal(size=nm) + 1j * rng.normal(size=nm)
+    actual_vec = apply_structural_sums_to_vector(
+        lmax=lmax,
+        structural_sums=np.asarray(sums, dtype=np.complex128),
+        ab5=ab5,
+        vector=vector,
+        dtype=np.complex64,
+        contraction_tensor=tensor,
+    )
+    expected_vec = np.asarray(
+        np.einsum(
+            "dpm,ijpm,j->di",
+            np.asarray(sums, dtype=np.complex64),
+            tensor,
+            np.asarray(vector, dtype=np.complex64),
+            optimize=True,
+        ),
+        dtype=np.complex64,
+    )
+    assert actual_vec.dtype == np.dtype(np.complex64)
+    np.testing.assert_array_equal(actual_vec, expected_vec)
 
 
 def test_batch_ewald_fails_fast_on_nonfinite_shell(

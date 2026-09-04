@@ -191,6 +191,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Ewald or hybrid Rayleigh coupling paths.
 
 ### Changed
+- Periodic NumPy structural contractions now honor `compute_dtype` while
+  retaining complex128 scalar Ewald accumulation for cancellation safety. The
+  mixed `complex64/complex128` policy therefore uses compact complex64
+  translation data without weakening the cancellation-sensitive Ewald sum.
 - Reduced CuPy MLFMM directional-transform upload and resident memory by using
   separable alpha/beta factors instead of dense sampled-direction matrices, so
   larger multilevel runs avoid avoidable out-of-memory failures.

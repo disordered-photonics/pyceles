@@ -213,7 +213,9 @@ def blocks_from_structural_sums(
     ``structural_sums`` can be either one table with shape ``(P, M)`` or a batch
     with shape ``(n_destinations, P, M)``. The returned array has shape
     ``(n_destinations, n_modes, n_modes)`` for batched input and
-    ``(n_modes, n_modes)`` for single-table input.
+    ``(n_modes, n_modes)`` for single-table input. ``dtype`` controls the
+    contraction and returned blocks even when the supplied structural table is
+    wider, as required by the periodic c64/c128 precision policy.
     """
     out_dtype = np.dtype(dtype)
     lmax_i = int(lmax)
@@ -231,8 +233,14 @@ def blocks_from_structural_sums(
             f"{expected_sums_shape} or (n_destinations, {expected_sums_shape[0]}, {expected_sums_shape[1]}). "
             f"Got {np.asarray(structural_sums).shape}."
         )
+    # Structural Ewald tables may be retained in c128 to protect their
+    # cancellation-heavy lattice sum, while the requested operator dtype still
+    # controls the actual translation contraction.  This mirrors the finite
+    # pairwise path: c64/c128 therefore performs the dense contraction in c64
+    # without weakening the scalar Ewald reference arithmetic.
+    block_dtype = np.result_type(out_dtype, np.complex64)
     tensor = (
-        translation_contraction_tensor(lmax=lmax_i, ab5=ab5)
+        translation_contraction_tensor(lmax=lmax_i, ab5=ab5, dtype=block_dtype)
         if contraction_tensor is None
         else np.asarray(contraction_tensor)
     )
@@ -241,7 +249,6 @@ def blocks_from_structural_sums(
         raise ValueError(
             f"`contraction_tensor` must have shape {expected_tensor_shape}. Got {tensor.shape}."
         )
-    block_dtype = np.result_type(sums.dtype, tensor.dtype, np.complex64)
     blocks = np.einsum(
         "dpm,ijpm->dij",
         np.asarray(sums, dtype=block_dtype),
@@ -301,8 +308,9 @@ def apply_structural_sums_to_vector(
             f"(n_destinations, {expected_sums_shape[0]}, {expected_sums_shape[1]}). "
             f"Got {sums.shape}."
         )
+    result_dtype = np.result_type(out_dtype, np.complex64)
     tensor = (
-        translation_contraction_tensor(lmax=lmax_i, ab5=ab5)
+        translation_contraction_tensor(lmax=lmax_i, ab5=ab5, dtype=result_dtype)
         if contraction_tensor is None
         else np.asarray(contraction_tensor)
     )
@@ -311,8 +319,7 @@ def apply_structural_sums_to_vector(
         raise ValueError(
             f"`contraction_tensor` must have shape {expected_tensor_shape}. Got {tensor.shape}."
         )
-    vec = np.asarray(vector, dtype=np.result_type(out_dtype, np.complex64)).reshape(nm)
-    result_dtype = np.result_type(sums.dtype, tensor.dtype, vec.dtype, np.complex64)
+    vec = np.asarray(vector, dtype=result_dtype).reshape(nm)
     result = np.einsum(
         "dpm,ijpm,j->di",
         np.asarray(sums, dtype=result_dtype),

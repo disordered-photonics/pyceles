@@ -313,6 +313,49 @@ def test_prepare_matvec_periodic_returns_ewald_operator() -> None:
     np.testing.assert_allclose(prepared.apply_W(x), expected, rtol=1e-12, atol=1e-12)
 
 
+def test_prepare_matvec_periodic_complex64_contraction_follows_operator_dtype() -> None:
+    spec = pcl.PeriodicSpec(
+        lattice=pcl.RectangularLattice2D(360.0, 390.0),
+        options=pcl.PeriodicOptions(
+            method="ewald",
+            eta=0.02,
+            real_shells=2,
+            reciprocal_shells=2,
+        ),
+    )
+    source = _plane_wave(polar_angle=0.2, azimuthal_angle=0.1)
+    prepared = prepare_matvec(
+        lmax=1,
+        k=2.0 * np.pi / 550.0,
+        particles=[_sphere(radius=10.0)],
+        n_medium=1.0 + 0j,
+        radial_lut_dr=1.0,
+        cache_translation_blocks=True,
+        periodic=spec,
+        k_parallel=pcl.core.plane_wave_k_parallel(source),
+        operator_dtype=np.complex64,
+        accum_dtype=np.complex128,
+        show_progress=False,
+    )
+
+    assert isinstance(prepared.coupling, PeriodicCouplingOperator)
+    coupling = prepared.coupling
+    assert coupling.ab5.dtype == np.dtype(np.complex64)
+    # Exercise the policy even if a caller supplies a wider translation table.
+    coupling.ab5 = translation_ab5_table(1, dtype=np.complex128)
+    assert coupling._contraction_tensor().dtype == np.dtype(np.complex64)
+
+    prepared.populate_coupling(show_progress=False)
+    assert coupling._ewald_block_cache
+    assert all(
+        block.dtype == np.dtype(np.complex64) for block in coupling._ewald_block_cache.values()
+    )
+
+    x = np.arange(n_modes(1), dtype=np.float32).astype(np.complex64) + np.complex64(0.25j)
+    y = prepared.apply_W(x)
+    assert y.dtype == np.dtype(np.complex64)
+
+
 def test_periodic_ewald_operator_matches_explicit_blocks_for_two_particle_cell() -> None:
     spec = pcl.PeriodicSpec(
         lattice=pcl.RectangularLattice2D(360.0, 390.0),
