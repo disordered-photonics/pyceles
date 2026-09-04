@@ -58,6 +58,7 @@ archetypes = (
         layer_refractive_indices=(1.8 + 0j, 1.5 + 0.01j),
     ),
 )
+positions = np.asarray([[0.0, 0.0, 0.0]], dtype=float)
 particles = pcl.ParticleCollection.from_archetypes(
     positions=positions,
     archetypes=archetypes,

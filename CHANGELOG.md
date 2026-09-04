@@ -116,7 +116,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - High-order periodic Ewald reciprocal structural sums now evaluate their
   factorial normalizations in log space, avoiding integer-to-float overflow
-  when large MLFMM closures are prepared.
+  in high-order structural evaluations.
 - High-order periodic Ewald real-space structural sums now advance a scaled
   radial recurrence, avoiding overflow and underflow from powers that cancel
   in the final structural coefficient.
@@ -135,9 +135,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   generalized-incomplete-gamma series. NumPy reuses cached upper-gamma shell
   coefficients, while the fused CuPy kernel evaluates the same short Horner
   expansion in-place without extra Ewald passes or host fallback.
-- Fixed high-order periodic Ewald structural batches exposed by MLFMM closure
-  preparation so large factorial values are converted with scalar square roots
-  rather than NumPy object-ufunc dispatch.
+- Fixed high-order periodic Ewald structural batches so large factorial values
+  are converted with scalar square roots rather than NumPy object-ufunc
+  dispatch.
 - Replaced the quadratic Python periodic circumsphere-overlap validator with
   the shared cKDTree broad phase used by finite geometries. Rectangular cells
   now apply minimum-image distances only in x and y, retain finite z, and

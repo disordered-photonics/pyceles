@@ -1,8 +1,7 @@
 # Capabilities
 
-This page keeps the detailed feature inventory out of the root README while
-preserving the implementation notes that are useful for future documentation,
-benchmark writeups, and paper drafting.
+This page summarizes supported capabilities and practical boundaries in more
+detail than the root README.
 
 ## Core conventions
 
@@ -22,7 +21,9 @@ Current source support includes:
 - Gaussian and Laguerre-Gaussian beams,
 - focused Laguerre-Gaussian beams,
 - Bessel beams,
-- SLM-modulated angular-spectrum sources,
+- Cartesian-polarized Bessel and focused Laguerre-Gaussian beams,
+- SLM-modulated angular-spectrum sources (`AngularSpectrumSLMSource` and
+  `SLMSource`),
 - local electric dipoles and dipole collections.
 
 Gaussian wavebundle support includes optimized normal-incidence kernels ported
@@ -201,6 +202,7 @@ Homogeneous rectangular 2D periodic-cell workflows currently include:
   `PeriodicOptions(method="rayleigh")`: one shared exact periodic self block, a
   configurable exact-Ewald vertical near band, and reciprocal Rayleigh
   upward/downward scans for vertically separated pairs,
+
 Periodic workflows remain experimental; current limits are documented in
 [limitations.md](limitations.md), and performance/convergence knobs are discussed
 in [performance.md](performance.md).

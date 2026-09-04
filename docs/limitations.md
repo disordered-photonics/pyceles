@@ -54,10 +54,10 @@ Current tested scope:
 
 Other periodic limitations include:
 
-- periodized MLFMM coupling (finite MLFMM remains available for nonperiodic clusters),
+- periodized MLFMM coupling is not implemented (finite MLFMM remains available
+  for nonperiodic clusters),
 - non-rectangular lattices,
 - reduced-cell local sources,
-- mixed-precision periodic production runs,
 
 The hybrid Rayleigh method is not a general cure for dense planar cells. Its
 exact-near cache scales with the number of directed non-self pairs inside the

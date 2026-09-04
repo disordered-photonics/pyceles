@@ -188,7 +188,8 @@ nf_mixed = pcl.compute_near_field_slice(polarized.mixed, ...)
 nf_te = pcl.compute_near_field_slice(polarized.te, ...)
 nf_tm = pcl.compute_near_field_slice(polarized.tm, ...)
 
-periodic_nf = pcl.compute_periodic_near_field_slice(periodic_polarized.mixed, ...)
+# For a periodic `PolarizationResult` named `periodic_result`:
+# periodic_nf = pcl.compute_periodic_near_field_slice(periodic_result.mixed, ...)
 I_unpolarized = pcl.io.unpolarized_far_field_intensity(polarized)
 ```
 
@@ -386,6 +387,10 @@ Warm starts are execution state, so they are passed to the operation rather
 than stored in the reusable configuration:
 
 ```python
+def M_inv_mv(v):
+    # Replace this identity with the desired approximate inverse.
+    return v
+
 cfg = pcl.SimulationConfig(
     solver_method="gmres",
     solver_preconditioner=M_inv_mv,

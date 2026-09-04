@@ -29,6 +29,24 @@ multi = simulation.run_sources({"left": source_a, "right": source_b})
 polarized = simulation.run_polarizations(jones_source)
 ```
 
+## Linear solvers and precision
+
+`SimulationConfig.solver_method` accepts `None`, `auto`, `direct`, `gmres`,
+`fgmres`, `lgmres`, `bicgstab`, and `gcrotmk`. NumPy/SciPy provides direct, GMRES,
+BiCGSTAB, LGMRES, and GCROTMK; CuPy provides direct and native GMRES,
+FGMRES, LGMRES, and BiCGSTAB. CuPy GMRES also handles a two-dimensional
+right-hand side with native block GMRES. `fgmres` is CuPy-only and `gcrotmk`
+is SciPy-only. With `None` (the high-level default), finite systems select
+BiCGSTAB and periodic systems select restarted GMRES. Explicit `auto` selects
+a direct solve below `solver_direct_max_n` and GMRES otherwise.
+
+`compute_dtype` controls compact operator and contraction arithmetic, while
+`accum_dtype` sets the wider precision budget for reductions on paths that
+support it. Native CuPy Krylov routines honor this policy; SciPy Krylov
+routines retain SciPy's own internal arithmetic. Periodic Ewald scalar lattice
+sums retain complex128 arithmetic for cancellation safety even when compact
+operator data use complex64.
+
 ## Particles
 
 Particle descriptors are passed to `Simulation`:
@@ -57,6 +75,9 @@ Common source descriptors include:
 - `pyceles.LaguerreGaussianBeam`
 - `pyceles.FocusedLaguerreGaussianBeam`
 - `pyceles.BesselBeam`
+- `pyceles.CartesianPolarizedBesselBeam`
+- `pyceles.CartesianPolarizedFocusedLaguerreGaussianBeam`
+- `pyceles.AngularSpectrumSLMSource`
 - `pyceles.SLMSource`
 - `pyceles.DipoleSource`
 - `pyceles.DipoleCollection`
@@ -128,7 +149,7 @@ Experimental periodic workflows use:
 - `pyceles.PeriodicSpec`
 - `pyceles.PeriodicOptions`
   - `method="ewald"`: exact pairwise Ewald operator (default),
-  - `method="directsum"`: small-case NumPy oracle,
+  - `method="directsum"`: small-case NumPy oracle (NumPy backend only),
   - `method="rayleigh"`: exact self/vertical-near Ewald plus far Rayleigh scans,
   - `rayleigh_z_cut`: exact-near half-band in the simulation length unit,
   - `rayleigh_reciprocal_shells`: fixed reciprocal square half-width or `None`
