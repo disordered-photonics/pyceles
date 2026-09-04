@@ -26,80 +26,116 @@ def _cuda_types(dtype_name: str) -> tuple[str, str, str, str, str]:
 
 
 @cache
-def _scan_kernel_source(dtype_name: str) -> tuple[str, str]:
-    scalar, complex_type, suffix, sincos, exponential = _cuda_types(dtype_name)
-    kernel_name = f"pyceles_rayleigh_scan_{suffix}"
+def _scan_kernel_source(
+    dtype_name: str,
+    accumulation_dtype_name: str | None = None,
+    indexed: bool = False,
+) -> tuple[str, str]:
+    storage_scalar, storage_complex, storage_suffix, _, _ = _cuda_types(dtype_name)
+    accum_name = dtype_name if accumulation_dtype_name is None else accumulation_dtype_name
+    accum_scalar, accum_complex, accum_suffix, sincos, exponential = _cuda_types(accum_name)
+    storage_dtype = np.dtype(dtype_name)
+    accum_dtype = np.dtype(accum_name)
+    if accum_dtype.itemsize < storage_dtype.itemsize:
+        raise ValueError(
+            "Rayleigh scan accumulation dtype cannot be narrower than source storage "
+            f"({storage_dtype.name}); got {accum_dtype.name}."
+        )
+    mixed = accum_dtype != storage_dtype
+    kernel_suffix = storage_suffix if not mixed else f"{storage_suffix}_accum_{accum_suffix}"
+    indexed_suffix = "_indexed" if indexed else ""
+    kernel_name = f"pyceles_rayleigh_scan_{kernel_suffix}{indexed_suffix}"
+    load_source = (
+        "source[src_idx]"
+        if not mixed
+        else f"{accum_complex}(({accum_scalar})source[src_idx].real(), "
+        f"({accum_scalar})source[src_idx].imag())"
+    )
+    store_output = (
+        "output[out_idx] = accumulator;"
+        if not mixed
+        else f"output[out_idx] = {storage_complex}(({storage_scalar})accumulator.real(), "
+        f"({storage_scalar})accumulator.imag());"
+    )
+    index_args = "    const int* q_indices,\n    const long long n_selected_q,\n" if indexed else ""
+    lane_count = "n_selected_q * n_pol * n_rhs" if indexed else "n_q * n_pol * n_rhs"
+    q_expr = "q_indices[temp / n_pol]" if indexed else "temp / n_pol"
     source = f"""
 #include <cupy/complex.cuh>
 
-__device__ inline {complex_type} pyceles_rayleigh_phase_{suffix}(
+__device__ inline {accum_complex} pyceles_rayleigh_phase_{kernel_suffix}(
     const complex<double> gamma,
     const double distance)
 {{
-    const {scalar} scaled_distance = ({scalar})distance;
-    const {scalar} gamma_imag = ({scalar})gamma.imag();
-    if (gamma_imag != ({scalar})0) {{
-        return {complex_type}(
+    const {accum_scalar} scaled_distance = ({accum_scalar})distance;
+    const {accum_scalar} gamma_imag = ({accum_scalar})gamma.imag();
+    if (gamma_imag != ({accum_scalar})0) {{
+        return {accum_complex}(
             {exponential}(-gamma_imag * scaled_distance),
-            ({scalar})0
+            ({accum_scalar})0
         );
     }}
-    {scalar} sine;
-    {scalar} cosine;
-    {sincos}(({scalar})gamma.real() * scaled_distance, &sine, &cosine);
-    return {complex_type}(cosine, sine);
+    {accum_scalar} sine;
+    {accum_scalar} cosine;
+    {sincos}(({accum_scalar})gamma.real() * scaled_distance, &sine, &cosine);
+    return {accum_complex}(cosine, sine);
 }}
 
 extern "C" __global__
 void {kernel_name}(
-    const {complex_type}* source,
+    const {storage_complex}* source,
     const double* z,
     const complex<double>* gamma,
     const long long n_particles,
     const long long n_q,
     const long long n_pol,
     const long long n_rhs,
+{index_args}
     const double z_cut,
     const int upward,
-    {complex_type}* output)
+    {storage_complex}* output)
 {{
     const long long lane = (long long)blockDim.x * blockIdx.x + threadIdx.x;
-    const long long n_lanes = n_q * n_pol * n_rhs;
+    const long long n_lanes = {lane_count};
     if (lane >= n_lanes) return;
     const long long rhs = lane % n_rhs;
     const long long temp = lane / n_rhs;
     const long long pol = temp % n_pol;
-    const long long q = temp / n_pol;
-    {complex_type} accumulator = {complex_type}(0.0, 0.0);
+    const long long q = {q_expr};
+    {accum_complex} accumulator = {accum_complex}(0.0, 0.0);
     if (upward != 0) {{
         long long pointer = 0;
         for (long long i = 0; i < n_particles; ++i) {{
             if (i > 0) {{
-                accumulator *= pyceles_rayleigh_phase_{suffix}(gamma[q], z[i] - z[i - 1]);
+                accumulator *= pyceles_rayleigh_phase_{kernel_suffix}(
+                    gamma[q], z[i] - z[i - 1]
+                );
             }}
             while (pointer < i && z[i] - z[pointer] > z_cut) {{
                 const long long src_idx = (((pointer * n_q + q) * n_pol + pol) * n_rhs + rhs);
-                accumulator += source[src_idx]
-                    * pyceles_rayleigh_phase_{suffix}(gamma[q], z[i] - z[pointer]);
+                accumulator += {load_source}
+                    * pyceles_rayleigh_phase_{kernel_suffix}(gamma[q], z[i] - z[pointer]);
                 ++pointer;
             }}
             const long long out_idx = (((i * n_q + q) * n_pol + pol) * n_rhs + rhs);
-            output[out_idx] = accumulator;
+            {store_output}
         }}
     }} else {{
         long long pointer = n_particles - 1;
         for (long long i = n_particles - 1; i >= 0; --i) {{
             if (i + 1 < n_particles) {{
-                accumulator *= pyceles_rayleigh_phase_{suffix}(gamma[q], z[i + 1] - z[i]);
+                accumulator *= pyceles_rayleigh_phase_{kernel_suffix}(
+                    gamma[q], z[i + 1] - z[i]
+                );
             }}
             while (pointer > i && z[pointer] - z[i] > z_cut) {{
                 const long long src_idx = (((pointer * n_q + q) * n_pol + pol) * n_rhs + rhs);
-                accumulator += source[src_idx]
-                    * pyceles_rayleigh_phase_{suffix}(gamma[q], z[pointer] - z[i]);
+                accumulator += {load_source}
+                    * pyceles_rayleigh_phase_{kernel_suffix}(gamma[q], z[pointer] - z[i]);
                 --pointer;
             }}
             const long long out_idx = (((i * n_q + q) * n_pol + pol) * n_rhs + rhs);
-            output[out_idx] = accumulator;
+            {store_output}
         }}
     }}
 }}
@@ -108,10 +144,59 @@ void {kernel_name}(
 
 
 @cache
-def _scan_kernel(dtype_name: str) -> Any:
+def _scan_kernel(
+    dtype_name: str,
+    accumulation_dtype_name: str | None = None,
+    indexed: bool = False,
+) -> Any:
     cp, _ = import_cupy()
-    name, source = _scan_kernel_source(dtype_name)
+    name, source = _scan_kernel_source(dtype_name, accumulation_dtype_name, indexed)
     return cp.RawKernel(source, name)
+
+
+def _scan_far_indexed_cupy(
+    *,
+    source_amplitudes: Any,
+    z: Any,
+    gamma: Any,
+    z_cut: float,
+    upward: bool,
+    q_indices: Any,
+    output: Any,
+    cupy: Any,
+    accumulation_dtype: Any,
+) -> None:
+    """Overwrite selected reciprocal modes with a wider scan recurrence."""
+    src = cupy.ascontiguousarray(source_amplitudes)
+    indices = cupy.ascontiguousarray(q_indices, dtype=cupy.int32)
+    n_particles, n_q, n_pol, n_rhs = (int(v) for v in src.shape)
+    n_selected = int(indices.size)
+    if n_selected == 0:
+        return
+    source_dtype = np.dtype(src.dtype)
+    accum_dtype = np.dtype(accumulation_dtype)
+    kernel = _scan_kernel(source_dtype.name, accum_dtype.name, True)
+    lanes = n_selected * n_pol * n_rhs
+    threads = 128
+    blocks = (lanes + threads - 1) // threads
+    kernel(
+        (blocks,),
+        (threads,),
+        (
+            src,
+            cupy.asarray(z, dtype=cupy.float64),
+            cupy.asarray(gamma, dtype=cupy.complex128),
+            np.int64(n_particles),
+            np.int64(n_q),
+            np.int64(n_pol),
+            np.int64(n_rhs),
+            indices,
+            np.int64(n_selected),
+            np.float64(z_cut),
+            np.int32(1 if upward else 0),
+            output,
+        ),
+    )
 
 
 @cache
@@ -421,14 +506,32 @@ def scan_far_cupy(
     z_cut: float,
     upward: bool,
     cupy: Any,
+    accumulation_dtype: Any | None = None,
 ) -> Any:
-    """Apply the stable delayed-entry scan on the device."""
+    """Apply the stable delayed-entry scan on the device.
+
+    ``accumulation_dtype`` normally follows the source dtype.  The one
+    supported mixed mode, complex64 storage with a complex128 recursive
+    state, is intentionally narrow: it improves only the long serial scan
+    without widening Rayleigh tables, GEMMs, or output storage.
+    """
     src = cupy.ascontiguousarray(source_amplitudes)
     if int(src.ndim) != 4:
         raise ValueError("`source_amplitudes` must have shape (N, Nq, 2, nrhs).")
+    source_dtype = np.dtype(src.dtype)
+    if source_dtype not in {np.dtype(np.complex64), np.dtype(np.complex128)}:
+        raise TypeError(f"Unsupported Rayleigh scan dtype {source_dtype!r}.")
+    accum_dtype = source_dtype if accumulation_dtype is None else np.dtype(accumulation_dtype)
+    if accum_dtype not in {np.dtype(np.complex64), np.dtype(np.complex128)}:
+        raise TypeError(f"Unsupported Rayleigh scan accumulation dtype {accum_dtype!r}.")
+    if accum_dtype.itemsize < source_dtype.itemsize:
+        raise ValueError(
+            "Rayleigh scan accumulation dtype cannot be narrower than source storage "
+            f"({source_dtype.name}); got {accum_dtype.name}."
+        )
     n_particles, n_q, n_pol, n_rhs = (int(v) for v in src.shape)
     out = cupy.empty_like(src)
-    kernel = _scan_kernel(np.dtype(src.dtype).name)
+    kernel = _scan_kernel(source_dtype.name, accum_dtype.name)
     lanes = n_q * n_pol * n_rhs
     threads = 128
     blocks = (lanes + threads - 1) // threads

@@ -8,6 +8,7 @@ from typing import Literal, cast
 import numpy as np
 import numpy.typing as npt
 
+from pyceles._dtypes import resolve_compute_accum_dtypes
 from pyceles._optional import import_cupy
 from pyceles.core.geometry_bounds import conservative_set_diameter
 from pyceles.core.indexing import n_modes
@@ -219,6 +220,7 @@ def prepare_matvec(
     radial_lut_dr: float,
     cache_translation_blocks: bool = False,
     operator_dtype: npt.DTypeLike = np.complex128,
+    accum_dtype: npt.DTypeLike | None = None,
     particle_t_group_factories: ParticleTGroupFactories | None = None,
     coupling_backend: Literal["pairwise", "mlfmm"] = "pairwise",
     mlfmm_options: MLFMMOptions | None = None,
@@ -227,7 +229,12 @@ def prepare_matvec(
     backend: Literal["numpy", "cupy"] = "numpy",
     show_progress: bool = False,
 ) -> PreparedOperator:
-    """Prepare reusable `A = I - T W` data from a particle collection."""
+    """Prepare reusable `A = I - T W` data from a particle collection.
+
+    ``operator_dtype`` controls stored operator arrays. ``accum_dtype`` is an
+    optional wider precision budget for sensitive reductions; it is consumed by
+    periodic coupling operators and defaults to the operator dtype here.
+    """
     part = ParticleCollection.from_particles(particles)
     positions = part.positions
     circumscribing_radii = part.circumscribing_radii
@@ -241,6 +248,10 @@ def prepare_matvec(
         raise ValueError(f"Unknown operator backend '{backend}'. Use 'numpy' or 'cupy'.")
 
     op_dtype = np.dtype(operator_dtype)
+    _, op_accum_dtype = resolve_compute_accum_dtypes(
+        compute_dtype=op_dtype,
+        accum_dtype=op_dtype if accum_dtype is None else accum_dtype,
+    )
     k_f = float(k)
     periodic_spec = periodic
     k_parallel_arr: np.ndarray | None = None
@@ -294,6 +305,7 @@ def prepare_matvec(
                 periodic=periodic_spec,
                 k_parallel=k_parallel_arr,
                 dtype=op_dtype,
+                accum_dtype=op_accum_dtype,
                 cache_blocks=bool(cache_translation_blocks),
                 circumscribing_radii=circumscribing_radii,
             )
@@ -372,6 +384,7 @@ def prepare_matvec(
                     periodic=periodic_spec,
                     k_parallel=k_parallel_arr,
                     dtype=op_dtype,
+                    accum_dtype=op_accum_dtype,
                     cache_blocks=bool(cache_translation_blocks),
                     circumscribing_radii=circumscribing_radii,
                 ),

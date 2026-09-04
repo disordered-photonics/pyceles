@@ -39,7 +39,13 @@ Array = np.ndarray
 
 @dataclass
 class PeriodicCouplingOperator:
-    """Bloch-reduced periodic coupling descriptor for rectangular 2D lattices."""
+    """Bloch-reduced periodic coupling descriptor for rectangular 2D lattices.
+
+    ``dtype`` controls stored coefficients and the public coupling output;
+    ``accum_dtype`` controls sensitive Rayleigh scan recurrences. Generic
+    Ewald structural sums retain their established complex128 reference
+    arithmetic before conversion at the operator boundary.
+    """
 
     lmax: int
     k: float
@@ -48,6 +54,7 @@ class PeriodicCouplingOperator:
     periodic: PeriodicSpec
     k_parallel: Array
     dtype: np.dtype
+    accum_dtype: np.dtype | None = None
     cache_blocks: bool = False
     circumscribing_radii: Array | None = None
     _ewald_block_cache: dict[tuple[int, int], Array] = field(
@@ -68,6 +75,17 @@ class PeriodicCouplingOperator:
 
     def __post_init__(self) -> None:
         self.dtype = np.dtype(self.dtype)
+        self.accum_dtype = self.dtype if self.accum_dtype is None else np.dtype(self.accum_dtype)
+        if self.accum_dtype not in {np.dtype(np.complex64), np.dtype(np.complex128)}:
+            raise TypeError(
+                "Periodic coupling accumulation requires complex64 or complex128; "
+                f"got {self.accum_dtype!r}."
+            )
+        if self.accum_dtype.itemsize < self.dtype.itemsize:
+            raise ValueError(
+                "Periodic coupling accumulation dtype cannot be narrower than the "
+                f"operator dtype ({self.dtype.name}); got {self.accum_dtype.name}."
+            )
         if self.periodic.options.method == "rayleigh" and self.cache_blocks:
             raise ValueError(
                 "`cache_translation_blocks=True` is incompatible with periodic "
@@ -278,7 +296,11 @@ class PeriodicCouplingOperator:
             arr = arr_raw.reshape(self.n_particles, self.n_modes, arr_raw.shape[1])
         else:
             raise ValueError(f"Input must be 1D or 2D. Got shape {arr_raw.shape}.")
-        y = apply_rayleigh_far_numpy(self._rayleigh_plan(), arr)
+        y = apply_rayleigh_far_numpy(
+            self._rayleigh_plan(),
+            arr,
+            accumulation_dtype=self.accum_dtype,
+        )
         y += np.einsum("ij,ajr->air", self._self_block(), arr, optimize=True)
         self._populate_near_structural_sums(show_progress=False)
         self._release_rayleigh_preparation_state()

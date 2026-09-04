@@ -133,8 +133,8 @@ def test_solve_sources_core_reuses_prepared_cache_and_broadcasts_warm_start(
             return np.asarray(b)
 
     def _fake_prepare_matvec(**kwargs):
-        del kwargs
         prepare_calls["count"] += 1
+        recorded["prepared_accum_dtype"] = kwargs["accum_dtype"]
         return _Prepared()
 
     def _fake_project_source_to_svwf(positions, lmax, source, **kwargs):
@@ -177,6 +177,7 @@ def test_solve_sources_core_reuses_prepared_cache_and_broadcasts_warm_start(
     )
     assert recorded["preconditioner"] is None
     assert np.dtype(cast(Any, recorded["accum_dtype"])) == np.dtype(accum_dtype)
+    assert np.dtype(cast(Any, recorded["prepared_accum_dtype"])) == np.dtype(accum_dtype)
     assert out0.coeffs["first"].shape == (1, 6)
     assert out0.coeffs["second"].shape == (1, 6)
     assert out1.rhs["first"].shape == (1, 6)

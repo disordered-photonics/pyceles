@@ -435,6 +435,73 @@ def test_rayleigh_point_scan_matches_explicit_far_blocks() -> None:
     np.testing.assert_allclose(actual, expected, rtol=2e-12, atol=2e-12)
 
 
+def test_rayleigh_scan_accumulation_dtype_preserves_c64_storage() -> None:
+    rng = np.random.default_rng(20260904)
+    n_particles = 257
+    z = np.sort(rng.uniform(-2200.0, 2200.0, size=n_particles))
+    k = 2.0 * np.pi / 366.6666666666667
+    gamma = np.asarray([0.8 * k + 0.0j, 0.015 * k + 0.0j], dtype=np.complex128)
+    source = (
+        rng.normal(size=(n_particles, 2, 2, 1)) + 1j * rng.normal(size=(n_particles, 2, 2, 1))
+    ).astype(np.complex64)
+
+    reference = rayleigh_module._scan_far_numpy(
+        source_amplitudes=source.astype(np.complex128),
+        z=z,
+        gamma=gamma,
+        z_cut=366.6666666666667,
+        upward=True,
+    ).astype(np.complex64)
+    standard = rayleigh_module._scan_far_numpy(
+        source_amplitudes=source,
+        z=z,
+        gamma=gamma,
+        z_cut=366.6666666666667,
+        upward=True,
+    )
+    wide = rayleigh_module._scan_far_numpy(
+        source_amplitudes=source,
+        z=z,
+        gamma=gamma,
+        z_cut=366.6666666666667,
+        upward=True,
+        accumulation_dtype=np.complex128,
+    )
+
+    assert wide.dtype == np.dtype(np.complex64)
+    standard_error = np.linalg.norm(standard.astype(np.complex128) - reference)
+    wide_error = np.linalg.norm(wide.astype(np.complex128) - reference)
+    np.testing.assert_allclose(wide, reference, rtol=5e-7, atol=5e-7)
+    assert wide_error < 0.05 * standard_error
+
+
+def test_rayleigh_long_lived_scan_modes_follow_physical_damping() -> None:
+    gamma = np.asarray(
+        [
+            0.01 + 0.0j,
+            0.0 + 2.0e-4j,
+            0.0 + 4.0e-3j,
+        ],
+        dtype=np.complex128,
+    )
+    indices = rayleigh_module._long_lived_scan_mode_indices(
+        gamma,
+        z_span=10_000.0,
+        z_cut=366.0,
+        storage_dtype=np.complex64,
+    )
+    np.testing.assert_array_equal(indices, np.asarray([0, 1], dtype=np.int64))
+    assert (
+        rayleigh_module._long_lived_scan_mode_indices(
+            gamma,
+            z_span=10_000.0,
+            z_cut=366.0,
+            storage_dtype=np.complex128,
+        ).size
+        == 0
+    )
+
+
 def test_hybrid_interior_local_l1_matches_exact_ewald() -> None:
     lmax = 2
     k = 2.0 * np.pi / 550.0
@@ -1008,6 +1075,8 @@ def test_prepare_matvec_passes_particle_radii_to_default_rayleigh_band() -> None
         n_medium=1.0 + 0.0j,
         radial_lut_dr=1.0,
         cache_translation_blocks=False,
+        operator_dtype=np.complex64,
+        accum_dtype=np.complex128,
         periodic=PeriodicSpec(
             lattice=pcl.RectangularLattice2D(900.0, 850.0),
             options=PeriodicOptions(
@@ -1024,6 +1093,7 @@ def test_prepare_matvec_passes_particle_radii_to_default_rayleigh_band() -> None
     )
 
     assert isinstance(prepared.coupling, PeriodicCouplingOperator)
+    assert prepared.coupling.accum_dtype == np.dtype(np.complex128)
     assert prepared.coupling._rayleigh_plan().z_cut == pytest.approx(wavelength)
 
 

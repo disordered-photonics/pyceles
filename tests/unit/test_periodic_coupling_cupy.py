@@ -15,10 +15,12 @@ from pyceles.core.operators import (
     prepare_matvec,
 )
 from pyceles.core.periodic import PeriodicOptions, PeriodicSpec
-from pyceles.core.periodic.rayleigh import build_rayleigh_plan
+from pyceles.core.periodic.rayleigh import _scan_far_numpy, build_rayleigh_plan
 from pyceles.core.periodic.rayleigh_cupy import (
+    _scan_far_indexed_cupy,
     apply_rayleigh_far_to_points_cupy,
     apply_sparse_near_coupling_cupy,
+    scan_far_cupy,
 )
 from pyceles.core.translation import translation_ab5_table
 from pyceles.postprocessing.nearfield.periodic_interior import (
@@ -229,16 +231,18 @@ def test_periodic_cupy_dense_assembly_from_cached_blocks_matches_matvec(
 
 @pytest.mark.parametrize("cache_residency", ["device", "host"])
 @pytest.mark.parametrize(
-    ("dtype", "rtol", "atol"),
+    ("dtype", "accum_dtype", "rtol", "atol"),
     [
-        (np.complex128, 2e-9, 2e-10),
-        (np.complex64, 4e-5, 4e-6),
+        (np.complex128, np.complex128, 2e-9, 2e-10),
+        (np.complex64, np.complex64, 4e-5, 4e-6),
+        (np.complex64, np.complex128, 4e-5, 4e-6),
     ],
 )
 def test_periodic_cupy_rayleigh_hybrid_matches_numpy_scan_and_near_cache(
     cupy_runtime: tuple[Any, Any],
     monkeypatch: pytest.MonkeyPatch,
     dtype: Any,
+    accum_dtype: Any,
     rtol: float,
     atol: float,
     cache_residency: str,
@@ -276,8 +280,8 @@ def test_periodic_cupy_rayleigh_hybrid_matches_numpy_scan_and_near_cache(
         cache_blocks=False,
         circumscribing_radii=np.full(positions.shape[0], 40.0),
     )
-    cpu = PeriodicCouplingOperator(**cast(Any, kwargs))
-    gpu = CuPyPeriodicCouplingOperator(**cast(Any, kwargs))
+    cpu = PeriodicCouplingOperator(**cast(Any, kwargs), accum_dtype=np.dtype(accum_dtype))
+    gpu = CuPyPeriodicCouplingOperator(**cast(Any, kwargs), accum_dtype=np.dtype(accum_dtype))
     monkeypatch.setattr(gpu, "_near_apply_batch_size", lambda **_kwargs: 1)
     if cache_residency == "host":
         gpu._near_cache_memory_plan = replace(gpu._near_cache_plan(), residency="host")
@@ -350,6 +354,114 @@ def test_periodic_cupy_sparse_rayleigh_near_kernel_matches_dense_lmax4(
             )
 
     np.testing.assert_allclose(cp.asnumpy(target), expected, rtol=5e-5, atol=8e-5)
+
+
+def test_periodic_cupy_rayleigh_wide_scan_state_matches_c128_recurrence(
+    cupy_runtime: tuple[Any, Any],
+) -> None:
+    cp, _ = cupy_runtime
+    rng = np.random.default_rng(20260904)
+    n_particles = 257
+    n_q = 7
+    z = np.sort(rng.uniform(-2200.0, 2200.0, size=n_particles))
+    k = 2.0 * np.pi / 366.6666666666667
+    rho = np.linspace(0.25 * k, 2.5 * k, n_q)
+    gamma = np.sqrt((k * k - rho * rho) + 0.0j).astype(np.complex128)
+    source = (
+        rng.normal(size=(n_particles, n_q, 2, 1)) + 1j * rng.normal(size=(n_particles, n_q, 2, 1))
+    ).astype(np.complex64)
+
+    for upward in (True, False):
+        reference = _scan_far_numpy(
+            source_amplitudes=source.astype(np.complex128),
+            z=z,
+            gamma=gamma,
+            z_cut=366.6666666666667,
+            upward=upward,
+        ).astype(np.complex64)
+        standard = scan_far_cupy(
+            source_amplitudes=cp.asarray(source),
+            z=cp.asarray(z),
+            gamma=cp.asarray(gamma),
+            z_cut=366.6666666666667,
+            upward=upward,
+            cupy=cp,
+        )
+        wide = scan_far_cupy(
+            source_amplitudes=cp.asarray(source),
+            z=cp.asarray(z),
+            gamma=cp.asarray(gamma),
+            z_cut=366.6666666666667,
+            upward=upward,
+            cupy=cp,
+            accumulation_dtype=np.complex128,
+        )
+        cp.cuda.Stream.null.synchronize()
+
+        standard_error = np.linalg.norm(cp.asnumpy(standard).astype(np.complex128) - reference)
+        wide_error = np.linalg.norm(cp.asnumpy(wide).astype(np.complex128) - reference)
+        np.testing.assert_allclose(cp.asnumpy(wide), reference, rtol=2e-6, atol=2e-6)
+        assert wide_error < standard_error
+
+
+def test_periodic_cupy_rayleigh_indexed_wide_scan_overwrites_only_selected_modes(
+    cupy_runtime: tuple[Any, Any],
+) -> None:
+    cp, _ = cupy_runtime
+    rng = np.random.default_rng(17)
+    n_particles = 97
+    n_q = 7
+    z = np.sort(rng.uniform(-1500.0, 1500.0, size=n_particles))
+    k = 2.0 * np.pi / 366.6666666666667
+    rho = np.linspace(0.2 * k, 2.0 * k, n_q)
+    gamma = np.sqrt((k * k - rho * rho) + 0.0j).astype(np.complex128)
+    source = (
+        rng.normal(size=(n_particles, n_q, 2, 1)) + 1j * rng.normal(size=(n_particles, n_q, 2, 1))
+    ).astype(np.complex64)
+    source_gpu = cp.asarray(source)
+    z_gpu = cp.asarray(z)
+    gamma_gpu = cp.asarray(gamma)
+    selected = np.asarray([0, 3, 6], dtype=np.int32)
+
+    standard = scan_far_cupy(
+        source_amplitudes=source_gpu,
+        z=z_gpu,
+        gamma=gamma_gpu,
+        z_cut=366.6666666666667,
+        upward=True,
+        cupy=cp,
+    )
+    expected_wide = scan_far_cupy(
+        source_amplitudes=source_gpu,
+        z=z_gpu,
+        gamma=gamma_gpu,
+        z_cut=366.6666666666667,
+        upward=True,
+        cupy=cp,
+        accumulation_dtype=np.complex128,
+    )
+    actual = standard.copy()
+    _scan_far_indexed_cupy(
+        source_amplitudes=source_gpu,
+        z=z_gpu,
+        gamma=gamma_gpu,
+        z_cut=366.6666666666667,
+        upward=True,
+        q_indices=cp.asarray(selected),
+        output=actual,
+        cupy=cp,
+        accumulation_dtype=np.complex128,
+    )
+    cp.cuda.Stream.null.synchronize()
+
+    selected_host = cp.asnumpy(actual[:, selected])
+    expected_host = cp.asnumpy(expected_wide[:, selected])
+    np.testing.assert_allclose(selected_host, expected_host, rtol=2e-6, atol=2e-6)
+    unselected = np.asarray([1, 2, 4, 5], dtype=np.int32)
+    np.testing.assert_array_equal(
+        cp.asnumpy(actual[:, unselected]),
+        cp.asnumpy(standard[:, unselected]),
+    )
 
 
 def test_periodic_cupy_rayleigh_auto_eta_stays_finite_for_large_cell(

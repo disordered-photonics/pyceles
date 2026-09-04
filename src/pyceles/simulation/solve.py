@@ -381,6 +381,8 @@ def _prepare_linear_system(
         sim._prepared_operator_cache is not None
         and sim._prepared_operator_dtype is not None
         and sim._prepared_operator_dtype == compute_dtype
+        and sim._prepared_operator_accum_dtype is not None
+        and sim._prepared_operator_accum_dtype == accum_dtype
         and sim._prepared_operator_periodic_key == periodic_key
     )
     if operator_is_current:
@@ -395,6 +397,7 @@ def _prepare_linear_system(
             radial_lut_dr=cfg.radial_lut_dr,
             cache_translation_blocks=cfg.cache_translation_blocks,
             operator_dtype=compute_dtype,
+            accum_dtype=accum_dtype,
             coupling_backend=cfg.coupling_backend,
             mlfmm_options=cfg.mlfmm_options,
             periodic=cfg.periodic,
@@ -405,6 +408,7 @@ def _prepare_linear_system(
         phase_timings["prepare_operator_s"] = time.perf_counter() - prepare_t0
         sim._prepared_operator_cache = prepared
         sim._prepared_operator_dtype = compute_dtype
+        sim._prepared_operator_accum_dtype = accum_dtype
         sim._prepared_operator_periodic_key = periodic_key
         sim._dense_operator_cache = None
         sim._dense_operator_dtype = None

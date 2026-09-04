@@ -46,6 +46,7 @@ class Simulation:
     _circumscribing_radii: np.ndarray
     _prepared_operator_cache: PreparedOperator | None
     _prepared_operator_dtype: np.dtype | None
+    _prepared_operator_accum_dtype: np.dtype | None
     _prepared_operator_periodic_key: tuple[float, float] | None
     _dense_operator_cache: np.ndarray | None
     _dense_operator_dtype: np.dtype | None
@@ -86,6 +87,7 @@ class Simulation:
         """
         self._prepared_operator_cache = None
         self._prepared_operator_dtype = None
+        self._prepared_operator_accum_dtype = None
         self._prepared_operator_periodic_key = None
         self._dense_operator_cache = None
         self._dense_operator_dtype = None

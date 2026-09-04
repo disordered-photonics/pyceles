@@ -26,13 +26,18 @@ from pyceles.core.periodic.rayleigh import (
     RAYLEIGH_TRANSIENT_WORKSPACE_BYTES,
     RayleighNearCacheEstimate,
     RayleighPlan,
+    _long_lived_scan_mode_indices,
     near_pair_csr,
     prepare_rayleigh_plan,
     rayleigh_near_cache_estimate,
     resolve_rayleigh_mode_chunk_size,
     valid_structural_indices,
 )
-from pyceles.core.periodic.rayleigh_cupy import apply_sparse_near_coupling_cupy, scan_far_cupy
+from pyceles.core.periodic.rayleigh_cupy import (
+    _scan_far_indexed_cupy,
+    apply_sparse_near_coupling_cupy,
+    scan_far_cupy,
+)
 from pyceles.core.periodic.scalar import structural_sum_m_normalization
 from pyceles.core.periodic.structural import (
     sparse_translation_contraction,
@@ -107,6 +112,9 @@ class CuPyPeriodicCouplingOperator:
     and remains source-batched when dense block caching is disabled. Hybrid
     Rayleigh coupling keeps the reciprocal scan on device and places its compact
     exact-near cache on device or host according to the guarded memory plan.
+    ``dtype`` controls device storage and output, while ``accum_dtype`` is the
+    requested precision budget for the Rayleigh scan recurrence. The c64/c128
+    policy selectively widens only physically long-lived reciprocal modes.
     """
 
     lmax: int
@@ -116,6 +124,7 @@ class CuPyPeriodicCouplingOperator:
     periodic: PeriodicSpec
     k_parallel: Array
     dtype: np.dtype
+    accum_dtype: np.dtype | None = None
     cache_blocks: bool = False
     circumscribing_radii: Array | None = None
     _positions_gpu: Any | None = field(default=None, init=False, repr=False)
@@ -146,10 +155,21 @@ class CuPyPeriodicCouplingOperator:
 
     def __post_init__(self) -> None:
         self.dtype = np.dtype(self.dtype)
+        self.accum_dtype = self.dtype if self.accum_dtype is None else np.dtype(self.accum_dtype)
         if self.dtype not in (np.dtype(np.complex64), np.dtype(np.complex128)):
             raise TypeError(
                 "CuPy periodic coupling supports only complex64 and complex128. "
                 f"Got {self.dtype!r}."
+            )
+        if self.accum_dtype not in (np.dtype(np.complex64), np.dtype(np.complex128)):
+            raise TypeError(
+                "CuPy periodic coupling accumulation requires complex64 or complex128. "
+                f"Got {self.accum_dtype!r}."
+            )
+        if self.accum_dtype.itemsize < self.dtype.itemsize:
+            raise ValueError(
+                "CuPy periodic coupling accumulation dtype cannot be narrower than the "
+                f"operator dtype ({self.dtype.name}); got {self.accum_dtype.name}."
             )
         if self.periodic.options.method not in {"ewald", "rayleigh"}:
             raise NotImplementedError(
@@ -682,6 +702,8 @@ class CuPyPeriodicCouplingOperator:
         weights = self._rayleigh_device_array("weights", plan.weights, dtype=self.dtype)
         arr_sorted = arr[order]
         y_sorted = cp.zeros_like(arr_sorted)
+        accum_dtype = np.dtype(self.accum_dtype)
+        z_span = float(plan.sorted_z[-1] - plan.sorted_z[0]) if plan.sorted_z.size else 0.0
         chunk = resolve_rayleigh_mode_chunk_size(
             n_modes_reciprocal=plan.n_modes_reciprocal,
             n_particles=int(arr.shape[0]),
@@ -692,6 +714,25 @@ class CuPyPeriodicCouplingOperator:
             stop = min(plan.n_modes_reciprocal, start + chunk)
             phase = phase_all[:, start:stop]
             gamma = gamma_all[start:stop]
+            wide_indices = (
+                _long_lived_scan_mode_indices(
+                    plan.gamma[start:stop],
+                    z_span=z_span,
+                    z_cut=float(plan.z_cut),
+                    storage_dtype=self.dtype,
+                )
+                if accum_dtype.itemsize > self.dtype.itemsize
+                else np.empty((0,), dtype=np.int64)
+            )
+            wide_indices_gpu = (
+                self._rayleigh_device_array(
+                    f"scan_wide_indices_{start}_{stop}",
+                    wide_indices,
+                    dtype=cp.int32,
+                )
+                if wide_indices.size
+                else None
+            )
             for direction, upward in ((0, True), (1, False)):
                 source = cp.einsum(
                     "qpm,amr->aqpr",
@@ -700,14 +741,37 @@ class CuPyPeriodicCouplingOperator:
                     optimize=True,
                 )
                 source *= cp.conjugate(phase)[:, :, None, None]
-                incoming = scan_far_cupy(
-                    source_amplitudes=source,
-                    z=z,
-                    gamma=gamma,
-                    z_cut=float(plan.z_cut),
-                    upward=upward,
-                    cupy=cp,
-                )
+                if wide_indices.size == int(stop - start) and wide_indices.size:
+                    incoming = scan_far_cupy(
+                        source_amplitudes=source,
+                        z=z,
+                        gamma=gamma,
+                        z_cut=float(plan.z_cut),
+                        upward=upward,
+                        cupy=cp,
+                        accumulation_dtype=accum_dtype,
+                    )
+                else:
+                    incoming = scan_far_cupy(
+                        source_amplitudes=source,
+                        z=z,
+                        gamma=gamma,
+                        z_cut=float(plan.z_cut),
+                        upward=upward,
+                        cupy=cp,
+                    )
+                    if wide_indices_gpu is not None:
+                        _scan_far_indexed_cupy(
+                            source_amplitudes=source,
+                            z=z,
+                            gamma=gamma,
+                            z_cut=float(plan.z_cut),
+                            upward=upward,
+                            q_indices=wide_indices_gpu,
+                            output=incoming,
+                            cupy=cp,
+                            accumulation_dtype=accum_dtype,
+                        )
                 del source
                 y_sorted += cp.einsum(
                     "qpm,aqpr,aq,q->amr",

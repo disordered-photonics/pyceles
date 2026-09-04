@@ -138,6 +138,31 @@ def _reciprocal_gamma(k: float, q: Array) -> Array:
     return np.asarray(gamma, dtype=np.complex128)
 
 
+def _long_lived_scan_mode_indices(
+    gamma: npt.ArrayLike,
+    *,
+    z_span: float,
+    z_cut: float,
+    storage_dtype: npt.DTypeLike,
+) -> Array:
+    """Return modes whose far-scan history survives above storage epsilon.
+
+    Propagating modes always qualify. Evanescent modes qualify only when their
+    damping across the active scan span is too weak to suppress old c64 state
+    below one storage unit roundoff.
+    """
+    dtype = np.dtype(storage_dtype)
+    if dtype != np.dtype(np.complex64):
+        return np.empty((0,), dtype=np.int64)
+    active_span = max(0.0, float(z_span) - float(z_cut))
+    if active_span <= 0.0:
+        return np.empty((0,), dtype=np.int64)
+    gamma_arr = np.asarray(gamma, dtype=np.complex128).reshape(-1)
+    damping_exponent = np.maximum(np.imag(gamma_arr), 0.0) * active_span
+    persistence_limit = -math.log(float(np.finfo(np.float32).eps))
+    return np.flatnonzero(damping_exponent <= persistence_limit).astype(np.int64, copy=False)
+
+
 @lru_cache(maxsize=64)
 def _resolve_rayleigh_half_width_cached(
     *,
@@ -542,6 +567,7 @@ def _scan_far_numpy(
     gamma: Array,
     z_cut: float,
     upward: bool,
+    accumulation_dtype: npt.DTypeLike | None = None,
 ) -> Array:
     """Apply one delayed-entry semiseparable scan on a shared z grid."""
     return _scan_far_to_destinations_numpy(
@@ -551,6 +577,7 @@ def _scan_far_numpy(
         gamma=gamma,
         z_cut=z_cut,
         upward=upward,
+        accumulation_dtype=accumulation_dtype,
     )
 
 
@@ -562,6 +589,7 @@ def _scan_far_to_destinations_numpy(
     gamma: Array,
     z_cut: float,
     upward: bool,
+    accumulation_dtype: npt.DTypeLike | None = None,
 ) -> Array:
     """Scan sorted source amplitudes onto a distinct sorted destination grid."""
     src = np.asarray(source_amplitudes)
@@ -570,26 +598,41 @@ def _scan_far_to_destinations_numpy(
     gamma_arr = np.asarray(gamma, dtype=np.complex128).reshape(-1)
     if src.shape[0] != src_z.size:
         raise ValueError("Rayleigh source amplitudes and source z coordinates disagree.")
-    out = np.zeros((dst_z.size, *src.shape[1:]), dtype=src.dtype)
-    acc = np.zeros(src.shape[1:], dtype=src.dtype)
+    source_dtype = np.dtype(src.dtype)
+    accum_dtype = source_dtype if accumulation_dtype is None else np.dtype(accumulation_dtype)
+    if accum_dtype not in {np.dtype(np.complex64), np.dtype(np.complex128)}:
+        raise TypeError(f"Unsupported Rayleigh scan accumulation dtype {accum_dtype!r}.")
+    if accum_dtype.itemsize < source_dtype.itemsize:
+        raise ValueError(
+            "Rayleigh scan accumulation dtype cannot be narrower than source storage "
+            f"({source_dtype.name}); got {accum_dtype.name}."
+        )
+    out = np.zeros((dst_z.size, *src.shape[1:]), dtype=source_dtype)
+    acc = np.zeros(src.shape[1:], dtype=accum_dtype)
     gamma_shape = (gamma_arr.size,) + (1,) * (src.ndim - 2)
     gamma_b = gamma_arr.reshape(gamma_shape)
     if upward:
         pointer = 0
         for i in range(dst_z.size):
             if i:
-                acc *= np.exp(1j * gamma_b * (dst_z[i] - dst_z[i - 1]))
+                acc *= np.exp(1j * gamma_b * (dst_z[i] - dst_z[i - 1])).astype(
+                    accum_dtype, copy=False
+                )
             while pointer < src_z.size and dst_z[i] - src_z[pointer] > float(z_cut):
-                acc += src[pointer] * np.exp(1j * gamma_b * (dst_z[i] - src_z[pointer]))
+                acc += np.asarray(src[pointer], dtype=accum_dtype) * np.exp(
+                    1j * gamma_b * (dst_z[i] - src_z[pointer])
+                ).astype(accum_dtype, copy=False)
                 pointer += 1
             out[i] = acc
         return out
     pointer = src_z.size - 1
     for i in range(dst_z.size - 1, -1, -1):
         if i < dst_z.size - 1:
-            acc *= np.exp(1j * gamma_b * (dst_z[i + 1] - dst_z[i]))
+            acc *= np.exp(1j * gamma_b * (dst_z[i + 1] - dst_z[i])).astype(accum_dtype, copy=False)
         while pointer >= 0 and src_z[pointer] - dst_z[i] > float(z_cut):
-            acc += src[pointer] * np.exp(1j * gamma_b * (src_z[pointer] - dst_z[i]))
+            acc += np.asarray(src[pointer], dtype=accum_dtype) * np.exp(
+                1j * gamma_b * (src_z[pointer] - dst_z[i])
+            ).astype(accum_dtype, copy=False)
             pointer -= 1
         out[i] = acc
     return out
@@ -617,7 +660,12 @@ def resolve_rayleigh_mode_chunk_size(
     return min(cap, memory_cap)
 
 
-def apply_rayleigh_far_numpy(plan: RayleighPlan, x: npt.ArrayLike) -> Array:
+def apply_rayleigh_far_numpy(
+    plan: RayleighPlan,
+    x: npt.ArrayLike,
+    *,
+    accumulation_dtype: npt.DTypeLike | None = None,
+) -> Array:
     """Apply the far-only Rayleigh operator to one or more right-hand sides."""
     arr_raw = np.asarray(x)
     squeezed = arr_raw.ndim == 2
@@ -658,6 +706,7 @@ def apply_rayleigh_far_numpy(plan: RayleighPlan, x: npt.ArrayLike) -> Array:
                 gamma=gamma,
                 z_cut=plan.z_cut,
                 upward=upward,
+                accumulation_dtype=accumulation_dtype,
             )
             y_sorted += np.einsum(
                 "qpm,aqpr,aq,q->amr",

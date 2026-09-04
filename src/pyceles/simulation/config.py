@@ -154,6 +154,12 @@ class SimulationConfig:
       applies to exact-near interactions while sampled-far MLFMM operators
       stay on `complex128`. Periodic systems use the pairwise Ewald/Rayleigh
       coupling path.
+    - For periodic Rayleigh with `compute_dtype="complex64"` and
+      `accum_dtype="complex128"`, compact operator storage remains complex64
+      while physically long-lived reciprocal scan recurrences are selectively
+      accumulated in complex128. `accum_dtype` is therefore the requested
+      precision budget for sensitive reductions, not a requirement that every
+      intermediate array use the wider dtype.
 
     Geometry / physics policy:
     - the current homogeneous-medium solver path assumes real `n_medium`
