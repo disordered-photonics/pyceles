@@ -43,9 +43,9 @@ def _mlfmm_multilevel_problem() -> tuple[int, float, ParticleCollection]:
     lmax = 1
     k = 2 * np.pi / 550.0
     gx, gy, gz = np.meshgrid(np.arange(8), np.arange(8), np.arange(8), indexing="ij")
-    # Keep the fixture geometry compact so far-order table setup stays fast
-    # while preserving a true multilevel partition with max_leaf_particles=1.
-    positions = (40.0 * np.stack((gx.ravel(), gy.ravel(), gz.ravel()), axis=1)[:9]).astype(float)
+    # Eight particles are the smallest fixture for this layout that resolves
+    # to a true multilevel partition with max_leaf_particles=1.
+    positions = (40.0 * np.stack((gx.ravel(), gy.ravel(), gz.ravel()), axis=1)[:8]).astype(float)
     particles = spheres_from_arrays(
         positions=positions,
         radii=np.full((positions.shape[0],), 8.0, dtype=float),
@@ -86,6 +86,7 @@ def prepared_multilevel_mlfmm():
     )
 
 
+@pytest.mark.slow
 def test_simulation_direct_solve_uses_matvec_fallback_for_true_mlfmm_coupling(
     prepared_multilevel_mlfmm,
 ) -> None:
