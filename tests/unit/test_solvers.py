@@ -24,7 +24,8 @@ from pyceles.linear.solvers import (
 def _fake_cupy_numpy_backend():
     class _FakeCuPy:
         @staticmethod
-        def asarray(x, dtype=None):
+        def asarray(x, dtype=None, order=None):
+            del order
             return np.asarray(x, dtype=dtype)
 
         @staticmethod
@@ -432,7 +433,8 @@ def test_factorize_dense_matrix_cupy_requests_inplace_overwrite(monkeypatch):
 
     class _FakeCuPy:
         @staticmethod
-        def asarray(x, dtype=None):
+        def asarray(x, dtype=None, order=None):
+            del order
             return np.asarray(x, dtype=dtype)
 
     fake_linalg = types.SimpleNamespace()

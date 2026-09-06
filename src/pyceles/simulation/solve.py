@@ -62,13 +62,18 @@ def _assemble_dense_operator_via_matvec(
     usable on the CuPy backend without forcing a separate dense-assembly kernel.
     """
     A = np.empty((n, n), dtype=dtype)
-    eye = np.eye(n, dtype=dtype)
+    # A full identity matrix is needlessly O(n^2) storage when only one basis
+    # vector is consumed per call.  Reuse one sparse basis vector instead;
+    # this is especially important for large direct-assembly probes.
+    basis = np.zeros((n,), dtype=dtype)
     col_iter: Iterable[int] = range(n)
     if show_progress:
         col_iter = tqdm(col_iter, desc="Assemble A (dense via matvec)")
     t0 = time.perf_counter()
     for j in col_iter:
-        A[:, j] = np.asarray(A_mv(eye[:, j]), dtype=dtype)
+        basis[j] = 1
+        A[:, j] = np.asarray(A_mv(basis), dtype=dtype)
+        basis[j] = 0
     _record_elapsed(timings, "dense_operator_assembly_s", t0)
     return A
 

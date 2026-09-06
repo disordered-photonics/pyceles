@@ -129,7 +129,12 @@ def factorize_dense_matrix(
         cupy, _ = import_cupy()
         import cupyx.scipy.linalg
 
-        A_gpu = cupy.asarray(A_dense, dtype=solve_dtype)
+        # cuSOLVER's LU routine requires Fortran-major storage.  Uploading a
+        # host C-order matrix without specifying the order first creates a
+        # second full device allocation inside ``lu_factor`` even when
+        # ``overwrite_a=True``.  Construct the device matrix in the required
+        # layout up front so the LU payload can overwrite it in place.
+        A_gpu = cupy.asarray(A_dense, dtype=solve_dtype, order="F")
         if int(A_gpu.ndim) != 2 or int(A_gpu.shape[0]) != int(A_gpu.shape[1]):
             raise ValueError(f"`A_dense` must be a square 2D matrix. Got shape {A_gpu.shape}.")
         # For the GPU direct path, the LU payload is the persistent object we
@@ -1704,12 +1709,14 @@ def direct_dense_scipy(
     else:
         if A_for_residual is None:
             A = np.empty((n, n), dtype=solve_dtype)
-            eye = np.eye(n, dtype=solve_dtype)
+            basis = np.zeros((n,), dtype=solve_dtype)
             col_iter: Iterable[int] = range(n)
             if show_progress:
                 col_iter = tqdm(col_iter, desc="Assemble A (dense via matvec)")
             for j in col_iter:
-                A[:, j] = np.asarray(A_mv(eye[:, j]), dtype=solve_dtype)
+                basis[j] = 1
+                A[:, j] = np.asarray(A_mv(basis), dtype=solve_dtype)
+                basis[j] = 0
             A_for_residual = A
         else:
             setup_mode = "factorize_dense"
@@ -1798,7 +1805,7 @@ def direct_dense_cupy(
     A_for_residual: np.ndarray | None = None
     A_gpu_dense: Any | None = None
     if A_dense is not None:
-        A_gpu_dense = cupy.asarray(A_dense, dtype=solve_dtype)
+        A_gpu_dense = cupy.asarray(A_dense, dtype=solve_dtype, order="F")
         if int(A_gpu_dense.ndim) != 2 or tuple(int(v) for v in A_gpu_dense.shape) != (n, n):
             raise ValueError(f"A_dense must have shape ({n},{n}), got {A_gpu_dense.shape}.")
         if compute_final_residual:
@@ -1811,14 +1818,16 @@ def direct_dense_cupy(
     else:
         if A_gpu_dense is None:
             A = np.empty((n, n), dtype=solve_dtype)
-            eye = np.eye(n, dtype=solve_dtype)
+            basis = np.zeros((n,), dtype=solve_dtype)
             col_iter: Iterable[int] = range(n)
             if show_progress:
                 col_iter = tqdm(col_iter, desc="Assemble A (dense via matvec)")
             for j in col_iter:
-                A[:, j] = np.asarray(A_mv(eye[:, j]), dtype=solve_dtype)
+                basis[j] = 1
+                A[:, j] = np.asarray(A_mv(basis), dtype=solve_dtype)
+                basis[j] = 0
             A_for_residual = A
-            A_gpu = cupy.asarray(A_for_residual)
+            A_gpu = cupy.asarray(A_for_residual, order="F")
         else:
             setup_mode = "factorize_dense"
             A_gpu = A_gpu_dense
