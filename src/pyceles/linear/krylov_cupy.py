@@ -9,6 +9,7 @@ from __future__ import annotations
 import inspect
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import cache
 from typing import Any, Literal
 
 import numpy as np
@@ -119,12 +120,77 @@ def _as_device_matrix(
     return arr
 
 
+@cache
+def _dot_reduction_kernel(input_dtype_name: str, accum_dtype_name: str) -> Any:
+    """Return a fused conjugate-dot reduction without widening full vectors."""
+    from pyceles._optional import import_cupy
+
+    cupy, _ = import_cupy()
+    input_dtype = np.dtype(input_dtype_name)
+    accum_dtype = np.dtype(accum_dtype_name)
+    reduce_type = "complex<double>" if accum_dtype == np.dtype(np.complex128) else "complex<float>"
+    return cupy.ReductionKernel(
+        f"{input_dtype.name} x, {input_dtype.name} y",
+        f"{accum_dtype.name} z",
+        "conj(x) * y",
+        "a + b",
+        "z = a",
+        "0",
+        f"pyceles_dot_{input_dtype.name}_accum_{accum_dtype.name}",
+        reduce_type=reduce_type,
+    )
+
+
+@cache
+def _norm_reduction_kernel(input_dtype_name: str, accum_dtype_name: str) -> Any:
+    """Return a fused Euclidean-norm reduction without widening the input."""
+    from pyceles._optional import import_cupy
+
+    cupy, _ = import_cupy()
+    input_dtype = np.dtype(input_dtype_name)
+    accum_dtype = np.dtype(accum_dtype_name)
+    real_output = "float64" if accum_dtype == np.dtype(np.complex128) else "float32"
+    scalar = "double" if real_output == "float64" else "float"
+    return cupy.ReductionKernel(
+        f"{input_dtype.name} x",
+        f"{real_output} y",
+        f"(({scalar})x.real() * ({scalar})x.real() + ({scalar})x.imag() * ({scalar})x.imag())",
+        "a + b",
+        "y = sqrt(a)",
+        "0",
+        f"pyceles_norm_{input_dtype.name}_accum_{accum_dtype.name}",
+    )
+
+
 def _dot(u: Any, v: Any, *, cupy: Any, accum_dtype: np.dtype) -> Any:
-    return cupy.vdot(cupy.asarray(u, dtype=accum_dtype), cupy.asarray(v, dtype=accum_dtype))
+    left = cupy.asarray(u)
+    right = cupy.asarray(v)
+    if tuple(left.shape) != tuple(right.shape):
+        raise ValueError(
+            f"Dot-product operands must have matching shapes. Got {left.shape} and {right.shape}."
+        )
+    dtype = np.dtype(left.dtype)
+    if (
+        dtype == np.dtype(right.dtype)
+        and dtype in {np.dtype(np.complex64), np.dtype(np.complex128)}
+        and hasattr(cupy, "ReductionKernel")
+    ):
+        kernel = _dot_reduction_kernel(dtype.name, np.dtype(accum_dtype).name)
+        return kernel(left, right)
+    return cupy.vdot(cupy.asarray(left, dtype=accum_dtype), cupy.asarray(right, dtype=accum_dtype))
 
 
 def _norm(v: Any, *, cupy: Any, accum_dtype: np.dtype) -> float:
-    return float(cupy.linalg.norm(cupy.asarray(v, dtype=accum_dtype)))
+    values = cupy.asarray(v)
+    if int(values.size) == 0:
+        return 0.0
+    dtype = np.dtype(values.dtype)
+    if dtype in {np.dtype(np.complex64), np.dtype(np.complex128)} and hasattr(
+        cupy, "ReductionKernel"
+    ):
+        kernel = _norm_reduction_kernel(dtype.name, np.dtype(accum_dtype).name)
+        return float(kernel(values))
+    return float(cupy.linalg.norm(cupy.asarray(values, dtype=accum_dtype)))
 
 
 def _norms_block(v: Any, *, cupy: Any, accum_dtype: np.dtype) -> Any:
