@@ -547,6 +547,9 @@ def test_prepare_matvec_accepts_custom_axisymmetric_group_factory():
     factories = ParticleTGroupFactories(
         axisymmetric=make_axisymmetric_group_factory(
             apply_subset=lambda x_subset, _particles, _context: x_subset @ axis_matrix.T,
+            apply_adjoint_subset=lambda x_subset, _particles, _context: (
+                x_subset @ np.conjugate(axis_matrix)
+            ),
             apply_local_block=lambda local_i, block, _particles, _context: axis_matrix @ block,
             metadata_builder=lambda group_particles, _context: {
                 "euler_angles": tuple(group_particles[0].euler_angles)  # type: ignore[attr-defined]
@@ -574,6 +577,15 @@ def test_prepare_matvec_accepts_custom_axisymmetric_group_factory():
     rhs = prepared.rhs_Tb(b[: 2 * nm])
     np.testing.assert_allclose(y_mv, y_dense, rtol=1e-12, atol=1e-12)
     assert rhs.shape == (2 * nm,)
+    adjoint_input = x[: 2 * nm]
+    expected_adjoint = adjoint_input.copy()
+    diagonal_group = cast(DiagonalTGroup, prepared.particle_t.groups[0])
+    expected_adjoint[:nm] = (
+        np.conjugate(diagonal_group.T_diag[diagonal_group.operator_indices[0]]) * adjoint_input[:nm]
+    )
+    expected_adjoint[nm:] = adjoint_input[nm:] @ np.conjugate(axis_matrix)
+    actual_adjoint = prepared.particle_t.apply_adjoint(adjoint_input)
+    np.testing.assert_allclose(actual_adjoint, expected_adjoint, rtol=1e-12, atol=1e-12)
 
 
 def test_prepare_matvec_accepts_axisymmetric_block_group_factory():

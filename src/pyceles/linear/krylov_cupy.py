@@ -71,6 +71,27 @@ class CuPyBiCGSTABNativeResult:
     preconditioner_applications: int
 
 
+@dataclass(frozen=True)
+class CuPyLSQRNativeResult:
+    """Result payload for the native matrix-free CuPy LSQR correction solve."""
+
+    x: Any
+    info: int
+    iterations: int
+    residual_norm: float
+    relative_residual: float
+    rhs_norm: float
+    converged_reason: str
+    residual_history: np.ndarray
+    true_history: np.ndarray
+    operator_applications: int
+    adjoint_applications: int
+    anorm: float
+    acond: float
+    arnorm: float
+    correction_norm: float
+
+
 def _dtype_complex(dtype: npt.DTypeLike, *, name: str) -> np.dtype:
     out = np.dtype(dtype)
     if out.kind != "c":
@@ -335,6 +356,307 @@ def _normalize_true_residual_mode(mode: str) -> Literal["none", "restart", "fina
     if out not in {"none", "restart", "final"}:
         raise ValueError("`true_residual_mode` must be 'none', 'restart', or 'final'.")
     return out  # type: ignore[return-value]
+
+
+def lsqr_cupy_native(
+    A_mv: Callable[[Any], Any],
+    A_h_mv: Callable[[Any], Any],
+    b: Any,
+    *,
+    cupy: Any,
+    x0: Any | None = None,
+    initial_residual: Any | None = None,
+    rhs_norm: float | None = None,
+    rtol: float = 1e-6,
+    atol: float = 0.0,
+    maxiter: int | None = None,
+    operator_dtype: npt.DTypeLike | None = None,
+    accum_dtype: npt.DTypeLike | None = None,
+    callback: Callable[[float], None] | None = None,
+    true_residual_every: int = 0,
+    compute_final_residual: bool = True,
+    condition_limit: float | None = None,
+) -> CuPyLSQRNativeResult:
+    """Run a matrix-free LSQR correction solve on CuPy.
+
+    ``A_mv`` and ``A_h_mv`` must be the production action and its exact
+    Hermitian adjoint.  Vector storage follows ``operator_dtype`` while all
+    norms, inner products, and scalar recurrences follow ``accum_dtype``.
+    The returned iterate solves ``A x = b`` from ``x0``; LSQR internally
+    applies the correction equation to ``b - A x0`` (or the supplied
+    ``initial_residual``) and never stores a Krylov basis.  ``rhs_norm`` keeps
+    tolerance normalization tied to the original right-hand side when a
+    correction residual is supplied.  ``true_residual_every`` is opt-in
+    because a physical residual check costs another production forward
+    action.
+    """
+
+    b_dtype_obj = getattr(b, "dtype", None)
+    b_dtype = np.dtype(np.asarray(b).dtype if b_dtype_obj is None else b_dtype_obj)
+    op_dtype = _dtype_complex(
+        operator_dtype if operator_dtype is not None else np.result_type(b_dtype, np.complex64),
+        name="operator_dtype",
+    )
+    acc_dtype = _resolve_accum_dtype(op_dtype, accum_dtype)
+    if float(rtol) < 0.0 or float(atol) < 0.0:
+        raise ValueError("`rtol` and `atol` must be non-negative.")
+    if int(true_residual_every) < 0:
+        raise ValueError("`true_residual_every` must be non-negative.")
+    if condition_limit is not None and not (float(condition_limit) > 0.0):
+        raise ValueError("`condition_limit` must be positive when provided.")
+    b_vec = _as_device_vector(b, cupy=cupy, dtype=op_dtype, name="b")
+    n = int(b_vec.size)
+    maxiter_total = int(maxiter) if maxiter is not None else max(1, 2 * n)
+    if maxiter_total < 1:
+        raise ValueError("`maxiter` must be >= 1 when provided.")
+    x0_vec = None if x0 is None else _as_device_vector(x0, cupy=cupy, dtype=op_dtype, name="x0")
+
+    def _apply(action: Callable[[Any], Any], values: Any, name: str) -> Any:
+        return _as_device_vector(
+            action(cupy.asarray(values, dtype=op_dtype)),
+            cupy=cupy,
+            dtype=op_dtype,
+            name=name,
+        )
+
+    def _scalar(value: Any) -> Any:
+        return cupy.asarray(value, dtype=acc_dtype)
+
+    if rhs_norm is None:
+        b_norm = _norm(b_vec, cupy=cupy, accum_dtype=acc_dtype)
+    else:
+        b_norm = float(rhs_norm)
+        if not np.isfinite(b_norm) or b_norm < 0.0:
+            raise ValueError("`rhs_norm` must be finite and non-negative when provided.")
+    target_abs = max(float(atol), float(rtol) * b_norm)
+    operator_applications = 0
+    adjoint_applications = 0
+    true_history: list[float] = []
+
+    if initial_residual is not None:
+        residual = _as_device_vector(
+            initial_residual, cupy=cupy, dtype=op_dtype, name="initial_residual"
+        )
+        if int(residual.size) != n:
+            raise ValueError(
+                f"`initial_residual` size {int(residual.size)} does not match `b` size {n}."
+            )
+    elif x0_vec is None or (
+        int(x0_vec.size) > 0 and bool(float(cupy.max(cupy.abs(x0_vec))) == 0.0)
+    ):
+        residual = cupy.asarray(b_vec, dtype=op_dtype)
+    else:
+        residual = b_vec - _apply(A_mv, x0_vec, "A(x0)")
+        operator_applications += 1
+    residual_norm = _norm(residual, cupy=cupy, accum_dtype=acc_dtype)
+    relative_residual = residual_norm / b_norm if b_norm > 0.0 else residual_norm
+    true_history.append(float(relative_residual))
+    if residual_norm <= target_abs:
+        # The scattering system is square.  Avoid an unnecessary adjoint probe
+        # merely to infer the solution shape when a supplied warm start already
+        # has the correct dimension.
+        solution = cupy.zeros_like(b_vec, dtype=op_dtype) if x0_vec is None else x0_vec
+        return CuPyLSQRNativeResult(
+            x=solution,
+            info=0,
+            iterations=0,
+            residual_norm=float(residual_norm),
+            relative_residual=float(relative_residual),
+            rhs_norm=float(b_norm),
+            converged_reason="converged",
+            residual_history=np.asarray([relative_residual], dtype=float),
+            true_history=np.asarray(true_history, dtype=float),
+            operator_applications=operator_applications,
+            adjoint_applications=adjoint_applications,
+            anorm=0.0,
+            acond=0.0,
+            arnorm=0.0,
+            correction_norm=0.0,
+        )
+
+    beta = residual_norm
+    u = residual / beta
+    v = _apply(A_h_mv, u, "A^H(u)")
+    adjoint_applications += 1
+    if x0_vec is not None and int(x0_vec.size) != int(v.size):
+        raise ValueError(
+            f"`x0` size {int(x0_vec.size)} does not match the solution dimension {int(v.size)}."
+        )
+    x_vec = cupy.zeros_like(v, dtype=op_dtype) if x0_vec is None else x0_vec
+    alpha = _norm(v, cupy=cupy, accum_dtype=acc_dtype)
+    if alpha == 0.0:
+        return CuPyLSQRNativeResult(
+            x=x_vec,
+            info=maxiter_total,
+            iterations=0,
+            residual_norm=float(residual_norm),
+            relative_residual=float(relative_residual),
+            rhs_norm=float(b_norm),
+            converged_reason="breakdown",
+            residual_history=np.asarray([relative_residual], dtype=float),
+            true_history=np.asarray(true_history, dtype=float),
+            operator_applications=operator_applications,
+            adjoint_applications=adjoint_applications,
+            anorm=0.0,
+            acond=float("inf"),
+            arnorm=0.0,
+            correction_norm=0.0,
+        )
+    v = v / alpha
+    w = cupy.asarray(v, dtype=op_dtype)
+    phibar = _scalar(beta)
+    rhobar = _scalar(alpha)
+    residual_history: list[float] = []
+    # Paige--Saunders diagnostics.  ``anorm`` starts at zero and each
+    # bidiagonalization step contributes the *current* alpha and newly formed
+    # beta.  Initializing with alpha^2+beta^2 and then adding alpha_next/beta_next
+    # double-counts the bidiagonal terms and overestimates both anorm and acond.
+    anorm_sq = _scalar(0.0)
+    ddnorm = _scalar(0.0)
+    anorm = 0.0
+    acond = 0.0
+    arnorm = float(alpha * beta)
+    correction_norm = 0.0
+    xxnorm = _scalar(0.0)
+    z = _scalar(0.0)
+    cs2 = _scalar(-1.0)
+    sn2 = _scalar(0.0)
+    info = maxiter_total
+    converged_reason = "maxiter_reached"
+    iterations = 0
+
+    for iteration in range(1, maxiter_total + 1):
+        u_next = _apply(A_mv, v, "A(v)")
+        operator_applications += 1
+        u_next = u_next - _scalar(alpha).astype(op_dtype) * u
+        beta_next = _norm(u_next, cupy=cupy, accum_dtype=acc_dtype)
+        if beta_next > 0.0:
+            u_next = u_next / beta_next
+            anorm_sq = anorm_sq + _scalar(alpha) ** 2 + _scalar(beta_next) ** 2
+            anorm = float(cupy.sqrt(cupy.asarray(anorm_sq).real))
+
+        v_next = _apply(A_h_mv, u_next, "A^H(u)")
+        adjoint_applications += 1
+        v_next = v_next - _scalar(beta_next).astype(op_dtype) * v
+        alpha_next = _norm(v_next, cupy=cupy, accum_dtype=acc_dtype)
+        if alpha_next > 0.0:
+            v_next = v_next / alpha_next
+        rho = float(cupy.sqrt(cupy.abs(rhobar) ** 2 + beta_next**2))
+        if rho == 0.0 or not np.isfinite(rho):
+            converged_reason = "breakdown"
+            info = iterations if iterations else maxiter_total
+            break
+        c = rhobar / rho
+        s = _scalar(beta_next / rho)
+        theta = s * _scalar(alpha_next)
+        rhobar = -c * _scalar(alpha_next)
+        phi = c * phibar
+        phibar = s * phibar
+        tau = s * phi
+        direction = w / _scalar(rho).astype(op_dtype)
+        ddnorm = ddnorm + _scalar(_norm(direction, cupy=cupy, accum_dtype=acc_dtype)) ** 2
+        w = v_next - _scalar(theta / rho).astype(op_dtype) * w
+        u, v = u_next, v_next
+        alpha, beta = alpha_next, beta_next
+        x_vec = x_vec + _scalar(phi).astype(op_dtype) * direction
+        iterations = iteration
+
+        # Right rotation used by the original LSQR recurrence to estimate the
+        # correction norm without another full-vector reduction.
+        delta = sn2 * _scalar(rho)
+        gambar = -cs2 * _scalar(rho)
+        rotated_rhs = phi - delta * z
+        if float(cupy.abs(gambar)) > 0.0:
+            zbar = rotated_rhs / gambar
+            correction_norm = float(cupy.sqrt(cupy.asarray(xxnorm + cupy.abs(zbar) ** 2).real))
+        gamma = float(cupy.sqrt(cupy.abs(gambar) ** 2 + cupy.abs(theta) ** 2))
+        if gamma > 0.0:
+            cs2 = gambar / _scalar(gamma)
+            sn2 = theta / _scalar(gamma)
+            z = rotated_rhs / _scalar(gamma)
+            xxnorm = xxnorm + cupy.abs(z) ** 2
+
+        acond = anorm * float(cupy.sqrt(cupy.asarray(ddnorm).real))
+        arnorm = float(alpha_next * cupy.abs(tau))
+        recursive_rel = (
+            float(cupy.abs(phibar)) / b_norm if b_norm > 0.0 else float(cupy.abs(phibar))
+        )
+        residual_history.append(float(recursive_rel))
+        if callback is not None:
+            callback(float(recursive_rel))
+
+        if condition_limit is not None and acond >= float(condition_limit):
+            info = iterations
+            converged_reason = "condition_limit"
+            break
+
+        should_check = bool(true_residual_every) and iteration % int(true_residual_every) == 0
+        if should_check:
+            candidate = x_vec
+            true_vec = b_vec - _apply(A_mv, candidate, "A(x)")
+            operator_applications += 1
+            true_abs = _norm(true_vec, cupy=cupy, accum_dtype=acc_dtype)
+            true_rel = true_abs / b_norm if b_norm > 0.0 else true_abs
+            true_history.append(float(true_rel))
+            if true_abs <= target_abs:
+                residual_norm, relative_residual = true_abs, true_rel
+                info = 0
+                converged_reason = "converged"
+                break
+
+        if recursive_rel <= (
+            max(float(atol), float(rtol) * b_norm) / b_norm if b_norm > 0.0 else float(atol)
+        ):
+            if compute_final_residual:
+                true_vec = b_vec - _apply(A_mv, x_vec, "A(x)")
+                operator_applications += 1
+                true_abs = _norm(true_vec, cupy=cupy, accum_dtype=acc_dtype)
+                true_rel = true_abs / b_norm if b_norm > 0.0 else true_abs
+                true_history.append(float(true_rel))
+                residual_norm, relative_residual = true_abs, true_rel
+                if true_abs <= target_abs:
+                    info = 0
+                    converged_reason = "converged"
+                    break
+            else:
+                residual_norm = float(cupy.abs(phibar))
+                relative_residual = recursive_rel
+                info = 0
+                converged_reason = "converged_recursive"
+                break
+        if beta_next == 0.0 and alpha_next == 0.0:
+            info = iterations
+            converged_reason = "breakdown"
+            break
+
+    if info != 0:
+        if compute_final_residual:
+            true_vec = b_vec - _apply(A_mv, x_vec, "A(x)")
+            operator_applications += 1
+            residual_norm = _norm(true_vec, cupy=cupy, accum_dtype=acc_dtype)
+            relative_residual = residual_norm / b_norm if b_norm > 0.0 else residual_norm
+            true_history.append(float(relative_residual))
+        else:
+            residual_norm = float(cupy.abs(phibar))
+            relative_residual = residual_norm / b_norm if b_norm > 0.0 else residual_norm
+
+    return CuPyLSQRNativeResult(
+        x=x_vec,
+        info=int(info),
+        iterations=int(iterations),
+        residual_norm=float(residual_norm),
+        relative_residual=float(relative_residual),
+        rhs_norm=float(b_norm),
+        converged_reason=str(converged_reason),
+        residual_history=np.asarray(residual_history, dtype=float),
+        true_history=np.asarray(true_history, dtype=float),
+        operator_applications=int(operator_applications),
+        adjoint_applications=int(adjoint_applications),
+        anorm=float(anorm),
+        acond=float(acond),
+        arnorm=float(arnorm),
+        correction_norm=float(correction_norm),
+    )
 
 
 def gmres_cupy_native(
@@ -1968,9 +2290,11 @@ __all__ = [
     "CuPyBiCGSTABNativeResult",
     "CuPyBlockGMRESNativeResult",
     "CuPyGMRESNativeResult",
+    "CuPyLSQRNativeResult",
     "bicgstab_cupy_native",
     "block_gmres_cupy_native",
     "fgmres_cupy_native",
     "gmres_cupy_native",
     "lgmres_cupy_native",
+    "lsqr_cupy_native",
 ]

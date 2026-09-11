@@ -54,7 +54,7 @@ Current tested capabilities include:
 - high-frequency MLFMM coupling for large sphere clusters on NumPy and CuPy
   repeated-apply paths,
 - native CuPy Krylov solvers, including GMRES-family methods, BiCGSTAB,
-  harmonic GCRO-DR, and block-GMRES for multi-RHS runs,
+  harmonic GCRO-DR, LSQR, and block-GMRES for multi-RHS runs,
 - near-field and far-field postprocessing, including component-resolved
   `initial`, `scattered`, `internal`, and `total` near-field maps,
 - local absorption and dipole power/LDOS diagnostics,

@@ -164,6 +164,51 @@ def sparse_translation_contraction(
     )
 
 
+def transpose_sparse_translation_contraction(
+    row_ptr: Array,
+    input_modes: Array,
+    structural_channels: Array,
+    values: Array,
+) -> tuple[Array, Array, Array, Array]:
+    """Transpose output-mode CSR metadata without assembling dense blocks.
+
+    ``sparse_translation_contraction`` groups entries by output mode.  The
+    exact-near adjoint needs the same entries grouped by the original input
+    mode.  Structural sums and coefficients are conjugated by the device
+    kernel at application time, so the returned values preserve their stored
+    dtype and are merely reordered here.
+    """
+
+    pointers = np.asarray(row_ptr, dtype=np.int64).reshape(-1)
+    inputs = np.asarray(input_modes, dtype=np.int32).reshape(-1)
+    channels = np.asarray(structural_channels, dtype=np.int32).reshape(-1)
+    factors = np.asarray(values).reshape(-1)
+    if pointers.size < 1:
+        raise ValueError("Sparse contraction row pointers must be non-empty.")
+    n_modes_i = int(pointers.size - 1)
+    if not (inputs.size == channels.size == factors.size == int(pointers[-1])):
+        raise ValueError("Sparse contraction metadata arrays have inconsistent lengths.")
+    if inputs.size and (int(inputs.min()) < 0 or int(inputs.max()) >= n_modes_i):
+        raise ValueError("Sparse contraction input-mode index is out of range.")
+
+    output_modes = np.repeat(
+        np.arange(n_modes_i, dtype=np.int32),
+        np.diff(pointers),
+    )
+    order = np.argsort(inputs, kind="stable")
+    transposed_rows = inputs[order]
+    counts = np.bincount(transposed_rows, minlength=n_modes_i).astype(np.int64, copy=False)
+    transposed_ptr = np.empty((n_modes_i + 1,), dtype=np.int64)
+    transposed_ptr[0] = 0
+    np.cumsum(counts, out=transposed_ptr[1:])
+    return (
+        transposed_ptr,
+        output_modes[order],
+        channels[order],
+        factors[order],
+    )
+
+
 def translation_contraction_tensor(
     *,
     lmax: int,
@@ -372,4 +417,5 @@ __all__ = [
     "periodic_direct_structural_block",
     "sparse_translation_contraction",
     "translation_contraction_tensor",
+    "transpose_sparse_translation_contraction",
 ]

@@ -32,11 +32,17 @@ polarized = simulation.run_polarizations(jones_source)
 ## Linear solvers and precision
 
 `SimulationConfig.solver_method` accepts `direct`, `gmres`, `fgmres`, `lgmres`,
-`bicgstab`, `gcro`, and `gcrotmk` (default: `gmres`). NumPy/SciPy provides direct,
+`bicgstab`, `gcro`, `gcrotmk`, and `lsqr` (default: `gmres`). NumPy/SciPy provides direct,
 GMRES, BiCGSTAB, LGMRES, and GCROTMK; CuPy provides direct and native GMRES,
-FGMRES, LGMRES, BiCGSTAB, and harmonic GCRO-DR. CuPy GMRES also handles a
+FGMRES, LGMRES, BiCGSTAB, harmonic GCRO-DR, and LSQR. CuPy GMRES also handles a
 two-dimensional right-hand side with native block GMRES. `fgmres` and `gcro`
-are CuPy-only and `gcrotmk` is SciPy-only. GCRO is a forward-only
+are CuPy-only, `gcrotmk` is SciPy-only, and `lsqr` is currently CuPy-only. LSQR
+is a single-RHS method and requires an exact Hermitian-adjoint prepared operator;
+the high-level path currently supports the periodic Rayleigh operator with
+diagonal, dense, and materialized axisymmetric particle blocks. Other coupling
+backends (including MLFMM) remain unavailable for LSQR until their adjoints are
+implemented and validated. LSQR uses `solver_maxiter` as its iteration budget;
+the common `solver_restart` setting has no effect. GCRO is a forward-only
 harmonic-recycling method with a single-RHS recurrence; multi-RHS workflows
 solve each column independently rather than using block GCRO. It exposes only
 `solver_recycle_dim` in addition to the common restart/tolerance/budget

@@ -3,7 +3,7 @@
 Large systems are typically solved matrix-free, while a dense direct solve is
 an explicitly requested full-matrix path. This module therefore provides:
 
-- Krylov methods (`gmres`, `bicgstab`, `lgmres`, `gcro`, `gcrotmk`)
+- Krylov methods (`gmres`, `fgmres`, `bicgstab`, `lgmres`, `gcro`, `gcrotmk`, `lsqr`)
 - optional dense direct solve when the caller can afford the full matrix
 - native CuPy block-GMRES for multi-RHS iterative solves
 - a dispatcher (`solve_linear_system`) with an explicit method (GMRES by default)
@@ -37,6 +37,7 @@ from .krylov_cupy import (
     fgmres_cupy_native,
     gmres_cupy_native,
     lgmres_cupy_native,
+    lsqr_cupy_native,
 )
 
 
@@ -1240,6 +1241,122 @@ def gcro_cupy(
     return replace(result, block_metadata=metadata)
 
 
+def lsqr_cupy(
+    A_mv: Callable[[Any], Any],
+    A_h_mv: Callable[[Any], Any],
+    b: np.ndarray,
+    *,
+    x0: np.ndarray | None = None,
+    initial_residual: np.ndarray | None = None,
+    rhs_norm: float | None = None,
+    rtol: float = 1e-6,
+    atol: float = 0.0,
+    maxiter: int | None = None,
+    dtype: npt.DTypeLike | None = None,
+    accum_dtype: npt.DTypeLike | None = None,
+    condition_limit: float | None = None,
+    true_residual_every: int = 0,
+    callback: Callable[[float], None] | None = None,
+    show_progress: bool = True,
+    compute_final_residual: bool = True,
+) -> LinearSolveResult:
+    """Solve one square system with the native CuPy LSQR recurrence.
+
+    ``A_h_mv`` must be the exact Hermitian-adjoint action.  This is a
+    single-RHS CuPy entry point; operators without a validated adjoint should
+    fail explicitly rather than silently use an inexact transpose.
+    """
+    b_arr = np.asarray(b)
+    if b_arr.ndim != 1:
+        raise ValueError("`lsqr_cupy` expects a 1D RHS.")
+    if initial_residual is not None:
+        residual_arr = np.asarray(initial_residual)
+        if residual_arr.ndim != 1 or residual_arr.size != b_arr.size:
+            raise ValueError("`initial_residual` must be a 1D vector with the same size as `b`.")
+    if x0 is not None:
+        x0_arr = np.asarray(x0)
+        if x0_arr.ndim != 1 or x0_arr.size != b_arr.size:
+            raise ValueError("`x0` must be a 1D vector with the same size as `b`.")
+
+    cupy, _ = import_cupy()
+    op_dtype = np.dtype(dtype if dtype is not None else np.result_type(b_arr.dtype, np.complex64))
+    maxiter_total = int(maxiter) if maxiter is not None else max(1, 2 * b_arr.size)
+    if maxiter_total < 1:
+        raise ValueError("`maxiter` must be >= 1 when provided.")
+    progress_update, progress_close, _ = _make_progress_tracker(
+        "lsqr[cupy]",
+        show_progress=show_progress,
+        target_rel=float(rtol),
+        residual_label="recursive_rel_res",
+        max_iters=maxiter_total,
+    )
+
+    def _native_callback(value: float) -> None:
+        progress_update(float(value))
+        if callback is not None:
+            callback(float(value))
+
+    try:
+        native = lsqr_cupy_native(
+            A_mv,
+            A_h_mv,
+            b_arr,
+            cupy=cupy,
+            x0=x0,
+            initial_residual=initial_residual,
+            rhs_norm=rhs_norm,
+            rtol=rtol,
+            atol=atol,
+            maxiter=maxiter_total,
+            operator_dtype=op_dtype,
+            accum_dtype=accum_dtype,
+            condition_limit=condition_limit,
+            true_residual_every=int(true_residual_every),
+            callback=_native_callback if (show_progress or callback is not None) else None,
+            compute_final_residual=bool(compute_final_residual),
+        )
+    except BaseException:
+        progress_close()
+        raise
+
+    if show_progress and compute_final_residual:
+        progress_update(
+            float(native.relative_residual),
+            residual_label_override="true_final_rel_res",
+            advance=False,
+        )
+    progress_close()
+    _record_backend_solution(native.x)
+    if compute_final_residual:
+        residual_norm = float(native.residual_norm)
+        relative_residual = float(native.relative_residual)
+    else:
+        residual_norm = float("nan")
+        relative_residual = float("nan")
+    return LinearSolveResult(
+        x=asnumpy(native.x),
+        info=int(native.info),
+        residual_norm=residual_norm,
+        relative_residual=relative_residual,
+        iterations=int(native.iterations),
+        method="lsqr[cupy]",
+        residual_history=np.asarray(native.residual_history, dtype=float),
+        rhs_count=1,
+        true_residual_history=np.asarray(native.true_history, dtype=float),
+        converged_reason=str(native.converged_reason),
+        block_metadata={
+            "residual_history_kind": "lsqr_recursive_residual",
+            "operator_applications": int(native.operator_applications),
+            "adjoint_applications": int(native.adjoint_applications),
+            "anorm": float(native.anorm),
+            "acond": float(native.acond),
+            "arnorm": float(native.arnorm),
+            "correction_norm": float(native.correction_norm),
+            "rhs_norm": float(native.rhs_norm),
+        },
+    )
+
+
 def fgmres_cupy(
     A_mv: Callable[[np.ndarray], np.ndarray],
     b: np.ndarray,
@@ -1965,6 +2082,11 @@ def solve_linear_system(
     b: np.ndarray,
     *,
     method: str = "gmres",
+    A_h_mv: Callable[[Any], Any] | None = None,
+    initial_residual: np.ndarray | None = None,
+    rhs_norm: float | None = None,
+    lsqr_condition_limit: float | None = None,
+    lsqr_true_residual_every: int = 0,
     A_dense: np.ndarray | None = None,
     A_factorized: DenseLUFactorization | None = None,
     x0: np.ndarray | None = None,
@@ -1992,7 +2114,7 @@ def solve_linear_system(
 ) -> LinearSolveResult:
     """Solve Ax=b with selected method.
 
-    Supported methods: `gmres`, `fgmres`, `bicgstab`, `lgmres`, `gcro`, `gcrotmk`, `direct`.
+    Supported methods: `gmres`, `fgmres`, `bicgstab`, `lgmres`, `gcro`, `gcrotmk`, `lsqr`, `direct`.
     If `method='direct'`, an optional preassembled `A_dense` can be
     supplied to avoid expensive column-by-column assembly via `A_mv`, and an
     optional `A_factorized=(lu, piv)` payload can be supplied to reuse LU
@@ -2027,6 +2149,15 @@ def solve_linear_system(
         Optional accumulation dtype for native CuPy Krylov reductions and small
         projected systems. When omitted, native solvers retain their robust
         default (complex128 accumulation).
+    A_h_mv, initial_residual, rhs_norm:
+        CuPy-native LSQR inputs. ``A_h_mv`` must be the exact Hermitian
+        adjoint and is required for ``method='lsqr'``. A supplied
+        ``initial_residual`` carries ``b - A @ x0`` from a preceding phase;
+        ``rhs_norm`` preserves the original right-hand-side norm.
+        LSQR has no restart cycle; ``restart`` is ignored for this method.
+    lsqr_condition_limit, lsqr_true_residual_every:
+        Optional LSQR safeguards and true-residual check interval. The latter
+        is zero by default because a true check costs another forward action.
     recycle_dim:
         CuPy-native GCRO-DR harmonic recycle dimension. ``restart`` is the
         total augmented dimension, so recycled cycles generate at most
@@ -2065,10 +2196,11 @@ def solve_linear_system(
         "bicgstab",
         "lgmres",
         "gcro",
+        "lsqr",
         "direct",
     }:
         raise ValueError(
-            "The CuPy linear-solver backend currently supports only GMRES, FGMRES, BiCGSTAB, LGMRES, GCRO, or direct solves."
+            "The CuPy linear-solver backend currently supports only GMRES, FGMRES, BiCGSTAB, LGMRES, GCRO, LSQR, or direct solves."
         )
 
     x0_mat: np.ndarray | None = None
@@ -2082,6 +2214,9 @@ def solve_linear_system(
             raise ValueError(f"`x0` must be 1D or 2D. Got shape {x0_arr.shape}.")
         if x0_mat.shape != b_mat.shape:
             raise ValueError(f"`x0` must match `b` shape {b_mat.shape}. Got {x0_mat.shape}.")
+
+    if m == "lsqr" and nrhs != 1:
+        raise ValueError("`method='lsqr'` currently supports one RHS only.")
 
     if m == "direct":
         direct_impl = direct_dense_cupy if backend_name == "cupy" else direct_dense_scipy
@@ -2171,6 +2306,31 @@ def solve_linear_system(
 
     b_vec = b_mat[:, 0]
     x0_vec = None if x0_mat is None else x0_mat[:, 0]
+
+    if m == "lsqr":
+        if backend_name != "cupy":
+            raise ValueError("`method='lsqr'` is currently available only with backend='cupy'.")
+        if A_h_mv is None:
+            raise ValueError("`method='lsqr'` requires an exact `A_h_mv` callable.")
+        if preconditioner is not None:
+            raise ValueError("`method='lsqr'` does not accept a preconditioner.")
+        return lsqr_cupy(
+            A_mv,
+            A_h_mv,
+            b_vec,
+            x0=x0_vec,
+            initial_residual=initial_residual,
+            rhs_norm=rhs_norm,
+            rtol=rtol,
+            atol=atol,
+            maxiter=maxiter,
+            accum_dtype=accum_dtype,
+            condition_limit=lsqr_condition_limit,
+            true_residual_every=lsqr_true_residual_every,
+            dtype=dtype,
+            show_progress=show_progress,
+            compute_final_residual=compute_final_residual,
+        )
 
     if m == "gmres":
         if backend_name == "cupy":
@@ -2319,5 +2479,5 @@ def solve_linear_system(
             compute_final_residual=compute_final_residual,
         )
     raise ValueError(
-        f"Unknown method '{method}'. Use one of gmres/fgmres/bicgstab/lgmres/gcro/gcrotmk/direct."
+        f"Unknown method '{method}'. Use one of gmres/fgmres/bicgstab/lgmres/gcro/gcrotmk/lsqr/direct."
     )

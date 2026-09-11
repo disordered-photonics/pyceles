@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any, Protocol, cast, runtime_checkable
 
@@ -87,10 +87,61 @@ class PreparedOperator:
     def apply_W(self, x: Array) -> Array:
         return self.coupling.apply(x)
 
+    @staticmethod
+    def _subtract_into(minuend: Any, subtrahend: Any) -> Any:
+        """Compute ``minuend - subtrahend`` into the owned second operand."""
+        if is_cupy_array(subtrahend):
+            cupy, _ = import_cupy()
+            cupy.subtract(minuend, subtrahend, out=subtrahend)
+        else:
+            np.subtract(minuend, subtrahend, out=subtrahend)
+        return subtrahend
+
     def apply_A(self, x: Array) -> Array:
         wx = self.apply_W(x)
         x_arr = coerce_array(x, dtype=self.dtype, prefer_cupy=False)
-        return cast(Array, x_arr - self.particle_t.apply(wx))
+        # Particle-T applications own their output. Reuse it as the final A(x)
+        # vector instead of allocating a third full-width temporary.
+        tx = self.particle_t.apply(wx)
+        return cast(Array, self._subtract_into(x_arr, tx))
+
+    def make_adjoint(self, *, backend: str | None = None) -> Callable[[Any], Any]:
+        """Return the exact prepared adjoint action when the operator provides it.
+
+        Adjoint ownership belongs to the prepared ``T`` and ``W`` operators,
+        not to the linear-solver package. ``backend`` is retained as an
+        optional consistency assertion for low-level callers.
+        """
+        coupling_adjoint = getattr(self.coupling, "apply_adjoint", None)
+        particle_adjoint = getattr(self.particle_t, "apply_adjoint", None)
+        if not callable(coupling_adjoint) or not callable(particle_adjoint):
+            raise NotImplementedError(
+                "This prepared operator does not expose exact T/W adjoint actions."
+            )
+        if backend is not None:
+            requested = str(backend).lower()
+            if requested not in {"numpy", "cupy"}:
+                raise ValueError(f"Unsupported adjoint backend {backend!r}.")
+            coupling_name = type(self.coupling).__name__
+            actual = "cupy" if coupling_name.startswith("CuPy") else "numpy"
+            if requested != actual:
+                raise TypeError(
+                    f"backend={requested!r} does not match the prepared {actual!r} coupling."
+                )
+        return self.apply_adjoint
+
+    def apply_adjoint(self, x: Array) -> Array:
+        """Apply ``A^H = I - W^H T^H`` while preserving RHS shape and ownership."""
+        coupling_adjoint = getattr(self.coupling, "apply_adjoint", None)
+        particle_adjoint = getattr(self.particle_t, "apply_adjoint", None)
+        if not callable(coupling_adjoint) or not callable(particle_adjoint):
+            raise NotImplementedError(
+                "This prepared operator does not expose exact T/W adjoint actions."
+            )
+        values = coerce_array(x, dtype=self.dtype, prefer_cupy=False)
+        weighted = particle_adjoint(values)
+        adjoint_coupling = coupling_adjoint(weighted)
+        return cast(Array, self._subtract_into(values, adjoint_coupling))
 
     def rhs(self, b: Array) -> Array:
         return self.particle_t.rhs(b)

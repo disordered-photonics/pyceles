@@ -1,6 +1,7 @@
 from .krylov_cupy import (
     CuPyBiCGSTABNativeResult,
     CuPyGMRESNativeResult,
+    CuPyLSQRNativeResult,
     bicgstab_cupy_native,
     fgmres_cupy_native,
     gmres_cupy_native,
@@ -24,6 +25,7 @@ from .solvers import (
     gmres_scipy,
     lgmres_cupy,
     lgmres_scipy,
+    lsqr_cupy,
     solve_linear_system,
 )
 
@@ -31,6 +33,7 @@ __all__ = [
     "BlockKrylovCallbackPayload",
     "CuPyBiCGSTABNativeResult",
     "CuPyGMRESNativeResult",
+    "CuPyLSQRNativeResult",
     "DenseLUFactorization",
     "GmresResult",
     "LinearSolveResult",
@@ -51,5 +54,6 @@ __all__ = [
     "lgmres_cupy",
     "lgmres_cupy_native",
     "lgmres_scipy",
+    "lsqr_cupy",
     "solve_linear_system",
 ]

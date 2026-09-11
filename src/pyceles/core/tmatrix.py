@@ -722,8 +722,9 @@ def particle_T_matrix_blocks(
 
     This helper intentionally mirrors `particle_T_diagonal(...)` but returns the
     denser `(Ng, Nm, Nm)` form expected by general prepared-operator paths.
-    Future spheroid implementations can plug into the solver by teaching this
-    dispatch how to build their spherical-basis T blocks.
+    Homogeneous spheroids use their axisymmetric EBCM block and are rotated into
+    the lab-frame spherical basis here; diagonal particle families are expanded
+    exactly for mixed-family and dense-operator paths.
 
     Identical particles are prepared once per `(particle signature, medium,
     truncation)` tuple and then reused across the subset. That matters for the

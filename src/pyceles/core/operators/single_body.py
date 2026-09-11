@@ -50,6 +50,8 @@ class ParticleTOperator(Protocol):
 
     def apply(self, x: Array) -> Array: ...
 
+    def apply_adjoint(self, x: Array) -> Array: ...
+
     def rhs(self, b: Array) -> Array: ...
 
     def apply_particle_block(self, particle_index: int, block: Array) -> Array: ...
@@ -129,6 +131,14 @@ class CompositeParticleTOperator:
         for group in self.groups:
             ids = np.asarray(group.particle_indices, dtype=np.int64)
             out[ids] = group.apply_subset(arr[ids])
+        return out.reshape(output_shape)
+
+    def apply_adjoint(self, x: Array) -> Array:
+        arr, output_shape = self._reshape_input(x)
+        out = np.zeros_like(arr, dtype=self.dtype)
+        for group in self.groups:
+            ids = np.asarray(group.particle_indices, dtype=np.int64)
+            out[ids] = group.apply_adjoint_subset(arr[ids])
         return out.reshape(output_shape)
 
     def rhs(self, b: Array) -> Array:

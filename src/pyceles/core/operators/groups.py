@@ -66,6 +66,8 @@ class PreparedParticleTGroup(Protocol):
 
     def apply_subset(self, x_subset: Array) -> Array: ...
 
+    def apply_adjoint_subset(self, x_subset: Array) -> Array: ...
+
     def rhs_subset(self, b_subset: Array) -> Array: ...
 
     def apply_local_block(self, local_particle_index: int, block: Array) -> Array: ...
@@ -202,6 +204,7 @@ class DiagonalTGroup:
     T_diag: Array
     operator_indices: Array = field(default_factory=lambda: np.zeros((0,), dtype=np.int64))
     dtype: np.dtype = COMPLEX128_DTYPE
+    _T_diag_adjoint: Array | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.T_M = np.asarray(self.T_M, dtype=self.dtype)
@@ -219,6 +222,18 @@ class DiagonalTGroup:
         return np.asarray(
             _apply_shared_diagonal(
                 self.T_diag,
+                self.operator_indices,
+                np.asarray(x_subset, dtype=self.dtype),
+            ),
+            dtype=self.dtype,
+        )
+
+    def apply_adjoint_subset(self, x_subset: Array) -> Array:
+        if self._T_diag_adjoint is None:
+            self._T_diag_adjoint = np.conjugate(self.T_diag)
+        return np.asarray(
+            _apply_shared_diagonal(
+                self._T_diag_adjoint,
                 self.operator_indices,
                 np.asarray(x_subset, dtype=self.dtype),
             ),
@@ -251,6 +266,7 @@ class DenseTGroup:
     T_blocks: Array
     operator_indices: Array = field(default_factory=lambda: np.zeros((0,), dtype=np.int64))
     dtype: np.dtype = COMPLEX128_DTYPE
+    _T_blocks_adjoint: Array | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         blocks = np.asarray(self.T_blocks, dtype=self.dtype)
@@ -267,6 +283,18 @@ class DenseTGroup:
         return np.asarray(
             _apply_shared_dense(
                 self.T_blocks,
+                self.operator_indices,
+                np.asarray(x_subset, dtype=self.dtype),
+            ),
+            dtype=self.dtype,
+        )
+
+    def apply_adjoint_subset(self, x_subset: Array) -> Array:
+        if self._T_blocks_adjoint is None:
+            self._T_blocks_adjoint = np.conjugate(self.T_blocks).swapaxes(-1, -2)
+        return np.asarray(
+            _apply_shared_dense(
+                self._T_blocks_adjoint,
                 self.operator_indices,
                 np.asarray(x_subset, dtype=self.dtype),
             ),
@@ -300,6 +328,8 @@ class AxisymmetricTGroup:
     apply_local_block_fn: Callable[[int, Array], Array] | None = None
     body_metadata: object | None = None
     dtype: np.dtype = COMPLEX128_DTYPE
+    apply_adjoint_subset_fn: Callable[[Array], Array] | None = None
+    _T_blocks_adjoint: Array | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.T_blocks is not None:
@@ -330,10 +360,33 @@ class AxisymmetricTGroup:
             )
         if self.apply_subset_fn is None:
             raise NotImplementedError(
-                "Axisymmetric particle-T operators are planned but not implemented yet."
+                "Callback-backed axisymmetric particle-T operators must provide an explicit "
+                "forward subset operation."
             )
         return np.asarray(
             self.apply_subset_fn(np.asarray(x_subset, dtype=self.dtype)), dtype=self.dtype
+        )
+
+    def apply_adjoint_subset(self, x_subset: Array) -> Array:
+        if self.T_blocks is not None:
+            if self._T_blocks_adjoint is None:
+                self._T_blocks_adjoint = np.conjugate(self.T_blocks).swapaxes(-1, -2)
+            return np.asarray(
+                _apply_shared_dense(
+                    self._T_blocks_adjoint,
+                    self.operator_indices,
+                    np.asarray(x_subset, dtype=self.dtype),
+                ),
+                dtype=self.dtype,
+            )
+        if self.apply_adjoint_subset_fn is None:
+            raise NotImplementedError(
+                "Callback-backed axisymmetric particle-T operators must provide an explicit "
+                "adjoint subset operation."
+            )
+        return np.asarray(
+            self.apply_adjoint_subset_fn(np.asarray(x_subset, dtype=self.dtype)),
+            dtype=self.dtype,
         )
 
     def rhs_subset(self, b_subset: Array) -> Array:
@@ -354,7 +407,8 @@ class AxisymmetricTGroup:
             )
         if self.apply_local_block_fn is None:
             raise NotImplementedError(
-                "Axisymmetric particle-T operators are planned but not implemented yet."
+                "Callback-backed axisymmetric particle-T operators must provide an explicit "
+                "local-block operation."
             )
         return np.asarray(
             self.apply_local_block_fn(
@@ -406,6 +460,7 @@ def make_axisymmetric_group_factory(
     *,
     apply_subset: AxisymmetricSubsetApply,
     apply_local_block: AxisymmetricLocalBlockApply,
+    apply_adjoint_subset: AxisymmetricSubsetApply | None = None,
     rhs_subset: AxisymmetricSubsetApply | None = None,
     metadata_builder: AxisymmetricMetadataBuilder | None = None,
 ) -> ParticleTGroupFactory:
@@ -443,9 +498,25 @@ def make_axisymmetric_group_factory(
                 dtype=context.dtype,
             )
 
+        def apply_adjoint_subset_bound(x_subset: Array) -> Array:
+            if apply_adjoint_subset is None:
+                raise NotImplementedError(
+                    "This callback-backed axisymmetric group does not provide an explicit "
+                    "adjoint subset operation."
+                )
+            return np.asarray(
+                apply_adjoint_subset(
+                    np.asarray(x_subset, dtype=context.dtype), group_particles, context
+                ),
+                dtype=context.dtype,
+            )
+
         return AxisymmetricTGroup(
             particle_indices=ids,
             apply_subset_fn=apply_subset_bound,
+            apply_adjoint_subset_fn=(
+                apply_adjoint_subset_bound if apply_adjoint_subset is not None else None
+            ),
             rhs_subset_fn=rhs_subset_bound,
             apply_local_block_fn=apply_local_block_bound,
             body_metadata=metadata,

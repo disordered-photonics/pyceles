@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added an opt-in native CuPy harmonic GCRO-DR solver
   (`solver_method="gcro"`). Its bounded recycle rank is controlled by
   `solver_recycle_dim`.
+- Added an opt-in native CuPy LSQR solver (`solver_method="lsqr"`) for
+  single-RHS systems whose prepared particle and coupling operators expose
+  exact Hermitian adjoints.
 
 ### Changed
 - Reduced memory traffic in native CuPy Krylov reductions by accumulating in

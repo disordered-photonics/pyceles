@@ -35,6 +35,7 @@ from pyceles.core.periodic.rayleigh import (
 )
 from pyceles.core.periodic.rayleigh_cupy import (
     _scan_far_indexed_cupy,
+    apply_sparse_near_adjoint_cupy,
     apply_sparse_near_coupling_cupy,
     scan_far_cupy,
 )
@@ -42,6 +43,7 @@ from pyceles.core.periodic.scalar import structural_sum_m_normalization
 from pyceles.core.periodic.structural import (
     sparse_translation_contraction,
     translation_contraction_tensor,
+    transpose_sparse_translation_contraction,
 )
 
 from .base import SourceBlockBatch
@@ -150,6 +152,9 @@ class CuPyPeriodicCouplingOperator:
     )
     _self_block_gpu: Any | None = field(default=None, init=False, repr=False)
     _near_sparse_contraction_gpu: tuple[Any, Any, Any, Any] | None = field(
+        default=None, init=False, repr=False
+    )
+    _near_sparse_adjoint_contraction_gpu: tuple[Any, Any, Any, Any] | None = field(
         default=None, init=False, repr=False
     )
 
@@ -405,6 +410,10 @@ class CuPyPeriodicCouplingOperator:
             ), False
         raise ValueError(f"Input must be 1D or 2D. Got shape {tuple(arr_raw.shape)}.")
 
+    def _flatten_rayleigh_output_device(self, values: Any, *, squeezed: bool) -> Any:
+        flat = values.reshape(self.n_particles * self.n_modes, int(values.shape[2]))
+        return flat[:, 0] if squeezed else flat
+
     @staticmethod
     def _memory_bounded_batch_size(
         *,
@@ -477,6 +486,24 @@ class CuPyPeriodicCouplingOperator:
             cp.asarray(values),
         )
         self._near_sparse_contraction_gpu = cached
+        return cached
+
+    def _near_sparse_adjoint_contraction_device(self) -> tuple[Any, Any, Any, Any]:
+        """Return input-mode CSR data for the exact-near adjoint."""
+        cached = self._near_sparse_adjoint_contraction_gpu
+        if cached is not None:
+            return cached
+        cp = self._cupy()
+        row_ptr, input_modes, channels, values = sparse_translation_contraction(
+            lmax=int(self.lmax), ab5=np.asarray(self.ab5), dtype=self.dtype
+        )
+        cached = tuple(
+            cp.asarray(value)
+            for value in transpose_sparse_translation_contraction(
+                row_ptr, input_modes, channels, values
+            )
+        )
+        self._near_sparse_adjoint_contraction_gpu = cached
         return cached
 
     def _release_rayleigh_preparation_state(self) -> None:
@@ -681,6 +708,110 @@ class CuPyPeriodicCouplingOperator:
         self._near_structural_sums_gpu = sums_gpu
         self._near_structural_sums_host = sums_host
 
+    def _apply_rayleigh_far_adjoint_reshaped_gpu(self, arr: Any) -> Any:
+        """Apply the Hermitian adjoint of the stored reciprocal Rayleigh field."""
+        cp = self._cupy()
+        plan = self._rayleigh_plan()
+        order = self._rayleigh_device_array("sort_order", plan.sort_order, dtype=cp.int32)
+        inverse = self._rayleigh_device_array("inverse_order", plan.inverse_order, dtype=cp.int32)
+        z = self._rayleigh_device_array("sorted_z", plan.sorted_z, dtype=cp.float64)
+        gamma_all = self._rayleigh_device_array("gamma", plan.gamma, dtype=cp.complex128)
+        gamma_adjoint_all = self._rayleigh_arrays_gpu.get("gamma_adjoint")
+        if gamma_adjoint_all is None:
+            gamma_adjoint_all = -cp.conjugate(gamma_all)
+            self._rayleigh_arrays_gpu["gamma_adjoint"] = gamma_adjoint_all
+        phase_all = self._rayleigh_device_array(
+            "sorted_xy_phase", plan.sorted_xy_phase, dtype=self.dtype
+        )
+        source_tables = self._rayleigh_device_array(
+            "source_tables", plan.source_tables, dtype=self.dtype
+        )
+        destination_tables = self._rayleigh_device_array(
+            "destination_tables", plan.destination_tables, dtype=self.dtype
+        )
+        weights = self._rayleigh_device_array("weights", plan.weights, dtype=self.dtype)
+        arr_sorted = arr[order]
+        y_sorted = cp.zeros_like(arr_sorted)
+        accum_dtype = np.dtype(self.accum_dtype)
+        z_span = float(plan.sorted_z[-1] - plan.sorted_z[0]) if plan.sorted_z.size else 0.0
+        chunk = resolve_rayleigh_mode_chunk_size(
+            n_modes_reciprocal=plan.n_modes_reciprocal,
+            n_particles=int(arr.shape[0]),
+            n_rhs=int(arr.shape[2]),
+            dtype=self.dtype,
+        )
+        for start in range(0, plan.n_modes_reciprocal, chunk):
+            stop = min(plan.n_modes_reciprocal, start + chunk)
+            phase = phase_all[:, start:stop]
+            gamma_adjoint = gamma_adjoint_all[start:stop]
+            wide_indices = (
+                _long_lived_scan_mode_indices(
+                    plan.gamma[start:stop],
+                    z_span=z_span,
+                    z_cut=float(plan.z_cut),
+                    storage_dtype=self.dtype,
+                )
+                if accum_dtype.itemsize > self.dtype.itemsize
+                else np.empty((0,), dtype=np.int64)
+            )
+            wide_indices_gpu = (
+                self._rayleigh_device_array(
+                    f"scan_adjoint_wide_indices_{start}_{stop}", wide_indices, dtype=cp.int32
+                )
+                if wide_indices.size
+                else None
+            )
+            for direction, upward in ((0, True), (1, False)):
+                source = cp.einsum(
+                    "qpm,amr->aqpr",
+                    cp.conjugate(destination_tables[direction, start:stop]),
+                    arr_sorted,
+                    optimize=True,
+                )
+                source *= cp.conjugate(phase)[:, :, None, None]
+                source *= cp.conjugate(weights[start:stop])[None, :, None, None]
+                if wide_indices.size == int(stop - start) and wide_indices.size:
+                    incoming = scan_far_cupy(
+                        source_amplitudes=source,
+                        z=z,
+                        gamma=gamma_adjoint,
+                        z_cut=float(plan.z_cut),
+                        upward=not upward,
+                        cupy=cp,
+                        accumulation_dtype=accum_dtype,
+                    )
+                else:
+                    incoming = scan_far_cupy(
+                        source_amplitudes=source,
+                        z=z,
+                        gamma=gamma_adjoint,
+                        z_cut=float(plan.z_cut),
+                        upward=not upward,
+                        cupy=cp,
+                    )
+                    if wide_indices_gpu is not None:
+                        _scan_far_indexed_cupy(
+                            source_amplitudes=source,
+                            z=z,
+                            gamma=gamma_adjoint,
+                            z_cut=float(plan.z_cut),
+                            upward=not upward,
+                            q_indices=wide_indices_gpu,
+                            output=incoming,
+                            cupy=cp,
+                            accumulation_dtype=accum_dtype,
+                        )
+                del source
+                y_sorted += cp.einsum(
+                    "qpm,aqpr,aq->amr",
+                    cp.conjugate(source_tables[direction, start:stop]),
+                    incoming,
+                    phase,
+                    optimize=True,
+                )
+                del incoming
+        return y_sorted[inverse]
+
     def _apply_rayleigh_gpu(self, x: Array | object) -> Any:
         cp = self._cupy()
         arr, squeezed = self._reshape_input_device(x)
@@ -834,6 +965,66 @@ class CuPyPeriodicCouplingOperator:
         flat = y.reshape(self.n_particles * self.n_modes, int(arr.shape[2]))
         return flat[:, 0] if squeezed else flat
 
+    def _apply_rayleigh_near_adjoint_reshaped_gpu(
+        self, arr: Any, *, target: Any | None = None
+    ) -> Any:
+        """Apply the exact adjoint of periodic self plus exact-near blocks."""
+        cp = self._cupy()
+        self_adjoint = self._rayleigh_arrays_gpu.get("self_block_adjoint")
+        if self_adjoint is None:
+            self_adjoint = cp.ascontiguousarray(cp.conjugate(self._self_block_device().T))
+            self._rayleigh_arrays_gpu["self_block_adjoint"] = self_adjoint
+        self_contribution = cp.einsum("ij,ajr->air", self_adjoint, arr, optimize=True)
+        y = cp.ascontiguousarray(self_contribution) if target is None else target
+        if target is not None:
+            y += self_contribution
+
+        self._populate_near_structural_sums_device(show_progress=False)
+        self._release_rayleigh_preparation_state()
+        sums_gpu = self._near_structural_sums_gpu
+        sums_host = self._near_structural_sums_host
+        if sums_gpu is None and sums_host is None:
+            raise RuntimeError("Periodic near Ewald cache population failed.")
+        destinations, sources = self._near_pairs()
+        total = int(destinations.size)
+        if total:
+            src_gpu = self._rayleigh_device_array("near_sources", sources, dtype=cp.int32)
+            dst_gpu = self._rayleigh_device_array("near_destinations", destinations, dtype=cp.int32)
+            row_ptr, input_modes, structural_channels, contraction_values = (
+                self._near_sparse_adjoint_contraction_device()
+            )
+            pair_batch = self._near_apply_batch_size(total=total)
+            structural_staging = (
+                None
+                if sums_gpu is not None
+                else self._near_host_staging_device(
+                    rows=pair_batch, width=(2 * int(self.lmax) + 1) ** 2
+                )
+            )
+            for start in range(0, total, pair_batch):
+                stop = min(total, start + pair_batch)
+                if sums_gpu is not None:
+                    structural = sums_gpu[start:stop]
+                else:
+                    if sums_host is None or structural_staging is None:
+                        raise RuntimeError("Periodic host near cache is unavailable.")
+                    structural = structural_staging[: stop - start]
+                    structural.set(sums_host[start:stop])
+                apply_sparse_near_adjoint_cupy(
+                    target=y,
+                    structural=structural,
+                    coefficients=arr,
+                    input_particles=dst_gpu[start:stop],
+                    output_particles=src_gpu[start:stop],
+                    row_ptr=row_ptr,
+                    input_modes=input_modes,
+                    structural_channels=structural_channels,
+                    values=contraction_values,
+                    cupy=cp,
+                )
+                del structural
+        return y
+
     def _dense_blocks_for_sources(self, source_indices: tuple[int, ...]) -> Any:
         """Recover source-major blocks from the flattened dense cache."""
         key = tuple(int(i) for i in source_indices)
@@ -961,6 +1152,21 @@ class CuPyPeriodicCouplingOperator:
 
     def apply(self, x: Array | object) -> Array | object:
         out = self._apply_gpu(x)
+        return out if is_cupy_array(x) else asnumpy(out)
+
+    def _apply_rayleigh_adjoint_gpu(self, x: Array | object) -> Any:
+        arr, squeezed = self._reshape_input_device(x)
+        y = self._apply_rayleigh_far_adjoint_reshaped_gpu(arr)
+        self._apply_rayleigh_near_adjoint_reshaped_gpu(arr, target=y)
+        return self._flatten_rayleigh_output_device(y, squeezed=squeezed)
+
+    def apply_adjoint(self, x: Array | object) -> Array | object:
+        """Apply ``W^H`` for the exact stored Rayleigh discretization."""
+        if self.periodic.options.method != "rayleigh":
+            raise NotImplementedError(
+                "Periodic coupling adjoints are currently implemented only for method='rayleigh'."
+            )
+        out = self._apply_rayleigh_adjoint_gpu(x)
         return out if is_cupy_array(x) else asnumpy(out)
 
 

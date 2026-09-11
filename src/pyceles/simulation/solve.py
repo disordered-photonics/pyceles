@@ -279,6 +279,7 @@ class _MultiSourceExecution:
 class _PreparedLinearSystem:
     """Prepared operator, transformed right-hand sides, and direct-solve assets."""
 
+    prepared_operator: PreparedOperator | None
     rhs_flat: dict[str, np.ndarray]
     apply_operator: Callable[[Any], Any] | None
     dense_operator: Any | None
@@ -375,7 +376,7 @@ def _prepare_linear_system(
     unknowns = n_particles * modes_per_particle
     rhs_flat = {label: np.zeros((unknowns,), dtype=accum_dtype) for label in labels}
     if unknowns == 0:
-        return _PreparedLinearSystem(rhs_flat, None, None, None)
+        return _PreparedLinearSystem(None, rhs_flat, None, None, None)
 
     periodic_key = (
         None
@@ -452,6 +453,7 @@ def _prepare_linear_system(
             phase_timings=phase_timings,
         )
     return _PreparedLinearSystem(
+        prepared,
         rhs_flat,
         apply_operator,
         dense_operator,
@@ -555,10 +557,18 @@ def _solve_sources_impl(
         will_use_direct=will_use_direct,
         phase_timings=phase_timings,
     )
+    prepared = prepared_system.prepared_operator
     rhs_flat = prepared_system.rhs_flat
     A_mv = prepared_system.apply_operator
     A_dense = prepared_system.dense_operator
     A_lu = prepared_system.dense_factorization
+    adjoint_operator: Callable[[Any], Any] | None = None
+    if solver_name == "lsqr" and unknowns > 0:
+        if prepared is None:
+            raise RuntimeError(
+                "Internal error: LSQR adjoint requested before operator preparation."
+            )
+        adjoint_operator = prepared.make_adjoint(backend=operator_backend)
 
     rhs_matrix = np.column_stack([rhs_flat[label] for label in labels])
     rhs_arg = rhs_matrix[:, 0] if n_channels == 1 else rhs_matrix
@@ -595,6 +605,7 @@ def _solve_sources_impl(
                 A_mv,
                 rhs_arg,
                 method=solver_method,
+                A_h_mv=adjoint_operator,
                 A_dense=A_dense,
                 A_factorized=A_lu,
                 x0=normalized_warm_start,

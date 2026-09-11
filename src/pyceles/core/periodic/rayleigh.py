@@ -721,6 +721,80 @@ def apply_rayleigh_far_numpy(
     return cast(Array, y[:, :, 0] if squeezed else y)
 
 
+def apply_rayleigh_far_adjoint_numpy(
+    plan: RayleighPlan,
+    x: npt.ArrayLike,
+    *,
+    accumulation_dtype: npt.DTypeLike | None = None,
+) -> Array:
+    """Apply the Hermitian adjoint of one prepared Rayleigh far operator.
+
+    This transposes the *stored discrete contraction* directly.  In
+    particular it does not construct a second physical plan at
+    ``-k_parallel``.  The adjoint of an upward delayed-entry scan is a
+    downward scan with ``gamma -> -conj(gamma)`` (and conversely), while the
+    source/destination projections exchange roles and are conjugated.
+
+    Using the same plan is both cheaper and numerically preferable for LSQR:
+    the returned action is the adjoint of exactly the matrix used by the
+    forward matvec, including its selected reciprocal window and stored
+    precision.
+    """
+
+    arr_raw = np.asarray(x)
+    squeezed = arr_raw.ndim == 2
+    if squeezed:
+        arr = arr_raw[:, :, None]
+    elif arr_raw.ndim == 3:
+        arr = arr_raw
+    else:
+        raise ValueError("Rayleigh input must have shape (N, Nm) or (N, Nm, nrhs).")
+    if arr.shape[0] != plan.sort_order.size:
+        raise ValueError("Rayleigh input particle count does not match the plan.")
+
+    arr_sorted = np.asarray(arr[plan.sort_order], dtype=plan.source_tables.dtype)
+    phase_sorted = plan.sorted_xy_phase
+    y_sorted = np.zeros_like(arr_sorted)
+    chunk = resolve_rayleigh_mode_chunk_size(
+        n_modes_reciprocal=plan.n_modes_reciprocal,
+        n_particles=arr.shape[0],
+        n_rhs=arr.shape[2],
+        dtype=arr_sorted.dtype,
+    )
+    for start in range(0, plan.n_modes_reciprocal, chunk):
+        stop = min(plan.n_modes_reciprocal, start + chunk)
+        phase = phase_sorted[:, start:stop]
+        gamma_adjoint = -np.conjugate(plan.gamma[start:stop])
+        weight_adjoint = np.conjugate(plan.weights[start:stop])
+        for direction, upward in ((0, True), (1, False)):
+            source = np.einsum(
+                "qpm,amr->aqpr",
+                np.conjugate(plan.destination_tables[direction, start:stop]),
+                arr_sorted,
+                optimize=True,
+            )
+            source *= np.conjugate(phase)[:, :, None, None]
+            source *= weight_adjoint[None, :, None, None]
+            incoming = _scan_far_numpy(
+                source_amplitudes=source,
+                z=plan.sorted_z,
+                gamma=gamma_adjoint,
+                z_cut=plan.z_cut,
+                upward=not upward,
+                accumulation_dtype=accumulation_dtype,
+            )
+            y_sorted += np.einsum(
+                "qpm,aqpr,aq->amr",
+                np.conjugate(plan.source_tables[direction, start:stop]),
+                incoming,
+                phase,
+                optimize=True,
+            )
+            del source, incoming
+    y = y_sorted[plan.inverse_order]
+    return cast(Array, y[:, :, 0] if squeezed else y)
+
+
 def _cartesian_xy_z_layout(
     points: npt.ArrayLike,
 ) -> tuple[Array, Array, Array, Array] | None:
@@ -1005,6 +1079,7 @@ def near_point_source_csr(
 __all__ = [
     "RayleighNearCacheEstimate",
     "RayleighPlan",
+    "apply_rayleigh_far_adjoint_numpy",
     "apply_rayleigh_far_numpy",
     "apply_rayleigh_far_to_points_numpy",
     "build_rayleigh_plan",

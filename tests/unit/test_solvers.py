@@ -1844,7 +1844,7 @@ def test_apply_operator_cupy_keeps_columnwise_inputs_on_backend():
         ),
         (
             {"b": np.ones((2,), dtype=np.complex128), "method": "gcrotmk", "backend": "cupy"},
-            "currently supports only GMRES, FGMRES, BiCGSTAB, LGMRES, GCRO, or direct solves",
+            "currently supports only GMRES, FGMRES, BiCGSTAB, LGMRES, GCRO, LSQR, or direct solves",
         ),
         (
             {"b": np.ones((2,), dtype=np.complex128), "method": "auto"},

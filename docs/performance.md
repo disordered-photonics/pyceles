@@ -28,10 +28,12 @@ routes to a native block-GMRES path, and `Simulation.solve_sources(...)` uses
 that path automatically on labeled multi-channel runs.
 
 For single-RHS iterative solves on the CuPy backend, pyceles also ships native
-`fgmres[cupy]`, `lgmres[cupy]`, `bicgstab[cupy]`, and harmonic `gcro[cupy]`
-paths. These keep the main Krylov state on device. GCRO retains a bounded
-harmonic recycle space controlled by `solver_recycle_dim`; multi-RHS workflows
-solve columns independently. Restarted GMRES-family methods use
+`fgmres[cupy]`, `lgmres[cupy]`, `bicgstab[cupy]`, harmonic `gcro[cupy]`, and
+`lsqr[cupy]` paths. These keep the main Krylov state on device. GCRO retains a
+bounded harmonic recycle space controlled by `solver_recycle_dim`; LSQR keeps
+only its bidiagonal recurrence but requires an exact Hermitian-adjoint action
+and currently supports one RHS. Multi-RHS workflows solve columns independently.
+Restarted GMRES-family methods use
 restart-boundary true-residual checks by default for robust stopping decisions.
 
 ## Practical CuPy notes

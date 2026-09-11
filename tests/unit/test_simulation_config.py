@@ -65,6 +65,16 @@ def test_simulation_config_rejects_gcro_on_numpy_backend() -> None:
         SimulationConfig(solver_method="gcro", verbose=False)
 
 
+def test_simulation_config_accepts_cupy_lsqr() -> None:
+    cfg = SimulationConfig(operator_backend="cupy", solver_method="lsqr", verbose=False)
+    assert cfg.solver_method == "lsqr"
+
+
+def test_simulation_config_rejects_lsqr_on_numpy_backend() -> None:
+    with pytest.raises(NotImplementedError, match="only with"):
+        SimulationConfig(solver_method="lsqr", verbose=False)
+
+
 def test_simulation_config_rejects_gcros_full_restart_recycle_space() -> None:
     with pytest.raises(ValueError, match="smaller than `solver_restart`"):
         SimulationConfig(

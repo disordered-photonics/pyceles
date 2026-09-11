@@ -183,9 +183,9 @@ class SimulationConfig:
     farfield_azimuthal_angles: np.ndarray | None = None
     radial_lut_dr: float = 0.0
     force_general_initial_field: bool = False
-    solver_method: Literal["gmres", "fgmres", "bicgstab", "lgmres", "gcro", "gcrotmk", "direct"] = (
-        "gmres"
-    )
+    solver_method: Literal[
+        "gmres", "fgmres", "bicgstab", "lgmres", "gcro", "gcrotmk", "lsqr", "direct"
+    ] = "gmres"
     solver_rtol: float = 1e-5
     solver_compute_final_residual: bool = True
     solver_restart: int = 100
@@ -250,7 +250,16 @@ class SimulationConfig:
         )
 
         method = str(self.solver_method).lower()
-        allowed = {"gmres", "fgmres", "bicgstab", "lgmres", "gcro", "gcrotmk", "direct"}
+        allowed = {
+            "gmres",
+            "fgmres",
+            "bicgstab",
+            "lgmres",
+            "gcro",
+            "gcrotmk",
+            "lsqr",
+            "direct",
+        }
         if method not in allowed:
             raise ValueError(
                 f"`solver_method` must be one of {sorted(allowed)}. Got {self.solver_method!r}."
@@ -267,6 +276,10 @@ class SimulationConfig:
         if method == "gcro" and backend != "cupy":
             raise NotImplementedError(
                 "`solver_method='gcro'` is currently available only with `operator_backend='cupy'`."
+            )
+        if method == "lsqr" and backend != "cupy":
+            raise NotImplementedError(
+                "`solver_method='lsqr'` is currently available only with `operator_backend='cupy'`."
             )
 
         coupling_backend = str(self.coupling_backend).lower()

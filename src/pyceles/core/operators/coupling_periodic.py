@@ -23,6 +23,7 @@ from pyceles.core.periodic.ewald import (
 from pyceles.core.periodic.rayleigh import (
     RayleighNearCacheEstimate,
     RayleighPlan,
+    apply_rayleigh_far_adjoint_numpy,
     apply_rayleigh_far_numpy,
     near_pair_csr,
     prepare_rayleigh_plan,
@@ -72,7 +73,11 @@ class PeriodicCouplingOperator:
         default=None, init=False, repr=False
     )
     _self_block_cache: Array | None = field(default=None, init=False, repr=False)
+    _self_block_adjoint_cache: Array | None = field(default=None, init=False, repr=False)
     _near_contraction_tensor_cache: Array | None = field(default=None, init=False, repr=False)
+    _near_contraction_tensor_adjoint_cache: Array | None = field(
+        default=None, init=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         self.dtype = np.dtype(self.dtype)
@@ -278,31 +283,37 @@ class PeriodicCouplingOperator:
             sums[start:stop] = local[:, degrees, orders].astype(self.dtype, copy=False)
         self._near_structural_sums = sums
 
-    def _apply_rayleigh(self, x: Array) -> Array:
+    def _reshape_rayleigh_input(self, x: Array) -> tuple[Array, bool]:
         arr_raw = np.asarray(x, dtype=self.dtype)
-        squeezed = arr_raw.ndim == 1
-        if squeezed:
-            if arr_raw.size != self.n_particles * self.n_modes:
+        expected = self.n_particles * self.n_modes
+        if arr_raw.ndim == 1:
+            if arr_raw.size != expected:
+                raise ValueError(f"Input length must match n_particles * n_modes ({expected}).")
+            return arr_raw.reshape(self.n_particles, self.n_modes, 1), True
+        if arr_raw.ndim == 2:
+            if arr_raw.shape[0] != expected:
                 raise ValueError(
-                    "Input length must match n_particles * n_modes. "
-                    f"Got {arr_raw.size} for {self.n_particles * self.n_modes}."
+                    f"Input first dimension must match n_particles * n_modes ({expected})."
                 )
-            arr = arr_raw.reshape(self.n_particles, self.n_modes, 1)
-        elif arr_raw.ndim == 2:
-            if arr_raw.shape[0] != self.n_particles * self.n_modes:
-                raise ValueError(
-                    "Input first dimension must match n_particles * n_modes. "
-                    f"Got {arr_raw.shape[0]} for {self.n_particles * self.n_modes}."
-                )
-            arr = arr_raw.reshape(self.n_particles, self.n_modes, arr_raw.shape[1])
-        else:
-            raise ValueError(f"Input must be 1D or 2D. Got shape {arr_raw.shape}.")
-        y = apply_rayleigh_far_numpy(
-            self._rayleigh_plan(),
-            arr,
-            accumulation_dtype=self.accum_dtype,
+            return arr_raw.reshape(self.n_particles, self.n_modes, arr_raw.shape[1]), False
+        raise ValueError(f"Input must be 1D or 2D. Got shape {arr_raw.shape}.")
+
+    def _flatten_rayleigh_output(self, values: Array, *, squeezed: bool) -> Array:
+        flat = np.asarray(values, dtype=self.dtype).reshape(
+            self.n_particles * self.n_modes, int(values.shape[2])
         )
-        y += np.einsum("ij,ajr->air", self._self_block(), arr, optimize=True)
+        return flat[:, 0] if squeezed else flat
+
+    def _apply_rayleigh_far_reshaped(self, arr: Array) -> Array:
+        return apply_rayleigh_far_numpy(
+            self._rayleigh_plan(), arr, accumulation_dtype=self.accum_dtype
+        )
+
+    def _apply_rayleigh_near_reshaped(self, arr: Array, *, target: Array | None = None) -> Array:
+        self_contribution = np.einsum("ij,ajr->air", self._self_block(), arr, optimize=True)
+        y = self_contribution if target is None else target
+        if target is not None:
+            y += self_contribution
         self._populate_near_structural_sums(show_progress=False)
         self._release_rayleigh_preparation_state()
         indptr, destinations = self._near_structure()
@@ -315,18 +326,81 @@ class PeriodicCouplingOperator:
             stop = int(indptr[source + 1])
             if start == stop:
                 continue
-            contribution = np.einsum(
-                "av,ijv,jr->air",
-                sums[start:stop],
-                tensor,
-                arr[source],
+            y[destinations[start:stop]] += np.einsum(
+                "av,ijv,jr->air", sums[start:stop], tensor, arr[source], optimize=True
+            )
+        return np.asarray(y, dtype=self.dtype)
+
+    def _apply_rayleigh_far_adjoint_reshaped(self, arr: Array) -> Array:
+        return apply_rayleigh_far_adjoint_numpy(
+            self._rayleigh_plan(), arr, accumulation_dtype=self.accum_dtype
+        )
+
+    def _apply_rayleigh_near_adjoint_reshaped(
+        self, arr: Array, *, target: Array | None = None
+    ) -> Array:
+        self_adjoint = self._self_block_adjoint_cache
+        if self_adjoint is None:
+            self_adjoint = np.ascontiguousarray(np.conjugate(self._self_block()).T)
+            self._self_block_adjoint_cache = self_adjoint
+        self_contribution = np.einsum("ij,ajr->air", self_adjoint, arr, optimize=True)
+        y = self_contribution if target is None else target
+        if target is not None:
+            y += self_contribution
+        self._populate_near_structural_sums(show_progress=False)
+        self._release_rayleigh_preparation_state()
+        indptr, destinations = self._near_structure()
+        sums = self._near_structural_sums
+        if sums is None:
+            raise RuntimeError("Periodic near Ewald cache population failed.")
+        tensor_adjoint = self._near_contraction_tensor_adjoint_cache
+        if tensor_adjoint is None:
+            tensor_adjoint = np.ascontiguousarray(np.conjugate(self._near_contraction_tensor()))
+            self._near_contraction_tensor_adjoint_cache = tensor_adjoint
+        for source in range(self.n_particles):
+            start = int(indptr[source])
+            stop = int(indptr[source + 1])
+            if start == stop:
+                continue
+            y[source] += np.einsum(
+                "av,ijv,air->jr",
+                np.conjugate(sums[start:stop]),
+                tensor_adjoint,
+                arr[destinations[start:stop]],
                 optimize=True,
             )
-            y[destinations[start:stop]] += contribution
-        flat = np.asarray(y, dtype=self.dtype).reshape(
-            self.n_particles * self.n_modes, int(arr.shape[2])
+        return np.asarray(y, dtype=self.dtype)
+
+    def _apply_rayleigh_near(self, x: Array) -> Array:
+        arr, squeezed = self._reshape_rayleigh_input(x)
+        return self._flatten_rayleigh_output(
+            self._apply_rayleigh_near_reshaped(arr), squeezed=squeezed
         )
-        return flat[:, 0] if squeezed else flat
+
+    def _apply_rayleigh_far(self, x: Array) -> Array:
+        arr, squeezed = self._reshape_rayleigh_input(x)
+        return self._flatten_rayleigh_output(
+            self._apply_rayleigh_far_reshaped(arr), squeezed=squeezed
+        )
+
+    def _apply_rayleigh(self, x: Array) -> Array:
+        arr, squeezed = self._reshape_rayleigh_input(x)
+        y = self._apply_rayleigh_far_reshaped(arr)
+        self._apply_rayleigh_near_reshaped(arr, target=y)
+        return self._flatten_rayleigh_output(y, squeezed=squeezed)
+
+    def _apply_rayleigh_adjoint(self, x: Array) -> Array:
+        arr, squeezed = self._reshape_rayleigh_input(x)
+        y = self._apply_rayleigh_far_adjoint_reshaped(arr)
+        self._apply_rayleigh_near_adjoint_reshaped(arr, target=y)
+        return self._flatten_rayleigh_output(y, squeezed=squeezed)
+
+    def apply_adjoint(self, x: Array) -> Array:
+        if self.periodic.options.method != "rayleigh":
+            raise NotImplementedError(
+                "Periodic coupling adjoints are currently implemented only for method='rayleigh'."
+            )
+        return self._apply_rayleigh_adjoint(x)
 
     def apply(self, x: Array) -> Array:
         """Apply the configured periodic coupling model to stacked coefficients."""
