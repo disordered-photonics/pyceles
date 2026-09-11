@@ -3,7 +3,7 @@
 Large systems are typically solved matrix-free, while a dense direct solve is
 only practical for small systems. This module therefore provides:
 
-- Krylov methods (`gmres`, `bicgstab`, `lgmres`, `gcrotmk`)
+- Krylov methods (`gmres`, `bicgstab`, `lgmres`, `gcro`, `gcrotmk`)
 - optional dense direct solve for small systems
 - native CuPy block-GMRES for multi-RHS iterative solves
 - a dispatcher (`solve_linear_system`) with `method='auto'`
@@ -20,7 +20,7 @@ import time
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal, cast
 
 import numpy as np
@@ -29,6 +29,7 @@ from tqdm.auto import tqdm
 
 from pyceles._optional import asnumpy, import_cupy
 
+from ._gcro_cupy import gcro_cupy_native
 from .krylov_cupy import (
     _resolve_accum_dtype,
     bicgstab_cupy_native,
@@ -325,6 +326,12 @@ def _combine_independent_results(
         history = result.residual_history
         histories.append(history if isinstance(history, np.ndarray) else None)
 
+    per_rhs_metadata = [dict(result.block_metadata or {}) for result in results]
+    combined_metadata = (
+        {"independent_rhs": per_rhs_metadata}
+        if any(bool(metadata) for metadata in per_rhs_metadata)
+        else None
+    )
     return LinearSolveResult(
         x=np.column_stack([np.asarray(result.x).reshape(-1) for result in results]),
         info=np.asarray([int(result.info) for result in results], dtype=int),
@@ -335,6 +342,7 @@ def _combine_independent_results(
         residual_history=histories,
         rhs_count=len(results),
         converged_reason=np.asarray([result.converged_reason for result in results], dtype=object),
+        block_metadata=combined_metadata,
     )
 
 
@@ -1141,6 +1149,97 @@ def gmres_cupy(
     )
 
 
+def gcro_cupy(
+    A_mv: Callable[[np.ndarray], np.ndarray],
+    b: np.ndarray,
+    *,
+    x0: np.ndarray | None = None,
+    rtol: float = 1e-6,
+    atol: float = 0.0,
+    restart: int = 100,
+    maxiter: int | None = None,
+    recycle_dim: int = 8,
+    accum_dtype: npt.DTypeLike | None = None,
+    callback: Callable[[float], None] | None = None,
+    callback_true: Callable[[float], None] | None = None,
+    monitor: Literal["preconditioned", "true", "both"] = "preconditioned",
+    progress_residual: Literal["preconditioned", "true"] = "preconditioned",
+    show_progress: bool = True,
+    compute_final_residual: bool = True,
+) -> LinearSolveResult:
+    """Solve ``Ax=b`` with native forward-only harmonic GCRO-DR.
+
+    ``restart`` is the total augmented GCRO-DR dimension.  After the first
+    ordinary GMRES cycle, at most ``recycle_dim`` harmonic Ritz vectors are
+    retained and subsequent cycles generate at most ``restart-recycle_dim``
+    new Arnoldi directions.  The physical residual is rebuilt at every
+    restart.
+    """
+    (
+        cupy,
+        op_dtype,
+        maxiter_total,
+        monitor_mode,
+        native_callback,
+        native_restart_callback,
+        progress_update,
+        progress_close,
+    ) = _prepare_cupy_restarted_solver(
+        "gcro",
+        b,
+        rtol=rtol,
+        maxiter=maxiter,
+        show_progress=show_progress,
+        monitor=monitor,
+        progress_residual=progress_residual,
+        callback=callback,
+        callback_true=callback_true,
+    )
+    try:
+        native = gcro_cupy_native(
+            A_mv,
+            b,
+            cupy=cupy,
+            x0=x0,
+            rtol=rtol,
+            atol=atol,
+            restart=restart,
+            maxiter=maxiter_total,
+            recycle_dim=recycle_dim,
+            operator_dtype=op_dtype,
+            accum_dtype=accum_dtype,
+            callback=native_callback,
+            restart_callback=native_restart_callback,
+            record_proxy_history=monitor_mode in {"preconditioned", "both"},
+            compute_final_residual=bool(compute_final_residual),
+        )
+    except BaseException:
+        progress_close()
+        raise
+
+    if show_progress and compute_final_residual:
+        progress_update(
+            float(native.relative_residual),
+            residual_label_override="true_final_rel_res",
+            advance=False,
+        )
+    progress_close()
+    _record_backend_solution(native.x)
+    result = _finalize_cupy_restarted_result(
+        "gcro",
+        native,
+        monitor_mode=monitor_mode,
+        compute_final_residual=bool(compute_final_residual),
+    )
+    metadata = dict(result.block_metadata or {})
+    metadata.update(
+        operator_applications=int(native.operator_applications),
+        restart_cycles=int(native.restart_cycles),
+        recycle_dimension=int(native.recycle_dimension),
+    )
+    return replace(result, block_metadata=metadata)
+
+
 def fgmres_cupy(
     A_mv: Callable[[np.ndarray], np.ndarray],
     b: np.ndarray,
@@ -1896,6 +1995,7 @@ def solve_linear_system(
     gmres_block_reorthogonalize: bool = True,
     lgmres_outer_k: int = 3,
     lgmres_store_outer_av: bool = True,
+    recycle_dim: int = 8,
     direct_max_n: int = 15000,
     dtype: npt.DTypeLike = np.complex128,
     accum_dtype: npt.DTypeLike | None = None,
@@ -1905,7 +2005,7 @@ def solve_linear_system(
 ) -> LinearSolveResult:
     """Solve Ax=b with selected method.
 
-    Supported methods: `auto`, `gmres`, `fgmres`, `bicgstab`, `lgmres`, `gcrotmk`, `direct`.
+    Supported methods: `auto`, `gmres`, `fgmres`, `bicgstab`, `lgmres`, `gcro`, `gcrotmk`, `direct`.
     If `method` resolves to `direct`, an optional preassembled `A_dense` can be
     supplied to avoid expensive column-by-column assembly via `A_mv`, and an
     optional `A_factorized=(lu, piv)` payload can be supplied to reuse LU
@@ -1921,7 +2021,8 @@ def solve_linear_system(
         Optional callable approximating `M^{-1}` for iterative methods.
         It can accept vectors and may optionally accept batched `(n, nrhs)` inputs.
         For native CuPy FGMRES, a two-argument form ``preconditioner(v, state)``
-        is also accepted, where ``state`` carries iteration indices.
+        is also accepted, where ``state`` carries iteration indices. The
+        initial native CuPy GCRO path does not accept a custom preconditioner.
     gmres_monitor, gmres_progress_residual:
         CuPy-native GMRES monitor channels. `gmres_monitor` controls which
         residual history is retained in the result, while
@@ -1939,6 +2040,10 @@ def solve_linear_system(
         Optional accumulation dtype for native CuPy Krylov reductions and small
         projected systems. When omitted, native solvers retain their robust
         default (complex128 accumulation).
+    recycle_dim:
+        CuPy-native GCRO-DR harmonic recycle dimension. ``restart`` is the
+        total augmented dimension, so recycled cycles generate at most
+        ``restart-recycle_dim`` new Arnoldi vectors.
     lgmres_outer_k, lgmres_store_outer_av:
         CuPy-native LGMRES recycle controls. ``lgmres_outer_k`` is the number
         of correction directions retained across restart cycles; enabling
@@ -1970,9 +2075,16 @@ def solve_linear_system(
     backend_name = backend
     if m == "auto":
         m = "direct" if n <= int(direct_max_n) else "gmres"
-    if backend_name == "cupy" and m not in {"gmres", "fgmres", "bicgstab", "lgmres", "direct"}:
+    if backend_name == "cupy" and m not in {
+        "gmres",
+        "fgmres",
+        "bicgstab",
+        "lgmres",
+        "gcro",
+        "direct",
+    }:
         raise ValueError(
-            "The CuPy linear-solver backend currently supports only GMRES, FGMRES, BiCGSTAB, LGMRES, or direct solves."
+            "The CuPy linear-solver backend currently supports only GMRES, FGMRES, BiCGSTAB, LGMRES, GCRO, or direct solves."
         )
 
     x0_mat: np.ndarray | None = None
@@ -2055,6 +2167,7 @@ def solve_linear_system(
                     gmres_block_reorthogonalize=gmres_block_reorthogonalize,
                     lgmres_outer_k=lgmres_outer_k,
                     lgmres_store_outer_av=lgmres_store_outer_av,
+                    recycle_dim=recycle_dim,
                     direct_max_n=direct_max_n,
                     dtype=dtype,
                     accum_dtype=accum_dtype,
@@ -2188,6 +2301,29 @@ def solve_linear_system(
             show_progress=show_progress,
             compute_final_residual=compute_final_residual,
         )
+    if m == "gcro":
+        if backend_name != "cupy":
+            raise ValueError("`method='gcro'` is currently available only with backend='cupy'.")
+        if preconditioner is not None:
+            raise NotImplementedError(
+                "The initial public GCRO path does not accept a custom preconditioner. "
+                "Use GMRES/FGMRES for preconditioned experiments."
+            )
+        return gcro_cupy(
+            A_mv,
+            b_vec,
+            x0=x0_vec,
+            rtol=rtol,
+            atol=atol,
+            restart=restart,
+            maxiter=maxiter,
+            recycle_dim=recycle_dim,
+            accum_dtype=accum_dtype,
+            monitor=gmres_monitor,
+            progress_residual=gmres_progress_residual,
+            show_progress=show_progress,
+            compute_final_residual=compute_final_residual,
+        )
     if m == "gcrotmk":
         return gcrotmk_scipy(
             A_mv,
@@ -2201,5 +2337,5 @@ def solve_linear_system(
             compute_final_residual=compute_final_residual,
         )
     raise ValueError(
-        f"Unknown method '{method}'. Use one of auto/gmres/fgmres/bicgstab/lgmres/gcrotmk/direct."
+        f"Unknown method '{method}'. Use one of auto/gmres/fgmres/bicgstab/lgmres/gcro/gcrotmk/direct."
     )

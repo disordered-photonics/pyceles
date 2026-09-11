@@ -596,6 +596,76 @@ def test_fgmres_cupy_matches_gmres_on_toy_system(monkeypatch):
     np.testing.assert_allclose(np.asarray(out_f.x), np.asarray(out_g.x), atol=1e-8, rtol=1e-8)
 
 
+@pytest.mark.gpu
+def test_gcro_cupy_harmonic_recycling_solves_toy_system(
+    cupy_runtime: tuple[Any, Any],
+) -> None:
+    """Exercise several recycled cycles through the native CuPy path."""
+    cupy, _ = cupy_runtime
+    rng = np.random.default_rng(24)
+    n = 12
+    M = rng.standard_normal((n, n)) + 1j * rng.standard_normal((n, n))
+    A = M.conj().T @ M + (0.5 + 0.0j) * np.eye(n)
+    b = rng.standard_normal(n) + 1j * rng.standard_normal(n)
+
+    out = solvers.solve_linear_system(
+        lambda x: cupy.asarray(A, dtype=cupy.complex128) @ x,
+        b,
+        method="gcro",
+        backend="cupy",
+        restart=5,
+        recycle_dim=2,
+        maxiter=100,
+        rtol=1e-10,
+        accum_dtype=np.complex128,
+        show_progress=False,
+    )
+
+    assert int(out.info) == 0
+    assert int(out.iterations) > 5
+    metadata = out.block_metadata
+    assert metadata is not None
+    assert int(metadata["restart_cycles"]) >= 2
+    assert int(metadata["recycle_dimension"]) == 2
+    np.testing.assert_allclose(np.asarray(out.x), np.linalg.solve(A, b), atol=1e-8, rtol=1e-8)
+    assert float(out.relative_residual) <= 1e-10
+
+    proxy_only = solvers.solve_linear_system(
+        lambda x: cupy.asarray(A, dtype=cupy.complex128) @ x,
+        b,
+        method="gcro",
+        backend="cupy",
+        restart=5,
+        recycle_dim=2,
+        maxiter=5,
+        rtol=1e-10,
+        accum_dtype=np.complex128,
+        show_progress=False,
+        compute_final_residual=False,
+    )
+    assert np.isnan(float(proxy_only.relative_residual))
+    assert proxy_only.true_residual_history is not None
+    assert proxy_only.true_residual_history.size == 0
+
+    multi = solvers.solve_linear_system(
+        lambda x: cupy.asarray(A, dtype=cupy.complex128) @ x,
+        np.column_stack((b, 2.0 * b)),
+        method="gcro",
+        backend="cupy",
+        restart=5,
+        recycle_dim=2,
+        maxiter=100,
+        rtol=1e-10,
+        accum_dtype=np.complex128,
+        show_progress=False,
+    )
+    assert multi.rhs_count == 2
+    multi_metadata = multi.block_metadata
+    assert multi_metadata is not None
+    assert len(multi_metadata["independent_rhs"]) == 2
+    assert all("restart_cycles" in item for item in multi_metadata["independent_rhs"])
+
+
 @pytest.mark.fake_gpu
 def test_lgmres_cupy_matches_gmres_on_toy_system(monkeypatch):
     monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
@@ -1777,7 +1847,7 @@ def test_apply_operator_cupy_keeps_columnwise_inputs_on_backend():
         ),
         (
             {"b": np.ones((2,), dtype=np.complex128), "method": "gcrotmk", "backend": "cupy"},
-            "currently supports only GMRES, FGMRES, BiCGSTAB, LGMRES, or direct solves",
+            "currently supports only GMRES, FGMRES, BiCGSTAB, LGMRES, GCRO, or direct solves",
         ),
     ],
 )
