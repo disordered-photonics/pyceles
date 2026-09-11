@@ -390,7 +390,6 @@ def _run_one(
         solver_rtol=float(args.solver_rtol),
         solver_restart=int(args.solver_restart),
         solver_maxiter=int(args.solver_maxiter),
-        solver_direct_max_n=1,
         solver_compute_final_residual=not bool(args.skip_final_residual_check),
         operator_backend=cast(OperatorBackend, args.operator_backend),
         coupling_backend=coupling,

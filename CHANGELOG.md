@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Reduced memory traffic in native CuPy Krylov reductions by accumulating in
   the requested precision without full-vector promotion.
+- Breaking: solver selection is now explicit. `auto` is no longer accepted,
+  `SimulationConfig` defaults to GMRES, and the dense-direct size guard has
+  been removed; explicit direct requests are allowed to reach the backend's
+  normal allocation or factorization limits.
 
 ## [0.5.0] - 2026-09-05
 

@@ -135,7 +135,7 @@ def test_direct_dense_solve_identity():
     n = 8
     rng = np.random.default_rng(5)
     b = rng.standard_normal(n) + 1j * rng.standard_normal(n)
-    out = direct_dense_scipy(lambda x: x.copy(), b, max_n=16, show_progress=False)
+    out = direct_dense_scipy(lambda x: x.copy(), b, show_progress=False)
     np.testing.assert_allclose(out.x, b, atol=1e-12, rtol=1e-12)
     assert out.info == 0
     assert out.method == "direct"
@@ -145,7 +145,7 @@ def test_direct_dense_solve_identity():
 def test_direct_dense_uses_preassembled_matrix():
     A = np.array([[2.0 + 0j, 1.0 - 1.0j], [0.5 + 0.2j, 3.0 + 0j]], dtype=np.complex128)
     b = np.array([1.0 + 0j, -2.0 + 0.5j], dtype=np.complex128)
-    out = direct_dense_scipy(lambda x: x.copy(), b, A_dense=A, max_n=16, show_progress=False)
+    out = direct_dense_scipy(lambda x: x.copy(), b, A_dense=A, show_progress=False)
     np.testing.assert_allclose(A @ out.x, b, atol=1e-12, rtol=1e-12)
     assert out.info == 0
     assert out.method == "direct"
@@ -162,7 +162,6 @@ def test_direct_dense_uses_precomputed_lu_factorization():
         lambda x: A @ np.asarray(x),
         b,
         A_factorized=lu,
-        max_n=16,
         show_progress=False,
     )
     np.testing.assert_allclose(A @ out.x, b, atol=1e-12, rtol=1e-12)
@@ -170,12 +169,10 @@ def test_direct_dense_uses_precomputed_lu_factorization():
     assert out.method == "direct"
 
 
-def test_solve_linear_system_auto_picks_direct_for_small_n():
+def test_solve_linear_system_defaults_to_gmres():
     b = np.array([1.0 + 0j, 2.0 + 0j])
-    out = solve_linear_system(
-        lambda x: x.copy(), b, method="auto", direct_max_n=4, show_progress=False
-    )
-    assert out.method == "direct"
+    out = solve_linear_system(lambda x: x.copy(), b, show_progress=False)
+    assert out.method == "gmres"
     np.testing.assert_allclose(out.x, b)
 
 
@@ -1849,6 +1846,10 @@ def test_apply_operator_cupy_keeps_columnwise_inputs_on_backend():
             {"b": np.ones((2,), dtype=np.complex128), "method": "gcrotmk", "backend": "cupy"},
             "currently supports only GMRES, FGMRES, BiCGSTAB, LGMRES, GCRO, or direct solves",
         ),
+        (
+            {"b": np.ones((2,), dtype=np.complex128), "method": "auto"},
+            "Unknown method",
+        ),
     ],
 )
 def test_solve_linear_system_validates_public_dispatch_inputs(kwargs, match):
@@ -1863,10 +1864,6 @@ def test_solve_linear_system_validates_public_dispatch_inputs(kwargs, match):
         (
             {"b": np.zeros((2, 1, 1), dtype=np.complex128)},
             "`b` must be 1D or 2D",
-        ),
-        (
-            {"b": np.ones((3,), dtype=np.complex128), "max_n": 2},
-            "Direct dense solve disabled",
         ),
         (
             {"b": np.ones((2,), dtype=np.complex128), "A_dense": np.eye(3, dtype=np.complex128)},

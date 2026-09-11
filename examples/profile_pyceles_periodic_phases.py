@@ -534,7 +534,7 @@ def _build_config(
         polar_angles=pcl.core.uniform_polar_grid(int(args.n_beta)),
         azimuthal_angles=pcl.core.uniform_periodic_azimuth_grid(int(args.n_alpha)),
         solver_method=cast(
-            Literal["auto", "gmres", "bicgstab", "lgmres", "gcrotmk", "direct"],
+            Literal["gmres", "bicgstab", "lgmres", "gcrotmk", "direct"],
             args.solver,
         ),
         solver_rtol=float(args.solver_rtol),

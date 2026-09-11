@@ -1,12 +1,12 @@
 """Linear solvers for the many-sphere system.
 
 Large systems are typically solved matrix-free, while a dense direct solve is
-only practical for small systems. This module therefore provides:
+an explicitly requested full-matrix path. This module therefore provides:
 
 - Krylov methods (`gmres`, `bicgstab`, `lgmres`, `gcro`, `gcrotmk`)
-- optional dense direct solve for small systems
+- optional dense direct solve when the caller can afford the full matrix
 - native CuPy block-GMRES for multi-RHS iterative solves
-- a dispatcher (`solve_linear_system`) with `method='auto'`
+- a dispatcher (`solve_linear_system`) with an explicit method (GMRES by default)
 
 Key requirements for development/debugging:
 - determinism and correctness-first
@@ -1741,14 +1741,15 @@ def direct_dense_scipy(
     *,
     A_dense: np.ndarray | None = None,
     A_factorized: DenseLUFactorization | None = None,
-    max_n: int = 15000,
     dtype: npt.DTypeLike = np.complex128,
     show_progress: bool = True,
     compute_final_residual: bool = True,
 ) -> LinearSolveResult:
     """Dense direct solve by explicit matrix assembly.
 
-    This is intended only for small systems.
+    This deliberately has no machine-specific size guard. Dense allocation and
+    factorization are performed when requested; callers are responsible for
+    ensuring that the system fits available memory.
 
     Parameters
     ----------
@@ -1758,10 +1759,6 @@ def direct_dense_scipy(
         Optional LU factorization payload `(lu, piv)` for repeated solves on
         the same operator. If provided, factorization is not recomputed.
 
-    Notes
-    -----
-    `max_n` limits the *system size* `n` (number of unknowns in `A`), not the
-    number of RHS columns. For many-sphere simulations, `n = N_spheres * N_modes`.
     """
 
     import scipy.linalg
@@ -1779,11 +1776,6 @@ def direct_dense_scipy(
 
     n = b_mat.shape[0]
     nrhs = b_mat.shape[1]
-    if n > int(max_n):
-        raise ValueError(
-            f"Direct dense solve disabled for n={n} (> max_n={max_n}). "
-            "Use an iterative method or raise `max_n` explicitly."
-        )
 
     A_for_residual: np.ndarray | None = None
     if A_dense is not None:
@@ -1869,7 +1861,6 @@ def direct_dense_cupy(
     *,
     A_dense: np.ndarray | None = None,
     A_factorized: DenseLUFactorization | None = None,
-    max_n: int = 15000,
     dtype: npt.DTypeLike = np.complex128,
     show_progress: bool = True,
     compute_final_residual: bool = True,
@@ -1878,6 +1869,8 @@ def direct_dense_cupy(
 
     The dense matrix may still be assembled on CPU today; this path uploads it,
     factorizes it once on device, and reuses the LU payload across repeated RHS.
+    There is no machine-specific size guard: an explicit direct request is
+    allowed to reach the backend's normal allocation/factorization error.
     """
     cupy, _ = import_cupy()
     import cupyx.scipy.linalg
@@ -1895,11 +1888,6 @@ def direct_dense_cupy(
 
     n = b_mat.shape[0]
     nrhs = b_mat.shape[1]
-    if n > int(max_n):
-        raise ValueError(
-            f"Direct dense solve disabled for n={n} (> max_n={max_n}). "
-            "Use an iterative method or raise `max_n` explicitly."
-        )
 
     A_for_residual: np.ndarray | None = None
     A_gpu_dense: Any | None = None
@@ -1976,7 +1964,7 @@ def solve_linear_system(
     A_mv: Callable[[np.ndarray], np.ndarray],
     b: np.ndarray,
     *,
-    method: str = "auto",
+    method: str = "gmres",
     A_dense: np.ndarray | None = None,
     A_factorized: DenseLUFactorization | None = None,
     x0: np.ndarray | None = None,
@@ -1996,7 +1984,6 @@ def solve_linear_system(
     lgmres_outer_k: int = 3,
     lgmres_store_outer_av: bool = True,
     recycle_dim: int = 8,
-    direct_max_n: int = 15000,
     dtype: npt.DTypeLike = np.complex128,
     accum_dtype: npt.DTypeLike | None = None,
     backend: Literal["numpy", "cupy"] = "numpy",
@@ -2005,8 +1992,8 @@ def solve_linear_system(
 ) -> LinearSolveResult:
     """Solve Ax=b with selected method.
 
-    Supported methods: `auto`, `gmres`, `fgmres`, `bicgstab`, `lgmres`, `gcro`, `gcrotmk`, `direct`.
-    If `method` resolves to `direct`, an optional preassembled `A_dense` can be
+    Supported methods: `gmres`, `fgmres`, `bicgstab`, `lgmres`, `gcro`, `gcrotmk`, `direct`.
+    If `method='direct'`, an optional preassembled `A_dense` can be
     supplied to avoid expensive column-by-column assembly via `A_mv`, and an
     optional `A_factorized=(lu, piv)` payload can be supplied to reuse LU
     factorization across repeated direct solves on either NumPy or CuPy backends.
@@ -2069,12 +2056,9 @@ def solve_linear_system(
     else:
         raise ValueError(f"`b` must be 1D or 2D. Got shape {b_arr.shape}.")
 
-    n = b_mat.shape[0]
     nrhs = b_mat.shape[1]
     m = str(method).lower()
     backend_name = backend
-    if m == "auto":
-        m = "direct" if n <= int(direct_max_n) else "gmres"
     if backend_name == "cupy" and m not in {
         "gmres",
         "fgmres",
@@ -2106,7 +2090,6 @@ def solve_linear_system(
             b_mat if nrhs > 1 else b_mat[:, 0],
             A_dense=A_dense,
             A_factorized=A_factorized,
-            max_n=direct_max_n,
             dtype=dtype,
             show_progress=show_progress,
             compute_final_residual=compute_final_residual,
@@ -2168,7 +2151,6 @@ def solve_linear_system(
                     lgmres_outer_k=lgmres_outer_k,
                     lgmres_store_outer_av=lgmres_store_outer_av,
                     recycle_dim=recycle_dim,
-                    direct_max_n=direct_max_n,
                     dtype=dtype,
                     accum_dtype=accum_dtype,
                     backend=backend_name,
@@ -2337,5 +2319,5 @@ def solve_linear_system(
             compute_final_residual=compute_final_residual,
         )
     raise ValueError(
-        f"Unknown method '{method}'. Use one of auto/gmres/fgmres/bicgstab/lgmres/gcro/gcrotmk/direct."
+        f"Unknown method '{method}'. Use one of gmres/fgmres/bicgstab/lgmres/gcro/gcrotmk/direct."
     )

@@ -58,7 +58,7 @@ def _make_no_particle_simulation(
         lmax=int(lmax),
         polar_angles=pcl.core.uniform_polar_grid(int(n_polar)),
         azimuthal_angles=pcl.core.uniform_periodic_azimuth_grid(int(n_azimuth)),
-        solver_method="auto",
+        solver_method="gmres",
         compute_dtype="complex64",
         accum_dtype="complex128",
         verbose=bool(verbose),

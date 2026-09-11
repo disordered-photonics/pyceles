@@ -76,14 +76,14 @@ def test_simulation_config_rejects_gcros_full_restart_recycle_space() -> None:
         )
 
 
-def test_simulation_config_selects_solver_default_by_periodicity() -> None:
+def test_simulation_config_defaults_to_gmres_for_all_workloads() -> None:
     finite = SimulationConfig(verbose=False)
     periodic = SimulationConfig(
         periodic=PeriodicSpec(lattice=RectangularLattice2D(300.0, 300.0)),
         verbose=False,
     )
 
-    assert finite.solver_method == "bicgstab"
+    assert finite.solver_method == "gmres"
     assert periodic.solver_method == "gmres"
 
 
@@ -194,7 +194,7 @@ def test_simulation_config_accepts_mlfmm_complex64(backend: str) -> None:
         ({"solver_restart": 0}, "solver_restart"),
         ({"solver_recycle_dim": 0}, "solver_recycle_dim"),
         ({"solver_maxiter": 0}, "solver_maxiter"),
-        ({"solver_direct_max_n": 0}, "solver_direct_max_n"),
+        ({"solver_method": "auto"}, "solver_method"),
         ({"solver_preconditioner": object()}, "callable"),
     ],
 )

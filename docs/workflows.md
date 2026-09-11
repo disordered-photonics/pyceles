@@ -412,11 +412,11 @@ same rule with the labels `"te"` and `"tm"`.
 
 Notes:
 
-- `direct_max_n` limits the matrix size `n` of the linear system, not the number
-  of RHS columns.
 - For many-sphere systems, `n = N_spheres * n_modes(lmax)`.
-- `SimulationConfig.solver_direct_max_n` is the high-level knob passed to the
-  low-level direct solver guard.
+- An explicit `solver_method="direct"` assembles and factorizes the full dense
+  operator without a pyceles size heuristic; the caller is responsible for
+  memory availability. An oversized request therefore fails at the backend's
+  normal allocation or factorization boundary.
 - Repeated direct solves on the same `Simulation` instance reuse both dense `A`
   and its LU factorization.
 - `SimulationConfig.solver_compute_final_residual` controls true-residual

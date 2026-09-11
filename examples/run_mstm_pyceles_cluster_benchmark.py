@@ -37,7 +37,7 @@ from pyceles.io import (
     plot_spheres,
 )
 
-SolverMethod = Literal["auto", "gmres", "bicgstab", "lgmres", "gcrotmk", "direct"]
+SolverMethod = Literal["gmres", "bicgstab", "lgmres", "gcrotmk", "direct"]
 ComplexDType = Literal["complex64", "complex128"]
 OperatorBackend = Literal["numpy", "cupy"]
 # Fixed channel mapping used throughout benchmark diagnostics.
@@ -578,7 +578,6 @@ def _pyceles_run(
         solver_rtol=float(cfg.py_solver_rtol),
         solver_maxiter=int(cfg.py_solver_maxiter),
         solver_restart=int(cfg.py_solver_restart),
-        solver_direct_max_n=20_000,
         operator_backend=operator_backend,
         compute_dtype=cfg.py_compute_dtype,
         accum_dtype=cfg.py_accum_dtype,
@@ -1329,7 +1328,7 @@ def main() -> None:
     parser.add_argument(
         "--py-solver-method",
         type=str,
-        choices=["auto", "gmres", "bicgstab", "lgmres", "gcrotmk", "direct"],
+        choices=["gmres", "bicgstab", "lgmres", "gcrotmk", "direct"],
         default=BenchmarkConfig.py_solver_method,
     )
     parser.add_argument(

@@ -236,7 +236,7 @@ def main() -> None:
         azimuthal_angles=pcl.core.uniform_periodic_azimuth_grid(int(args.n_alpha)),
         radial_lut_dr=float(args.radial_lut_dr),
         solver_method=cast(
-            Literal["auto", "gmres", "bicgstab", "lgmres", "gcrotmk", "direct"],
+            Literal["gmres", "bicgstab", "lgmres", "gcrotmk", "direct"],
             args.solver,
         ),
         solver_rtol=float(args.solver_rtol),
@@ -353,7 +353,6 @@ def main() -> None:
             atol=0.0,
             restart=cfg.solver_restart,
             maxiter=cfg.solver_maxiter,
-            direct_max_n=cfg.solver_direct_max_n,
             dtype=np.dtype(cfg.compute_dtype),
             accum_dtype=np.dtype(cfg.accum_dtype),
             backend=operator_backend,

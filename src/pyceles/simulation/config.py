@@ -141,10 +141,9 @@ class SimulationConfig:
 
     Backend policy:
     - `operator_backend` controls the many-body solve backend.
-    - `solver_method=None` selects BiCGSTAB for finite clusters and GMRES for
-      periodic systems. The defaults reflect the observed convergence policy:
-      BiCGSTAB is the efficient finite-cluster workhorse, while periodic
-      systems are generally more robust with restarted GMRES.
+    - `solver_method` defaults to restarted GMRES for a predictable,
+      broadly applicable baseline. Expert users can select another supported
+      method explicitly for a workload where it is better suited.
     - `postprocessing_backend` defaults to `"inherit"`, which reuses the
       chosen operator backend so a CuPy solve naturally prefers CuPy
       postprocessing where accelerated kernels exist.
@@ -184,10 +183,9 @@ class SimulationConfig:
     farfield_azimuthal_angles: np.ndarray | None = None
     radial_lut_dr: float = 0.0
     force_general_initial_field: bool = False
-    solver_method: (
-        Literal["auto", "gmres", "fgmres", "bicgstab", "lgmres", "gcro", "gcrotmk", "direct"] | None
-    ) = None
-    solver_direct_max_n: int = 15_000
+    solver_method: Literal["gmres", "fgmres", "bicgstab", "lgmres", "gcro", "gcrotmk", "direct"] = (
+        "gmres"
+    )
     solver_rtol: float = 1e-5
     solver_compute_final_residual: bool = True
     solver_restart: int = 100
@@ -207,10 +205,6 @@ class SimulationConfig:
     verbose: bool = True
 
     def __post_init__(self) -> None:
-        if self.solver_method is None:
-            object.__setattr__(
-                self, "solver_method", "gmres" if self.periodic is not None else "bicgstab"
-            )
         if not (float(self.wavelength) > 0.0):
             raise ValueError(f"`wavelength` must be > 0. Got {self.wavelength!r}.")
         if int(self.lmax) < 1:
@@ -248,10 +242,6 @@ class SimulationConfig:
             )
         if int(self.solver_maxiter) < 1:
             raise ValueError(f"`solver_maxiter` must be >= 1. Got {self.solver_maxiter!r}.")
-        if int(self.solver_direct_max_n) < 1:
-            raise ValueError(
-                f"`solver_direct_max_n` must be >= 1. Got {self.solver_direct_max_n!r}."
-            )
         if self.solver_preconditioner is not None and not callable(self.solver_preconditioner):
             raise ValueError("`solver_preconditioner` must be callable or None.")
         resolve_compute_accum_dtypes(
@@ -260,7 +250,7 @@ class SimulationConfig:
         )
 
         method = str(self.solver_method).lower()
-        allowed = {"auto", "gmres", "fgmres", "bicgstab", "lgmres", "gcro", "gcrotmk", "direct"}
+        allowed = {"gmres", "fgmres", "bicgstab", "lgmres", "gcro", "gcrotmk", "direct"}
         if method not in allowed:
             raise ValueError(
                 f"`solver_method` must be one of {sorted(allowed)}. Got {self.solver_method!r}."

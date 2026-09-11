@@ -492,14 +492,10 @@ def _solve_sources_impl(
     k = k0 * float(np.real(cfg.n_medium))
 
     solver_method = cfg.solver_method
-    if solver_method is None:
-        raise RuntimeError("SimulationConfig did not resolve its default solver method.")
     solver_name = str(solver_method).lower()
     operator_backend = cfg.operator_backend
     k_parallel = periodic_shared_k_parallel(sim, labeled_sources)
-    will_use_direct = solver_name == "direct" or (
-        solver_name == "auto" and unknowns <= int(cfg.solver_direct_max_n)
-    )
+    will_use_direct = solver_name == "direct"
     if cfg.verbose:
         print_startup_logo_once()
         print(
@@ -608,7 +604,6 @@ def _solve_sources_impl(
                 restart=int(cfg.solver_restart),
                 recycle_dim=int(cfg.solver_recycle_dim),
                 maxiter=int(cfg.solver_maxiter),
-                direct_max_n=int(cfg.solver_direct_max_n),
                 dtype=compute_dtype,
                 accum_dtype=accum_dtype,
                 backend=operator_backend,
