@@ -421,6 +421,10 @@ Notes:
   and its LU factorization.
 - `SimulationConfig.solver_compute_final_residual` controls true-residual
   verification/diagnostics policy.
+- `solver_method="gcro"` selects the native CuPy harmonic recycling solver for
+  single-RHS runs; `SimulationConfig.solver_recycle_dim` controls its bounded
+  recycle rank. The common `solver_restart` value is the total augmented
+  dimension.
 - For native CuPy restarted GMRES/FGMRES/LGMRES, final-residual checks are
   performed at restart boundaries by default; set the option to `False` only
   for profiling-focused runs.

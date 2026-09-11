@@ -185,12 +185,13 @@ class SimulationConfig:
     radial_lut_dr: float = 0.0
     force_general_initial_field: bool = False
     solver_method: (
-        Literal["auto", "gmres", "fgmres", "bicgstab", "lgmres", "gcrotmk", "direct"] | None
+        Literal["auto", "gmres", "fgmres", "bicgstab", "lgmres", "gcro", "gcrotmk", "direct"] | None
     ) = None
     solver_direct_max_n: int = 15_000
     solver_rtol: float = 1e-5
     solver_compute_final_residual: bool = True
     solver_restart: int = 100
+    solver_recycle_dim: int = 8
     solver_maxiter: int = 1000
     solver_preconditioner: Callable[[np.ndarray], np.ndarray] | None = None
     operator_backend: Literal["numpy", "cupy"] = "numpy"
@@ -236,6 +237,15 @@ class SimulationConfig:
             raise ValueError("`solver_compute_final_residual` must be a boolean.")
         if int(self.solver_restart) < 1:
             raise ValueError(f"`solver_restart` must be >= 1. Got {self.solver_restart!r}.")
+        if int(self.solver_recycle_dim) < 1:
+            raise ValueError(f"`solver_recycle_dim` must be >= 1. Got {self.solver_recycle_dim!r}.")
+        if str(self.solver_method).lower() == "gcro" and int(self.solver_recycle_dim) >= int(
+            self.solver_restart
+        ):
+            raise ValueError(
+                "`solver_recycle_dim` must be smaller than `solver_restart` so GCRO "
+                "retains room for new Arnoldi directions."
+            )
         if int(self.solver_maxiter) < 1:
             raise ValueError(f"`solver_maxiter` must be >= 1. Got {self.solver_maxiter!r}.")
         if int(self.solver_direct_max_n) < 1:
@@ -250,7 +260,7 @@ class SimulationConfig:
         )
 
         method = str(self.solver_method).lower()
-        allowed = {"auto", "gmres", "fgmres", "bicgstab", "lgmres", "gcrotmk", "direct"}
+        allowed = {"auto", "gmres", "fgmres", "bicgstab", "lgmres", "gcro", "gcrotmk", "direct"}
         if method not in allowed:
             raise ValueError(
                 f"`solver_method` must be one of {sorted(allowed)}. Got {self.solver_method!r}."
@@ -264,6 +274,10 @@ class SimulationConfig:
                 f"Got {self.operator_backend!r}."
             )
         object.__setattr__(self, "operator_backend", backend)
+        if method == "gcro" and backend != "cupy":
+            raise NotImplementedError(
+                "`solver_method='gcro'` is currently available only with `operator_backend='cupy'`."
+            )
 
         coupling_backend = str(self.coupling_backend).lower()
         if coupling_backend not in {"pairwise", "mlfmm"}:

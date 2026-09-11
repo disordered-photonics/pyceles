@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Added an opt-in native CuPy harmonic GCRO-DR solver
+  (`solver_method="gcro"`). Its bounded recycle rank is controlled by
+  `solver_recycle_dim`.
+
+### Changed
+- Reduced memory traffic in native CuPy Krylov reductions by accumulating in
+  the requested precision without full-vector promotion.
+
 ## [0.5.0] - 2026-09-05
 
 ### Added

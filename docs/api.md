@@ -32,13 +32,19 @@ polarized = simulation.run_polarizations(jones_source)
 ## Linear solvers and precision
 
 `SimulationConfig.solver_method` accepts `None`, `auto`, `direct`, `gmres`,
-`fgmres`, `lgmres`, `bicgstab`, and `gcrotmk`. NumPy/SciPy provides direct, GMRES,
-BiCGSTAB, LGMRES, and GCROTMK; CuPy provides direct and native GMRES,
-FGMRES, LGMRES, and BiCGSTAB. CuPy GMRES also handles a two-dimensional
-right-hand side with native block GMRES. `fgmres` is CuPy-only and `gcrotmk`
-is SciPy-only. With `None` (the high-level default), finite systems select
-BiCGSTAB and periodic systems select restarted GMRES. Explicit `auto` selects
-a direct solve below `solver_direct_max_n` and GMRES otherwise.
+`fgmres`, `lgmres`, `bicgstab`, `gcro`, and `gcrotmk`. NumPy/SciPy provides direct,
+GMRES, BiCGSTAB, LGMRES, and GCROTMK; CuPy provides direct and native GMRES,
+FGMRES, LGMRES, BiCGSTAB, and harmonic GCRO-DR. CuPy GMRES also handles a
+two-dimensional right-hand side with native block GMRES. `fgmres` and `gcro`
+are CuPy-only and `gcrotmk` is SciPy-only. GCRO is a forward-only
+harmonic-recycling method with a single-RHS recurrence; multi-RHS workflows
+solve each column independently rather than using block GCRO. It exposes only
+`solver_recycle_dim` in addition to the common restart/tolerance/budget
+controls, while its extraction policy remains fixed internally. The initial
+GCRO path does not accept a custom preconditioner. With `None`
+(the high-level default), finite systems select BiCGSTAB and periodic systems
+select restarted GMRES. Explicit `auto` selects a direct solve below
+`solver_direct_max_n` and GMRES otherwise.
 
 `compute_dtype` controls compact operator and contraction arithmetic, while
 `accum_dtype` sets the wider precision budget for reductions on paths that

@@ -606,6 +606,7 @@ def _solve_sources_impl(
                 rtol=float(cfg.solver_rtol),
                 atol=0.0,
                 restart=int(cfg.solver_restart),
+                recycle_dim=int(cfg.solver_recycle_dim),
                 maxiter=int(cfg.solver_maxiter),
                 direct_max_n=int(cfg.solver_direct_max_n),
                 dtype=compute_dtype,

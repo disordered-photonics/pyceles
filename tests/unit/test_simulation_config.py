@@ -48,6 +48,34 @@ def test_simulation_config_accepts_cupy_operator_backend() -> None:
     assert cfg.resolved_postprocessing_backend() == "cupy"
 
 
+def test_simulation_config_accepts_cupy_gcro_and_recycle_dimension() -> None:
+    cfg = SimulationConfig(
+        operator_backend="cupy",
+        solver_method="gcro",
+        solver_restart=16,
+        solver_recycle_dim=4,
+        verbose=False,
+    )
+    assert cfg.solver_method == "gcro"
+    assert cfg.solver_recycle_dim == 4
+
+
+def test_simulation_config_rejects_gcro_on_numpy_backend() -> None:
+    with pytest.raises(NotImplementedError, match="only with"):
+        SimulationConfig(solver_method="gcro", verbose=False)
+
+
+def test_simulation_config_rejects_gcros_full_restart_recycle_space() -> None:
+    with pytest.raises(ValueError, match="smaller than `solver_restart`"):
+        SimulationConfig(
+            operator_backend="cupy",
+            solver_method="gcro",
+            solver_restart=8,
+            solver_recycle_dim=8,
+            verbose=False,
+        )
+
+
 def test_simulation_config_selects_solver_default_by_periodicity() -> None:
     finite = SimulationConfig(verbose=False)
     periodic = SimulationConfig(
@@ -164,6 +192,7 @@ def test_simulation_config_accepts_mlfmm_complex64(backend: str) -> None:
         ({"solver_rtol": 0.0}, "solver_rtol"),
         ({"solver_compute_final_residual": "yes"}, "boolean"),
         ({"solver_restart": 0}, "solver_restart"),
+        ({"solver_recycle_dim": 0}, "solver_recycle_dim"),
         ({"solver_maxiter": 0}, "solver_maxiter"),
         ({"solver_direct_max_n": 0}, "solver_direct_max_n"),
         ({"solver_preconditioner": object()}, "callable"),
