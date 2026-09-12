@@ -1380,9 +1380,9 @@ def lsqr_scipy(
     residual from a previous phase is supplied, LSQR solves for a correction
     and adds it to ``x0``; this matches the native CuPy continuation contract.
     SciPy's ``btol`` is scaled to the original RHS norm (including
-    continuation solves); ``atol`` remains SciPy's absolute normal-equation
-    safeguard.  The returned status is checked against pyceles' physical
-    residual target whenever ``compute_final_residual`` is enabled.
+    continuation solves).  SciPy's normal-equation ``atol`` is disabled here:
+    the physical residual target is checked explicitly below, so an internal
+    normal-equation criterion must not terminate a correction solve early.
     """
     from scipy.sparse.linalg import LinearOperator, lsqr
 
@@ -1396,10 +1396,17 @@ def lsqr_scipy(
     if condition_limit is not None and not (float(condition_limit) > 0.0):
         raise ValueError("`condition_limit` must be positive when provided.")
 
+    forward_applications = 0
+    adjoint_applications = 0
+
     def _mv(v: np.ndarray) -> np.ndarray:
+        nonlocal forward_applications
+        forward_applications += 1
         return np.asarray(_apply_operator(A_mv, np.asarray(v)), dtype=op_dtype).copy()
 
     def _rmv(v: np.ndarray) -> np.ndarray:
+        nonlocal adjoint_applications
+        adjoint_applications += 1
         return np.asarray(_apply_operator(A_h_mv, np.asarray(v)), dtype=op_dtype).copy()
 
     operator = LinearOperator((n, n), matvec=_mv, rmatvec=_rmv, dtype=op_dtype)
@@ -1462,11 +1469,13 @@ def lsqr_scipy(
     result = lsqr(
         operator,
         rhs,
-        # SciPy's ``btol`` is relative to the correction RHS.  Scale it to
-        # pyceles' original-RHS stopping target so continuation solves do not
-        # silently accept a residual that is large in the physical system.
-        atol=float(atol),
-        btol=(target_abs / correction_rhs_norm if correction_rhs_norm > 0.0 else float(rtol)),
+        # ``btol`` is relative to the correction RHS.  Scale it to pyceles'
+        # original-RHS stopping target so continuation solves do not silently
+        # accept a residual that is large in the physical system.  ``atol=0``
+        # avoids SciPy's separate normal-equation stopping criterion; the
+        # physical residual is authoritative for this wrapper.
+        atol=0.0,
+        btol=(target_abs / correction_rhs_norm if correction_rhs_norm > 0.0 else 0.0),
         conlim=1.0e8 if condition_limit is None else float(condition_limit),
         iter_lim=iter_lim,
         show=bool(show_progress),
@@ -1477,7 +1486,8 @@ def lsqr_scipy(
         x = np.asarray(base + x, dtype=op_dtype)
     iterations = int(result[2])
     istop = int(result[1])
-    info = 0 if istop in {1, 2} else 1
+    # SciPy uses istop=0 for an exact zero-RHS/zero-initial-residual solve.
+    info = 0 if istop in {0, 1, 2} else 1
     converged_reason = "converged" if info == 0 else f"scipy_istop_{istop}"
     finalized = _finalize_result(
         A_mv,
@@ -1522,11 +1532,11 @@ def lsqr_scipy(
             true_residual_history=true_history,
         )
     metadata = {
-        # SciPy does not expose callback-level operator counts.  LSQR performs
-        # one forward and one adjoint action per bidiagonalization step (plus
-        # the initial pair), so report the corresponding deterministic budget.
-        "operator_applications": int(2 * iterations + 2),
-        "adjoint_applications": int(iterations + 1),
+        # Count wrapped calls rather than infer a fixed budget.  SciPy may
+        # terminate before a complete bidiagonalization step (and the optional
+        # physical check is one additional forward action outside SciPy).
+        "operator_applications": int(forward_applications + bool(compute_final_residual)),
+        "adjoint_applications": int(adjoint_applications),
         "anorm": float(result[5]),
         "acond": float(result[6]),
         "arnorm": float(result[7]),
