@@ -122,13 +122,6 @@ Measured on a laptop with:
 - CuPy: `14.0.1`,
 - script: `examples/profile_pyceles_phases.py`.
 
-The finite values below were refreshed on 2026-08-08 as arithmetic means of two
-consecutive complete suite runs. Most phases varied
-by less than 5%; the largest meaningful spread was the short finite CuPy
-`complex128` near-field phase (1.63 s versus 1.40 s). Very short setup
-phases can show larger relative percentages while remaining negligible in
-absolute time.
-
 For a reproducible refresh of the supported finite and periodic cases, run the
 public suite orchestrator from a clean Python process:
 
@@ -146,8 +139,10 @@ documented NumPy and CuPy xy, interior-xy, and xz field maps; cache-off, direct,
 and Rayleigh cases remain solve-focused. Use `--suite finite` or
 `--suite periodic` for one family, `--skip-postprocessing` when only
 solve/preparation data is wanted, and `--skip-periodic-cache-off` when only
-cache-on periodic rows are needed. Every CuPy case is run to convergence. The
-slow NumPy periodic cache-off and Rayleigh cases are one-iteration reference
+cache-on periodic rows are needed. Use `--backends cupy` to restrict a refresh
+to CuPy rows when the NumPy reference rows are already available; the default
+remains both backends. Every CuPy case is run to convergence. The slow NumPy
+periodic cache-off and Rayleigh cases are one-iteration reference
 probes whose linear-solve time can be extrapolated
 from equivalent converged runs. `--reuse-existing` resumes a refresh and
 reruns a case if its existing summary is missing a required field phase.
@@ -168,8 +163,8 @@ Solve/preparation wall times from the default suite are:
 | --- | ---: |
 | NumPy, `complex128/complex128` | `383.3 s` |
 | NumPy, `complex64/complex128` | `321.3 s` |
-| CuPy, `complex128/complex128` | `5.55 s` |
-| CuPy, `complex64/complex128` | `0.48 s` |
+| CuPy, `complex128/complex128` | `5.66 s` |
+| CuPy, `complex64/complex128` | `0.51 s` |
 
 Postprocessing is measured once for every finite backend/precision row. These
 measurements use the same profile geometry and angular/field grids; cache-mode
@@ -180,8 +175,8 @@ depend on the solver iteration count.
 | --- | ---: | ---: |
 | NumPy, `complex128/complex128` | `20.57 s` | `165.96 s` |
 | NumPy, `complex64/complex128` | `19.35 s` | `132.67 s` |
-| CuPy, `complex128/complex128` | `2.03 s` | `1.52 s` |
-| CuPy, `complex64/complex128` | `0.93 s` | `1.18 s` |
+| CuPy, `complex128/complex128` | `1.87 s` | `0.89 s` |
+| CuPy, `complex64/complex128` | `0.70 s` | `0.65 s` |
 
 The low-level linear-solver `preconditioner=...` callable hook remains available
 for custom experiments; no built-in preconditioner is selected automatically.
@@ -227,9 +222,7 @@ often beneficial when repeating solves in the same process.
 ## Periodic benchmark snapshot
 
 Use `examples/profile_pyceles_benchmark_suite.py --suite periodic` to refresh
-this complete supported snapshot. The two complete runs below were completed
-on 2026-09-04 with `complex128/complex128` and `complex64/complex128` profile
-precision, respectively:
+this complete supported snapshot.
 
 To refresh a different precision policy, pass
 `--periodic-compute-dtype` and `--periodic-accum-dtype`; keep the resulting rows
@@ -253,16 +246,16 @@ rows are reference probes, not converged solves.
 | backend and dtype | coupling mode | prep | linear solve | solve | iterations |
 | --- | --- | ---: | ---: | ---: | ---: |
 | NumPy, `complex128/complex128` | Pairwise, W cache on | `147.18 s` | `520.74 s` | `671.34 s` | 160 |
-| CuPy, `complex128/complex128` | Pairwise, W cache on | `8.38 s` | `5.10 s` | `13.73 s` | 160 |
-| CuPy, `complex128/complex128` | Pairwise, W cache off | `0.06 s` | `529.48 s` | `532.95 s` | 160 |
+| CuPy, `complex128/complex128` | Pairwise, W cache on | `7.41 s` | `4.66 s` | `12.25 s` | 160 |
+| CuPy, `complex128/complex128` | Pairwise, W cache off | `0.06 s` | `536.65 s` | `540.19 s` | 160 |
 | NumPy, `complex128/complex128` | Pairwise, W cache off | `0.03 s` | `285.93 s` | `429.74 s` | 1* |
-| CuPy, `complex128/complex128` | Rayleigh, cache off | `2.50 s` | `11.31 s` | `14.09 s` | 160 |
+| CuPy, `complex128/complex128` | Rayleigh, cache off | `2.58 s` | `11.38 s` | `14.30 s` | 160 |
 | NumPy, `complex128/complex128` | Rayleigh, cache off | `58.72 s` | `1.44 s` | `61.08 s` | 1* |
 | NumPy, `complex64/complex128` | Pairwise, W cache on | `148.90 s` | `537.60 s` | `689.76 s` | 160 |
-| CuPy, `complex64/complex128` | Pairwise, W cache on | `6.73 s` | `4.45 s` | `11.57 s` | 160 |
-| CuPy, `complex64/complex128` | Pairwise, W cache off | `0.06 s` | `524.36 s` | `527.81 s` | 160 |
+| CuPy, `complex64/complex128` | Pairwise, W cache on | `6.57 s` | `3.60 s` | `10.37 s` | 160 |
+| CuPy, `complex64/complex128` | Pairwise, W cache off | `0.06 s` | `530.97 s` | `534.46 s` | 160 |
 | NumPy, `complex64/complex128` | Pairwise, W cache off | `0.03 s` | `285.82 s` | `430.03 s` | 1* |
-| CuPy, `complex64/complex128` | Rayleigh, cache off | `2.57 s` | `5.22 s` | `8.03 s` | 160 |
+| CuPy, `complex64/complex128` | Rayleigh, cache off | `2.53 s` | `4.59 s` | `7.38 s` | 160 |
 | NumPy, `complex64/complex128` | Rayleigh, cache off | `57.74 s` | `1.09 s` | `59.53 s` | 1* |
 
 All 160-step GMRES rows reached approximately `9.35e-5`; the two precision
@@ -284,9 +277,9 @@ Direct dense validation (field work and final residual check skipped):
 | backend and dtype | W-block generation | assembly | factorization | solve phase |
 | --- | ---: | ---: | ---: | ---: |
 | NumPy, `complex128/complex128` | `147.23 s` | `3.51 s` | `20.07 s` | `318.34 s` |
-| CuPy, `complex128/complex128` | `5.36 s` | `2.18 s` | `43.75 s` | `54.81 s` |
+| CuPy, `complex128/complex128` | `5.45 s` | `2.14 s` | `43.68 s` | `55.13 s` |
 | NumPy, `complex64/complex128` | `147.22 s` | `2.09 s` | `10.59 s` | `305.05 s` |
-| CuPy, `complex64/complex128` | `4.53 s` | `0.27 s` | `1.74 s` | `10.07 s` |
+| CuPy, `complex64/complex128` | `4.57 s` | `0.26 s` | `1.49 s` | `10.38 s` |
 
 `*` One-iteration reference probe. Extrapolating its linear-solve time is
 useful for rough planning, but preparation and convergence behavior still need
@@ -298,9 +291,9 @@ are independent of Krylov convergence:
 | backend and dtype | exterior xy | interior xy | vertical xz |
 | --- | ---: | ---: | ---: |
 | NumPy, `complex128/complex128` | `1.40 s` | `1515.71 s` | `1624.09 s` |
-| CuPy, `complex128/complex128` | `1.37 s` | `11.49 s` | `10.02 s` |
+| CuPy, `complex128/complex128` | `1.47 s` | `7.57 s` | `9.86 s` |
 | NumPy, `complex64/complex128` | `1.38 s` | `1481.91 s` | `1600.28 s` |
-| CuPy, `complex64/complex128` | `1.40 s` | `7.75 s` | `9.69 s` |
+| CuPy, `complex64/complex128` | `1.46 s` | `7.57 s` | `9.86 s` |
 
 The interior plane is the occupied-slab midpoint (`z=1488.49 nm`; 872 of
 10,201 pixels are inside particles for this seed) and is saved as

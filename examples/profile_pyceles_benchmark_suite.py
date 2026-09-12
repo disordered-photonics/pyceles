@@ -134,8 +134,9 @@ def _periodic_required_phases(
 
 def _build_cases(args: argparse.Namespace, output_root: Path) -> list[dict[str, Any]]:
     cases: list[dict[str, Any]] = []
+    backends = tuple(str(backend) for backend in args.backends)
     if args.suite in ("finite", "all"):
-        for backend in ("numpy", "cupy"):
+        for backend in backends:
             for dtype in ("complex128", "complex64"):
                 name = f"finite_{backend}_{dtype}"
                 case_dir = output_root / name
@@ -178,7 +179,7 @@ def _build_cases(args: argparse.Namespace, output_root: Path) -> list[dict[str, 
 
     if args.suite in ("periodic", "all"):
         periodic_precision = _periodic_precision_arguments(args)
-        for backend in ("numpy", "cupy"):
+        for backend in backends:
             name = f"periodic_pairwise_{backend}_cache_on"
             case_dir = output_root / name
             include_postprocessing = not args.skip_postprocessing
@@ -346,38 +347,39 @@ def _build_cases(args: argparse.Namespace, output_root: Path) -> list[dict[str, 
                     output_dir=case_dir,
                 )
             )
-            name = f"periodic_{method_name}_numpy_1iter"
-            case_dir = output_root / name
-            cases.append(
-                _case(
-                    name=name,
-                    script="profile_pyceles_periodic_phases.py",
-                    arguments=[
-                        "--coupling-backend",
-                        coupling,
-                        "--operator-backend",
-                        "numpy",
-                        *periodic_precision,
-                        "--periodic-method",
-                        method,
-                        "--cache-mode",
-                        "off",
-                        "--solver",
-                        "gmres",
-                        "--solver-maxiter",
-                        str(args.numpy_advanced_maxiter),
-                        "--skip-final-residual-check",
-                        "--out-dir",
-                        str(case_dir),
-                        *_field_arguments(
-                            args,
-                            periodic=True,
-                            include_postprocessing=False,
-                        ),
-                    ],
-                    output_dir=case_dir,
+            if "numpy" in backends:
+                name = f"periodic_{method_name}_numpy_1iter"
+                case_dir = output_root / name
+                cases.append(
+                    _case(
+                        name=name,
+                        script="profile_pyceles_periodic_phases.py",
+                        arguments=[
+                            "--coupling-backend",
+                            coupling,
+                            "--operator-backend",
+                            "numpy",
+                            *periodic_precision,
+                            "--periodic-method",
+                            method,
+                            "--cache-mode",
+                            "off",
+                            "--solver",
+                            "gmres",
+                            "--solver-maxiter",
+                            str(args.numpy_advanced_maxiter),
+                            "--skip-final-residual-check",
+                            "--out-dir",
+                            str(case_dir),
+                            *_field_arguments(
+                                args,
+                                periodic=True,
+                                include_postprocessing=False,
+                            ),
+                        ],
+                        output_dir=case_dir,
+                    )
                 )
-            )
     return cases
 
 
@@ -386,6 +388,13 @@ def main() -> None:
         description="Run the reproducible public finite and periodic performance profiles."
     )
     parser.add_argument("--suite", choices=("finite", "periodic", "all"), default="all")
+    parser.add_argument(
+        "--backends",
+        nargs="+",
+        choices=("numpy", "cupy"),
+        default=("numpy", "cupy"),
+        help="Operator backends to include (default: numpy cupy).",
+    )
     parser.add_argument(
         "--output-root",
         type=Path,
