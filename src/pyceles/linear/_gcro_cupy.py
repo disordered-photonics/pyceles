@@ -28,6 +28,7 @@ from .krylov_cupy import (
     _givens_complex,
     _norm,
     _resolve_accum_dtype,
+    _solve_rotated_upper,
 )
 
 
@@ -354,10 +355,6 @@ def gcro_cupy_native(
         raise ValueError(f"`x0` size {int(x.size)} does not match `b` size {n}.")
 
     x0_is_zero = x0 is None
-    if not x0_is_zero and n > 0:
-        # Avoid an expensive first operator application for an explicit zero
-        # warm start, matching the native GMRES/BiCGSTAB entry points.
-        x0_is_zero = bool(float(cupy.max(cupy.abs(x))) == 0.0)
 
     operator_applications = 0
 
@@ -524,20 +521,14 @@ def gcro_cupy_native(
             converged_reason = "breakdown"
             break
 
-        import cupyx.scipy.linalg
-
-        r_upper = H_rot[:k_used, :k_used].T
-        rhs_small = cupy.asarray(g[:k_used], dtype=acc_dtype)
-        try:
-            y = cupyx.scipy.linalg.solve_triangular(
-                r_upper,
-                rhs_small,
-                lower=False,
-                overwrite_b=False,
-                check_finite=False,
-            )
-        except Exception:
-            y = cupy.linalg.solve(r_upper, rhs_small)
+        y = _solve_rotated_upper(
+            H_rot,
+            g,
+            k_used=k_used,
+            cupy=cupy,
+            accum_dtype=acc_dtype,
+            breakdown_tol=breakdown,
+        )
         y_op = cupy.asarray(y, dtype=op_dtype)
         correction = y_op @ V[:k_used, :]
         if recycle_space is not None and coupling is not None:

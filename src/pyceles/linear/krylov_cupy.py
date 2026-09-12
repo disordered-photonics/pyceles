@@ -15,6 +15,8 @@ from typing import Any, Literal
 import numpy as np
 import numpy.typing as npt
 
+from pyceles._optional import is_cupy_array
+
 
 @dataclass(frozen=True)
 class CuPyGMRESNativeResult:
@@ -45,8 +47,6 @@ class CuPyBlockGMRESNativeResult:
     preconditioned_history: np.ndarray
     true_history: np.ndarray
     per_rhs_true_history: np.ndarray
-    operator_supports_block: bool
-    preconditioner_supports_block: bool
 
 
 @dataclass(frozen=True)
@@ -115,9 +115,9 @@ def _resolve_accum_dtype(operator_dtype: np.dtype, accum_dtype: npt.DTypeLike | 
 
 
 def _as_device_vector(x: Any, *, cupy: Any, dtype: np.dtype, name: str) -> Any:
-    out = cupy.asarray(x, dtype=dtype).reshape(-1)
+    out = cupy.asarray(x, dtype=dtype)
     if int(out.ndim) != 1:
-        raise ValueError(f"{name} must be 1D after reshape. Got ndim={int(out.ndim)}.")
+        raise ValueError(f"{name} must be 1D. Got shape={tuple(out.shape)}.")
     return out
 
 
@@ -218,6 +218,22 @@ def _norms_block(v: Any, *, cupy: Any, accum_dtype: np.dtype) -> Any:
     return cupy.linalg.norm(cupy.asarray(v, dtype=accum_dtype), axis=0)
 
 
+def _solve_upper_triangular(r_upper: Any, rhs: Any, *, cupy: Any) -> Any:
+    """Solve a small upper-triangular system on the active array backend."""
+
+    if not is_cupy_array(r_upper):
+        return cupy.linalg.solve(r_upper, rhs)
+    from cupyx.scipy.linalg import solve_triangular
+
+    return solve_triangular(
+        r_upper,
+        rhs,
+        lower=False,
+        overwrite_b=False,
+        check_finite=False,
+    )
+
+
 def _solve_block_least_squares(
     h: Any,
     g: Any,
@@ -236,15 +252,74 @@ def _solve_block_least_squares(
     g_acc = cupy.asarray(g, dtype=accum_dtype)
     q, r = cupy.linalg.qr(h_acc, mode="reduced")
     rhs = q.conj().T @ g_acc
-    try:
-        return cupy.linalg.solve(r, rhs)
-    except Exception:
-        # Defensive fallback for near-rank-deficient projected systems.
-        hth = h_acc.conj().T @ h_acc
-        eye = cupy.eye(int(hth.shape[0]), dtype=accum_dtype)
-        ridge = cupy.asarray(np.finfo(accum_dtype).eps, dtype=accum_dtype)
-        htg = h_acc.conj().T @ g_acc
-        return cupy.linalg.solve(hth + ridge * eye, htg)
+
+    # Keep the regular path triangular. If the projected problem has actually
+    # lost rank, solve that problem directly rather than hiding it behind
+    # normal equations plus an arbitrary ridge (which squares the condition
+    # number and changes the GMRES minimization problem).
+    diagonal = cupy.abs(cupy.diag(r))
+    scale = float(cupy.max(diagonal)) if int(diagonal.size) else 0.0
+    smallest = float(cupy.min(diagonal)) if int(diagonal.size) else 0.0
+    real_dtype = np.float64 if np.dtype(accum_dtype) == np.dtype(np.complex128) else np.float32
+    threshold = np.finfo(real_dtype).eps * max(h_acc.shape) * scale
+    if scale > 0.0 and smallest > threshold:
+        return _solve_upper_triangular(r, rhs, cupy=cupy)
+    return cupy.linalg.lstsq(h_acc, g_acc, rcond=None)[0]
+
+
+def _block_basis_projection(
+    v_blocks: Any,
+    w: Any,
+    *,
+    cupy: Any,
+    accum_dtype: np.dtype,
+    workspace_bytes: int = 64 * 1024**2,
+) -> Any:
+    """Return ``V^H w`` for a block basis without widening all of ``V``.
+
+    ``v_blocks`` has shape ``(n_blocks, n, p)``.  Only bounded slices of the
+    unknown dimension are promoted to accumulation precision; this avoids the
+    ``O(n * restart * p)`` complex128 temporary previously created on every
+    block-Arnoldi step.
+    """
+
+    basis = cupy.asarray(v_blocks)
+    values = cupy.asarray(w)
+    n_blocks, n, p = (int(value) for value in basis.shape)
+    if tuple(values.shape) != (n, p):
+        raise ValueError(
+            f"Block projection input must have shape ({n}, {p}). Got {tuple(values.shape)}."
+        )
+    coefficients = cupy.zeros((n_blocks * p, p), dtype=accum_dtype)
+    if n_blocks == 0 or n == 0:
+        return coefficients
+
+    itemsize = int(np.dtype(accum_dtype).itemsize)
+    live_columns = max(1, n_blocks * p + p)
+    chunk = max(1, min(n, int(workspace_bytes) // (live_columns * itemsize)))
+    for start in range(0, n, chunk):
+        stop = min(n, start + chunk)
+        basis_chunk = basis[:, start:stop, :].transpose(1, 0, 2).reshape(stop - start, n_blocks * p)
+        left = cupy.asarray(basis_chunk, dtype=accum_dtype)
+        right = cupy.asarray(values[start:stop, :], dtype=accum_dtype)
+        coefficients += left.conj().T @ right
+    return coefficients
+
+
+def _subtract_block_basis_projection(
+    w: Any,
+    v_blocks: Any,
+    coefficients: Any,
+    *,
+    cupy: Any,
+) -> None:
+    """Apply ``w -= V @ coefficients`` without packing the full basis."""
+
+    basis = cupy.asarray(v_blocks)
+    n_blocks, _, p = (int(value) for value in basis.shape)
+    coeff_blocks = cupy.asarray(coefficients, dtype=basis.dtype).reshape(n_blocks, p, p)
+    correction = cupy.einsum("knp,kpq->nq", basis, coeff_blocks, optimize=True)
+    cupy.subtract(w, correction, out=w)
 
 
 def _pack_block_basis(v_blocks: Any, *, cupy: Any, dtype: np.dtype) -> Any:
@@ -259,32 +334,23 @@ def _apply_block_op(
     *,
     cupy: Any,
     dtype: np.dtype,
-    supports_block: bool | None = None,
-) -> tuple[Any, bool]:
+) -> Any:
+    """Apply a block-capable operator and validate its matrix shape."""
+
     x_mat = _as_device_matrix(x, cupy=cupy, dtype=dtype, name="x_block")
-    if supports_block is not False:
-        try:
-            y_try = _as_device_matrix(
-                op(cupy.asarray(x_mat, dtype=dtype)),
-                cupy=cupy,
-                dtype=dtype,
-                name="op(X)",
-                n_rows=int(x_mat.shape[0]),
-            )
-            if int(y_try.shape[1]) == int(x_mat.shape[1]):
-                return y_try, True
-        except (TypeError, ValueError):
-            pass
-    cols = [
-        _as_device_vector(
-            op(cupy.asarray(x_mat[:, j], dtype=dtype)),
-            cupy=cupy,
-            dtype=dtype,
-            name="op(x_j)",
-        )[:, None]
-        for j in range(int(x_mat.shape[1]))
-    ]
-    return cupy.concatenate(cols, axis=1), False
+    y = _as_device_matrix(
+        op(x_mat),
+        cupy=cupy,
+        dtype=dtype,
+        name="op(X)",
+        n_rows=int(x_mat.shape[0]),
+    )
+    if int(y.shape[1]) != int(x_mat.shape[1]):
+        raise ValueError(
+            "Block operator must preserve the RHS column count. "
+            f"Got input {int(x_mat.shape[1])}, output {int(y.shape[1])}."
+        )
+    return y
 
 
 def _apply_block_preconditioner(
@@ -293,34 +359,25 @@ def _apply_block_preconditioner(
     *,
     cupy: Any,
     dtype: np.dtype,
-    supports_block: bool | None = None,
-) -> tuple[Any, bool]:
+) -> Any:
+    """Apply a block-capable preconditioner without legacy column adapters."""
+
     x_mat = _as_device_matrix(x, cupy=cupy, dtype=dtype, name="X")
     if preconditioner is None:
-        return cupy.asarray(x_mat, dtype=dtype), True
-    if supports_block is not False:
-        try:
-            y_try = _as_device_matrix(
-                preconditioner(cupy.asarray(x_mat, dtype=dtype)),
-                cupy=cupy,
-                dtype=dtype,
-                name="M^-1(X)",
-                n_rows=int(x_mat.shape[0]),
-            )
-            if int(y_try.shape[1]) == int(x_mat.shape[1]):
-                return y_try, True
-        except (TypeError, ValueError):
-            pass
-    cols = [
-        _as_device_vector(
-            preconditioner(cupy.asarray(x_mat[:, j], dtype=dtype)),
-            cupy=cupy,
-            dtype=dtype,
-            name="M^-1(x_j)",
-        )[:, None]
-        for j in range(int(x_mat.shape[1]))
-    ]
-    return cupy.concatenate(cols, axis=1), False
+        return x_mat
+    y = _as_device_matrix(
+        preconditioner(x_mat),
+        cupy=cupy,
+        dtype=dtype,
+        name="M^-1(X)",
+        n_rows=int(x_mat.shape[0]),
+    )
+    if int(y.shape[1]) != int(x_mat.shape[1]):
+        raise ValueError(
+            "Block preconditioner must preserve the RHS column count. "
+            f"Got input {int(x_mat.shape[1])}, output {int(y.shape[1])}."
+        )
+    return y
 
 
 def _givens_complex(a: Any, b: Any, *, cupy: Any, accum_dtype: np.dtype) -> tuple[Any, Any]:
@@ -360,14 +417,11 @@ def _solve_rotated_upper(
     accum_dtype: np.dtype,
     breakdown_tol: float,
 ) -> Any:
-    """Solve one rotated GMRES projected system without scalar sync loops.
+    """Solve one rotated GMRES projected system entirely on device.
 
-    The Hessenberg coefficients are stored row-wise, i.e. the leading block
-    is lower triangular while the system to solve is its ordinary transpose.
-    CuPy's triangular solve handles that small projected system in one device
-    operation.  A general device solve is retained only as the same defensive
-    fallback used by the existing GCRO implementation; the old scalar loop is
-    kept solely for an actual near-breakdown projected system.
+    The regular path is triangular.  Only an actual near-singular projected
+    system falls back to a small least-squares solve; there is no Python
+    scalar back-substitution or broad exception-based compatibility path.
     """
 
     if int(k_used) <= 0:
@@ -376,30 +430,8 @@ def _solve_rotated_upper(
     rhs = cupy.asarray(g[:k_used], dtype=accum_dtype)
     last = int(k_used) - 1
     if float(cupy.abs(r_upper[last, last])) > float(breakdown_tol):
-        try:
-            cupyx_linalg = __import__("cupyx.scipy.linalg", fromlist=["solve_triangular"])
-            return cupyx_linalg.solve_triangular(
-                r_upper,
-                rhs,
-                lower=False,
-                overwrite_b=False,
-                check_finite=False,
-            )
-        except Exception:
-            return cupy.linalg.solve(r_upper, rhs)
-
-    y = cupy.array(rhs, dtype=accum_dtype)
-    y[last] = cupy.asarray(0.0 + 0.0j, dtype=accum_dtype)
-    for row in range(last, 0, -1):
-        y_row = y[row].copy()
-        if float(cupy.abs(y_row)) == 0.0:
-            continue
-        y_row = y_row / r_upper[row, row].copy()
-        y[row] = y_row
-        y[:row] = y[:row] - y_row * r_upper[:row, row]
-    if float(cupy.abs(y[0])) > 0.0:
-        y[0] = y[0] / r_upper[0, 0].copy()
-    return y
+        return _solve_upper_triangular(r_upper, rhs, cupy=cupy)
+    return cupy.linalg.lstsq(r_upper, rhs, rcond=None)[0]
 
 
 def _normalize_true_residual_mode(mode: str) -> Literal["none", "restart", "final"]:
@@ -492,11 +524,13 @@ def lsqr_cupy_native(
             raise ValueError(
                 f"`initial_residual` size {int(residual.size)} does not match `b` size {n}."
             )
-    elif x0_vec is None or (
-        int(x0_vec.size) > 0 and bool(float(cupy.max(cupy.abs(x0_vec))) == 0.0)
-    ):
+    elif x0_vec is None:
         residual = cupy.asarray(b_vec, dtype=op_dtype)
     else:
+        # A supplied warm start is semantically a real warm start.  Do not
+        # scan the complete device vector merely to special-case an all-zero
+        # value; callers that already know the residual can pass
+        # ``initial_residual`` and avoid this production action entirely.
         residual = b_vec - _apply(A_mv, x0_vec, "A(x0)")
         operator_applications += 1
     residual_norm = _norm(residual, cupy=cupy, accum_dtype=acc_dtype)
@@ -560,13 +594,13 @@ def lsqr_cupy_native(
             arnorm=0.0,
             correction_norm=0.0,
         )
-    v = v / alpha
-    # ``asarray`` may alias ``v``.  LSQR updates ``w`` independently of the
-    # Lanczos vector, so make one explicit copy and reuse two scratch vectors
-    # for the remaining recurrences.
+    cupy.divide(v, alpha, out=v)
+    # ``w`` evolves independently of the Lanczos vector.  One additional
+    # solution-sized scratch buffer is sufficient for all vector recurrences:
+    # it is used first for bidiagonal subtraction, then for the solution
+    # increment, and finally becomes the next ``w`` after a reference swap.
     w = cupy.asarray(v, dtype=op_dtype).copy()
-    direction = cupy.empty_like(w)
-    w_next = cupy.empty_like(w)
+    scratch = cupy.empty_like(w)
     phibar = _scalar(beta)
     rhobar = _scalar(alpha)
     residual_history: list[float] = []
@@ -591,19 +625,21 @@ def lsqr_cupy_native(
     for iteration in range(1, maxiter_total + 1):
         u_next = _apply(A_mv, v, "A(v)")
         operator_applications += 1
-        u_next = u_next - _scalar(alpha).astype(op_dtype) * u
+        cupy.multiply(u, _scalar(alpha).astype(op_dtype), out=scratch)
+        cupy.subtract(u_next, scratch, out=u_next)
         beta_next = _norm(u_next, cupy=cupy, accum_dtype=acc_dtype)
         if beta_next > 0.0:
-            u_next = u_next / beta_next
+            cupy.divide(u_next, beta_next, out=u_next)
             anorm_sq = anorm_sq + _scalar(alpha) ** 2 + _scalar(beta_next) ** 2
             anorm = float(cupy.sqrt(cupy.asarray(anorm_sq).real))
 
         v_next = _apply(A_h_mv, u_next, "A^H(u)")
         adjoint_applications += 1
-        v_next = v_next - _scalar(beta_next).astype(op_dtype) * v
+        cupy.multiply(v, _scalar(beta_next).astype(op_dtype), out=scratch)
+        cupy.subtract(v_next, scratch, out=v_next)
         alpha_next = _norm(v_next, cupy=cupy, accum_dtype=acc_dtype)
         if alpha_next > 0.0:
-            v_next = v_next / alpha_next
+            cupy.divide(v_next, alpha_next, out=v_next)
         rho = float(cupy.sqrt(cupy.abs(rhobar) ** 2 + beta_next**2))
         if rho == 0.0 or not np.isfinite(rho):
             converged_reason = "breakdown"
@@ -616,16 +652,16 @@ def lsqr_cupy_native(
         phi = c * phibar
         phibar = s * phibar
         tau = s * phi
-        cupy.multiply(w, 1.0 / _scalar(rho).astype(op_dtype), out=direction)
-        ddnorm = ddnorm + _scalar(_norm(direction, cupy=cupy, accum_dtype=acc_dtype)) ** 2
-        # Update the solution while ``direction`` still contains the old
-        # ``w / rho``.  Build the next recurrence vector in the other scratch
-        # buffer, then rotate the two references for the next iteration.
-        cupy.multiply(direction, _scalar(phi).astype(op_dtype), out=direction)
-        cupy.add(x_vec, direction, out=x_vec)
-        cupy.multiply(w, _scalar(theta / rho).astype(op_dtype), out=w_next)
-        cupy.subtract(v_next, w_next, out=w_next)
-        w, w_next = w_next, w
+        w_norm = _norm(w, cupy=cupy, accum_dtype=acc_dtype)
+        ddnorm = ddnorm + _scalar(w_norm / rho) ** 2
+        # Reuse one scratch vector for both the solution increment and the
+        # next search direction.  The old ``w`` becomes the scratch buffer
+        # after the reference swap.
+        cupy.multiply(w, _scalar(phi / rho).astype(op_dtype), out=scratch)
+        cupy.add(x_vec, scratch, out=x_vec)
+        cupy.multiply(w, _scalar(theta / rho).astype(op_dtype), out=scratch)
+        cupy.subtract(v_next, scratch, out=scratch)
+        w, scratch = scratch, w
         u, v = u_next, v_next
         alpha, beta = alpha_next, beta_next
         iterations = iteration
@@ -791,10 +827,6 @@ def gmres_cupy_native(
     if int(x_vec.size) != n:
         raise ValueError(f"`x0` size {int(x_vec.size)} does not match `b` size {n}.")
     x0_is_zero = x0 is None
-    if not x0_is_zero and n > 0:
-        # Mirror SciPy's zero-initial-guess shortcut and avoid one expensive
-        # `A @ x0` matvec when the provided warm start is exactly zero.
-        x0_is_zero = bool(float(cupy.max(cupy.abs(x_vec))) == 0.0)
 
     def _apply(op: Callable[[Any], Any], vec: Any) -> Any:
         return _as_device_vector(
@@ -1122,8 +1154,6 @@ def fgmres_cupy_native(
     if int(x_vec.size) != n:
         raise ValueError(f"`x0` size {int(x_vec.size)} does not match `b` size {n}.")
     x0_is_zero = x0 is None
-    if not x0_is_zero and n > 0:
-        x0_is_zero = bool(float(cupy.max(cupy.abs(x_vec))) == 0.0)
 
     accepts_state = _preconditioner_accepts_state(preconditioner)
 
@@ -1429,8 +1459,6 @@ def lgmres_cupy_native(
     if int(x_vec.size) != n:
         raise ValueError(f"`x0` size {int(x_vec.size)} does not match `b` size {n}.")
     x0_is_zero = x0 is None
-    if not x0_is_zero and n > 0:
-        x0_is_zero = bool(float(cupy.max(cupy.abs(x_vec))) == 0.0)
 
     def _apply(op: Callable[[Any], Any], vec: Any) -> Any:
         return _as_device_vector(
@@ -1745,13 +1773,7 @@ def bicgstab_cupy_native(
     )
     if int(x_vec.size) != n:
         raise ValueError(f"`x0` size {int(x_vec.size)} does not match `b` size {n}.")
-    # An explicitly supplied zero warm start has the same exact residual as
-    # the implicit cold start. Avoid spending a production matvec merely to
-    # rediscover ``A @ 0 == 0``; nonzero warm starts still get an independent
-    # physical residual evaluation below.
     x0_is_zero = x0 is None
-    if x0 is not None:
-        x0_is_zero = bool(float(cupy.max(cupy.abs(x_vec))) == 0.0)
 
     operator_applications = 0
     preconditioner_applications = 0
@@ -2034,30 +2056,11 @@ def block_gmres_cupy_native(
     if int(x_mat.shape[1]) != p:
         raise ValueError(f"`x0` column count {int(x_mat.shape[1])} does not match `b` columns {p}.")
 
-    op_supports_block: bool | None = None
-    minv_supports_block: bool | None = None
-
     def _apply(x_curr: Any) -> Any:
-        nonlocal op_supports_block
-        out, op_supports_block = _apply_block_op(
-            A_mv,
-            x_curr,
-            cupy=cupy,
-            dtype=op_dtype,
-            supports_block=op_supports_block,
-        )
-        return out
+        return _apply_block_op(A_mv, x_curr, cupy=cupy, dtype=op_dtype)
 
     def _apply_minv(x_curr: Any) -> Any:
-        nonlocal minv_supports_block
-        out, minv_supports_block = _apply_block_preconditioner(
-            preconditioner,
-            x_curr,
-            cupy=cupy,
-            dtype=op_dtype,
-            supports_block=minv_supports_block,
-        )
-        return out
+        return _apply_block_preconditioner(preconditioner, x_curr, cupy=cupy, dtype=op_dtype)
 
     def _true_residual_stats(x_curr: Any) -> tuple[float, float, np.ndarray, np.ndarray, Any]:
         r_true = b_mat - _apply(x_curr)
@@ -2094,8 +2097,6 @@ def block_gmres_cupy_native(
     relative_residuals = np.full((p,), np.nan, dtype=float)
     r_true = None
     x0_is_zero = x0 is None
-    if not x0_is_zero and n * p > 0:
-        x0_is_zero = bool(float(cupy.max(cupy.abs(x_mat))) == 0.0)
 
     def _all_rhs_converged(rhs_abs: np.ndarray) -> bool:
         return bool(np.all(np.asarray(rhs_abs, dtype=float) <= rhs_target_abs))
@@ -2157,18 +2158,21 @@ def block_gmres_cupy_native(
         inner_proxy_interval = 1 if (record_preconditioned_history or callback is not None) else 4
 
         for col in range(cycle_steps):
-            w_acc = cupy.asarray(_apply_minv(_apply(V[col])), dtype=acc_dtype)
-            v_prev = _pack_block_basis(V[: col + 1], cupy=cupy, dtype=acc_dtype)
+            # Projection is performed in place. Own the action result so a
+            # legitimate operator that returns an input view cannot mutate
+            # the accumulated basis during orthogonalization.
+            w = cupy.asarray(_apply_minv(_apply(V[col])), dtype=op_dtype).copy()
+            v_prev = V[: col + 1]
             cs = slice(col * p, (col + 1) * p)
-            h_block = v_prev.conj().T @ w_acc
+            h_block = _block_basis_projection(v_prev, w, cupy=cupy, accum_dtype=acc_dtype)
             H[: (col + 1) * p, cs] = h_block
-            w_acc = w_acc - v_prev @ h_block
+            _subtract_block_basis_projection(w, v_prev, h_block, cupy=cupy)
             if reorthogonalize:
-                h_block2 = v_prev.conj().T @ w_acc
+                h_block2 = _block_basis_projection(v_prev, w, cupy=cupy, accum_dtype=acc_dtype)
                 H[: (col + 1) * p, cs] = H[: (col + 1) * p, cs] + h_block2
-                w_acc = w_acc - v_prev @ h_block2
+                _subtract_block_basis_projection(w, v_prev, h_block2, cupy=cupy)
 
-            q_next, r_next = cupy.linalg.qr(w_acc, mode="reduced")
+            q_next, r_next = cupy.linalg.qr(cupy.asarray(w, dtype=acc_dtype), mode="reduced")
             if float(cupy.linalg.norm(r_next)) <= max(breakdown_tol_f, eps):
                 cycle_breakdown = True
                 k_used = col + 1
@@ -2334,10 +2338,6 @@ def block_gmres_cupy_native(
         preconditioned_history=np.asarray(precond_hist, dtype=float),
         true_history=np.asarray(true_hist, dtype=float),
         per_rhs_true_history=np.asarray(per_rhs_true_hist, dtype=float),
-        operator_supports_block=bool(op_supports_block) if op_supports_block is not None else False,
-        preconditioner_supports_block=(
-            bool(minv_supports_block) if minv_supports_block is not None else True
-        ),
     )
 
 

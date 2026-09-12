@@ -54,6 +54,14 @@ def _fake_cupy_numpy_backend():
             return np.concatenate(xs, axis=axis)
 
         @staticmethod
+        def einsum(*args, **kwargs):
+            return np.einsum(*args, **kwargs)
+
+        @staticmethod
+        def subtract(x, y, out=None):
+            return np.subtract(x, y, out=out)
+
+        @staticmethod
         def column_stack(xs):
             return np.column_stack(xs)
 
@@ -76,6 +84,14 @@ def _fake_cupy_numpy_backend():
         @staticmethod
         def max(x):
             return np.max(x)
+
+        @staticmethod
+        def min(x):
+            return np.min(x)
+
+        @staticmethod
+        def diag(x):
+            return np.diag(x)
 
         @staticmethod
         def argsort(x):
@@ -758,7 +774,7 @@ def test_bicgstab_cupy_separates_recursive_and_true_residual_histories(monkeypat
 
 
 @pytest.mark.fake_gpu
-def test_bicgstab_cupy_explicit_zero_warm_start_avoids_initial_matvec(monkeypatch):
+def test_bicgstab_cupy_explicit_zero_warm_start_evaluates_initial_matvec(monkeypatch):
     monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
     b = np.asarray([1.0 + 0.0j, -0.5 + 0.0j], dtype=np.complex128)
     out = solvers.bicgstab_cupy(
@@ -772,7 +788,7 @@ def test_bicgstab_cupy_explicit_zero_warm_start_avoids_initial_matvec(monkeypatc
 
     assert int(out.info) == 0
     assert out.block_metadata is not None
-    assert out.block_metadata["operator_applications"] == 2
+    assert out.block_metadata["operator_applications"] == 3
 
 
 @pytest.mark.fake_gpu
@@ -1127,8 +1143,6 @@ def test_solve_linear_system_cupy_block_gmres_identity_shape_and_metadata(monkey
     np.testing.assert_array_equal(np.asarray(out.info, dtype=int), np.zeros((p,), dtype=int))
     assert out.block_metadata is not None
     assert int(out.block_metadata["batch_count"]) == 1
-    assert not bool(out.block_metadata["operator_block_adapter_used"])
-    assert not bool(out.block_metadata["preconditioner_block_adapter_used"])
 
     b_vec = B[:, 0]
     out_vec = solve_linear_system(
@@ -1172,7 +1186,7 @@ def test_solve_linear_system_cupy_block_gmres_matches_direct_on_dense_system(mon
 
 
 @pytest.mark.fake_gpu
-def test_solve_linear_system_cupy_block_gmres_vector_only_operator_fallback(monkeypatch):
+def test_solve_linear_system_cupy_block_gmres_requires_block_operator(monkeypatch):
     monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
     rng = np.random.default_rng(99)
     n, p = 8, 3
@@ -1186,44 +1200,18 @@ def test_solve_linear_system_cupy_block_gmres_vector_only_operator_fallback(monk
             raise ValueError("vector-only operator")
         return cast(np.ndarray, A @ arr)
 
-    def _m_vec_only(x: np.ndarray) -> np.ndarray:
-        arr = np.asarray(x)
-        if arr.ndim != 1:
-            raise ValueError("vector-only preconditioner")
-        return cast(np.ndarray, arr / diag)
-
-    out_block = solve_linear_system(
-        _a_vec_only,
-        B,
-        method="gmres",
-        backend="cupy",
-        preconditioner=_m_vec_only,
-        rtol=1e-10,
-        atol=0.0,
-        restart=4,
-        maxiter=40,
-        show_progress=False,
-    )
-    cols = []
-    for j in range(p):
-        col = solve_linear_system(
+    with pytest.raises(ValueError, match="vector-only operator"):
+        solve_linear_system(
             _a_vec_only,
-            B[:, j],
+            B,
             method="gmres",
             backend="cupy",
-            preconditioner=_m_vec_only,
             rtol=1e-10,
             atol=0.0,
             restart=4,
             maxiter=40,
             show_progress=False,
         )
-        cols.append(np.asarray(col.x).reshape(-1))
-    x_cols = np.column_stack(cols)
-    np.testing.assert_allclose(np.asarray(out_block.x), x_cols, atol=1e-8, rtol=1e-8)
-    assert out_block.block_metadata is not None
-    assert bool(out_block.block_metadata["operator_block_adapter_used"])
-    assert bool(out_block.block_metadata["preconditioner_block_adapter_used"])
 
 
 @pytest.mark.fake_gpu
@@ -1290,8 +1278,6 @@ def test_solve_linear_system_cupy_block_gmres_enforces_per_rhs_tolerance(monkeyp
             preconditioned_history=np.asarray([1.0], dtype=float),
             true_history=np.asarray([1.0], dtype=float),
             per_rhs_true_history=np.asarray([np.ones((p,), dtype=float)], dtype=float),
-            operator_supports_block=False,
-            preconditioner_supports_block=True,
         )
 
     monkeypatch.setattr(solvers, "block_gmres_cupy_native", _fake_native)
@@ -1315,7 +1301,6 @@ def test_solve_linear_system_cupy_block_gmres_enforces_per_rhs_tolerance(monkeyp
     np.testing.assert_allclose(np.asarray(out.relative_residual, dtype=float), 1.0, atol=1e-12)
     assert np.all(np.asarray(out.converged_reason, dtype=object) == "tolerance_not_met")
     assert out.block_metadata is not None
-    assert bool(out.block_metadata["operator_block_adapter_used"])
 
 
 @pytest.mark.fake_gpu

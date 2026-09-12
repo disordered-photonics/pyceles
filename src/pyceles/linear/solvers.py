@@ -683,10 +683,8 @@ def gmres_cupy_block(
     every RHS column to satisfy ``||r_j|| <= max(atol, rtol * ||b_j||)``,
     while block Frobenius residuals remain available as aggregate diagnostics.
 
-    Operator and preconditioner callables may expose either 2D `(n, nrhs)` or
-    legacy 1D `(n,)` interfaces. Legacy callables are adapted column-wise.
-    The returned ``LinearSolveResult.block_metadata`` includes
-    ``operator_block_adapter_used`` and ``preconditioner_block_adapter_used``.
+    Operator and preconditioner callables must accept the same 2D
+    ``(n, nrhs)`` block interface as the prepared production operators.
     """
     cupy, _ = import_cupy()
     b_mat = np.asarray(b)
@@ -853,8 +851,6 @@ def gmres_cupy_block(
                 "iterations": int(native.iterations),
                 "info": int(native.info),
                 "converged_reason": str(native.converged_reason),
-                "operator_supports_block": bool(native.operator_supports_block),
-                "preconditioner_supports_block": bool(native.preconditioner_supports_block),
                 **dmeta,
             }
         )
@@ -946,12 +942,6 @@ def gmres_cupy_block(
             "block_residual_norm": float(block_residual),
             "block_relative_residual": float(block_relative),
             "per_rhs_target_abs": np.asarray(rhs_target_abs, dtype=float).tolist(),
-            "operator_block_adapter_used": any(
-                not bool(batch.get("operator_supports_block", False)) for batch in batch_meta
-            ),
-            "preconditioner_block_adapter_used": any(
-                not bool(batch.get("preconditioner_supports_block", True)) for batch in batch_meta
-            ),
         },
     )
 
@@ -2323,10 +2313,12 @@ def solve_linear_system(
         Optional warm start, shaped like `b`.
     preconditioner:
         Optional callable approximating `M^{-1}` for iterative methods.
-        It can accept vectors and may optionally accept batched `(n, nrhs)` inputs.
-        For native CuPy FGMRES, a two-argument form ``preconditioner(v, state)``
-        is also accepted, where ``state`` carries iteration indices. The
-        initial native CuPy GCRO path does not accept a custom preconditioner.
+        Vector methods call it with a one-dimensional input. For native CuPy
+        block GMRES, it must accept the batched `(n, nrhs)` input directly;
+        block GMRES does not adapt vector-only callables. For native CuPy
+        FGMRES, a two-argument form ``preconditioner(v, state)`` is also
+        accepted, where ``state`` carries iteration indices. The initial
+        native CuPy GCRO path does not accept a custom preconditioner.
     gmres_monitor, gmres_progress_residual:
         CuPy-native GMRES monitor channels. `gmres_monitor` controls which
         residual history is retained in the result, while
