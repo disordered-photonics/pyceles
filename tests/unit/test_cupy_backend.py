@@ -561,16 +561,6 @@ def test_cupy_prepare_coupling_rejects_nonpositive_streamed_far_chunk_bytes_budg
         )
 
 
-def test_cupy_prepare_coupling_rejects_negative_near_adjoint_cache_budget(
-    _policy_coupling_fixture: MLFMMCouplingOperator,
-) -> None:
-    with pytest.raises(ValueError, match="near_adjoint_cache_bytes_budget must be non-negative"):
-        _ = prepare_mlfmm_cupy_coupling(
-            _policy_coupling_fixture,
-            host_cache_policy=CuPyMLFMMHostCachePolicy(near_adjoint_cache_bytes_budget=-1),
-        )
-
-
 def _mlfmm_transition_particles() -> ParticleCollection:
     # 27 particles (seed=50) is the smallest deterministic fixture we found
     # that reliably resolves to the multilevel stage with max_leaf_particles=4.
@@ -1162,8 +1152,8 @@ def test_cupy_mlfmm_adjoint_matches_inner_product(
     assert abs(lhs - rhs) / max(abs(lhs), abs(rhs), 1.0) < tolerance
 
 
-def test_cupy_mlfmm_adjoint_can_stream_exact_near_blocks_without_retaining_them() -> None:
-    """A zero near-cache budget preserves the adjoint while bounding device storage."""
+def test_cupy_mlfmm_adjoint_exact_near_uses_device_kernel() -> None:
+    """The reverse exact-near action needs no resident dense block cache."""
 
     lmax = 1
     particles = _mlfmm_single_level_particles()
@@ -1180,10 +1170,7 @@ def test_cupy_mlfmm_adjoint_can_stream_exact_near_blocks_without_retaining_them(
     )
     coupling = prepared_reference.coupling
     assert isinstance(coupling, MLFMMCouplingOperator)
-    runtime = prepare_mlfmm_cupy_coupling(
-        coupling,
-        host_cache_policy=CuPyMLFMMHostCachePolicy(near_adjoint_cache_bytes_budget=0),
-    )
+    runtime = prepare_mlfmm_cupy_coupling(coupling)
     n = len(particles) * n_modes(lmax)
     rng = np.random.default_rng(20260912)
     x = np.asarray(rng.standard_normal(n) + 1j * rng.standard_normal(n), dtype=np.complex128)
@@ -1193,7 +1180,7 @@ def test_cupy_mlfmm_adjoint_can_stream_exact_near_blocks_without_retaining_them(
     assert abs(lhs - rhs) / max(abs(lhs), abs(rhs), 1.0) < 1.0e-9
     workspace = runtime.memory_diagnostics()["workspace_bytes"]
     assert isinstance(workspace, dict)
-    assert int(workspace["near_adjoint_blocks_bytes"]) == 0
+    assert "near_adjoint_blocks_bytes" not in workspace
 
 
 @pytest.mark.parametrize("max_depth", (2, 3, 4))
