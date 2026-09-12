@@ -326,8 +326,9 @@ class CuPyDirectionalTransformsData:
 class CuPyDirectionalInterpolationData:
     """Device copy of one directional transfer map.
 
-    The map is stored either as a CuPy dense matrix (`storage="dense"`) or
-    as a CuPy CSR sparse matrix (`storage="sparse"`).
+    The map is stored either as a CuPy dense matrix (`storage="dense"`),
+    a CuPy CSR sparse matrix (`storage="sparse"`), or a low-width packed
+    row stencil (`storage="packed_stencil"`).
     """
 
     source_order: int
@@ -1339,6 +1340,41 @@ def _upload_directional_transforms(
     )
 
 
+_PACKED_STENCIL_WIDTH_LIMIT = 32
+
+
+def _upload_packed_stencil(
+    csr: Any,
+    *,
+    cupy: Any,
+) -> tuple[Any, Any, np.int32] | None:
+    """Pack a low-width CSR map for a fused device transfer kernel."""
+
+    rows = int(csr.shape[0])
+    row_ptr = np.ascontiguousarray(np.asarray(csr.indptr, dtype=np.int32))
+    row_nnz = np.diff(row_ptr)
+    max_row_nnz = int(row_nnz.max(initial=0))
+    if max_row_nnz <= 0 or max_row_nnz > _PACKED_STENCIL_WIDTH_LIMIT:
+        return None
+    idx_pack = np.full((rows, max_row_nnz), -1, dtype=np.int32)
+    val_pack = np.zeros((rows, max_row_nnz), dtype=np.complex128)
+    cols_arr = np.asarray(csr.indices, dtype=np.int32)
+    vals_arr = np.asarray(csr.data, dtype=np.complex128)
+    for row in range(rows):
+        start = int(row_ptr[row])
+        end = int(row_ptr[row + 1])
+        width = end - start
+        if width <= 0:
+            continue
+        idx_pack[row, :width] = cols_arr[start:end]
+        val_pack[row, :width] = vals_arr[start:end]
+    return (
+        cupy.asarray(np.ascontiguousarray(idx_pack.reshape(-1)), dtype=cupy.int32),
+        cupy.asarray(np.ascontiguousarray(val_pack.reshape(-1)), dtype=cupy.complex128),
+        np.int32(max_row_nnz),
+    )
+
+
 def _upload_directional_map(
     matrix_csr: Any,
     *,
@@ -1373,25 +1409,13 @@ def _upload_directional_map(
     row_ptr = np.ascontiguousarray(np.asarray(csr.indptr, dtype=np.int32))
     row_nnz = np.diff(row_ptr)
     max_row_nnz = int(row_nnz.max(initial=0))
-    use_packed_stencil = bool(nnz > 0 and max_row_nnz > 0 and max_row_nnz <= 32)
+    use_packed_stencil = bool(
+        nnz > 0 and max_row_nnz > 0 and max_row_nnz <= _PACKED_STENCIL_WIDTH_LIMIT
+    )
     if use_packed_stencil:
-        idx_pack = np.full((rows, max_row_nnz), -1, dtype=np.int32)
-        val_pack = np.zeros((rows, max_row_nnz), dtype=np.complex128)
-        cols_arr = np.asarray(csr.indices, dtype=np.int32)
-        vals_arr = np.asarray(csr.data, dtype=np.complex128)
-        for row in range(rows):
-            start = int(row_ptr[row])
-            end = int(row_ptr[row + 1])
-            width = end - start
-            if width <= 0:
-                continue
-            idx_pack[row, :width] = cols_arr[start:end]
-            val_pack[row, :width] = vals_arr[start:end]
-        packed = (
-            cupy.asarray(np.ascontiguousarray(idx_pack.reshape(-1)), dtype=cupy.int32),
-            cupy.asarray(np.ascontiguousarray(val_pack.reshape(-1)), dtype=cupy.complex128),
-            np.int32(max_row_nnz),
-        )
+        packed = _upload_packed_stencil(csr, cupy=cupy)
+        if packed is None:
+            raise RuntimeError("Internal CuPy MLFMM error: packed map width changed during upload.")
         return CuPyDirectionalInterpolationData(
             source_order=int(source_order),
             target_order=int(target_order),
@@ -2382,11 +2406,14 @@ def _upload_transfer(
         name=f"transfer[{transfer.child_level}->{transfer.parent_level}].parent_reflection_permutation",
     )
     child_inv = np.ascontiguousarray(np.argsort(child_perm), dtype=np.int32)
-    parent_inv = np.ascontiguousarray(np.argsort(parent_perm), dtype=np.int32)
-
     interp_csr = transfer.interpolation.matrix.tocsr().astype(np.complex128)
     map_up_csr = interp_csr[parent_perm, :][:, child_inv].tocsr().astype(np.complex128)
-    map_down_csr = interp_csr.T.tocsr()[child_perm, :][:, parent_inv].tocsr().astype(np.complex128)
+    # Directional interpolation weights are real by construction and the
+    # reflection permutations are mutual inverses. Keep the downward map as
+    # the exact transpose partner of the upward map: the reverse traversal can
+    # then reuse the opposite forward map as the Hermitian adjoint without
+    # storing a second reverse-only representation.
+    map_down_csr = map_up_csr.T.tocsr()
 
     map_up = _upload_directional_map(
         map_up_csr,
@@ -3714,6 +3741,96 @@ def _transfer_down_sparse_unique_complex128(
     )
 
 
+def _transfer_down_adjoint_unique_complex128(
+    target: Any,
+    dst_indices: Any,
+    source_values: Any,
+    src_indices: Any,
+    transfer: CuPyMLFMMTransferData,
+    phase: Any,
+    *,
+    cupy: Any,
+) -> None:
+    """Reverse one downward transfer using its paired upward map.
+
+    Directional interpolation weights are real and ``map_up == map_down.T``.
+    Hence ``map_down.H == map_up`` and the reverse path can reuse the forward
+    representation (and its fused sparse/packed kernels) without storing an
+    adjoint-only map.
+    """
+
+    map_data = transfer.map_up
+    phase_adj = cupy.conjugate(cupy.asarray(phase, dtype=cupy.complex128))
+    storage = str(map_data.storage)
+    if storage == "packed_stencil":
+        _transfer_up_packed_unique_complex128(
+            target,
+            dst_indices,
+            source_values,
+            src_indices,
+            map_data,
+            phase_adj,
+            cupy=cupy,
+        )
+        return
+    if storage == "sparse":
+        _transfer_up_sparse_unique_complex128(
+            target,
+            dst_indices,
+            source_values,
+            src_indices,
+            map_data,
+            phase_adj,
+            cupy=cupy,
+        )
+        return
+    mapped = _apply_directional_map(source_values[src_indices], map_data, cupy=cupy)
+    mapped *= phase_adj[None, None, :, None]
+    _add_at_complex128(target, dst_indices, mapped, cupy=cupy)
+
+
+def _transfer_up_adjoint_unique_complex128(
+    target: Any,
+    dst_indices: Any,
+    source_values: Any,
+    src_indices: Any,
+    transfer: CuPyMLFMMTransferData,
+    phase: Any,
+    *,
+    cupy: Any,
+) -> None:
+    """Reverse one upward transfer using its paired downward map."""
+
+    map_data = transfer.map_down
+    phase_adj = cupy.conjugate(cupy.asarray(phase, dtype=cupy.complex128))
+    storage = str(map_data.storage)
+    if storage == "packed_stencil":
+        _transfer_down_packed_unique_complex128(
+            target,
+            dst_indices,
+            source_values,
+            src_indices,
+            map_data,
+            phase_adj,
+            cupy=cupy,
+        )
+        return
+    if storage == "sparse":
+        _transfer_down_sparse_unique_complex128(
+            target,
+            dst_indices,
+            source_values,
+            src_indices,
+            map_data,
+            phase_adj,
+            cupy=cupy,
+        )
+        return
+    shifted = source_values[src_indices] * phase_adj[None, None, :, None]
+    mapped = _apply_directional_map(shifted, map_data, cupy=cupy)
+    _add_at_complex128(target, dst_indices, mapped, cupy=cupy)
+
+
 @cache
 def _directional_packed_stencil_map_c128_raw_kernel() -> Any:
     cupy, _ = import_cupy()
@@ -4030,63 +4147,6 @@ def _directional_to_box_regular_adjoint_cupy(
         work[:, 2] += phase * (1j * top_phi[:, None, :, :] + bottom_theta[:, None, :, :])
         work[:, 3] += phase * (-1j * top_theta[:, None, :, :] + bottom_phi[:, None, :, :])
     return out
-
-
-def _apply_directional_map_adjoint(
-    values: Any,
-    map_data: CuPyDirectionalInterpolationData,
-    *,
-    cupy: Any,
-    cache: dict[int, Any] | None = None,
-) -> Any:
-    """Apply a conjugate-transposed directional interpolation map on device."""
-
-    arr = cupy.asarray(values, dtype=cupy.complex128)
-    if arr.ndim != 4 or int(arr.shape[1]) != 4:
-        raise ValueError(
-            "Directional adjoint map input must have shape (batch, 4, n_target, nrhs)."
-        )
-    target_order = int(map_data.target_order)
-    if int(arr.shape[2]) != target_order:
-        raise ValueError(
-            f"Directional adjoint map target mismatch: {int(arr.shape[2])} vs {target_order}."
-        )
-    source_order = int(map_data.source_order)
-    flat = arr.transpose(0, 1, 3, 2).reshape(-1, target_order)
-    if str(map_data.storage) == "dense":
-        matrix = cupy.asarray(map_data.matrix, dtype=cupy.complex128)
-        mapped = flat @ cupy.conjugate(matrix)
-    elif str(map_data.storage) in {"sparse", "packed_stencil"}:
-        key = id(map_data)
-        adjoint_sparse = None if cache is None else cache.get(key)
-        if adjoint_sparse is None:
-            if str(map_data.storage) == "sparse":
-                sparse = map_data.matrix
-            else:
-                cupyx_sparse = import_module("cupyx.scipy.sparse")
-                packed_cols, packed_vals, width_i32 = map_data.matrix
-                width = int(width_i32)
-                rows = cupy.repeat(cupy.arange(target_order, dtype=cupy.int32), width)
-                cols = cupy.asarray(packed_cols, dtype=cupy.int32).reshape(-1)
-                vals = cupy.asarray(packed_vals, dtype=cupy.complex128).reshape(-1)
-                valid = cols >= 0
-                sparse = cupyx_sparse.coo_matrix(
-                    (vals[valid], (rows[valid], cols[valid])),
-                    shape=(target_order, source_order),
-                ).tocsr()
-            # Cache the matrix actually consumed by the reverse traversal.
-            # Re-forming ``sparse.conjugate().T`` in every streamed chunk
-            # creates avoidable sparse data/index temporaries and can leave a
-            # large allocator-pool footprint across LSQR iterations.
-            adjoint_sparse = sparse.conjugate().T.tocsr()
-            if cache is not None:
-                cache[key] = adjoint_sparse
-        mapped = (adjoint_sparse @ flat.T).T
-    else:
-        raise ValueError(f"Unsupported directional map storage {map_data.storage!r}.")
-    return mapped.reshape(int(arr.shape[0]), 4, int(arr.shape[3]), source_order).transpose(
-        0, 1, 3, 2
-    )
 
 
 def _leaf_translation_blocks_from_pair_deltas(
@@ -5156,15 +5216,20 @@ def _receive_selected_leaf_boxes_to_particles(
                 raise RuntimeError(
                     "Internal CuPy MLFMM error: dense leaf receive mode requires aggregation tensors."
                 )
-            agg_group = group.aggregation[group_rows]
             if receive_adjoint_cache is not None:
-                cache_key = int(agg_group.data.ptr)
-                receive_adj = receive_adjoint_cache.get(cache_key)
-                if receive_adj is None:
-                    receive_adj = cupy.swapaxes(agg_group, 1, 2).conj()
-                    receive_adjoint_cache[cache_key] = receive_adj
+                # Key the cache by the persistent group tensor, not by the
+                # advanced-indexing temporary below.  Temporary device
+                # pointers are allocator-owned and may be reused, so using
+                # them as persistent identities can both grow the cache and
+                # return a stale transform for a different selected subset.
+                cache_key = int(group.aggregation.data.ptr)
+                receive_adj_all = receive_adjoint_cache.get(cache_key)
+                if receive_adj_all is None:
+                    receive_adj_all = cupy.swapaxes(group.aggregation, 1, 2).conj()
+                    receive_adjoint_cache[cache_key] = receive_adj_all
+                receive_adj = receive_adj_all[group_rows]
             else:
-                receive_adj = cupy.swapaxes(agg_group, 1, 2).conj()
+                receive_adj = cupy.swapaxes(group.aggregation[group_rows], 1, 2).conj()
             contribution = cupy.matmul(
                 receive_adj,
                 incoming[selected_rows],
@@ -5344,7 +5409,7 @@ def _ensure_single_level_workspace(
     cache: dict[CuPyMLFMMSingleLevelWorkspaceKey, CuPyMLFMMSingleLevelWorkspace],
     cupy: Any,
 ) -> CuPyMLFMMSingleLevelWorkspace:
-    """Return reusable single-level far workspace keyed by runtime shape metadata."""
+    """Return the reusable single-level workspace for the active runtime shape."""
 
     single = prepared.single_level
     if single is None:
@@ -5360,6 +5425,10 @@ def _ensure_single_level_workspace(
     ws = cache.get(key)
     if ws is not None:
         return ws
+    # RHS cardinality is allowed to vary across calls. Retaining every width
+    # would pin one full device workspace per historical shape and also force
+    # the next allocation to coexist with all stale workspaces.
+    cache.clear()
     ws = CuPyMLFMMSingleLevelWorkspace(
         nrhs=int(key.nrhs),
         box_states=cupy.empty(
@@ -5393,7 +5462,7 @@ def _ensure_multilevel_workspace(
     cache: dict[CuPyMLFMMMultilevelWorkspaceKey, CuPyMLFMMMultilevelWorkspace],
     cupy: Any,
 ) -> CuPyMLFMMMultilevelWorkspace:
-    """Return reusable multilevel far workspace keyed by runtime shape metadata."""
+    """Return the reusable multilevel workspace for the active runtime shape."""
 
     multilevel = prepared.multilevel
     if multilevel is None:
@@ -5406,6 +5475,7 @@ def _ensure_multilevel_workspace(
     ws = cache.get(key)
     if ws is not None:
         return ws
+    cache.clear()
     if str(multilevel.leaf_apply_mode) == "on_the_fly":
         ws = CuPyMLFMMMultilevelWorkspace(
             nrhs=int(key.nrhs),
@@ -5459,7 +5529,7 @@ def _ensure_exact_near_workspace(
     cache: dict[CuPyMLFMMNearWorkspaceKey, CuPyMLFMMNearWorkspace],
     cupy: Any,
 ) -> CuPyMLFMMNearWorkspace:
-    """Return reusable exact-near workspace keyed by runtime shape and near dtype."""
+    """Return the reusable exact-near workspace for the active runtime shape."""
 
     near = prepared.near_pairs
     key = CuPyMLFMMNearWorkspaceKey(
@@ -5481,6 +5551,7 @@ def _ensure_exact_near_workspace(
             "CuPy MLFMM near workspace supports only complex64/complex128 near dtypes. "
             f"Got {np.dtype(near_dtype)!r}."
         )
+    cache.clear()
     ws = CuPyMLFMMNearWorkspace(
         nrhs=int(key.nrhs),
         y_states=cupy.empty(
@@ -5704,7 +5775,6 @@ def _apply_single_level_far_adjoint(
     pair_blocks_scratch: dict[str, Any] | None,
     leaf_otf_chunk_leaves: int | None,
     leaf_otf_bytes_budget: int | None,
-    map_adjoint_cache: dict[int, Any] | None,
     cupy: Any,
 ) -> Any:
     """Apply the Hermitian adjoint of the single-level sampled far map."""
@@ -5764,7 +5834,6 @@ def _apply_multilevel_far_adjoint(
     pair_blocks_scratch: dict[str, Any] | None,
     leaf_otf_chunk_leaves: int | None,
     leaf_otf_bytes_budget: int | None,
-    map_adjoint_cache: dict[int, Any] | None,
     cupy: Any,
 ) -> Any:
     """Apply the Hermitian adjoint of the resident multilevel sampled far map."""
@@ -5804,16 +5873,15 @@ def _apply_multilevel_far_adjoint(
         parent_adj = incoming[int(transfer.parent_level)]
         child_adj = incoming[int(transfer.child_level)]
         for shift, batch in transfer.batches_by_shift.items():
-            mapped = _apply_directional_map_adjoint(
-                child_adj[batch.src_indices],
-                transfer.map_down,
+            _transfer_down_adjoint_unique_complex128(
+                parent_adj,
+                batch.dst_indices,
+                child_adj,
+                batch.src_indices,
+                transfer,
+                transfer.phase_down_by_shift[shift],
                 cupy=cupy,
-                cache=map_adjoint_cache,
             )
-            values = (
-                mapped * cupy.conjugate(transfer.phase_down_by_shift[shift])[None, None, :, None]
-            )
-            _add_at_complex128(parent_adj, batch.dst_indices, values, cupy=cupy)
 
     outgoing = [cupy.zeros_like(values, dtype=cupy.complex128) for values in incoming]
     for level_idx in range(int(multilevel.hf_end_level), int(multilevel.hf_start_level) - 1, -1):
@@ -5835,17 +5903,15 @@ def _apply_multilevel_far_adjoint(
         parent_adj = outgoing[int(transfer.parent_level)]
         child_adj = outgoing[int(transfer.child_level)]
         for shift, batch in transfer.batches_by_shift.items():
-            shifted = (
-                parent_adj[batch.dst_indices]
-                * cupy.conjugate(transfer.phase_up_by_shift[shift])[None, None, :, None]
-            )
-            mapped = _apply_directional_map_adjoint(
-                shifted,
-                transfer.map_up,
+            _transfer_up_adjoint_unique_complex128(
+                child_adj,
+                batch.src_indices,
+                parent_adj,
+                batch.dst_indices,
+                transfer,
+                transfer.phase_up_by_shift[shift],
                 cupy=cupy,
-                cache=map_adjoint_cache,
             )
-            _add_at_complex128(child_adj, batch.src_indices, mapped, cupy=cupy)
 
     outgoing_box = _box_outgoing_to_directional_adjoint_cupy(
         levels[leaf_level].directional,
@@ -7070,7 +7136,6 @@ def _build_incoming_adjoint_subset_streamed(
     x_states: Any,
     nrhs: int,
     cupy: Any,
-    map_adjoint_cache: dict[int, Any] | None,
     stream_stats: dict[str, object] | None,
 ) -> Any:
     """Build the downward-hierarchy adjoint for one selected box subset.
@@ -7187,18 +7252,18 @@ def _build_incoming_adjoint_subset_streamed(
             x_states=x_states,
             nrhs=int(nrhs),
             cupy=cupy,
-            map_adjoint_cache=map_adjoint_cache,
             stream_stats=stream_stats,
         )
         for shift, child_local, parent_rows in chunk_matches:
-            mapped = _apply_directional_map_adjoint(
-                child_adjoint[child_local],
-                transfer.map_down,
+            _transfer_down_adjoint_unique_complex128(
+                incoming_adjoint,
+                parent_rows,
+                child_adjoint,
+                child_local,
+                transfer,
+                transfer.phase_down_by_shift[shift],
                 cupy=cupy,
-                cache=map_adjoint_cache,
             )
-            mapped *= cupy.conjugate(transfer.phase_down_by_shift[shift])[None, None, :, None]
-            _add_at_complex128(incoming_adjoint, parent_rows, mapped, cupy=cupy)
         child_adjoint = None
     return incoming_adjoint
 
@@ -7222,7 +7287,6 @@ def _scatter_outgoing_adjoint_subset_streamed(
     nrhs: int,
     y_out: Any,
     cupy: Any,
-    map_adjoint_cache: dict[int, Any] | None,
     stream_stats: dict[str, object] | None,
 ) -> None:
     """Propagate selected outgoing adjoints to leaves and particle states."""
@@ -7303,17 +7367,15 @@ def _scatter_outgoing_adjoint_subset_streamed(
             dtype=cupy.complex128,
         )
         for shift, child_local, parent_rows in chunk_matches:
-            shifted = (
-                values[parent_rows]
-                * cupy.conjugate(transfer.phase_up_by_shift[shift])[None, None, :, None]
-            )
-            mapped = _apply_directional_map_adjoint(
-                shifted,
-                transfer.map_up,
+            _transfer_up_adjoint_unique_complex128(
+                child_adjoint,
+                child_local,
+                values,
+                parent_rows,
+                transfer,
+                transfer.phase_up_by_shift[shift],
                 cupy=cupy,
-                cache=map_adjoint_cache,
             )
-            _add_at_complex128(child_adjoint, child_local, mapped, cupy=cupy)
         _scatter_outgoing_adjoint_subset_streamed(
             levels=levels,
             transfer_by_parent=transfer_by_parent,
@@ -7332,7 +7394,6 @@ def _scatter_outgoing_adjoint_subset_streamed(
             nrhs=int(nrhs),
             y_out=y_out,
             cupy=cupy,
-            map_adjoint_cache=map_adjoint_cache,
             stream_stats=stream_stats,
         )
         child_adjoint = None
@@ -7354,7 +7415,6 @@ def _apply_same_level_far_adjoint_streamed_chunk_group(
     x_states: Any,
     nrhs: int,
     cupy: Any,
-    map_adjoint_cache: dict[int, Any] | None,
     stream_stats: dict[str, object] | None,
 ) -> None:
     """Accumulate ``F^H`` into one bounded source-box reverse frontier."""
@@ -7429,7 +7489,6 @@ def _apply_same_level_far_adjoint_streamed_chunk_group(
             x_states=x_states,
             nrhs=int(nrhs),
             cupy=cupy,
-            map_adjoint_cache=map_adjoint_cache,
             stream_stats=stream_stats,
         )
         for (_source_ids, outgoing_adjoint), offset_matches in zip(
@@ -7460,7 +7519,6 @@ def _apply_multilevel_far_adjoint_streamed(
     leaf_otf_chunk_leaves: int | None,
     streamed_far_chunk_bytes_budget: int,
     streamed_far_frontier_bytes_budget: int,
-    map_adjoint_cache: dict[int, Any] | None,
     workspace: CuPyMLFMMMultilevelWorkspace | None,
     cupy: Any,
     stream_stats: dict[str, object] | None,
@@ -7562,7 +7620,6 @@ def _apply_multilevel_far_adjoint_streamed(
                 x_states=x_states,
                 nrhs=int(nrhs),
                 cupy=cupy,
-                map_adjoint_cache=map_adjoint_cache,
                 stream_stats=stream_stats,
             )
             for box_ids, outgoing_adjoint in source_frontier:
@@ -7584,7 +7641,6 @@ def _apply_multilevel_far_adjoint_streamed(
                     nrhs=int(nrhs),
                     y_out=y_far,
                     cupy=cupy,
-                    map_adjoint_cache=map_adjoint_cache,
                     stream_stats=stream_stats,
                 )
             source_frontier.clear()
@@ -8574,7 +8630,6 @@ class CuPyMLFMMCouplingOperator:
     near_dtype: np.dtype = COMPLEX128_DTYPE
     far_dtype: np.dtype = COMPLEX128_DTYPE
     _receive_adjoint_cache: dict[int, Any] = field(default_factory=dict, init=False, repr=False)
-    _map_adjoint_cache: dict[int, Any] = field(default_factory=dict, init=False, repr=False)
     _leaf_otf_pair_blocks_scratch: dict[str, Any] = field(
         default_factory=dict, init=False, repr=False
     )
@@ -8728,10 +8783,9 @@ class CuPyMLFMMCouplingOperator:
         leaf_otf_scratch_bytes = _device_array_nbytes(
             self._leaf_otf_pair_blocks_scratch.get("buffer")
         )
-        map_adjoint_cache_bytes = int(
-            sum(_device_array_nbytes(value) for value in self._map_adjoint_cache.values())
+        leaf_receive_cache_bytes = int(
+            sum(_device_array_nbytes(value) for value in self._receive_adjoint_cache.values())
         )
-
         multilevel = self.prepared_data.multilevel
         rolling_diag: dict[str, object] | None = None
         streaming_diag: dict[str, object] | None = None
@@ -9019,19 +9073,20 @@ class CuPyMLFMMCouplingOperator:
                 "near": len(self._near_workspace_cache),
                 "single_level": len(self._single_level_workspace_cache),
                 "multilevel": len(self._multilevel_workspace_cache),
+                "leaf_receive": len(self._receive_adjoint_cache),
             },
             "workspace_bytes": {
                 "near_total_bytes": int(near_ws_total),
                 "single_level_total_bytes": int(single_ws_total),
                 "multilevel_total_bytes": int(multilevel_ws_total),
                 "leaf_otf_pair_blocks_scratch_bytes": int(leaf_otf_scratch_bytes),
-                "map_adjoint_cache_bytes": int(map_adjoint_cache_bytes),
+                "leaf_receive_cache_bytes": int(leaf_receive_cache_bytes),
                 "total_bytes": int(
                     near_ws_total
                     + single_ws_total
                     + multilevel_ws_total
                     + leaf_otf_scratch_bytes
-                    + map_adjoint_cache_bytes
+                    + leaf_receive_cache_bytes
                 ),
             },
             "multilevel_rolling": rolling_diag,
@@ -9329,7 +9384,6 @@ class CuPyMLFMMCouplingOperator:
                 pair_blocks_scratch=self._leaf_otf_pair_blocks_scratch,
                 leaf_otf_chunk_leaves=self.host_cache_policy.leaf_otf_chunk_leaves,
                 leaf_otf_bytes_budget=resolved_leaf_otf_bytes_budget,
-                map_adjoint_cache=self._map_adjoint_cache,
                 cupy=cupy,
             )
             far_elapsed = elapsed_after_device_work(far_started)
@@ -9377,7 +9431,6 @@ class CuPyMLFMMCouplingOperator:
                     streamed_far_frontier_bytes_budget=int(
                         resolved_streamed_far_frontier_bytes_budget
                     ),
-                    map_adjoint_cache=self._map_adjoint_cache,
                     workspace=multi_ws,
                     cupy=cupy,
                     stream_stats=stream_stats,
@@ -9393,7 +9446,6 @@ class CuPyMLFMMCouplingOperator:
                     pair_blocks_scratch=self._leaf_otf_pair_blocks_scratch,
                     leaf_otf_chunk_leaves=self.host_cache_policy.leaf_otf_chunk_leaves,
                     leaf_otf_bytes_budget=self.host_cache_policy.leaf_otf_bytes_budget,
-                    map_adjoint_cache=self._map_adjoint_cache,
                     cupy=cupy,
                 )
                 far_elapsed = elapsed_after_device_work(far_started)

@@ -913,6 +913,85 @@ def test_cupy_multilevel_stream_stats_collection_is_opt_in(
         assert streaming.get("last_apply_timing_seconds") is None
 
 
+def test_cupy_mlfmm_workspace_cache_keeps_only_active_rhs_shape(
+    _transition_multilevel_coupling: MLFMMCouplingOperator,
+) -> None:
+    """Changing RHS width replaces, rather than accumulates, device workspaces."""
+
+    cupy, _ = import_cupy()
+    runtime = prepare_mlfmm_cupy_coupling(_transition_multilevel_coupling)
+    nm = n_modes(1)
+    n_particles = int(_transition_multilevel_coupling.positions.shape[0])
+    rng = np.random.default_rng(20260912)
+    for nrhs in (1, 4, 2):
+        x = np.asarray(
+            rng.standard_normal((n_particles * nm, nrhs))
+            + 1j * rng.standard_normal((n_particles * nm, nrhs)),
+            dtype=np.complex128,
+        )
+        _ = runtime.apply(x)
+        cupy.cuda.Stream.null.synchronize()
+        entries = runtime.memory_diagnostics()["workspace_cache_entries"]
+        assert isinstance(entries, dict)
+        assert entries["near"] == 1
+        assert entries["single_level"] == 0
+        assert entries["multilevel"] == 1
+
+
+def test_cupy_mlfmm_dense_receive_cache_uses_stable_group_identity() -> None:
+    """Dense/debug receive caching is stable across repeated adjoint actions."""
+
+    particles = _mlfmm_policy_particles()
+    positions = particles.positions
+    k = 2.0 * np.pi / 550.0
+    radial_lut = RadialLUT(
+        lmax=3,
+        k=k,
+        r_max=float(np.max(np.linalg.norm(positions[:, None, :] - positions[None, :, :], axis=2))),
+        dr=0.5,
+        dtype=np.complex128,
+    )
+    coupling = prepare_mlfmm_coupling(
+        lmax=3,
+        k=k,
+        positions=positions,
+        particle_circumscribing_radii=particles.circumscribing_radii,
+        radial_lut=radial_lut,
+        options=MLFMMOptions(max_leaf_particles=4, max_depth=4, accuracy_level=2, order_additive=1),
+        dtype=np.complex128,
+        cache_translation_blocks=False,
+        leaf_map_backend="cupy",
+        build_leaf_maps=True,
+    )
+    if not isinstance(coupling, MLFMMCouplingOperator):
+        raise AssertionError("Dense receive fixture unexpectedly resolved to direct stage.")
+    runtime = prepare_mlfmm_cupy_coupling(
+        coupling,
+        host_cache_policy=CuPyMLFMMHostCachePolicy(leaf_apply_mode="dense"),
+    )
+    n = int(coupling.positions.shape[0]) * n_modes(3)
+    rng = np.random.default_rng(20260913)
+    x = np.asarray(rng.standard_normal(n) + 1j * rng.standard_normal(n), dtype=np.complex128)
+    first = asnumpy(runtime.apply_adjoint(x))
+    first_diagnostics = runtime.memory_diagnostics()
+    second = asnumpy(runtime.apply_adjoint(x))
+    second_diagnostics = runtime.memory_diagnostics()
+    np.testing.assert_allclose(first, second, rtol=1e-14, atol=1e-14)
+    first_entries = first_diagnostics["workspace_cache_entries"]
+    second_entries = second_diagnostics["workspace_cache_entries"]
+    first_workspace = first_diagnostics["workspace_bytes"]
+    second_workspace = second_diagnostics["workspace_bytes"]
+    assert isinstance(first_entries, dict)
+    assert isinstance(second_entries, dict)
+    assert isinstance(first_workspace, dict)
+    assert isinstance(second_workspace, dict)
+    assert first_entries["leaf_receive"] > 0
+    assert second_entries["leaf_receive"] == first_entries["leaf_receive"]
+    assert (
+        second_workspace["leaf_receive_cache_bytes"] == first_workspace["leaf_receive_cache_bytes"]
+    )
+
+
 @pytest.mark.parametrize(
     ("operator_dtype", "rtol", "atol"),
     [
