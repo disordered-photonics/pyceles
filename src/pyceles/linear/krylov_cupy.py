@@ -365,21 +365,17 @@ def _solve_rotated_upper(
     The Hessenberg coefficients are stored row-wise, i.e. the leading block
     is lower triangular while the system to solve is its ordinary transpose.
     CuPy's triangular solve handles that small projected system in one device
-    operation.  The explicit fallback retains the previous breakdown-safe
-    algorithm for fake backends and installations without ``cupyx``.
+    operation.  A general device solve is retained only as the same defensive
+    fallback used by the existing GCRO implementation; the old scalar loop is
+    kept solely for an actual near-breakdown projected system.
     """
 
     if int(k_used) <= 0:
         raise ValueError("`k_used` must be positive.")
     r_upper = cupy.asarray(h_rows[:k_used, :k_used].T, dtype=accum_dtype)
     rhs = cupy.asarray(g[:k_used], dtype=accum_dtype)
-    use_library = True
-    try:
-        if float(cupy.abs(r_upper[-1, -1])) <= float(breakdown_tol):
-            use_library = False
-    except Exception:
-        use_library = False
-    if use_library:
+    last = int(k_used) - 1
+    if float(cupy.abs(r_upper[last, last])) > float(breakdown_tol):
         try:
             cupyx_linalg = __import__("cupyx.scipy.linalg", fromlist=["solve_triangular"])
             return cupyx_linalg.solve_triangular(
@@ -390,14 +386,10 @@ def _solve_rotated_upper(
                 check_finite=False,
             )
         except Exception:
-            # Keep a portable path for fake CuPy test doubles and CUDA stacks
-            # without the optional triangular-solve wrapper.
-            pass
+            return cupy.linalg.solve(r_upper, rhs)
 
     y = cupy.array(rhs, dtype=accum_dtype)
-    last = int(k_used) - 1
-    if float(cupy.abs(r_upper[last, last])) <= float(breakdown_tol):
-        y[last] = cupy.asarray(0.0 + 0.0j, dtype=accum_dtype)
+    y[last] = cupy.asarray(0.0 + 0.0j, dtype=accum_dtype)
     for row in range(last, 0, -1):
         y_row = y[row].copy()
         if float(cupy.abs(y_row)) == 0.0:
@@ -573,12 +565,8 @@ def lsqr_cupy_native(
     # Lanczos vector, so make one explicit copy and reuse two scratch vectors
     # for the remaining recurrences.
     w = cupy.asarray(v, dtype=op_dtype).copy()
-    empty_like = getattr(cupy, "empty_like", cupy.zeros_like)
-    direction = empty_like(w)
-    w_next = empty_like(w)
-    multiply = getattr(cupy, "multiply", np.multiply)
-    add = getattr(cupy, "add", np.add)
-    subtract = getattr(cupy, "subtract", np.subtract)
+    direction = cupy.empty_like(w)
+    w_next = cupy.empty_like(w)
     phibar = _scalar(beta)
     rhobar = _scalar(alpha)
     residual_history: list[float] = []
@@ -628,15 +616,15 @@ def lsqr_cupy_native(
         phi = c * phibar
         phibar = s * phibar
         tau = s * phi
-        multiply(w, 1.0 / _scalar(rho).astype(op_dtype), out=direction)
+        cupy.multiply(w, 1.0 / _scalar(rho).astype(op_dtype), out=direction)
         ddnorm = ddnorm + _scalar(_norm(direction, cupy=cupy, accum_dtype=acc_dtype)) ** 2
         # Update the solution while ``direction`` still contains the old
         # ``w / rho``.  Build the next recurrence vector in the other scratch
         # buffer, then rotate the two references for the next iteration.
-        multiply(direction, _scalar(phi).astype(op_dtype), out=direction)
-        add(x_vec, direction, out=x_vec)
-        multiply(w, _scalar(theta / rho).astype(op_dtype), out=w_next)
-        subtract(v_next, w_next, out=w_next)
+        cupy.multiply(direction, _scalar(phi).astype(op_dtype), out=direction)
+        cupy.add(x_vec, direction, out=x_vec)
+        cupy.multiply(w, _scalar(theta / rho).astype(op_dtype), out=w_next)
+        cupy.subtract(v_next, w_next, out=w_next)
         w, w_next = w_next, w
         u, v = u_next, v_next
         alpha, beta = alpha_next, beta_next
