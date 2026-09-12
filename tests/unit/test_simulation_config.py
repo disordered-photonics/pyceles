@@ -93,7 +93,7 @@ def test_simulation_config_rejects_unsupported_solver_preconditioners(method: st
 
 
 def test_simulation_config_rejects_custom_cupy_preconditioner() -> None:
-    with pytest.raises(NotImplementedError, match="CuPy.*preconditioner"):
+    with pytest.raises(NotImplementedError, match=r"CuPy.*preconditioner"):
         SimulationConfig(
             operator_backend="cupy",
             solver_method="gmres",

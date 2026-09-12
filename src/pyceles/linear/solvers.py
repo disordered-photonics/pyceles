@@ -2378,6 +2378,7 @@ def solve_linear_system(
     backend_name = str(backend).lower()
     if backend_name not in {"numpy", "cupy"}:
         raise ValueError(f"`backend` must be 'numpy' or 'cupy'. Got {backend!r}.")
+    backend_literal = cast(Literal["numpy", "cupy"], backend_name)
     if backend_name == "cupy" and m not in {
         "gmres",
         "fgmres",
@@ -2478,7 +2479,7 @@ def solve_linear_system(
                     gcro_recycle_dim=gcro_recycle_dim,
                     dtype=dtype,
                     accum_dtype=accum_dtype,
-                    backend=backend_name,
+                    backend=backend_literal,
                     show_progress=show_progress,
                     compute_final_residual=compute_final_residual,
                 )

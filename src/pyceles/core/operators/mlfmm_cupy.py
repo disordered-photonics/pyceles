@@ -7392,9 +7392,7 @@ def _apply_same_level_far_adjoint_streamed_chunk_group(
     destination_ids_unique = cupy.unique(cupy.concatenate(destination_batches, axis=0)).astype(
         cupy.int32, copy=False
     )
-    destination_matches_by_source: list[
-        list[tuple[Any, Any, dict[int, tuple[Any, Any]]]]
-    ] = []
+    destination_matches_by_source: list[list[tuple[Any, Any, dict[int, tuple[Any, Any]]]]] = []
     for filtered_offsets in filtered_by_source:
         offset_matches: list[tuple[Any, Any, dict[int, tuple[Any, Any]]]] = []
         for diagonal, destination_ids_all, source_local_all in filtered_offsets:
@@ -7857,9 +7855,7 @@ def _apply_multilevel_far_streamed(
     top_chunk_box_cap = min(int(top_chunk_box_cap), int(top_frontier_box_cap))
     if stream_stats is not None:
         chunk_caps = cast(dict[str, int], stream_stats.setdefault("level_chunk_box_cap", {}))
-        frontier_caps = cast(
-            dict[str, int], stream_stats.setdefault("level_frontier_box_cap", {})
-        )
+        frontier_caps = cast(dict[str, int], stream_stats.setdefault("level_frontier_box_cap", {}))
         chunk_caps[str(hf_start)] = int(top_chunk_box_cap)
         frontier_caps[str(hf_start)] = int(top_frontier_box_cap)
     # Process the sampled hierarchy as frontiers so one source chunk can feed
@@ -9377,9 +9373,7 @@ class CuPyMLFMMCouplingOperator:
                     x_states,
                     receive_adjoint_cache=self._receive_adjoint_cache,
                     leaf_otf_chunk_leaves=self.host_cache_policy.leaf_otf_chunk_leaves,
-                    streamed_far_chunk_bytes_budget=int(
-                        resolved_streamed_far_chunk_bytes_budget
-                    ),
+                    streamed_far_chunk_bytes_budget=int(resolved_streamed_far_chunk_bytes_budget),
                     streamed_far_frontier_bytes_budget=int(
                         resolved_streamed_far_frontier_bytes_budget
                     ),

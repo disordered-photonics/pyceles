@@ -465,33 +465,12 @@ def test_simulation_clear_caches_rebuilds_equivalent_operator_state() -> None:
 
 
 @pytest.mark.fake_gpu
-def test_solve_sources_core_rejects_custom_preconditioner_on_cupy_backend(monkeypatch):
-    sim = _single_sphere_sim(
-        operator_backend="cupy",
-        solver_preconditioner=lambda x: np.asarray(x),
-    )
-
-    class _Prepared:
-        def __init__(self) -> None:
-            self.coupling = object()
-
-        def apply_A(self, x: np.ndarray) -> np.ndarray:
-            return np.asarray(x)
-
-        def rhs_Tb(self, b: np.ndarray) -> np.ndarray:
-            return np.asarray(b)
-
-    monkeypatch.setattr(sim_solve, "prepare_matvec", lambda **kwargs: _Prepared())
-    monkeypatch.setattr(
-        sim_solve,
-        "project_source_to_svwf",
-        lambda positions, lmax, source, **kwargs: np.zeros(
-            (positions.shape[0], sim_solve.n_modes(lmax)), dtype=np.complex128
-        ),
-    )
-
-    with pytest.raises(NotImplementedError, match="does not support custom preconditioner"):
-        sim_solve.solve_sources_core(sim, {"src": _plane_wave()})
+def test_solve_sources_core_rejects_custom_preconditioner_on_cupy_backend():
+    with pytest.raises(NotImplementedError, match=r"CuPy.*preconditioner"):
+        _single_sphere_sim(
+            operator_backend="cupy",
+            solver_preconditioner=lambda x: np.asarray(x),
+        )
 
 
 @pytest.mark.api_contract

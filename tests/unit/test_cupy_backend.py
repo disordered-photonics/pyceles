@@ -1106,6 +1106,9 @@ def test_cupy_mlfmm_prepared_operator_matches_numpy_reference(
     y_numpy = np.asarray(prepared_numpy.apply_W(x), dtype=np.complex128)
     y_cupy = np.asarray(asnumpy(prepared_cupy.apply_W(x)), dtype=np.complex128)
     np.testing.assert_allclose(y_cupy, y_numpy, rtol=1e-10, atol=1e-10)
+    adjoint_numpy = np.asarray(prepared_numpy.coupling.apply_adjoint(x), dtype=np.complex128)
+    adjoint_cupy = np.asarray(asnumpy(prepared_cupy.coupling.apply_adjoint(x)), dtype=np.complex128)
+    np.testing.assert_allclose(adjoint_cupy, adjoint_numpy, rtol=1e-10, atol=1e-10)
 
 
 @pytest.mark.parametrize("expected_stage", ("single_level", "multilevel"))

@@ -233,12 +233,9 @@ class SimulationConfig:
             raise ValueError(f"`solver_restart` must be >= 1. Got {self.solver_restart!r}.")
         if int(self.solver_gcro_recycle_dim) < 1:
             raise ValueError(
-                "`solver_gcro_recycle_dim` must be >= 1. "
-                f"Got {self.solver_gcro_recycle_dim!r}."
+                f"`solver_gcro_recycle_dim` must be >= 1. Got {self.solver_gcro_recycle_dim!r}."
             )
-        if str(self.solver_method).lower() == "gcro" and int(
-            self.solver_gcro_recycle_dim
-        ) >= int(
+        if str(self.solver_method).lower() == "gcro" and int(self.solver_gcro_recycle_dim) >= int(
             self.solver_restart
         ):
             raise ValueError(
@@ -291,9 +288,7 @@ class SimulationConfig:
         if method == "lsqr" and self.solver_preconditioner is not None:
             raise NotImplementedError("`solver_method='lsqr'` does not accept a preconditioner.")
         if method == "direct" and self.solver_preconditioner is not None:
-            raise NotImplementedError(
-                "`solver_method='direct'` does not use a preconditioner."
-            )
+            raise NotImplementedError("`solver_method='direct'` does not use a preconditioner.")
         if method == "gcro" and self.solver_preconditioner is not None:
             raise NotImplementedError(
                 "`solver_method='gcro'` does not currently accept a preconditioner."
