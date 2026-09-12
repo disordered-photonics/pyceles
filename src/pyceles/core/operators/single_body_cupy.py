@@ -292,6 +292,7 @@ class CuPyCompositeParticleTOperator:
     dtype: np.dtype = DEFAULT_COMPLEX_DTYPE
     _particle_to_group: np.ndarray = field(init=False, repr=False)
     _particle_to_local: np.ndarray = field(init=False, repr=False)
+    _group_indices_gpu: dict[int, Any] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
         ns = int(self.n_particles)
@@ -316,6 +317,15 @@ class CuPyCompositeParticleTOperator:
     def n_modes(self) -> int:
         return n_modes(self.lmax)
 
+    def _indices_gpu(self, group_index: int, ids: np.ndarray, *, cupy: Any) -> Any:
+        """Return a cached device gather/scatter index array for one group."""
+
+        cached = self._group_indices_gpu.get(int(group_index))
+        if cached is None:
+            cached = cupy.asarray(ids, dtype=np.int64)
+            self._group_indices_gpu[int(group_index)] = cached
+        return cached
+
     def _apply_impl(self, x: Array | object, *, group_method: str = "apply_subset") -> object:
         cupy, _ = import_cupy()
         arr_raw = coerce_array(x, dtype=self.dtype, prefer_cupy=True)
@@ -326,8 +336,10 @@ class CuPyCompositeParticleTOperator:
                     f"Got {int(arr_raw.size)} for {self.n_particles * self.n_modes}."
                 )
             arr = arr_raw.reshape(self.n_particles, self.n_modes)
-            out = cupy.zeros((self.n_particles, self.n_modes), dtype=self.dtype)
-            for group in self.groups:
+            # Groups are validated to be disjoint and exhaustive in
+            # ``__post_init__``; every output row is assigned exactly once.
+            out = cupy.empty((self.n_particles, self.n_modes), dtype=self.dtype)
+            for group_index, group in enumerate(self.groups):
                 ids = np.asarray(group.particle_indices, dtype=np.int64)
                 if ids.size == 0:
                     continue
@@ -340,7 +352,7 @@ class CuPyCompositeParticleTOperator:
                     )
                     out[start:stop] = subset_out
                     continue
-                ids_gpu = cupy.asarray(ids, dtype=np.int64)
+                ids_gpu = self._indices_gpu(group_index, ids, cupy=cupy)
                 subset = arr[ids_gpu]
                 subset_out = cupy.asarray(getattr(group, group_method)(subset), dtype=self.dtype)
                 out[ids_gpu] = subset_out
@@ -355,8 +367,8 @@ class CuPyCompositeParticleTOperator:
         else:
             raise ValueError(f"Input must be 1D or 2D. Got shape {tuple(arr_raw.shape)}.")
 
-        out = cupy.zeros((self.n_particles, self.n_modes, int(arr.shape[2])), dtype=self.dtype)
-        for group in self.groups:
+        out = cupy.empty((self.n_particles, self.n_modes, int(arr.shape[2])), dtype=self.dtype)
+        for group_index, group in enumerate(self.groups):
             ids = np.asarray(group.particle_indices, dtype=np.int64)
             # Large sphere-only CuPy runs usually prepare one diagonal group
             # covering a contiguous particle range. Keep that case slice-based.
@@ -389,7 +401,7 @@ class CuPyCompositeParticleTOperator:
                 subset_out = cupy.asarray(getattr(group, group_method)(subset), dtype=self.dtype)
                 out[start:stop] = subset_out
                 continue
-            ids_gpu = cupy.asarray(ids, dtype=np.int64)
+            ids_gpu = self._indices_gpu(group_index, ids, cupy=cupy)
             subset = arr[ids_gpu]
             subset_out = cupy.asarray(getattr(group, group_method)(subset), dtype=self.dtype)
             out[ids_gpu] = subset_out

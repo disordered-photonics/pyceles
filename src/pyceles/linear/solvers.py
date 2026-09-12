@@ -1379,8 +1379,10 @@ def lsqr_scipy(
     retaining pyceles' explicit forward/adjoint operator boundary.  When a
     residual from a previous phase is supplied, LSQR solves for a correction
     and adds it to ``x0``; this matches the native CuPy continuation contract.
-    ``atol`` and ``rtol`` are combined as SciPy's absolute and relative
-    stopping tolerances.
+    SciPy's ``btol`` is scaled to the original RHS norm (including
+    continuation solves); ``atol`` remains SciPy's absolute normal-equation
+    safeguard.  The returned status is checked against pyceles' physical
+    residual target whenever ``compute_final_residual`` is enabled.
     """
     from scipy.sparse.linalg import LinearOperator, lsqr
 
@@ -1389,6 +1391,10 @@ def lsqr_scipy(
         raise ValueError("`lsqr_scipy` expects a 1D RHS.")
     n = int(b_arr.size)
     op_dtype = np.dtype(dtype if dtype is not None else np.result_type(b_arr.dtype, np.complex64))
+    if float(rtol) < 0.0 or float(atol) < 0.0:
+        raise ValueError("`rtol` and `atol` must be non-negative.")
+    if condition_limit is not None and not (float(condition_limit) > 0.0):
+        raise ValueError("`condition_limit` must be positive when provided.")
 
     def _mv(v: np.ndarray) -> np.ndarray:
         return np.asarray(_apply_operator(A_mv, np.asarray(v)), dtype=op_dtype).copy()
@@ -1410,14 +1416,57 @@ def lsqr_scipy(
     if base is not None and (base.ndim != 1 or base.size != n):
         raise ValueError("`x0` must be a 1D vector with the same size as `b`.")
 
+    if rhs_norm is None:
+        original_rhs_norm = float(np.linalg.norm(np.asarray(b_arr, dtype=np.complex128)))
+    else:
+        original_rhs_norm = float(rhs_norm)
+        if not np.isfinite(original_rhs_norm) or original_rhs_norm < 0.0:
+            raise ValueError("`rhs_norm` must be finite and non-negative when provided.")
+    target_abs = max(float(atol), float(rtol) * original_rhs_norm)
+    correction_rhs_norm = float(np.linalg.norm(np.asarray(rhs, dtype=np.complex128)))
+    if correction and correction_rhs_norm <= target_abs:
+        # A supplied continuation residual is authoritative.  In particular,
+        # do not spend an extra forward action merely to rediscover that the
+        # warm start already satisfies the requested physical tolerance.
+        solution = np.zeros((n,), dtype=op_dtype) if base is None else np.asarray(base).copy()
+        relative = (
+            correction_rhs_norm / original_rhs_norm
+            if original_rhs_norm > 0.0
+            else correction_rhs_norm
+        )
+        return LinearSolveResult(
+            x=solution,
+            info=0,
+            residual_norm=correction_rhs_norm,
+            relative_residual=float(relative),
+            iterations=0,
+            method="lsqr",
+            residual_history=None,
+            rhs_count=1,
+            true_residual_history=np.asarray([relative], dtype=float)
+            if compute_final_residual
+            else None,
+            converged_reason="converged",
+            block_metadata={
+                "operator_applications": 0,
+                "adjoint_applications": 0,
+                "rhs_norm": original_rhs_norm,
+                "residual_history_kind": "scipy_lsqr_summary_only",
+                "scipy_istop": 0,
+            },
+        )
+
     iter_lim = int(maxiter) if maxiter is not None else max(1, 2 * n)
     if iter_lim < 1:
         raise ValueError("`maxiter` must be >= 1 when provided.")
     result = lsqr(
         operator,
         rhs,
-        atol=max(float(atol), float(rtol)),
-        btol=max(float(atol), float(rtol)),
+        # SciPy's ``btol`` is relative to the correction RHS.  Scale it to
+        # pyceles' original-RHS stopping target so continuation solves do not
+        # silently accept a residual that is large in the physical system.
+        atol=float(atol),
+        btol=(target_abs / correction_rhs_norm if correction_rhs_norm > 0.0 else float(rtol)),
         conlim=1.0e8 if condition_limit is None else float(condition_limit),
         iter_lim=iter_lim,
         show=bool(show_progress),
@@ -1441,6 +1490,37 @@ def lsqr_scipy(
         compute_final_residual=compute_final_residual,
         converged_reason=converged_reason,
     )
+    true_history: np.ndarray | None = None
+    if compute_final_residual:
+        final_abs = float(finalized.residual_norm)
+        # `_finalize_result` normalizes by ``||b||``.  Continuation callers
+        # may intentionally provide a stable original-RHS norm, so restore
+        # that denominator here to keep SciPy and native LSQR diagnostics
+        # comparable.
+        final_relative = final_abs / original_rhs_norm if original_rhs_norm > 0.0 else final_abs
+        true_history_values = [final_relative]
+        if correction:
+            initial_relative = (
+                correction_rhs_norm / original_rhs_norm
+                if original_rhs_norm > 0.0
+                else correction_rhs_norm
+            )
+            true_history_values.insert(0, float(initial_relative))
+        true_history = np.asarray(true_history_values, dtype=float)
+        target_relative = target_abs / original_rhs_norm if original_rhs_norm > 0.0 else target_abs
+        if not np.isfinite(final_relative) or final_relative > target_relative:
+            info = max(1, iterations)
+            converged_reason = "tolerance_not_met"
+        else:
+            info = 0
+            converged_reason = "converged"
+        finalized = replace(
+            finalized,
+            info=info,
+            relative_residual=float(final_relative),
+            converged_reason=converged_reason,
+            true_residual_history=true_history,
+        )
     metadata = {
         # SciPy does not expose callback-level operator counts.  LSQR performs
         # one forward and one adjoint action per bidiagonalization step (plus
@@ -1455,7 +1535,7 @@ def lsqr_scipy(
         # public result reports the original system norm, matching the native
         # continuation contract and the denominator used by the final
         # physical-residual check.
-        "rhs_norm": float(np.linalg.norm(b_arr) if rhs_norm is None else rhs_norm),
+        "rhs_norm": original_rhs_norm,
         "scipy_istop": istop,
         "residual_history_kind": "scipy_lsqr_summary_only",
     }

@@ -482,7 +482,14 @@ def lsqr_cupy_native(
         raise ValueError(
             f"`x0` size {int(x0_vec.size)} does not match the solution dimension {int(v.size)}."
         )
-    x_vec = cupy.zeros_like(v, dtype=op_dtype) if x0_vec is None else x0_vec
+    # Keep the caller's warm-start array immutable.  The update below is
+    # deliberately performed in-place into ``x_vec`` to avoid allocating a
+    # full solution-sized temporary on every bidiagonalization step.
+    x_vec = (
+        cupy.zeros_like(v, dtype=op_dtype)
+        if x0_vec is None
+        else cupy.asarray(x0_vec, dtype=op_dtype).copy()
+    )
     alpha = _norm(v, cupy=cupy, accum_dtype=acc_dtype)
     if alpha == 0.0:
         return CuPyLSQRNativeResult(
@@ -503,7 +510,16 @@ def lsqr_cupy_native(
             correction_norm=0.0,
         )
     v = v / alpha
-    w = cupy.asarray(v, dtype=op_dtype)
+    # ``asarray`` may alias ``v``.  LSQR updates ``w`` independently of the
+    # Lanczos vector, so make one explicit copy and reuse two scratch vectors
+    # for the remaining recurrences.
+    w = cupy.asarray(v, dtype=op_dtype).copy()
+    empty_like = getattr(cupy, "empty_like", cupy.zeros_like)
+    direction = empty_like(w)
+    w_next = empty_like(w)
+    multiply = getattr(cupy, "multiply", np.multiply)
+    add = getattr(cupy, "add", np.add)
+    subtract = getattr(cupy, "subtract", np.subtract)
     phibar = _scalar(beta)
     rhobar = _scalar(alpha)
     residual_history: list[float] = []
@@ -553,12 +569,18 @@ def lsqr_cupy_native(
         phi = c * phibar
         phibar = s * phibar
         tau = s * phi
-        direction = w / _scalar(rho).astype(op_dtype)
+        multiply(w, 1.0 / _scalar(rho).astype(op_dtype), out=direction)
         ddnorm = ddnorm + _scalar(_norm(direction, cupy=cupy, accum_dtype=acc_dtype)) ** 2
-        w = v_next - _scalar(theta / rho).astype(op_dtype) * w
+        # Update the solution while ``direction`` still contains the old
+        # ``w / rho``.  Build the next recurrence vector in the other scratch
+        # buffer, then rotate the two references for the next iteration.
+        multiply(direction, _scalar(phi).astype(op_dtype), out=direction)
+        add(x_vec, direction, out=x_vec)
+        multiply(w, _scalar(theta / rho).astype(op_dtype), out=w_next)
+        subtract(v_next, w_next, out=w_next)
+        w, w_next = w_next, w
         u, v = u_next, v_next
         alpha, beta = alpha_next, beta_next
-        x_vec = x_vec + _scalar(phi).astype(op_dtype) * direction
         iterations = iteration
 
         # Right rotation used by the original LSQR recurrence to estimate the
@@ -795,7 +817,11 @@ def gmres_cupy_native(
             break
 
         cycle_steps = min(restart_n, maxiter_total - iterations)
-        V = cupy.zeros((cycle_steps + 1, n), dtype=op_dtype)
+        # Every Arnoldi vector is written before it is read.  Avoid clearing
+        # the full basis (which can be a substantial device-memory bandwidth
+        # cost for large restarts); Hessenberg and recurrence arrays below
+        # remain zero-initialized because their structural zeros are used.
+        V = cupy.empty((cycle_steps + 1, n), dtype=op_dtype)
         H = cupy.zeros((cycle_steps, cycle_steps + 1), dtype=acc_dtype)
         cs = cupy.zeros((cycle_steps,), dtype=acc_dtype)
         sn = cupy.zeros((cycle_steps,), dtype=acc_dtype)
@@ -1125,8 +1151,8 @@ def fgmres_cupy_native(
             break
 
         cycle_steps = min(restart_n, maxiter_total - iterations)
-        V = cupy.zeros((cycle_steps + 1, n), dtype=op_dtype)
-        Z = cupy.zeros((cycle_steps, n), dtype=op_dtype)
+        V = cupy.empty((cycle_steps + 1, n), dtype=op_dtype)
+        Z = cupy.empty((cycle_steps, n), dtype=op_dtype)
         H = cupy.zeros((cycle_steps, cycle_steps + 1), dtype=acc_dtype)
         cs = cupy.zeros((cycle_steps,), dtype=acc_dtype)
         sn = cupy.zeros((cycle_steps,), dtype=acc_dtype)
@@ -1436,8 +1462,8 @@ def lgmres_cupy_native(
         cycle_steps = min(restart_n, maxiter_total - iterations)
         aug_count = min(len(outer_v), outer_keep)
         total_steps = cycle_steps + aug_count
-        V = cupy.zeros((total_steps + 1, n), dtype=op_dtype)
-        Z = cupy.zeros((total_steps, n), dtype=op_dtype)
+        V = cupy.empty((total_steps + 1, n), dtype=op_dtype)
+        Z = cupy.empty((total_steps, n), dtype=op_dtype)
         H = cupy.zeros((total_steps, total_steps + 1), dtype=acc_dtype)
         cs = cupy.zeros((total_steps,), dtype=acc_dtype)
         sn = cupy.zeros((total_steps,), dtype=acc_dtype)
@@ -2088,7 +2114,7 @@ def block_gmres_cupy_native(
             break
 
         cycle_steps = min(restart_n, maxiter_total - iterations)
-        V = cupy.zeros((cycle_steps + 1, n, p), dtype=op_dtype)
+        V = cupy.empty((cycle_steps + 1, n, p), dtype=op_dtype)
         V[0] = q0
         H = cupy.zeros(((cycle_steps + 1) * p, cycle_steps * p), dtype=acc_dtype)
         G = cupy.zeros(((cycle_steps + 1) * p, p), dtype=acc_dtype)

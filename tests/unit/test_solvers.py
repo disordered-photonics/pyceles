@@ -17,6 +17,7 @@ from pyceles.linear.solvers import (
     gcrotmk_scipy,
     gmres_scipy,
     lgmres_scipy,
+    lsqr_scipy,
     solve_linear_system,
 )
 
@@ -43,6 +44,10 @@ def _fake_cupy_numpy_backend():
         @staticmethod
         def zeros(shape, dtype=None):
             return np.zeros(shape, dtype=dtype)
+
+        @staticmethod
+        def empty(shape, dtype=None):
+            return np.empty(shape, dtype=dtype)
 
         @staticmethod
         def concatenate(xs, axis=0):
@@ -836,18 +841,68 @@ def test_gmres_cupy_native_zero_initial_guess_skips_extra_initial_matvec(monkeyp
     assert matvec_calls == 2
 
 
+def test_lsqr_scipy_uses_original_rhs_norm_for_continuation_accounting() -> None:
+    matrix = np.asarray([[2.0 + 0.1j, 0.2 - 0.1j], [0.1 + 0.3j, 1.5 - 0.2j]], dtype=np.complex128)
+    rhs = np.asarray([1.0 + 0.5j, -0.4 + 0.2j], dtype=np.complex128)
+    x0 = np.asarray([0.1 - 0.2j, 0.3 + 0.1j], dtype=np.complex128)
+    residual = rhs - matrix @ x0
+    original_norm = float(np.linalg.norm(rhs))
+    result = lsqr_scipy(
+        lambda values: matrix @ values,
+        lambda values: matrix.conj().T @ values,
+        rhs,
+        x0=x0,
+        initial_residual=residual,
+        rhs_norm=original_norm,
+        rtol=1.0e-10,
+        maxiter=20,
+        show_progress=False,
+    )
+    assert result.info == 0
+    assert result.converged_reason == "converged"
+    assert result.relative_residual == pytest.approx(
+        float(result.residual_norm) / original_norm, rel=1.0e-12
+    )
+    assert result.true_residual_history is not None
+    assert result.true_residual_history.shape == (2,)
+    assert result.block_metadata is not None
+    assert result.block_metadata["rhs_norm"] == pytest.approx(original_norm)
+
+
+def test_lsqr_scipy_marks_physical_tolerance_failure_after_scipy_stop() -> None:
+    matrix = np.diag(np.asarray([1.0, 3.0], dtype=np.complex128))
+    rhs = np.asarray([1.0, 1.0], dtype=np.complex128)
+    result = lsqr_scipy(
+        lambda values: matrix @ values,
+        lambda values: matrix.conj().T @ values,
+        rhs,
+        rtol=1.0e-14,
+        maxiter=1,
+        show_progress=False,
+    )
+    assert result.info != 0
+    assert result.converged_reason == "tolerance_not_met"
+    assert result.true_residual_history is not None
+    assert result.true_residual_history.shape == (1,)
+
+
 @pytest.mark.fake_gpu
 def test_gmres_cupy_native_clamps_restart_to_system_size(monkeypatch):
     cupy = _fake_cupy_numpy_backend()
-    zero_shapes: list[tuple[int, ...]] = []
+    basis_shapes: list[tuple[int, ...]] = []
     orig_zeros = cupy.zeros
+    orig_empty = cupy.empty
 
     def _zeros(shape, dtype=None):
-        if isinstance(shape, tuple):
-            zero_shapes.append(tuple(int(v) for v in shape))
         return orig_zeros(shape, dtype=dtype)
 
+    def _empty(shape, dtype=None):
+        if isinstance(shape, tuple):
+            basis_shapes.append(tuple(int(v) for v in shape))
+        return orig_empty(shape, dtype=dtype)
+
     cupy.zeros = _zeros
+    cupy.empty = _empty
     monkeypatch.setattr(solvers, "import_cupy", lambda: (cupy, None))
     n = 4
     b = np.arange(1, n + 1, dtype=np.float64).astype(np.complex128)
@@ -863,30 +918,30 @@ def test_gmres_cupy_native_clamps_restart_to_system_size(monkeypatch):
     )
     # V has shape (cycle_steps + 1, n); with restart clamp and n=4 we expect (5, 4),
     # not an oversized (10, 4) allocation from restart=50/maxiter=9.
-    assert (5, 4) in zero_shapes
-    assert (10, 4) not in zero_shapes
+    assert (5, 4) in basis_shapes
+    assert (10, 4) not in basis_shapes
 
 
 @pytest.mark.fake_gpu
 def test_gmres_cupy_releases_completed_basis_before_restart(monkeypatch):
     cupy = _fake_cupy_numpy_backend()
-    original_zeros = cupy.zeros
+    original_empty = cupy.empty
     basis_refs: list[weakref.ReferenceType[np.ndarray]] = []
     live_basis_at_second_cycle: list[int] = []
 
-    def tracked_zeros(shape, dtype=None):
+    def tracked_empty(shape, dtype=None):
         shape_tuple = tuple(int(value) for value in shape) if isinstance(shape, tuple) else ()
         if shape_tuple == (2, 3):
             if basis_refs:
                 live_basis_at_second_cycle.append(
                     sum(reference() is not None for reference in basis_refs)
                 )
-            array = original_zeros(shape, dtype=dtype)
+            array = original_empty(shape, dtype=dtype)
             basis_refs.append(weakref.ref(array))
             return array
-        return original_zeros(shape, dtype=dtype)
+        return original_empty(shape, dtype=dtype)
 
-    cupy.zeros = tracked_zeros
+    cupy.empty = tracked_empty
     monkeypatch.setattr(solvers, "import_cupy", lambda: (cupy, None))
     diagonal = np.asarray([2.0, 3.0, 4.0], dtype=np.complex128)
 

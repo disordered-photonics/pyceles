@@ -127,7 +127,9 @@ class CompositeParticleTOperator:
 
     def apply(self, x: Array) -> Array:
         arr, output_shape = self._reshape_input(x)
-        out = np.zeros_like(arr, dtype=self.dtype)
+        # Groups are disjoint and exhaustive, so no output element needs a
+        # zero default before the group assignments below.
+        out = np.empty_like(arr, dtype=self.dtype)
         for group in self.groups:
             ids = np.asarray(group.particle_indices, dtype=np.int64)
             out[ids] = group.apply_subset(arr[ids])
@@ -135,7 +137,7 @@ class CompositeParticleTOperator:
 
     def apply_adjoint(self, x: Array) -> Array:
         arr, output_shape = self._reshape_input(x)
-        out = np.zeros_like(arr, dtype=self.dtype)
+        out = np.empty_like(arr, dtype=self.dtype)
         for group in self.groups:
             ids = np.asarray(group.particle_indices, dtype=np.int64)
             out[ids] = group.apply_adjoint_subset(arr[ids])
@@ -143,7 +145,7 @@ class CompositeParticleTOperator:
 
     def rhs(self, b: Array) -> Array:
         arr, output_shape = self._reshape_input(b)
-        out = np.zeros_like(arr, dtype=self.dtype)
+        out = np.empty_like(arr, dtype=self.dtype)
         for group in self.groups:
             ids = np.asarray(group.particle_indices, dtype=np.int64)
             out[ids] = group.rhs_subset(arr[ids])
