@@ -23,19 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Backend-native CuPy Krylov result classes and `*_native` entry points are
   internal implementation details; the stable package surface is the
   high-level solver functions and `LinearSolveResult`.
-- Reduced memory traffic in native CuPy Krylov reductions by accumulating in
-  the requested precision without full-vector promotion.
-- Reused native CuPy LSQR update workspaces and stopped clearing Krylov bases
-  whose entries are overwritten before use, reducing per-iteration allocation
-  and restart-boundary memory traffic.
-- Composite particle-T applications now use zero-fill-free output staging and
-  reuse device gather indices for non-contiguous groups.
-- Reference LSQR continuation now scales SciPy's stopping test to the original
-  RHS norm and verifies/report its physical residual consistently with native
-  LSQR.
-- CuPy finite-MLFMM adjoint exact-near blocks now use a bounded resident cache;
-  oversized plans stream uncached leaf pairs instead of retaining gigabytes of
-  dense blocks.
+- Reduced precision-aware allocation and memory traffic in native CuPy Krylov
+  and particle-local operator paths, including device-resident projected solves
+  and bounded finite-MLFMM adjoint near-field storage.
+- Reference LSQR continuation now uses the same physical stopping semantics as
+  native LSQR and reports forward/adjoint action counts consistently.
 - Breaking: solver selection is now explicit. `auto` is no longer accepted,
   `SimulationConfig` defaults to GMRES, and the dense-direct size guard has
   been removed; explicit direct requests are allowed to reach the backend's

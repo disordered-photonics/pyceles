@@ -450,9 +450,9 @@ Notes:
   and mode ordering match.
 - `solver_preconditioner` is a custom callable hook: `M_inv_mv(v)` should return
   an approximate application of `M^{-1} v` for the current linear system.
-- pyceles no longer ships a built-in grid-block preconditioner in the high-level
-  simulation API. That implementation was explored, but it did not deliver
-  robust speedups relative to its maintenance cost.
+- pyceles does not select a built-in grid-block preconditioner in the high-level
+  simulation API. Use `solver_preconditioner` when a workload has a suitable
+  custom preconditioner.
 
 ## HDF5 output for explicit channels
 

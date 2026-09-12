@@ -65,9 +65,10 @@ with a smaller solver-state footprint. For memory-aware large-scale CuPy runs,
 `bicgstab` is a sensible first solver choice unless a specific geometry shows
 better behavior with a restarted method.
 
-The high-level defaults follow the same split: finite clusters default to
-BiCGSTAB, while periodic systems default to restarted GMRES because periodic
-BiCGSTAB can stagnate when the corresponding GMRES solve progresses.
+`SimulationConfig` defaults to restarted GMRES for a predictable, broadly
+applicable baseline. Users can select BiCGSTAB or another supported method
+explicitly when it better suits a particular workload; periodic systems in
+particular can be sensitive to solver choice.
 
 ## MLFMM implementation notes
 
@@ -100,12 +101,13 @@ Current implementation details:
   fall back to generic dense assembly through repeated matrix-free applies,
 - the octree policy is uniform-depth rather than adaptive.
 
-A previous rotation-translation-rotation coupling idea was explored as an
+A previous rotation-translation-rotation coupling idea was also explored as an
 alternative translation backend. After matching the formulas to the shipped
 CELES-compatible conventions, the experimental implementation reproduced
 translation blocks accurately but was much slower than the current reference
 block builder on the public 500-particle benchmark: about `26x` slower at
-`lmax=3` and `38x` slower at `lmax=4`.
+`lmax=3` and `38x` slower at `lmax=4`. It is therefore not part of the active
+translation path.
 
 ## Recent finite-cluster benchmark snapshot
 
@@ -179,17 +181,12 @@ depend on the solver iteration count.
 | CuPy, `complex128/complex128` | `2.03 s` | `1.52 s` |
 | CuPy, `complex64/complex128` | `0.93 s` | `1.18 s` |
 
-
-The "no preconditioner" wording refers to a regular-grid block preconditioner
-that was previously shipped with pyceles, directly inspired by the CELES
-implementation. This option was later removed due to the lack of robust speedups
-in the measured workloads, especially with the current CuPy implementation.
 The low-level linear-solver `preconditioner=...` callable hook remains available
-for custom experiments.
+for custom experiments; no built-in preconditioner is selected automatically.
 
 ## Pairwise optimization notes
 
-Kept improvements:
+The current implementation emphasizes:
 
 - scalar-Legendre translation path in `translation_block`,
 - translation table/LUT reuse,
