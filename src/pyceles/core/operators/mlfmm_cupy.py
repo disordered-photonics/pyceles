@@ -120,6 +120,12 @@ class CuPyMLFMMHostCachePolicy:
     multilevel chunk/build counters. Leave it off for production runs so
     repeated applies do not spend time updating per-apply bookkeeping
     dictionaries.
+
+    `near_adjoint_cache_bytes_budget` bounds the resident exact-near blocks
+    used by the CuPy reverse action.  Blocks beyond this budget are rebuilt
+    one leaf pair at a time during an adjoint apply, keeping memory bounded
+    for tall/high-occupancy MLFMM plans.  Set it to zero to disable block
+    retention, or to ``None`` only for an explicitly unbounded diagnostic run.
     """
 
     leaf_apply_mode: CuPyMLFMMLeafApplyMode = "on_the_fly"
@@ -128,6 +134,7 @@ class CuPyMLFMMHostCachePolicy:
     leaf_otf_bytes_budget: int | None = None
     streamed_far_chunk_bytes_budget: int | None = None
     collect_stream_stats: bool = False
+    near_adjoint_cache_bytes_budget: int | None = 128 * _MIB
 
 
 @dataclass(frozen=True)
@@ -464,6 +471,28 @@ class CuPyMLFMMNearPairData:
     pair_offset: Any
     pair_pmin: Any
     pair_pcount: Any
+
+
+@dataclass(frozen=True)
+class _CuPyMLFMMNearAdjointContext:
+    """Host-side ingredients for bounded exact-near adjoint assembly.
+
+    The forward near kernel already keeps these compact lookup tables on the
+    device.  The reverse fallback reconstructs one leaf-pair block at a time
+    from this context instead of retaining every dense block simultaneously.
+    """
+
+    positions: np.ndarray
+    leaf_particle_offsets: np.ndarray
+    leaf_particle_indices: np.ndarray
+    dst_leaf_indices: np.ndarray
+    src_leaf_indices: np.ndarray
+    radial_lut: RadialLUT
+    ab5: np.ndarray
+    lmax: int
+    k: float
+    near_dtype: np.dtype
+    nm: int
 
 
 @dataclass(frozen=True)
@@ -1843,6 +1872,12 @@ def _resolve_host_cache_policy(
             "CuPy MLFMM streamed_far_chunk_bytes_budget must be positive when set. "
             f"Got {resolved.streamed_far_chunk_bytes_budget!r}."
         )
+    near_adjoint_cache_bytes_budget = resolved.near_adjoint_cache_bytes_budget
+    if near_adjoint_cache_bytes_budget is not None and int(near_adjoint_cache_bytes_budget) < 0:
+        raise ValueError(
+            "CuPy MLFMM near_adjoint_cache_bytes_budget must be non-negative when set. "
+            f"Got {resolved.near_adjoint_cache_bytes_budget!r}."
+        )
     return replace(
         resolved,
         host_cache_retention=cast(CuPyMLFMMHostCacheRetention, retention),
@@ -1854,6 +1889,11 @@ def _resolve_host_cache_policy(
             None
             if streamed_far_chunk_bytes_budget is None
             else int(streamed_far_chunk_bytes_budget)
+        ),
+        near_adjoint_cache_bytes_budget=(
+            None
+            if near_adjoint_cache_bytes_budget is None
+            else int(near_adjoint_cache_bytes_budget)
         ),
     )
 
@@ -1918,6 +1958,11 @@ def _runtime_host_cache_summary(
             None
             if policy.streamed_far_chunk_bytes_budget is None
             else int(policy.streamed_far_chunk_bytes_budget)
+        ),
+        "near_adjoint_cache_bytes_budget": (
+            None
+            if policy.near_adjoint_cache_bytes_budget is None
+            else int(policy.near_adjoint_cache_bytes_budget)
         ),
         "collect_stream_stats": bool(policy.collect_stream_stats),
         "stage": str(cache.stage),
@@ -5576,23 +5621,15 @@ def _apply_exact_near_pairs(
     return y_arr
 
 
-def _build_exact_near_adjoint_blocks(
+def _build_exact_near_adjoint_context(
     prepared: CuPyMLFMMPreparedData,
     *,
     lmax: int,
     k: float,
     near_dtype: np.dtype,
     cupy: Any,
-) -> list[tuple[Any, Any, Any]]:
-    """Build cached directed exact-near blocks for the CuPy adjoint path.
-
-    The forward exact-near kernel evaluates translation entries directly from
-    the shared lookup tables.  The first adjoint call builds the same sparse
-    leaf-pair blocks on the host and uploads them once; subsequent applications
-    remain device-resident and only perform batched conjugate-transposed GEMMs.
-    This one-time fallback keeps the reverse implementation independent of the
-    forward RawKernel launch geometry while retaining near-field memory scaling.
-    """
+) -> _CuPyMLFMMNearAdjointContext:
+    """Extract compact host ingredients for the exact-near reverse action."""
 
     near = prepared.near_pairs
     positions = np.asarray(cupy.asnumpy(near.positions), dtype=float).reshape(-1, 3)
@@ -5622,57 +5659,99 @@ def _build_exact_near_adjoint_blocks(
     radial_lut._last_index = int(near.last_index)
     radial_lut._inv_dr = float(near.inv_dr)
     ab5 = translation_ab5_table(int(lmax), dtype=np.complex128)
-    blocks_out: list[tuple[Any, Any, Any]] = []
     nm = int(n_modes(int(lmax)))
-    for dst_leaf, src_leaf in zip(dst_leaves.tolist(), src_leaves.tolist(), strict=True):
-        dst_ids = indices[offsets[int(dst_leaf)] : offsets[int(dst_leaf) + 1]]
-        src_ids = indices[offsets[int(src_leaf)] : offsets[int(src_leaf) + 1]]
-        blocks = np.empty((dst_ids.size, src_ids.size, nm, nm), dtype=np.dtype(near_dtype))
-        for dst_row, dst_particle in enumerate(dst_ids.tolist()):
-            for src_col, src_particle in enumerate(src_ids.tolist()):
-                if int(dst_particle) == int(src_particle):
-                    blocks[dst_row, src_col].fill(0)
-                    continue
-                blocks[dst_row, src_col] = np.asarray(
-                    translation_block(
-                        int(lmax),
-                        float(k),
-                        positions[int(dst_particle)] - positions[int(src_particle)],
-                        ab5=ab5,
-                        radial_lut=radial_lut,
-                    ),
-                    dtype=np.dtype(near_dtype),
-                )
-        blocks_out.append(
-            (
-                cupy.asarray(dst_ids, dtype=cupy.int32),
-                cupy.asarray(src_ids, dtype=cupy.int32),
-                cupy.asarray(blocks, dtype=_cupy_complex_dtype(near_dtype, cupy=cupy)),
+    return _CuPyMLFMMNearAdjointContext(
+        positions=positions,
+        leaf_particle_offsets=offsets,
+        leaf_particle_indices=indices,
+        dst_leaf_indices=dst_leaves,
+        src_leaf_indices=src_leaves,
+        radial_lut=radial_lut,
+        ab5=ab5,
+        lmax=int(lmax),
+        k=float(k),
+        near_dtype=np.dtype(near_dtype),
+        nm=nm,
+    )
+
+
+def _build_exact_near_adjoint_block(
+    context: _CuPyMLFMMNearAdjointContext,
+    pair_index: int,
+    *,
+    cupy: Any,
+) -> tuple[Any, Any, Any]:
+    """Build and upload one directed exact-near leaf-pair block."""
+
+    dst_leaf = int(context.dst_leaf_indices[int(pair_index)])
+    src_leaf = int(context.src_leaf_indices[int(pair_index)])
+    offsets = context.leaf_particle_offsets
+    indices = context.leaf_particle_indices
+    dst_ids = indices[int(offsets[dst_leaf]) : int(offsets[dst_leaf + 1])]
+    src_ids = indices[int(offsets[src_leaf]) : int(offsets[src_leaf + 1])]
+    blocks = np.empty(
+        (dst_ids.size, src_ids.size, context.nm, context.nm), dtype=context.near_dtype
+    )
+    for dst_row, dst_particle in enumerate(dst_ids.tolist()):
+        for src_col, src_particle in enumerate(src_ids.tolist()):
+            if int(dst_particle) == int(src_particle):
+                blocks[dst_row, src_col].fill(0)
+                continue
+            blocks[dst_row, src_col] = np.asarray(
+                translation_block(
+                    int(context.lmax),
+                    float(context.k),
+                    context.positions[int(dst_particle)] - context.positions[int(src_particle)],
+                    ab5=context.ab5,
+                    radial_lut=context.radial_lut,
+                ),
+                dtype=context.near_dtype,
             )
-        )
-    return blocks_out
+    return (
+        cupy.asarray(dst_ids, dtype=cupy.int32),
+        cupy.asarray(src_ids, dtype=cupy.int32),
+        cupy.asarray(blocks, dtype=_cupy_complex_dtype(context.near_dtype, cupy=cupy)),
+    )
 
 
-def _apply_exact_near_adjoint_blocks(
-    blocks: list[tuple[Any, Any, Any]],
+def _exact_near_adjoint_block_bytes(block: tuple[Any, Any, Any]) -> int:
+    """Return resident bytes for one uploaded reverse near block."""
+
+    return int(sum(_device_array_nbytes(value) for value in block))
+
+
+def _apply_exact_near_adjoint_streaming(
+    context: _CuPyMLFMMNearAdjointContext,
+    cached_blocks: dict[int, tuple[Any, Any, Any]],
     x_states: Any,
     *,
     out: Any,
+    cache_bytes: int,
+    cache_budget: int | None,
     cupy: Any,
-) -> Any:
-    """Apply cached sparse exact-near blocks in reverse orientation."""
+) -> tuple[Any, int]:
+    """Apply exact-near reverse blocks with a bounded resident cache."""
 
     out.fill(0)
-    for dst_ids, src_ids, pair_blocks in blocks:
+    n_pairs = int(context.dst_leaf_indices.size)
+    for pair_index in range(n_pairs):
+        block = cached_blocks.get(pair_index)
+        if block is None:
+            block = _build_exact_near_adjoint_block(context, pair_index, cupy=cupy)
+            block_bytes = _exact_near_adjoint_block_bytes(block)
+            if cache_budget is None or cache_bytes + block_bytes <= int(cache_budget):
+                cached_blocks[pair_index] = block
+                cache_bytes += block_bytes
+        dst_ids, src_ids, pair_blocks = block
         if int(dst_ids.size) == 0 or int(src_ids.size) == 0:
             continue
         # The block stores ``W[dst_mode, src_mode]``.  Contracting its
-        # conjugate with the destination state already produces the source
-        # state; swapping the last two axes would contract the wrong mode.
-        block_adjoint = cupy.conjugate(pair_blocks)
-        contribution = cupy.einsum("abij,air->bjr", block_adjoint, x_states[dst_ids], optimize=True)
+        # conjugate with the destination state produces the source state.
+        contribution = cupy.einsum(
+            "abij,air->bjr", cupy.conjugate(pair_blocks), x_states[dst_ids], optimize=True
+        )
         out[src_ids] += contribution
-    return out
+    return out, int(cache_bytes)
 
 
 def _apply_single_level_far(
@@ -8025,9 +8104,13 @@ class CuPyMLFMMCouplingOperator:
     far_dtype: np.dtype = COMPLEX128_DTYPE
     _receive_adjoint_cache: dict[int, Any] = field(default_factory=dict, init=False, repr=False)
     _map_adjoint_cache: dict[int, Any] = field(default_factory=dict, init=False, repr=False)
-    _near_adjoint_blocks: list[tuple[Any, Any, Any]] | None = field(
+    _near_adjoint_context: _CuPyMLFMMNearAdjointContext | None = field(
         default=None, init=False, repr=False
     )
+    _near_adjoint_blocks: dict[int, tuple[Any, Any, Any]] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _near_adjoint_cached_bytes: int = field(default=0, init=False, repr=False)
     _leaf_otf_pair_blocks_scratch: dict[str, Any] = field(
         default_factory=dict, init=False, repr=False
     )
@@ -8186,7 +8269,7 @@ class CuPyMLFMMCouplingOperator:
                 _device_array_nbytes(dst_ids)
                 + _device_array_nbytes(src_ids)
                 + _device_array_nbytes(pair_blocks)
-                for dst_ids, src_ids, pair_blocks in (self._near_adjoint_blocks or ())
+                for dst_ids, src_ids, pair_blocks in self._near_adjoint_blocks.values()
             )
         )
         map_adjoint_cache_bytes = int(
@@ -8456,6 +8539,11 @@ class CuPyMLFMMCouplingOperator:
                 None
                 if self.host_cache_policy.streamed_far_chunk_bytes_budget is None
                 else int(self.host_cache_policy.streamed_far_chunk_bytes_budget)
+            ),
+            "near_adjoint_cache_bytes_budget": (
+                None
+                if self.host_cache_policy.near_adjoint_cache_bytes_budget is None
+                else int(self.host_cache_policy.near_adjoint_cache_bytes_budget)
             ),
             "streamed_far_frontier_bytes_budget": (
                 None
@@ -8770,14 +8858,16 @@ class CuPyMLFMMCouplingOperator:
             dtype=out_dtype,
             cupy=cupy,
         )
-        if self._near_adjoint_blocks is None:
-            self._near_adjoint_blocks = _build_exact_near_adjoint_blocks(
+        near_context = self._near_adjoint_context
+        if near_context is None:
+            near_context = _build_exact_near_adjoint_context(
                 self.prepared_data,
                 lmax=int(self.lmax),
                 k=float(self.k),
                 near_dtype=near_dtype,
                 cupy=cupy,
             )
+            self._near_adjoint_context = near_context
         near_ws = _ensure_exact_near_workspace(
             self.prepared_data,
             n_particles=int(self.n_particles),
@@ -8787,12 +8877,16 @@ class CuPyMLFMMCouplingOperator:
             cache=self._near_workspace_cache,
             cupy=cupy,
         )
-        y_near = _apply_exact_near_adjoint_blocks(
+        _, self._near_adjoint_cached_bytes = _apply_exact_near_adjoint_streaming(
+            near_context,
             self._near_adjoint_blocks,
             x_states,
             out=near_ws.y_states,
+            cache_bytes=int(self._near_adjoint_cached_bytes),
+            cache_budget=self.host_cache_policy.near_adjoint_cache_bytes_budget,
             cupy=cupy,
         )
+        y_near = near_ws.y_states
         stage = str(self.prepared_data.stage)
         if stage == "single_level":
             y_far = _apply_single_level_far_adjoint(

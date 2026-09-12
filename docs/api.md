@@ -42,7 +42,8 @@ are available for pairwise finite coupling and periodic Rayleigh, Ewald, and
 direct-sum operators when the selected particle-T representation provides its
 forward and adjoint actions (including explicit dense blocks). Finite MLFMM
 coupling provides the same action on NumPy and CuPy; the CuPy multilevel reverse
-currently retains its sampled hierarchy during an adjoint apply. Periodic
+keeps its sampled hierarchy during an adjoint apply, while exact-near reverse
+blocks are bounded by the host-cache policy (128 MiB by default). Periodic
 direct-sum remains a NumPy/reference-only coupling
 path; CuPy periodic preparation accepts Ewald and Rayleigh. LSQR uses
 `solver_maxiter` as its iteration budget;
