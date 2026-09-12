@@ -40,8 +40,10 @@ and `gcro` are CuPy-only, while `gcrotmk` is SciPy-only. LSQR is a single-RHS
 method and requires an exact Hermitian-adjoint prepared operator. Exact adjoints
 are available for pairwise finite coupling and periodic Rayleigh, Ewald, and
 direct-sum operators when the selected particle-T representation provides its
-forward and adjoint actions (including explicit dense blocks). MLFMM adjoints
-remain deferred. Periodic direct-sum remains a NumPy/reference-only coupling
+forward and adjoint actions (including explicit dense blocks). Finite MLFMM
+coupling provides the same action on NumPy and CuPy; the CuPy multilevel reverse
+currently retains its sampled hierarchy during an adjoint apply. Periodic
+direct-sum remains a NumPy/reference-only coupling
 path; CuPy periodic preparation accepts Ewald and Rayleigh. LSQR uses
 `solver_maxiter` as its iteration budget;
 the common `solver_restart` setting has no effect. GCRO is a forward-only

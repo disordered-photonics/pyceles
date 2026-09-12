@@ -609,6 +609,100 @@ def directional_to_box_regular(
     return np.concatenate((top, bottom)).astype(np.complex128, copy=False)
 
 
+def box_outgoing_to_directional_adjoint(
+    transforms: MLFMMDirectionalTransformData,
+    a_theta: Array,
+    a_phi: Array,
+    b_theta: Array,
+    b_phi: Array,
+) -> Array:
+    """Apply the Hermitian adjoint of ``box_outgoing_to_directional``.
+
+    The forward transform first evaluates the two SVWF polarizations on the
+    sampled grid and then applies the involutive beta reflection.  Reversing
+    that operation therefore only requires the reflected samples and the
+    conjugate-transposed ``Fth/Fph`` factors.  This is kept separate from
+    ``directional_to_box_regular``: the latter is the regular-field receive
+    map and contains the polarization mixing specific to regular waves.
+    """
+
+    if isinstance(transforms, MLFMMDirectionalStructuredTransforms):
+        # The separable factors have exactly the same contractions as the
+        # dense adjoint, but avoid materialising the dense (ndir, nscl) maps.
+        a_theta_arr, a_phi_arr, b_theta_arr, b_phi_arr = apply_directional_reflection(
+            transforms.grid.reflection_permutation,
+            np.asarray(a_theta, dtype=np.complex128).reshape(-1),
+            np.asarray(a_phi, dtype=np.complex128).reshape(-1),
+            np.asarray(b_theta, dtype=np.complex128).reshape(-1),
+            np.asarray(b_phi, dtype=np.complex128).reshape(-1),
+        )
+        n_alpha = int(transforms.grid.alpha.size)
+        n_beta = int(transforms.grid.beta.size)
+        nscl = int(transforms.fth_beta.shape[1])
+        grids = (
+            a_theta_arr.reshape(n_alpha, n_beta),
+            a_phi_arr.reshape(n_alpha, n_beta),
+            b_theta_arr.reshape(n_alpha, n_beta),
+            b_phi_arr.reshape(n_alpha, n_beta),
+        )
+        m_values = np.arange(-int(transforms.box_order), int(transforms.box_order) + 1)
+        phase_adj = np.conjugate(_phase_by_m(transforms.grid.alpha, m_values))
+        top = np.zeros((nscl,), dtype=np.complex128)
+        bottom = np.zeros_like(top)
+        for im, m in enumerate(m_values.tolist()):
+            mode_mask = transforms.m_of_scalar == int(m)
+            if not np.any(mode_mask):
+                continue
+            alpha_sum = tuple(phase_adj[:, im] @ grid for grid in grids)
+            fth_h = np.conjugate(transforms.fth_beta[:, mode_mask])
+            fph_h = np.conjugate(transforms.fph_beta[:, mode_mask])
+            top[mode_mask] = fth_h.T @ alpha_sum[0] + fph_h.T @ alpha_sum[1]
+            bottom[mode_mask] = fth_h.T @ alpha_sum[2] + fph_h.T @ alpha_sum[3]
+        return np.concatenate((top, bottom)).astype(np.complex128, copy=False)
+
+    reflected = apply_directional_reflection(
+        transforms.grid.reflection_permutation,
+        np.asarray(a_theta, dtype=np.complex128).reshape(-1),
+        np.asarray(a_phi, dtype=np.complex128).reshape(-1),
+        np.asarray(b_theta, dtype=np.complex128).reshape(-1),
+        np.asarray(b_phi, dtype=np.complex128).reshape(-1),
+    )
+    a = transforms.Fth_adj @ reflected[0] + transforms.Fph_adj @ reflected[1]
+    b = transforms.Fth_adj @ reflected[2] + transforms.Fph_adj @ reflected[3]
+    return np.concatenate((a, b)).astype(np.complex128, copy=False)
+
+
+def directional_to_box_regular_adjoint(
+    transforms: MLFMMDirectionalTransformData,
+    box_state: Array,
+) -> tuple[Array, Array, Array, Array]:
+    """Apply the Hermitian adjoint of ``directional_to_box_regular``.
+
+    ``directional_to_box_regular`` is assembled from the outgoing directional
+    evaluations and the canonical electric/magnetic polarization identities.
+    Consequently its adjoint can be expressed using two outgoing evaluations,
+    preserving the structured transform representation and its conventions.
+    """
+
+    coeffs = np.asarray(box_state, dtype=np.complex128).reshape(-1)
+    nscl = n_scalar(int(transforms.box_order))
+    if coeffs.size != 2 * nscl:
+        raise ValueError(f"box_state must have length {2 * nscl}, got {coeffs.size}.")
+    zero = np.zeros_like(coeffs)
+    a_channels = box_outgoing_to_directional(
+        transforms, np.concatenate((coeffs[:nscl], zero[nscl:]))
+    )
+    b_channels = box_outgoing_to_directional(
+        transforms, np.concatenate((zero[:nscl], coeffs[nscl:]))
+    )
+    return (
+        np.asarray(a_channels[0] + 1j * b_channels[3], dtype=np.complex128),
+        np.asarray(a_channels[1] - 1j * b_channels[2], dtype=np.complex128),
+        np.asarray(1j * a_channels[1] + b_channels[2], dtype=np.complex128),
+        np.asarray(-1j * a_channels[0] + b_channels[3], dtype=np.complex128),
+    )
+
+
 def _build_sparse_directional_interpolation(
     *,
     source_alpha: Array,
@@ -832,11 +926,13 @@ __all__ = [
     "MLFMMDirectionalTransforms",
     "apply_directional_reflection",
     "box_outgoing_to_directional",
+    "box_outgoing_to_directional_adjoint",
     "box_outgoing_to_directional_structured",
     "directional_anterpolation",
     "directional_grid",
     "directional_interpolation",
     "directional_to_box_regular",
+    "directional_to_box_regular_adjoint",
     "directional_to_box_regular_structured",
     "directional_transforms",
     "structured_directional_transforms",

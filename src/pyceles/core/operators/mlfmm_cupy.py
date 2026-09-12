@@ -28,6 +28,8 @@ from pyceles.core.translation import (
     RadialLUT,
     _translation_ab5_compact_tables,
     _translation_plm_coeff_table,
+    translation_ab5_table,
+    translation_block,
 )
 from pyceles.core.wigner import wigner_3j
 
@@ -3923,6 +3925,129 @@ def _directional_to_box_regular_cupy(
     return out_arr
 
 
+def _box_outgoing_to_directional_adjoint_cupy(
+    directional: CuPyDirectionalTransformsData,
+    directional_channels: Any,
+    *,
+    cupy: Any,
+) -> Any:
+    """Apply the adjoint of the outgoing directional transform on device."""
+
+    channels = cupy.asarray(directional_channels, dtype=cupy.complex128)
+    if channels.ndim != 4 or int(channels.shape[1]) != 4:
+        raise ValueError("Directional adjoint input must have shape (batch, 4, ndir, nrhs).")
+    n_batch = int(channels.shape[0])
+    n_rhs = int(channels.shape[3])
+    n_alpha = int(directional.grid.n_alpha)
+    n_beta = int(directional.grid.n_beta)
+    nscl = int(directional.nscl)
+    reflected = channels.reshape(n_batch, 4, n_alpha, n_beta, n_rhs)[
+        :, :, :, directional.grid.beta_reflection_permutation, :
+    ]
+    out = cupy.zeros((n_batch, 2 * nscl, n_rhs), dtype=cupy.complex128)
+    top = out[:, :nscl, :]
+    bottom = out[:, nscl:, :]
+    fth_h_all = cupy.conjugate(cupy.swapaxes(directional.fth_beta, 0, 1))
+    fph_h_all = cupy.conjugate(cupy.swapaxes(directional.fph_beta, 0, 1))
+    phase_adj = cupy.conjugate(directional.phase_by_m)
+    for im, mode_idx in enumerate(directional.mode_indices_by_m):
+        if int(mode_idx.size) == 0:
+            continue
+        a_theta = cupy.einsum("a,bakr->bkr", phase_adj[:, im], reflected[:, 0], optimize=True)
+        a_phi = cupy.einsum("a,bakr->bkr", phase_adj[:, im], reflected[:, 1], optimize=True)
+        b_theta = cupy.einsum("a,bakr->bkr", phase_adj[:, im], reflected[:, 2], optimize=True)
+        b_phi = cupy.einsum("a,bakr->bkr", phase_adj[:, im], reflected[:, 3], optimize=True)
+        fth_h = fth_h_all[mode_idx, :]
+        fph_h = fph_h_all[mode_idx, :]
+        top[:, mode_idx, :] = cupy.matmul(fth_h[None, :, :], a_theta) + cupy.matmul(
+            fph_h[None, :, :], a_phi
+        )
+        bottom[:, mode_idx, :] = cupy.matmul(fth_h[None, :, :], b_theta) + cupy.matmul(
+            fph_h[None, :, :], b_phi
+        )
+    return out
+
+
+def _directional_to_box_regular_adjoint_cupy(
+    directional: CuPyDirectionalTransformsData,
+    box_states: Any,
+    *,
+    cupy: Any,
+) -> Any:
+    """Apply the adjoint of the regular directional receive transform."""
+
+    states = cupy.asarray(box_states, dtype=cupy.complex128)
+    nscl = int(directional.nscl)
+    if states.ndim != 3 or int(states.shape[1]) != 2 * nscl:
+        raise ValueError("Regular-transform adjoint input must have shape (batch, 2*nscl, nrhs).")
+    zeros = cupy.zeros_like(states)
+    a_state = cupy.concatenate((states[:, :nscl, :], zeros[:, nscl:, :]), axis=1)
+    b_state = cupy.concatenate((zeros[:, :nscl, :], states[:, nscl:, :]), axis=1)
+    a_channels = _box_outgoing_to_directional_cupy(directional, a_state, cupy=cupy)
+    b_channels = _box_outgoing_to_directional_cupy(directional, b_state, cupy=cupy)
+    out = cupy.empty(
+        (int(states.shape[0]), 4, int(directional.grid.n_directions), int(states.shape[2])),
+        dtype=cupy.complex128,
+    )
+    out[:, 0] = a_channels[:, 0] + 1j * b_channels[:, 3]
+    out[:, 1] = a_channels[:, 1] - 1j * b_channels[:, 2]
+    out[:, 2] = 1j * a_channels[:, 1] + b_channels[:, 2]
+    out[:, 3] = -1j * a_channels[:, 0] + b_channels[:, 3]
+    return out
+
+
+def _apply_directional_map_adjoint(
+    values: Any,
+    map_data: CuPyDirectionalInterpolationData,
+    *,
+    cupy: Any,
+    cache: dict[int, Any] | None = None,
+) -> Any:
+    """Apply a conjugate-transposed directional interpolation map on device."""
+
+    arr = cupy.asarray(values, dtype=cupy.complex128)
+    if arr.ndim != 4 or int(arr.shape[1]) != 4:
+        raise ValueError(
+            "Directional adjoint map input must have shape (batch, 4, n_target, nrhs)."
+        )
+    target_order = int(map_data.target_order)
+    if int(arr.shape[2]) != target_order:
+        raise ValueError(
+            f"Directional adjoint map target mismatch: {int(arr.shape[2])} vs {target_order}."
+        )
+    source_order = int(map_data.source_order)
+    flat = arr.transpose(0, 1, 3, 2).reshape(-1, target_order)
+    if str(map_data.storage) == "dense":
+        matrix = cupy.asarray(map_data.matrix, dtype=cupy.complex128)
+        mapped = flat @ cupy.conjugate(matrix)
+    elif str(map_data.storage) == "sparse":
+        sparse = map_data.matrix
+        mapped = (sparse.conjugate().T @ flat.T).T
+    elif str(map_data.storage) == "packed_stencil":
+        key = id(map_data)
+        sparse = None if cache is None else cache.get(key)
+        if sparse is None:
+            cupyx_sparse = import_module("cupyx.scipy.sparse")
+            packed_cols, packed_vals, width_i32 = map_data.matrix
+            width = int(width_i32)
+            rows = cupy.repeat(cupy.arange(target_order, dtype=cupy.int32), width)
+            cols = cupy.asarray(packed_cols, dtype=cupy.int32).reshape(-1)
+            vals = cupy.asarray(packed_vals, dtype=cupy.complex128).reshape(-1)
+            valid = cols >= 0
+            sparse = cupyx_sparse.coo_matrix(
+                (vals[valid], (rows[valid], cols[valid])),
+                shape=(target_order, source_order),
+            ).tocsr()
+            if cache is not None:
+                cache[key] = sparse
+        mapped = (sparse.conjugate().T @ flat.T).T
+    else:
+        raise ValueError(f"Unsupported directional map storage {map_data.storage!r}.")
+    return mapped.reshape(int(arr.shape[0]), 4, int(arr.shape[3]), source_order).transpose(
+        0, 1, 3, 2
+    )
+
+
 def _leaf_translation_blocks_from_pair_deltas(
     pair_deltas: Any,
     *,
@@ -5451,6 +5576,105 @@ def _apply_exact_near_pairs(
     return y_arr
 
 
+def _build_exact_near_adjoint_blocks(
+    prepared: CuPyMLFMMPreparedData,
+    *,
+    lmax: int,
+    k: float,
+    near_dtype: np.dtype,
+    cupy: Any,
+) -> list[tuple[Any, Any, Any]]:
+    """Build cached directed exact-near blocks for the CuPy adjoint path.
+
+    The forward exact-near kernel evaluates translation entries directly from
+    the shared lookup tables.  The first adjoint call builds the same sparse
+    leaf-pair blocks on the host and uploads them once; subsequent applications
+    remain device-resident and only perform batched conjugate-transposed GEMMs.
+    This one-time fallback keeps the reverse implementation independent of the
+    forward RawKernel launch geometry while retaining near-field memory scaling.
+    """
+
+    near = prepared.near_pairs
+    positions = np.asarray(cupy.asnumpy(near.positions), dtype=float).reshape(-1, 3)
+    offsets = np.asarray(cupy.asnumpy(near.leaf_particle_offsets), dtype=np.int32)
+    indices = np.asarray(cupy.asnumpy(near.leaf_particle_indices), dtype=np.int32)
+    dst_leaves = np.asarray(cupy.asnumpy(near.dst_leaf_indices), dtype=np.int32)
+    src_leaves = np.asarray(cupy.asnumpy(near.src_leaf_indices), dtype=np.int32)
+    # Reconstruct the exact radial lookup object from its uploaded row-major
+    # real/imaginary table. The CuPy forward kernel uses linear interpolation.
+    dr = 1.0 / float(near.inv_dr)
+    radial_lut = RadialLUT(
+        lmax=int(lmax),
+        k=float(k),
+        r_max=float(near.last_index) * dr,
+        dr=dr,
+        dtype=np.dtype(near_dtype),
+    )
+    n_orders = 2 * int(lmax) + 1
+    radial_lut.h = np.asarray(
+        np.asarray(cupy.asnumpy(near.lut_re)).reshape(-1, n_orders)
+        + 1j * np.asarray(cupy.asnumpy(near.lut_im)).reshape(-1, n_orders),
+        dtype=np.dtype(near_dtype),
+    ).T
+    # Match the uploaded table exactly; the constructor's guard row is not
+    # part of the device lookup payload and must not be addressed here.
+    radial_lut.r_grid = dr * np.arange(int(near.last_index) + 1, dtype=float)
+    radial_lut._last_index = int(near.last_index)
+    radial_lut._inv_dr = float(near.inv_dr)
+    ab5 = translation_ab5_table(int(lmax), dtype=np.complex128)
+    blocks_out: list[tuple[Any, Any, Any]] = []
+    nm = int(n_modes(int(lmax)))
+    for dst_leaf, src_leaf in zip(dst_leaves.tolist(), src_leaves.tolist(), strict=True):
+        dst_ids = indices[offsets[int(dst_leaf)] : offsets[int(dst_leaf) + 1]]
+        src_ids = indices[offsets[int(src_leaf)] : offsets[int(src_leaf) + 1]]
+        blocks = np.empty((dst_ids.size, src_ids.size, nm, nm), dtype=np.dtype(near_dtype))
+        for dst_row, dst_particle in enumerate(dst_ids.tolist()):
+            for src_col, src_particle in enumerate(src_ids.tolist()):
+                if int(dst_particle) == int(src_particle):
+                    blocks[dst_row, src_col].fill(0)
+                    continue
+                blocks[dst_row, src_col] = np.asarray(
+                    translation_block(
+                        int(lmax),
+                        float(k),
+                        positions[int(dst_particle)] - positions[int(src_particle)],
+                        ab5=ab5,
+                        radial_lut=radial_lut,
+                    ),
+                    dtype=np.dtype(near_dtype),
+                )
+        blocks_out.append(
+            (
+                cupy.asarray(dst_ids, dtype=cupy.int32),
+                cupy.asarray(src_ids, dtype=cupy.int32),
+                cupy.asarray(blocks, dtype=_cupy_complex_dtype(near_dtype, cupy=cupy)),
+            )
+        )
+    return blocks_out
+
+
+def _apply_exact_near_adjoint_blocks(
+    blocks: list[tuple[Any, Any, Any]],
+    x_states: Any,
+    *,
+    out: Any,
+    cupy: Any,
+) -> Any:
+    """Apply cached sparse exact-near blocks in reverse orientation."""
+
+    out.fill(0)
+    for dst_ids, src_ids, pair_blocks in blocks:
+        if int(dst_ids.size) == 0 or int(src_ids.size) == 0:
+            continue
+        # The block stores ``W[dst_mode, src_mode]``.  Contracting its
+        # conjugate with the destination state already produces the source
+        # state; swapping the last two axes would contract the wrong mode.
+        block_adjoint = cupy.conjugate(pair_blocks)
+        contribution = cupy.einsum("abij,air->bjr", block_adjoint, x_states[dst_ids], optimize=True)
+        out[src_ids] += contribution
+    return out
+
+
 def _apply_single_level_far(
     prepared: CuPyMLFMMPreparedData,
     x_states: Any,
@@ -5524,6 +5748,178 @@ def _apply_single_level_far(
         n_particles=n_particles,
         nrhs=nrhs,
         out=(ws.y_states if ws is not None else None),
+        cupy=cupy,
+    )
+
+
+def _apply_single_level_far_adjoint(
+    prepared: CuPyMLFMMPreparedData,
+    x_states: Any,
+    *,
+    receive_adjoint_cache: dict[int, Any] | None,
+    pair_blocks_scratch: dict[str, Any] | None,
+    leaf_otf_chunk_leaves: int | None,
+    leaf_otf_bytes_budget: int | None,
+    map_adjoint_cache: dict[int, Any] | None,
+    cupy: Any,
+) -> Any:
+    """Apply the Hermitian adjoint of the single-level sampled far map."""
+
+    single = prepared.single_level
+    if single is None:
+        raise RuntimeError("Internal CuPy MLFMM error: missing single-level prepared data.")
+    n_particles, nm, nrhs = (int(v) for v in x_states.shape)
+    box_states = _aggregate_leaf_box_states(
+        x_states,
+        leaf_groups=single.leaf_groups,
+        leaf_apply_mode=single.leaf_apply_mode,
+        leaf_translation_tables=single.leaf_translation_tables,
+        pair_blocks_scratch=pair_blocks_scratch,
+        leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
+        leaf_otf_bytes_budget=leaf_otf_bytes_budget,
+        n_leaves=int(single.n_leaves),
+        box_nm=int(single.box_nm),
+        nrhs=nrhs,
+        cupy=cupy,
+    )
+    incoming = _directional_to_box_regular_adjoint_cupy(single.directional, box_states, cupy=cupy)
+    outgoing = cupy.zeros_like(incoming, dtype=cupy.complex128)
+    for offset, batch in single.far_offset_batches.items():
+        _weighted_gather_add_complex128(
+            outgoing,
+            batch.src_indices,
+            incoming,
+            batch.dst_indices,
+            cupy.conjugate(single.offset_diagonals[offset]),
+            cupy=cupy,
+        )
+    outgoing_box = _box_outgoing_to_directional_adjoint_cupy(
+        single.directional, outgoing, cupy=cupy
+    )
+    return _receive_leaf_boxes_to_particles(
+        outgoing_box,
+        leaf_groups=single.leaf_groups,
+        leaf_apply_mode=single.leaf_apply_mode,
+        leaf_translation_tables=single.leaf_translation_tables,
+        pair_blocks_scratch=pair_blocks_scratch,
+        leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
+        leaf_otf_bytes_budget=leaf_otf_bytes_budget,
+        receive_adjoint_cache=receive_adjoint_cache,
+        nm=nm,
+        n_particles=n_particles,
+        nrhs=nrhs,
+        cupy=cupy,
+    )
+
+
+def _apply_multilevel_far_adjoint(
+    prepared: CuPyMLFMMPreparedData,
+    x_states: Any,
+    *,
+    receive_adjoint_cache: dict[int, Any] | None,
+    pair_blocks_scratch: dict[str, Any] | None,
+    leaf_otf_chunk_leaves: int | None,
+    leaf_otf_bytes_budget: int | None,
+    map_adjoint_cache: dict[int, Any] | None,
+    cupy: Any,
+) -> Any:
+    """Apply the Hermitian adjoint of the resident multilevel sampled far map."""
+
+    multilevel = prepared.multilevel
+    if multilevel is None:
+        raise RuntimeError("Internal CuPy MLFMM error: missing multilevel prepared data.")
+    n_particles, nm, nrhs = (int(v) for v in x_states.shape)
+    leaf_level = int(multilevel.leaf_level)
+    leaf_box_states = _aggregate_leaf_box_states(
+        x_states,
+        leaf_groups=multilevel.leaf_groups,
+        leaf_apply_mode=multilevel.leaf_apply_mode,
+        leaf_translation_tables=multilevel.leaf_translation_tables,
+        pair_blocks_scratch=pair_blocks_scratch,
+        leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
+        leaf_otf_bytes_budget=leaf_otf_bytes_budget,
+        n_leaves=int(multilevel.n_leaves),
+        box_nm=int(multilevel.box_nm),
+        nrhs=nrhs,
+        cupy=cupy,
+    )
+    levels = multilevel.levels
+    incoming = [
+        cupy.zeros(
+            (int(level.n_boxes), 4, int(level.directional.grid.n_directions), nrhs),
+            dtype=cupy.complex128,
+        )
+        for level in levels
+    ]
+    incoming[leaf_level] = _directional_to_box_regular_adjoint_cupy(
+        levels[leaf_level].directional, leaf_box_states, cupy=cupy
+    )
+    # Reverse the forward downward transfer, propagating leaf adjoints toward
+    # the coarser sampled levels.
+    for transfer in reversed(multilevel.transfers):
+        parent_adj = incoming[int(transfer.parent_level)]
+        child_adj = incoming[int(transfer.child_level)]
+        for shift, batch in transfer.batches_by_shift.items():
+            mapped = _apply_directional_map_adjoint(
+                child_adj[batch.src_indices],
+                transfer.map_down,
+                cupy=cupy,
+                cache=map_adjoint_cache,
+            )
+            values = (
+                mapped * cupy.conjugate(transfer.phase_down_by_shift[shift])[None, None, :, None]
+            )
+            _add_at_complex128(parent_adj, batch.dst_indices, values, cupy=cupy)
+
+    outgoing = [cupy.zeros_like(values, dtype=cupy.complex128) for values in incoming]
+    for level_idx in range(int(multilevel.hf_end_level), int(multilevel.hf_start_level) - 1, -1):
+        level = levels[level_idx]
+        for offset, batch in level.far_offset_batches.items():
+            _weighted_gather_add_complex128(
+                outgoing[level_idx],
+                batch.src_indices,
+                incoming[level_idx],
+                batch.dst_indices,
+                cupy.conjugate(level.offset_diagonals[offset]),
+                cupy=cupy,
+            )
+
+    # Reverse the forward upward transfer, now propagating parent adjoints to
+    # child outgoing states. The map adjoint handles dense, sparse, and packed
+    # interpolation storage uniformly.
+    for transfer in multilevel.transfers:
+        parent_adj = outgoing[int(transfer.parent_level)]
+        child_adj = outgoing[int(transfer.child_level)]
+        for shift, batch in transfer.batches_by_shift.items():
+            shifted = (
+                parent_adj[batch.dst_indices]
+                * cupy.conjugate(transfer.phase_up_by_shift[shift])[None, None, :, None]
+            )
+            mapped = _apply_directional_map_adjoint(
+                shifted,
+                transfer.map_up,
+                cupy=cupy,
+                cache=map_adjoint_cache,
+            )
+            _add_at_complex128(child_adj, batch.src_indices, mapped, cupy=cupy)
+
+    outgoing_box = _box_outgoing_to_directional_adjoint_cupy(
+        levels[leaf_level].directional,
+        outgoing[leaf_level],
+        cupy=cupy,
+    )
+    return _receive_leaf_boxes_to_particles(
+        outgoing_box,
+        leaf_groups=multilevel.leaf_groups,
+        leaf_apply_mode=multilevel.leaf_apply_mode,
+        leaf_translation_tables=multilevel.leaf_translation_tables,
+        pair_blocks_scratch=pair_blocks_scratch,
+        leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
+        leaf_otf_bytes_budget=leaf_otf_bytes_budget,
+        receive_adjoint_cache=receive_adjoint_cache,
+        nm=nm,
+        n_particles=n_particles,
+        nrhs=nrhs,
         cupy=cupy,
     )
 
@@ -7203,9 +7599,15 @@ def _device_array_nbytes(arr: Any) -> int:
     if arr is None:
         return 0
     nbytes = getattr(arr, "nbytes", None)
-    if nbytes is None:
-        return 0
-    return int(nbytes)
+    if nbytes is not None:
+        return int(nbytes)
+    # cupyx sparse matrices expose their resident CSR arrays rather than a
+    # scalar ``nbytes`` attribute.
+    return int(
+        sum(
+            _device_array_nbytes(getattr(arr, name, None)) for name in ("data", "indices", "indptr")
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -7613,6 +8015,7 @@ class CuPyMLFMMCouplingOperator:
 
     lmax: int
     n_particles: int
+    k: float
     prepared_data: CuPyMLFMMPreparedData
     host_cache: CuPyMLFMMHostCacheData | None = field(default=None, repr=False)
     host_cache_summary: dict[str, object] | None = field(default=None, repr=False)
@@ -7621,6 +8024,10 @@ class CuPyMLFMMCouplingOperator:
     near_dtype: np.dtype = COMPLEX128_DTYPE
     far_dtype: np.dtype = COMPLEX128_DTYPE
     _receive_adjoint_cache: dict[int, Any] = field(default_factory=dict, init=False, repr=False)
+    _map_adjoint_cache: dict[int, Any] = field(default_factory=dict, init=False, repr=False)
+    _near_adjoint_blocks: list[tuple[Any, Any, Any]] | None = field(
+        default=None, init=False, repr=False
+    )
     _leaf_otf_pair_blocks_scratch: dict[str, Any] = field(
         default_factory=dict, init=False, repr=False
     )
@@ -7773,6 +8180,17 @@ class CuPyMLFMMCouplingOperator:
         )
         leaf_otf_scratch_bytes = _device_array_nbytes(
             self._leaf_otf_pair_blocks_scratch.get("buffer")
+        )
+        near_adjoint_blocks_bytes = int(
+            sum(
+                _device_array_nbytes(dst_ids)
+                + _device_array_nbytes(src_ids)
+                + _device_array_nbytes(pair_blocks)
+                for dst_ids, src_ids, pair_blocks in (self._near_adjoint_blocks or ())
+            )
+        )
+        map_adjoint_cache_bytes = int(
+            sum(_device_array_nbytes(value) for value in self._map_adjoint_cache.values())
         )
 
         multilevel = self.prepared_data.multilevel
@@ -8068,8 +8486,15 @@ class CuPyMLFMMCouplingOperator:
                 "single_level_total_bytes": int(single_ws_total),
                 "multilevel_total_bytes": int(multilevel_ws_total),
                 "leaf_otf_pair_blocks_scratch_bytes": int(leaf_otf_scratch_bytes),
+                "near_adjoint_blocks_bytes": int(near_adjoint_blocks_bytes),
+                "map_adjoint_cache_bytes": int(map_adjoint_cache_bytes),
                 "total_bytes": int(
-                    near_ws_total + single_ws_total + multilevel_ws_total + leaf_otf_scratch_bytes
+                    near_ws_total
+                    + single_ws_total
+                    + multilevel_ws_total
+                    + leaf_otf_scratch_bytes
+                    + near_adjoint_blocks_bytes
+                    + map_adjoint_cache_bytes
                 ),
             },
             "multilevel_rolling": rolling_diag,
@@ -8317,6 +8742,90 @@ class CuPyMLFMMCouplingOperator:
             squeezed=squeezed,
         )
 
+    def apply_adjoint(self, x: Any) -> Any:
+        """Apply the Hermitian adjoint of the finite MLFMM coupling on device.
+
+        Sampled-far reverse traversals currently retain all hierarchy levels for
+        the duration of this action. This is intentionally the first correct
+        implementation; the forward path remains streamed and memory-bounded,
+        while a later optimization can introduce the analogous reverse
+        frontier traversal once validation establishes the algebra.
+        """
+
+        cupy, _ = import_cupy()
+        out_dtype = np.dtype(self.dtype)
+        near_dtype = np.dtype(self.near_dtype)
+        far_dtype = np.dtype(self.far_dtype)
+        if out_dtype not in {np.dtype(np.complex64), np.dtype(np.complex128)}:
+            raise ValueError(f"Unsupported CuPy MLFMM output dtype {out_dtype!r}.")
+        if near_dtype not in {np.dtype(np.complex64), np.dtype(np.complex128)}:
+            raise ValueError(f"Unsupported CuPy MLFMM near dtype {near_dtype!r}.")
+        if far_dtype != np.dtype(np.complex128):
+            raise ValueError("CuPy MLFMM adjoint requires complex128 sampled-far precision.")
+        nm = n_modes(int(self.lmax))
+        x_states, squeezed = _reshape_unknowns_to_particle_modes(
+            x,
+            n_particles=int(self.n_particles),
+            nm=nm,
+            dtype=out_dtype,
+            cupy=cupy,
+        )
+        if self._near_adjoint_blocks is None:
+            self._near_adjoint_blocks = _build_exact_near_adjoint_blocks(
+                self.prepared_data,
+                lmax=int(self.lmax),
+                k=float(self.k),
+                near_dtype=near_dtype,
+                cupy=cupy,
+            )
+        near_ws = _ensure_exact_near_workspace(
+            self.prepared_data,
+            n_particles=int(self.n_particles),
+            nm=nm,
+            nrhs=int(x_states.shape[2]),
+            near_dtype=near_dtype,
+            cache=self._near_workspace_cache,
+            cupy=cupy,
+        )
+        y_near = _apply_exact_near_adjoint_blocks(
+            self._near_adjoint_blocks,
+            x_states,
+            out=near_ws.y_states,
+            cupy=cupy,
+        )
+        stage = str(self.prepared_data.stage)
+        if stage == "single_level":
+            y_far = _apply_single_level_far_adjoint(
+                self.prepared_data,
+                x_states,
+                receive_adjoint_cache=self._receive_adjoint_cache,
+                pair_blocks_scratch=self._leaf_otf_pair_blocks_scratch,
+                leaf_otf_chunk_leaves=self.host_cache_policy.leaf_otf_chunk_leaves,
+                leaf_otf_bytes_budget=self.host_cache_policy.leaf_otf_bytes_budget,
+                map_adjoint_cache=self._map_adjoint_cache,
+                cupy=cupy,
+            )
+        elif stage == "multilevel":
+            y_far = _apply_multilevel_far_adjoint(
+                self.prepared_data,
+                x_states,
+                receive_adjoint_cache=self._receive_adjoint_cache,
+                pair_blocks_scratch=self._leaf_otf_pair_blocks_scratch,
+                leaf_otf_chunk_leaves=self.host_cache_policy.leaf_otf_chunk_leaves,
+                leaf_otf_bytes_budget=self.host_cache_policy.leaf_otf_bytes_budget,
+                map_adjoint_cache=self._map_adjoint_cache,
+                cupy=cupy,
+            )
+        else:
+            raise RuntimeError(f"Unsupported CuPy MLFMM stage {stage!r}.")
+        y_total = cupy.asarray(y_far, dtype=cupy.complex128) + cupy.asarray(
+            y_near, dtype=cupy.complex128
+        )
+        return _restore_unknown_shape(
+            y_total.astype(_cupy_complex_dtype(out_dtype, cupy=cupy), copy=False),
+            squeezed=squeezed,
+        )
+
     def __getstate__(self) -> dict[str, Any]:
         raise TypeError(
             "CuPyMLFMMCouplingOperator is runtime-only and intentionally non-picklable. "
@@ -8348,6 +8857,7 @@ def prepare_mlfmm_cupy_coupling(
         lmax=int(coupling.lmax),
         n_particles=int(np.asarray(coupling.positions).shape[0]),
         prepared_data=prepared,
+        k=float(coupling.k),
         host_cache=(host_cache if retention == "full" else None),
         host_cache_summary=host_cache_summary,
         host_cache_policy=policy,

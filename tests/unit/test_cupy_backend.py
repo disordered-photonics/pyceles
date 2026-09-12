@@ -573,6 +573,26 @@ def _mlfmm_single_level_particles() -> ParticleCollection:
     return _random_uniform_sphere_particles(n_particles=8, seed=45)
 
 
+def _mlfmm_adjoint_depth_particles() -> ParticleCollection:
+    """Sixteen tiny particles populate eight separated leaves for depth probes."""
+
+    corners = np.asarray(
+        [
+            [x, y, z]
+            for x in (-1000.0, 1000.0)
+            for y in (-1000.0, 1000.0)
+            for z in (-1000.0, 1000.0)
+        ],
+        dtype=float,
+    )
+    positions = np.vstack((corners, corners + np.array([1.0, 1.0, 1.0])))
+    return spheres_from_arrays(
+        positions=positions,
+        radii=np.full((positions.shape[0],), 1.0),
+        refractive_indices=np.full((positions.shape[0],), 1.59 + 0.0j, dtype=np.complex128),
+    )
+
+
 def _transition_numpy_mlfmm_coupling(*, max_leaf_particles: int) -> MLFMMCouplingOperator:
     lmax = 1
     wavelength = 550.0
@@ -1086,6 +1106,84 @@ def test_cupy_mlfmm_prepared_operator_matches_numpy_reference(
     y_numpy = np.asarray(prepared_numpy.apply_W(x), dtype=np.complex128)
     y_cupy = np.asarray(asnumpy(prepared_cupy.apply_W(x)), dtype=np.complex128)
     np.testing.assert_allclose(y_cupy, y_numpy, rtol=1e-10, atol=1e-10)
+
+
+@pytest.mark.parametrize("expected_stage", ("single_level", "multilevel"))
+@pytest.mark.parametrize(
+    ("operator_dtype", "tolerance"),
+    ((np.complex64, 5.0e-6), (np.complex128, 1.0e-9)),
+)
+def test_cupy_mlfmm_adjoint_matches_inner_product(
+    expected_stage: str,
+    operator_dtype: type[np.complexfloating[Any, Any]],
+    tolerance: float,
+) -> None:
+    """CuPy's exact-near and sampled-far MLFMM reverse map is Hermitian-consistent."""
+
+    lmax = 1
+    wavelength = 550.0
+    particles = (
+        _mlfmm_single_level_particles()
+        if expected_stage == "single_level"
+        else _mlfmm_transition_particles()
+    )
+    prepared = prepare_matvec(
+        lmax=lmax,
+        k=2.0 * np.pi / wavelength,
+        particles=particles,
+        n_medium=1.0 + 0j,
+        radial_lut_dr=0.5,
+        cache_translation_blocks=False,
+        operator_dtype=operator_dtype,
+        coupling_backend="mlfmm",
+        mlfmm_options=MLFMMOptions(max_leaf_particles=4, max_depth=4),
+        backend="cupy",
+    )
+    coupling = prepared.coupling
+    assert isinstance(coupling, CuPyMLFMMCouplingOperator)
+    assert str(coupling.prepared_data.stage) == expected_stage
+
+    n = len(particles) * n_modes(lmax)
+    rng = np.random.default_rng(20260912 + len(particles))
+    x = np.asarray(rng.standard_normal(n) + 1j * rng.standard_normal(n), dtype=operator_dtype)
+    y = np.asarray(rng.standard_normal(n) + 1j * rng.standard_normal(n), dtype=operator_dtype)
+    lhs = np.vdot(asnumpy(coupling.apply(x)), y)
+    rhs = np.vdot(x, asnumpy(coupling.apply_adjoint(y)))
+    assert abs(lhs - rhs) / max(abs(lhs), abs(rhs), 1.0) < tolerance
+
+
+@pytest.mark.parametrize("max_depth", (2, 3, 4))
+def test_cupy_mlfmm_adjoint_depth_probe(max_depth: int) -> None:
+    """Depth-2/3/4 occupied hierarchies retain the same adjoint identity."""
+
+    particles = _mlfmm_adjoint_depth_particles()
+    prepared = prepare_matvec(
+        lmax=1,
+        k=2.0 * np.pi / 550.0,
+        particles=particles,
+        n_medium=1.0 + 0j,
+        radial_lut_dr=5.0,
+        cache_translation_blocks=False,
+        operator_dtype=np.complex128,
+        coupling_backend="mlfmm",
+        mlfmm_options=MLFMMOptions(
+            max_leaf_particles=1,
+            max_depth=max_depth,
+            accuracy_level=1,
+            order_additive=0,
+        ),
+        backend="cupy",
+    )
+    coupling = prepared.coupling
+    assert isinstance(coupling, CuPyMLFMMCouplingOperator)
+    assert coupling.prepared_data.stage in {"single_level", "multilevel"}
+    n = len(particles) * n_modes(1)
+    rng = np.random.default_rng(20260912 + max_depth)
+    x = np.asarray(rng.standard_normal(n) + 1j * rng.standard_normal(n))
+    y = np.asarray(rng.standard_normal(n) + 1j * rng.standard_normal(n))
+    lhs = np.vdot(asnumpy(coupling.apply(x)), y)
+    rhs = np.vdot(x, asnumpy(coupling.apply_adjoint(y)))
+    assert abs(lhs - rhs) / max(abs(lhs), abs(rhs), 1.0) < 1e-9
 
 
 def test_cupy_mlfmm_options_collect_stream_stats_reaches_runtime_policy() -> None:

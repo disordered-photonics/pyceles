@@ -68,6 +68,60 @@ def _single_level_fixture() -> tuple[np.ndarray, np.ndarray, int, float]:
     return positions, radii, 3, 2.0 * np.pi / 550.0
 
 
+def _adjoint_hierarchy_fixture() -> tuple[np.ndarray, np.ndarray, float]:
+    """Small occupied leaves that exercise depths 2, 3, and 4."""
+
+    corners = np.asarray(
+        [
+            [x, y, z]
+            for x in (-1000.0, 1000.0)
+            for y in (-1000.0, 1000.0)
+            for z in (-1000.0, 1000.0)
+        ],
+        dtype=float,
+    )
+    positions = np.vstack((corners, corners + np.array([1.0, 1.0, 1.0])))
+    radii = np.full((positions.shape[0],), 1.0, dtype=float)
+    return positions, radii, 2.0 * np.pi / 550.0
+
+
+@pytest.mark.parametrize("max_depth", (2, 3, 4))
+@pytest.mark.parametrize("build_leaf_maps", (True, False))
+def test_mlfmm_adjoint_matches_inner_product_across_hierarchy_depths(
+    max_depth: int,
+    build_leaf_maps: bool,
+) -> None:
+    """The exact-near plus sampled-far MLFMM map has a valid Hermitian adjoint."""
+
+    positions, radii, k = _adjoint_hierarchy_fixture()
+    radial_lut = RadialLUT(lmax=8, k=k, r_max=5000.0, dr=5.0, dtype=np.complex128)
+    coupling = prepare_mlfmm_coupling(
+        lmax=1,
+        k=k,
+        positions=positions,
+        particle_circumscribing_radii=radii,
+        radial_lut=radial_lut,
+        options=MLFMMOptions(
+            max_leaf_particles=1,
+            max_depth=max_depth,
+            accuracy_level=1,
+            order_additive=0,
+        ),
+        cache_translation_blocks=True,
+        build_leaf_maps=build_leaf_maps,
+    )
+    assert isinstance(coupling, MLFMMCouplingOperator)
+    assert coupling.resolved_plan.selected_depth == max_depth
+    rng = np.random.default_rng(20260912 + max_depth + int(build_leaf_maps))
+    n_unknowns = positions.shape[0] * n_modes(1)
+    x = rng.standard_normal(n_unknowns) + 1j * rng.standard_normal(n_unknowns)
+    y = rng.standard_normal(n_unknowns) + 1j * rng.standard_normal(n_unknowns)
+
+    lhs = np.vdot(coupling.apply(x), y)
+    rhs = np.vdot(x, coupling.apply_adjoint(y))
+    np.testing.assert_allclose(lhs, rhs, rtol=5e-12, atol=5e-12)
+
+
 def test_mlfmm_staging_uses_structured_directional_transforms(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

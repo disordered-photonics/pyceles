@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added exact adjoint actions for finite pairwise and periodic Ewald coupling
   (NumPy/CuPy), and for NumPy periodic direct-sum coupling, extending the
   existing Rayleigh path to dense particle-T groups.
+- Added exact Hermitian-adjoint actions for finite NumPy and CuPy MLFMM
+  coupling, including single-level and multilevel sampled-far traversals.
 
 ### Changed
 - Backend-native CuPy Krylov result classes and `*_native` entry points are

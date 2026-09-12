@@ -133,7 +133,9 @@ GCRO-DR, and single-RHS LSQR. NumPy uses SciPy's reference LSQR, while CuPy
 uses the native device recurrence. LSQR requires an exact Hermitian adjoint of
 the prepared `A = I - T W` action; finite pairwise and periodic Rayleigh,
 Ewald, and NumPy direct-sum coupling provide that action for diagonal and
-explicit dense particle-T groups. MLFMM adjoints are not yet implemented.
+explicit dense particle-T groups. Finite MLFMM coupling also provides the
+adjoint on both NumPy and CuPy; its CuPy multilevel reverse currently retains
+the sampled hierarchy for the duration of one action.
 
 ## MLFMM scope
 

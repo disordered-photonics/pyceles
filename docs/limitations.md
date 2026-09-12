@@ -56,8 +56,10 @@ LSQR is limited to single-RHS prepared operators with exact Hermitian adjoints.
 Finite pairwise and periodic Rayleigh, Ewald, and direct-sum coupling expose
 those adjoints for diagonal and explicit dense particle-T groups. The NumPy
 backend uses SciPy's reference LSQR and CuPy uses the native implementation.
-Periodic direct-sum remains NumPy/reference-only, and MLFMM adjoints are not
-yet available.
+Finite MLFMM coupling now exposes the same exact adjoint on NumPy and CuPy.
+Periodic direct-sum remains NumPy/reference-only. The CuPy multilevel MLFMM
+reverse traversal currently retains its sampled hierarchy during one adjoint
+action, so its memory use should be benchmarked separately for large plans.
 
 Other periodic limitations include:
 

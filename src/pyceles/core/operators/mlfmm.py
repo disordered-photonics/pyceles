@@ -27,9 +27,11 @@ from .mlfmm_directional import (
     MLFMMDirectionalStructuredTransforms,
     MLFMMDirectionalTransformData,
     box_outgoing_to_directional,
+    box_outgoing_to_directional_adjoint,
     directional_anterpolation,
     directional_interpolation,
     directional_to_box_regular,
+    directional_to_box_regular_adjoint,
     structured_directional_transforms,
 )
 from .mlfmm_partition import (
@@ -271,6 +273,46 @@ class MLFMMCouplingOperator:
             y_total = np.asarray(y_near, dtype=far_dtype) + np.asarray(y_far, dtype=far_dtype)
             return np.asarray(y_total, dtype=self.dtype)
         raise RuntimeError(f"Unsupported MLFMM stage {self.resolved_plan.stage!r}.")
+
+    def apply_adjoint(self, x: np.ndarray) -> np.ndarray:
+        """Apply the Hermitian adjoint of the prepared MLFMM coupling ``W``."""
+
+        near_dtype = np.dtype(self.near_dtype)
+        far_dtype = np.dtype(self.far_dtype)
+        if self.resolved_plan.stage == "single_level":
+            if self.single_level is None:
+                raise RuntimeError("Internal error: single-level operators are missing.")
+            y_near, y_far = _apply_single_level_mlfmm_adjoint(
+                lmax=int(self.lmax),
+                k=float(self.k),
+                positions=self.positions,
+                x=x,
+                operators=self.single_level,
+                radial_lut=self.radial_lut,
+                near_dtype=near_dtype,
+                far_dtype=far_dtype,
+                block_cache=self._exact_block_cache,
+            )
+        elif self.resolved_plan.stage == "multilevel":
+            if self.multilevel is None:
+                raise RuntimeError("Internal error: multilevel operators are missing.")
+            y_near, y_far = _apply_multilevel_mlfmm_adjoint(
+                lmax=int(self.lmax),
+                k=float(self.k),
+                positions=self.positions,
+                x=x,
+                operators=self.multilevel,
+                radial_lut=self.radial_lut,
+                near_dtype=near_dtype,
+                far_dtype=far_dtype,
+                block_cache=self._exact_block_cache,
+            )
+        else:
+            raise RuntimeError(f"Unsupported MLFMM stage {self.resolved_plan.stage!r}.")
+        return np.asarray(
+            np.asarray(y_near, dtype=far_dtype) + np.asarray(y_far, dtype=far_dtype),
+            dtype=self.dtype,
+        )
 
     def populate(self, *, show_progress: bool = False) -> None:
         """Optionally precompute exact near blocks used by the current partition."""
@@ -1504,6 +1546,57 @@ def _exact_leaf_near_apply(
     return y.reshape(-1)
 
 
+def _exact_leaf_near_adjoint_apply(
+    *,
+    lmax: int,
+    k: float,
+    positions: np.ndarray,
+    x: np.ndarray,
+    partition: MLFMMPartition,
+    radial_lut: RadialLUT | None,
+    dtype: np.dtype,
+    block_cache: dict[tuple[int, int], np.ndarray] | None = None,
+) -> np.ndarray:
+    """Apply the Hermitian adjoint of the exact leaf-near interactions."""
+
+    nm = n_modes(int(lmax))
+    arr = np.asarray(x, dtype=dtype).reshape(np.asarray(positions).shape[0], nm)
+    y = np.zeros_like(arr, dtype=dtype)
+    ab5 = translation_ab5_table(int(lmax), dtype=np.complex128)
+    positions_arr = np.asarray(positions, dtype=float)
+
+    def block(i: int, j: int) -> np.ndarray:
+        key = (int(i), int(j))
+        wij = block_cache.get(key) if block_cache is not None else None
+        if wij is None:
+            wij = translation_block(
+                int(lmax),
+                float(k),
+                np.asarray(positions_arr[int(i)] - positions_arr[int(j)], dtype=float),
+                ab5=ab5,
+                radial_lut=radial_lut,
+            )
+            if block_cache is not None:
+                block_cache[key] = wij
+        return np.asarray(wij, dtype=dtype)
+
+    for a, b in partition.leaf_near_pairs:
+        leaf_a = partition.leaves[int(a)]
+        leaf_b = partition.leaves[int(b)]
+        for i in leaf_a.particle_indices:
+            for j in leaf_b.particle_indices:
+                if int(i) == int(j):
+                    continue
+                wij = block(int(i), int(j))
+                # Forward contributes y[i] += W_ij x[j].  Its adjoint adds
+                # W_ij^H x[i] to the source particle j.
+                y[int(j)] += np.conjugate(wij.T) @ arr[int(i)]
+                if int(a) != int(b):
+                    wji = block(int(j), int(i))
+                    y[int(i)] += np.conjugate(wji.T) @ arr[int(j)]
+    return y.reshape(-1)
+
+
 def _populate_exact_leaf_near_cache(
     *,
     lmax: int,
@@ -2086,6 +2179,260 @@ def _apply_linear_map_to_channel_batches(
     return np.asarray(mapped, dtype=arr.dtype).reshape(
         *arr.shape[:-1], interpolation.matrix.shape[0]
     )
+
+
+def _apply_linear_map_adjoint_to_channel_batches(
+    channel_batches: np.ndarray,
+    interpolation: MLFMMDirectionalInterpolation,
+) -> np.ndarray:
+    """Apply the Hermitian adjoint of one sparse directional map to batches."""
+
+    arr = np.asarray(channel_batches)
+    flat = arr.reshape(-1, arr.shape[-1])
+    # Keep the reference path sparse as well. Materialising a dense
+    # conjugate-transpose is needlessly quadratic in the directional order.
+    mapped = (interpolation.matrix.conjugate().T @ flat.T).T
+    return np.asarray(mapped, dtype=arr.dtype).reshape(
+        *arr.shape[:-1], interpolation.matrix.shape[1]
+    )
+
+
+def _apply_single_level_mlfmm_adjoint(
+    *,
+    lmax: int,
+    k: float,
+    positions: np.ndarray,
+    x: np.ndarray,
+    operators: MLFMMSingleLevelOperators,
+    radial_lut: RadialLUT | None,
+    near_dtype: np.dtype,
+    far_dtype: np.dtype,
+    block_cache: dict[tuple[int, int], np.ndarray] | None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Apply the Hermitian adjoint of the single-level sampled MLFMM map."""
+
+    positions_arr = np.asarray(positions, dtype=float)
+    x_arr = np.asarray(x)
+    y_near = _exact_leaf_near_adjoint_apply(
+        lmax=int(lmax),
+        k=float(k),
+        positions=positions_arr,
+        x=np.asarray(x_arr, dtype=near_dtype),
+        partition=operators.partition,
+        radial_lut=radial_lut,
+        dtype=near_dtype,
+        block_cache=block_cache,
+    )
+    if operators.leaf_groups:
+        leaf_box = _aggregate_leaf_box_states(
+            lmax=int(lmax),
+            box_order=int(operators.box_order),
+            k=float(k),
+            x=np.asarray(x_arr, dtype=far_dtype),
+            leaf_groups=operators.leaf_groups,
+            n_leaves=len(operators.partition.leaves),
+            radial_lut=radial_lut,
+            dtype=far_dtype,
+        )
+    else:
+        leaf_box = _leaf_box_states_from_dense_maps(
+            lmax=int(lmax),
+            positions=positions_arr,
+            x=np.asarray(x_arr, dtype=far_dtype),
+            partition=operators.partition,
+            aggregation=operators.aggregation,
+            dtype=far_dtype,
+        )
+    ndir = int(operators.directional.grid.directions.shape[0])
+    incoming_adj = np.zeros((len(operators.partition.leaves), 4, ndir), dtype=far_dtype)
+    for leaf_id, state in enumerate(leaf_box):
+        channels = directional_to_box_regular_adjoint(operators.directional, state)
+        for channel_idx, channel in enumerate(channels):
+            incoming_adj[leaf_id, channel_idx] = np.asarray(channel, dtype=far_dtype)
+
+    outgoing_adj = np.zeros_like(incoming_adj, dtype=far_dtype)
+    for offset, (src_idx, dst_idx) in operators.far_offset_batches.items():
+        np.add.at(
+            outgoing_adj,
+            src_idx,
+            incoming_adj[dst_idx] * np.conjugate(operators.offset_diagonals[offset])[None, None, :],
+        )
+    box_nm = n_modes(int(operators.box_order))
+    outgoing_box = np.zeros((len(operators.partition.leaves), box_nm), dtype=far_dtype)
+    for leaf_id in range(len(operators.partition.leaves)):
+        outgoing_box[leaf_id] = box_outgoing_to_directional_adjoint(
+            operators.directional,
+            outgoing_adj[leaf_id, 0],
+            outgoing_adj[leaf_id, 1],
+            outgoing_adj[leaf_id, 2],
+            outgoing_adj[leaf_id, 3],
+        )
+    if operators.leaf_groups:
+        y_far = _receive_leaf_boxes_to_particles(
+            lmax=int(lmax),
+            box_order=int(operators.box_order),
+            k=float(k),
+            n_particles=positions_arr.shape[0],
+            incoming_box=outgoing_box,
+            leaf_groups=operators.leaf_groups,
+            radial_lut=radial_lut,
+            dtype=far_dtype,
+        )
+    else:
+        nm = n_modes(int(lmax))
+        y_far = np.zeros((positions_arr.shape[0], nm), dtype=far_dtype)
+        for leaf in operators.partition.leaves:
+            contribution = operators.receive[int(leaf.id)] @ outgoing_box[int(leaf.id)]
+            y_far[leaf.particle_indices] += contribution.reshape(leaf.particle_indices.size, nm)
+    return y_near.reshape(-1), y_far.reshape(-1)
+
+
+def _apply_multilevel_mlfmm_adjoint(
+    *,
+    lmax: int,
+    k: float,
+    positions: np.ndarray,
+    x: np.ndarray,
+    operators: MLFMMMultilevelOperators,
+    radial_lut: RadialLUT | None,
+    near_dtype: np.dtype,
+    far_dtype: np.dtype,
+    block_cache: dict[tuple[int, int], np.ndarray] | None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Apply the Hermitian adjoint of the multilevel sampled MLFMM map."""
+
+    positions_arr = np.asarray(positions, dtype=float)
+    x_arr = np.asarray(x)
+    y_near = _exact_leaf_near_adjoint_apply(
+        lmax=int(lmax),
+        k=float(k),
+        positions=positions_arr,
+        x=np.asarray(x_arr, dtype=near_dtype),
+        partition=operators.partition,
+        radial_lut=radial_lut,
+        dtype=near_dtype,
+        block_cache=block_cache,
+    )
+    leaf_level = int(operators.leaf_level)
+    if operators.leaf_groups:
+        leaf_box = _aggregate_leaf_box_states(
+            lmax=int(lmax),
+            box_order=int(operators.levels[leaf_level].box_order),
+            k=float(k),
+            x=np.asarray(x_arr, dtype=far_dtype),
+            leaf_groups=operators.leaf_groups,
+            n_leaves=len(operators.partition.leaves),
+            radial_lut=radial_lut,
+            dtype=far_dtype,
+        )
+    else:
+        leaf_box = _leaf_box_states_from_dense_maps(
+            lmax=int(lmax),
+            positions=positions_arr,
+            x=np.asarray(x_arr, dtype=far_dtype),
+            partition=operators.partition,
+            aggregation=operators.aggregation,
+            dtype=far_dtype,
+        )
+    incoming_adj = [
+        np.zeros(
+            (level.coords.shape[0], 4, level.directional.grid.directions.shape[0]), dtype=far_dtype
+        )
+        for level in operators.levels
+    ]
+    for leaf_id, state in enumerate(leaf_box):
+        channels = directional_to_box_regular_adjoint(
+            operators.levels[leaf_level].directional, state
+        )
+        for channel_idx, channel in enumerate(channels):
+            incoming_adj[leaf_level][leaf_id, channel_idx] = np.asarray(channel, dtype=far_dtype)
+
+    # Reverse the forward downward pass (child -> parent adjoint).
+    for transfer in reversed(operators.transfers):
+        parent_adj = incoming_adj[int(transfer.parent_level)]
+        child_adj = incoming_adj[int(transfer.child_level)]
+        parent_level = operators.levels[int(transfer.parent_level)]
+        child_level = operators.levels[int(transfer.child_level)]
+        for shift, (child_idx, parent_idx) in transfer.batches_by_shift.items():
+            child_values = child_adj[child_idx]
+            reflected_child = _apply_reflection_to_channel_batches(
+                child_values, child_level.directional.grid.reflection_permutation
+            )
+            mapped = _apply_linear_map_adjoint_to_channel_batches(
+                reflected_child, transfer.anterpolation
+            )
+            reflected_parent = _apply_reflection_to_channel_batches(
+                mapped, parent_level.directional.grid.reflection_permutation
+            )
+            reflected_parent *= np.conjugate(
+                np.asarray(transfer.phase_down_by_shift[shift], dtype=far_dtype)
+            )[None, None, :]
+            np.add.at(parent_adj, parent_idx, reflected_parent)
+
+    outgoing_adj = [np.zeros_like(values, dtype=far_dtype) for values in incoming_adj]
+    # Reverse same-level translations, from the finest sampled level upward.
+    for level_idx in range(int(operators.hf_end_level), int(operators.hf_start_level) - 1, -1):
+        level = operators.levels[level_idx]
+        for offset, (src_idx, dst_idx) in level.far_offset_batches.items():
+            np.add.at(
+                outgoing_adj[level_idx],
+                src_idx,
+                incoming_adj[level_idx][dst_idx]
+                * np.conjugate(level.offset_diagonals[offset])[None, None, :],
+            )
+
+    # Reverse the forward upward pass (parent adjoint -> child adjoint).
+    for transfer in operators.transfers:
+        parent_adj = outgoing_adj[int(transfer.parent_level)]
+        child_adj = outgoing_adj[int(transfer.child_level)]
+        parent_level = operators.levels[int(transfer.parent_level)]
+        child_level = operators.levels[int(transfer.child_level)]
+        for shift, (child_idx, parent_idx) in transfer.batches_by_shift.items():
+            shifted = (
+                parent_adj[parent_idx]
+                * np.conjugate(np.asarray(transfer.phase_up_by_shift[shift], dtype=far_dtype))[
+                    None, None, :
+                ]
+            )
+            reflected_parent = _apply_reflection_to_channel_batches(
+                shifted, parent_level.directional.grid.reflection_permutation
+            )
+            mapped = _apply_linear_map_adjoint_to_channel_batches(
+                reflected_parent, transfer.interpolation
+            )
+            reflected_child = _apply_reflection_to_channel_batches(
+                mapped, child_level.directional.grid.reflection_permutation
+            )
+            np.add.at(child_adj, child_idx, reflected_child)
+
+    box_nm = n_modes(int(operators.levels[leaf_level].box_order))
+    outgoing_box = np.zeros((len(operators.partition.leaves), box_nm), dtype=far_dtype)
+    for leaf_id in range(len(operators.partition.leaves)):
+        outgoing_box[leaf_id] = box_outgoing_to_directional_adjoint(
+            operators.levels[leaf_level].directional,
+            outgoing_adj[leaf_level][leaf_id, 0],
+            outgoing_adj[leaf_level][leaf_id, 1],
+            outgoing_adj[leaf_level][leaf_id, 2],
+            outgoing_adj[leaf_level][leaf_id, 3],
+        )
+    if operators.leaf_groups:
+        y_far = _receive_leaf_boxes_to_particles(
+            lmax=int(lmax),
+            box_order=int(operators.levels[leaf_level].box_order),
+            k=float(k),
+            n_particles=positions_arr.shape[0],
+            incoming_box=outgoing_box,
+            leaf_groups=operators.leaf_groups,
+            radial_lut=radial_lut,
+            dtype=far_dtype,
+        )
+    else:
+        nm = n_modes(int(lmax))
+        y_far = np.zeros((positions_arr.shape[0], nm), dtype=far_dtype)
+        for leaf in operators.partition.leaves:
+            contribution = operators.receive[int(leaf.id)] @ outgoing_box[int(leaf.id)]
+            y_far[leaf.particle_indices] += contribution.reshape(leaf.particle_indices.size, nm)
+    return y_near.reshape(-1), y_far.reshape(-1)
 
 
 def apply_multilevel_mlfmm(

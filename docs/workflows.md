@@ -430,8 +430,10 @@ Notes:
   recurrence. Both require an exact Hermitian adjoint of the prepared
   `A = I - T W` action. Pairwise finite coupling and periodic Rayleigh, Ewald,
   and direct-sum coupling provide this when particle-T groups expose matching
-  forward/adjoint actions, including explicit dense blocks. MLFMM remains
-  unsupported for LSQR. Periodic direct-sum is available on the NumPy/reference
+  forward/adjoint actions, including explicit dense blocks. Finite MLFMM also
+  provides matching forward/adjoint actions on NumPy and CuPy; on CuPy, a
+  multilevel reverse apply currently retains the sampled hierarchy. Periodic
+  direct-sum is available on the NumPy/reference
   backend; CuPy periodic workflows currently use Ewald or Rayleigh. LSQR does
   not restart; `solver_maxiter` is its iteration budget and `solver_restart` is
   ignored.
