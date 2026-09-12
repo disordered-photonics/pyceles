@@ -142,6 +142,7 @@ class CuPyPeriodicCouplingOperator:
     )
     _rayleigh_plan_cache: RayleighPlan | None = field(default=None, init=False, repr=False)
     _rayleigh_arrays_gpu: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
+    _rayleigh_scan_chunk_size: int | None = field(default=None, init=False, repr=False)
     _near_destinations: Array | None = field(default=None, init=False, repr=False)
     _near_sources: Array | None = field(default=None, init=False, repr=False)
     _near_structural_sums_gpu: Any | None = field(default=None, init=False, repr=False)
@@ -384,6 +385,40 @@ class CuPyPeriodicCouplingOperator:
         out = cp.asarray(value, dtype=dtype)
         self._rayleigh_arrays_gpu[name] = out
         return out
+
+    def _rayleigh_wide_scan_indices_device(
+        self,
+        *,
+        plan: RayleighPlan,
+        start: int,
+        stop: int,
+        chunk_size: int,
+    ) -> tuple[Any | None, int]:
+        """Return cached wide-scan mode ids for the active RHS chunking only."""
+
+        if np.dtype(self.accum_dtype).itemsize <= self.dtype.itemsize:
+            return None, 0
+        chunk_i = int(chunk_size)
+        if self._rayleigh_scan_chunk_size != chunk_i:
+            for key in tuple(self._rayleigh_arrays_gpu):
+                if key.startswith("scan_wide_indices_"):
+                    self._rayleigh_arrays_gpu.pop(key, None)
+            self._rayleigh_scan_chunk_size = chunk_i
+        key = f"scan_wide_indices_{int(start)}_{int(stop)}"
+        cached = self._rayleigh_arrays_gpu.get(key)
+        if cached is None:
+            z_span = float(plan.sorted_z[-1] - plan.sorted_z[0]) if plan.sorted_z.size else 0.0
+            wide_indices = _long_lived_scan_mode_indices(
+                plan.gamma[int(start) : int(stop)],
+                z_span=z_span,
+                z_cut=float(plan.z_cut),
+                storage_dtype=self.dtype,
+            )
+            cp = self._cupy()
+            cached = cp.asarray(wide_indices, dtype=cp.int32)
+            self._rayleigh_arrays_gpu[key] = cached
+        count = int(cached.size)
+        return (cached if count else None), count
 
     def _reshape_input_device(self, x: Array | object) -> tuple[Any, bool]:
         """Normalize a stacked vector or RHS matrix to ``(N, Nm, nrhs)``."""
@@ -716,10 +751,6 @@ class CuPyPeriodicCouplingOperator:
         inverse = self._rayleigh_device_array("inverse_order", plan.inverse_order, dtype=cp.int32)
         z = self._rayleigh_device_array("sorted_z", plan.sorted_z, dtype=cp.float64)
         gamma_all = self._rayleigh_device_array("gamma", plan.gamma, dtype=cp.complex128)
-        gamma_adjoint_all = self._rayleigh_arrays_gpu.get("gamma_adjoint")
-        if gamma_adjoint_all is None:
-            gamma_adjoint_all = -cp.conjugate(gamma_all)
-            self._rayleigh_arrays_gpu["gamma_adjoint"] = gamma_adjoint_all
         phase_all = self._rayleigh_device_array(
             "sorted_xy_phase", plan.sorted_xy_phase, dtype=self.dtype
         )
@@ -733,7 +764,6 @@ class CuPyPeriodicCouplingOperator:
         arr_sorted = arr[order]
         y_sorted = cp.zeros_like(arr_sorted)
         accum_dtype = np.dtype(self.accum_dtype)
-        z_span = float(plan.sorted_z[-1] - plan.sorted_z[0]) if plan.sorted_z.size else 0.0
         chunk = resolve_rayleigh_mode_chunk_size(
             n_modes_reciprocal=plan.n_modes_reciprocal,
             n_particles=int(arr.shape[0]),
@@ -743,23 +773,9 @@ class CuPyPeriodicCouplingOperator:
         for start in range(0, plan.n_modes_reciprocal, chunk):
             stop = min(plan.n_modes_reciprocal, start + chunk)
             phase = phase_all[:, start:stop]
-            gamma_adjoint = gamma_adjoint_all[start:stop]
-            wide_indices = (
-                _long_lived_scan_mode_indices(
-                    plan.gamma[start:stop],
-                    z_span=z_span,
-                    z_cut=float(plan.z_cut),
-                    storage_dtype=self.dtype,
-                )
-                if accum_dtype.itemsize > self.dtype.itemsize
-                else np.empty((0,), dtype=np.int64)
-            )
-            wide_indices_gpu = (
-                self._rayleigh_device_array(
-                    f"scan_adjoint_wide_indices_{start}_{stop}", wide_indices, dtype=cp.int32
-                )
-                if wide_indices.size
-                else None
+            gamma_adjoint = -cp.conjugate(gamma_all[start:stop])
+            wide_indices_gpu, wide_count = self._rayleigh_wide_scan_indices_device(
+                plan=plan, start=start, stop=stop, chunk_size=chunk
             )
             for direction, upward in ((0, True), (1, False)):
                 source = cp.einsum(
@@ -770,7 +786,7 @@ class CuPyPeriodicCouplingOperator:
                 )
                 source *= cp.conjugate(phase)[:, :, None, None]
                 source *= cp.conjugate(weights[start:stop])[None, :, None, None]
-                if wide_indices.size == int(stop - start) and wide_indices.size:
+                if wide_count == int(stop - start) and wide_count:
                     incoming = scan_far_cupy(
                         source_amplitudes=source,
                         z=z,
@@ -834,7 +850,6 @@ class CuPyPeriodicCouplingOperator:
         arr_sorted = arr[order]
         y_sorted = cp.zeros_like(arr_sorted)
         accum_dtype = np.dtype(self.accum_dtype)
-        z_span = float(plan.sorted_z[-1] - plan.sorted_z[0]) if plan.sorted_z.size else 0.0
         chunk = resolve_rayleigh_mode_chunk_size(
             n_modes_reciprocal=plan.n_modes_reciprocal,
             n_particles=int(arr.shape[0]),
@@ -845,24 +860,8 @@ class CuPyPeriodicCouplingOperator:
             stop = min(plan.n_modes_reciprocal, start + chunk)
             phase = phase_all[:, start:stop]
             gamma = gamma_all[start:stop]
-            wide_indices = (
-                _long_lived_scan_mode_indices(
-                    plan.gamma[start:stop],
-                    z_span=z_span,
-                    z_cut=float(plan.z_cut),
-                    storage_dtype=self.dtype,
-                )
-                if accum_dtype.itemsize > self.dtype.itemsize
-                else np.empty((0,), dtype=np.int64)
-            )
-            wide_indices_gpu = (
-                self._rayleigh_device_array(
-                    f"scan_wide_indices_{start}_{stop}",
-                    wide_indices,
-                    dtype=cp.int32,
-                )
-                if wide_indices.size
-                else None
+            wide_indices_gpu, wide_count = self._rayleigh_wide_scan_indices_device(
+                plan=plan, start=start, stop=stop, chunk_size=chunk
             )
             for direction, upward in ((0, True), (1, False)):
                 source = cp.einsum(
@@ -872,7 +871,7 @@ class CuPyPeriodicCouplingOperator:
                     optimize=True,
                 )
                 source *= cp.conjugate(phase)[:, :, None, None]
-                if wide_indices.size == int(stop - start) and wide_indices.size:
+                if wide_count == int(stop - start) and wide_count:
                     incoming = scan_far_cupy(
                         source_amplitudes=source,
                         z=z,
@@ -1170,26 +1169,32 @@ class CuPyPeriodicCouplingOperator:
             if matrix is None:
                 raise RuntimeError("Periodic dense block cache population failed.")
             flat = arr.reshape(self.n_particles * self.n_modes, int(arr.shape[2]))
-            result = matrix.conj().T @ flat
+            # W^H x = conj(W.T @ conj(x)); transpose is a view, avoiding a
+            # transient conjugated copy of the O(N^2) dense cache.
+            result = matrix.T @ cp.conjugate(flat)
+            cp.conjugate(result, out=result)
             if squeezed:
                 return result[:, 0]
             return result
 
         y = cp.zeros_like(arr, dtype=self.dtype)
         tensor = self._contraction_tensor_device()
+        arr_conj = cp.conjugate(arr)
         for source_indices in self._source_batches():
             source_indexer = self._source_index_device(source_indices)
             sums = self._structural_sums_for_sources(source_indices)
-            # Forward blocks have indices (source batch, destination, out, in).
-            # Contracting their conjugate transpose writes one independent
-            # output source block for each source in this batch.
-            y[source_indexer] = cp.einsum(
+            # Reuse forward structural storage via Hx = conj(M.T @ conj(x)).
+            # This replaces conjugated tensor/sum replicas with one vector-sized
+            # conjugation scratch shared by all source batches.
+            contribution = cp.einsum(
                 "sdpm,ijpm,dir->sjr",
-                cp.conjugate(sums.astype(self.dtype, copy=False)),
-                cp.conjugate(tensor),
-                arr,
+                sums.astype(self.dtype, copy=False),
+                tensor,
+                arr_conj,
                 optimize=True,
             )
+            cp.conjugate(contribution, out=contribution)
+            y[source_indexer] = contribution
         flat = y.reshape(self.n_particles * self.n_modes, int(arr.shape[2]))
         return flat[:, 0] if squeezed else flat
 
