@@ -27,6 +27,10 @@ class _SyntheticParticleT:
     def __init__(self, diagonal: np.ndarray) -> None:
         self._diagonal = diagonal
 
+    @property
+    def supports_adjoint(self) -> bool:
+        return True
+
     def mode_diagonal(self) -> np.ndarray:
         return self._diagonal
 

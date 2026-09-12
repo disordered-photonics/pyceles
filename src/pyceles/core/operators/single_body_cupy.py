@@ -71,6 +71,10 @@ class CuPyDiagonalTGroup:
         if self.operator_indices.size != self.particle_indices.size:
             raise ValueError("`operator_indices` must align with `particle_indices`.")
 
+    @property
+    def supports_adjoint(self) -> bool:
+        return True
+
     def _diag_gpu(self):
         cupy, _ = import_cupy()
         if self._T_diag_gpu is None:
@@ -168,7 +172,6 @@ class CuPyDenseTGroup:
     dtype: np.dtype = DEFAULT_COMPLEX_DTYPE
     body_metadata: object | None = None
     _T_blocks_gpu: object | None = field(default=None, init=False, repr=False)
-    _T_blocks_adjoint_gpu: object | None = field(default=None, init=False, repr=False)
     _local_indices_gpu: dict[int, object] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -183,6 +186,10 @@ class CuPyDenseTGroup:
             self.operator_indices = np.asarray(self.operator_indices, dtype=np.int64).reshape(-1)
         if self.operator_indices.size != self.particle_indices.size:
             raise ValueError("`operator_indices` must align with `particle_indices`.")
+
+    @property
+    def supports_adjoint(self) -> bool:
+        return True
 
     def _blocks_gpu(self):
         cupy, _ = import_cupy()
@@ -199,72 +206,58 @@ class CuPyDenseTGroup:
             self._local_indices_gpu[operator_index] = cached
         return cached
 
-    def apply_subset(self, x_subset: Array | object) -> object:
+    def _apply_blocks(self, arr: object, blocks: object, *, transposed: bool) -> object:
         cupy, _ = import_cupy()
-        arr = coerce_array(x_subset, dtype=self.dtype, prefer_cupy=True)
-        if int(arr.ndim) not in {2, 3}:
-            raise ValueError(f"Dense T-group subset must be 2D or 3D. Got ndim={int(arr.ndim)}.")
-        blocks = self._blocks_gpu()
+        ndim = int(cast(Any, arr).ndim)
+        shared = (
+            ("ji,gj->gi" if ndim == 2 else "ji,gjr->gir")
+            if transposed
+            else ("ij,gj->gi" if ndim == 2 else "ij,gjr->gir")
+        )
+        mapped = (
+            ("gji,gj->gi" if ndim == 2 else "gji,gjr->gir")
+            if transposed
+            else ("gij,gj->gi" if ndim == 2 else "gij,gjr->gir")
+        )
         if self.T_blocks.shape[0] == 1:
-            if int(arr.ndim) == 2:
-                return cupy.einsum("ij,gj->gi", blocks[0], arr, optimize=True)
-            return cupy.einsum("ij,gjr->gir", blocks[0], arr, optimize=True)
+            return cupy.einsum(shared, cast(Any, blocks)[0], arr, optimize=True)
         identity = self.T_blocks.shape[0] == self.particle_indices.size and np.array_equal(
             self.operator_indices, np.arange(self.particle_indices.size)
         )
         if identity:
-            if int(arr.ndim) == 2:
-                return cupy.einsum("gij,gj->gi", blocks, arr, optimize=True)
-            return cupy.einsum("gij,gjr->gir", blocks, arr, optimize=True)
+            return cupy.einsum(mapped, blocks, arr, optimize=True)
 
         out = cupy.empty_like(arr)
         for operator_index in range(self.T_blocks.shape[0]):
             local_ids = self._local_ids_gpu(operator_index)
-            subset = arr[local_ids]
-            if int(arr.ndim) == 2:
-                out[local_ids] = cupy.einsum(
-                    "ij,gj->gi", blocks[operator_index], subset, optimize=True
-                )
-            else:
-                out[local_ids] = cupy.einsum(
-                    "ij,gjr->gir", blocks[operator_index], subset, optimize=True
-                )
+            out[local_ids] = cupy.einsum(
+                shared,
+                cast(Any, blocks)[operator_index],
+                cast(Any, arr)[local_ids],
+                optimize=True,
+            )
         return out
+
+    def apply_subset(self, x_subset: Array | object) -> object:
+        arr = coerce_array(x_subset, dtype=self.dtype, prefer_cupy=True)
+        if int(arr.ndim) not in {2, 3}:
+            raise ValueError(f"Dense T-group subset must be 2D or 3D. Got ndim={int(arr.ndim)}.")
+        return self._apply_blocks(arr, self._blocks_gpu(), transposed=False)
 
     def apply_adjoint_subset(self, x_subset: Array | object) -> object:
         cupy, _ = import_cupy()
         arr = coerce_array(x_subset, dtype=self.dtype, prefer_cupy=True)
         if int(arr.ndim) not in {2, 3}:
             raise ValueError(f"Dense T-group subset must be 2D or 3D. Got ndim={int(arr.ndim)}.")
-        if self._T_blocks_adjoint_gpu is None:
-            self._T_blocks_adjoint_gpu = cupy.ascontiguousarray(
-                cupy.conjugate(self._blocks_gpu()).swapaxes(-1, -2)
-            )
-        blocks = cast(Any, self._T_blocks_adjoint_gpu)
-        if self.T_blocks.shape[0] == 1:
-            if int(arr.ndim) == 2:
-                return cupy.einsum("ij,gj->gi", blocks[0], arr, optimize=True)
-            return cupy.einsum("ij,gjr->gir", blocks[0], arr, optimize=True)
-        identity = self.T_blocks.shape[0] == self.particle_indices.size and np.array_equal(
-            self.operator_indices, np.arange(self.particle_indices.size)
+        # T^H x = conj(T^T conj(x)); the transpose is a view of the already
+        # resident forward blocks, so adjoint use does not duplicate T storage.
+        mapped = self._apply_blocks(
+            cupy.conjugate(arr),
+            self._blocks_gpu(),
+            transposed=True,
         )
-        if identity:
-            if int(arr.ndim) == 2:
-                return cupy.einsum("gij,gj->gi", blocks, arr, optimize=True)
-            return cupy.einsum("gij,gjr->gir", blocks, arr, optimize=True)
-        out = cupy.empty_like(arr)
-        for operator_index in range(self.T_blocks.shape[0]):
-            local_ids = self._local_ids_gpu(operator_index)
-            subset = arr[local_ids]
-            if int(arr.ndim) == 2:
-                out[local_ids] = cupy.einsum(
-                    "ij,gj->gi", blocks[operator_index], subset, optimize=True
-                )
-            else:
-                out[local_ids] = cupy.einsum(
-                    "ij,gjr->gir", blocks[operator_index], subset, optimize=True
-                )
-        return out
+        cupy.conjugate(mapped, out=mapped)
+        return mapped
 
     def rhs_subset(self, b_subset: Array | object) -> object:
         return self.apply_subset(b_subset)
@@ -321,6 +314,10 @@ class CuPyCompositeParticleTOperator:
     @property
     def n_modes(self) -> int:
         return n_modes(self.lmax)
+
+    @property
+    def supports_adjoint(self) -> bool:
+        return all(bool(group.supports_adjoint) for group in self.groups)
 
     def _indices_gpu(self, group_index: int, ids: np.ndarray, *, cupy: Any) -> Any:
         """Return a cached device gather/scatter index array for one group."""

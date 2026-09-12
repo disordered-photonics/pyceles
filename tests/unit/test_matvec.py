@@ -442,6 +442,7 @@ def test_prepare_matvec_accepts_rotated_spheroids_with_default_axisymmetric_path
     assert isinstance(prepared.particle_t.groups[0], DiagonalTGroup)
     assert isinstance(prepared.particle_t.groups[1], AxisymmetricTGroup)
     assert prepared.particle_t.groups[1].T_blocks is not None
+    assert prepared.supports_adjoint
 
 
 def test_prepare_matvec_accepts_default_aligned_spheroid_axisymmetric_path():
@@ -569,6 +570,7 @@ def test_prepare_matvec_accepts_custom_axisymmetric_group_factory():
     assert isinstance(prepared.particle_t, CompositeParticleTOperator)
     assert isinstance(prepared.particle_t.groups[1], AxisymmetricTGroup)
     assert prepared.particle_t.groups[1].body_metadata is not None
+    assert prepared.supports_adjoint
     y_dense = (
         assemble_dense_A_numpy(prepared, show_progress=False, use_cache=False, store_blocks=False)
         @ x[: 2 * nm]
@@ -758,6 +760,9 @@ def test_sphere_and_layered_match_when_forced_through_axisymmetric_factory():
     n = len(base_particles) * n_modes(lmax)
     assert isinstance(forced.particle_t, CompositeParticleTOperator)
     assert isinstance(forced.particle_t.groups[0], AxisymmetricTGroup)
+    assert not forced.supports_adjoint
+    with pytest.raises(NotImplementedError, match="exact T/W adjoint"):
+        forced.make_adjoint()
     np.testing.assert_allclose(
         forced.apply_A(x[:n]), reference.apply_A(x[:n]), rtol=1e-12, atol=1e-12
     )

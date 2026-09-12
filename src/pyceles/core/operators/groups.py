@@ -64,6 +64,9 @@ class PreparedParticleTGroup(Protocol):
     operator_indices: Array
     dtype: np.dtype
 
+    @property
+    def supports_adjoint(self) -> bool: ...
+
     def apply_subset(self, x_subset: Array) -> Array: ...
 
     def apply_adjoint_subset(self, x_subset: Array) -> Array: ...
@@ -196,6 +199,22 @@ def _apply_shared_dense(blocks: Array, operator_indices: Array, x_subset: Array)
     return out
 
 
+def _apply_shared_dense_adjoint(
+    block_rows: Array,
+    operator_indices: Array,
+    values: Array,
+) -> Array:
+    """Apply dense Hermitian adjoints without storing conjugated block copies."""
+
+    mapped = _apply_shared_dense(
+        np.swapaxes(block_rows, -1, -2),
+        operator_indices,
+        np.conjugate(values),
+    )
+    np.conjugate(mapped, out=mapped)
+    return mapped
+
+
 @dataclass
 class DiagonalTGroup:
     particle_indices: Array
@@ -217,6 +236,10 @@ class DiagonalTGroup:
             None if self.operator_indices.size == 0 else self.operator_indices,
             n_operators=self.T_diag.shape[0],
         )
+
+    @property
+    def supports_adjoint(self) -> bool:
+        return True
 
     def apply_subset(self, x_subset: Array) -> Array:
         return np.asarray(
@@ -266,7 +289,6 @@ class DenseTGroup:
     T_blocks: Array
     operator_indices: Array = field(default_factory=lambda: np.zeros((0,), dtype=np.int64))
     dtype: np.dtype = COMPLEX128_DTYPE
-    _T_blocks_adjoint: Array | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         blocks = np.asarray(self.T_blocks, dtype=self.dtype)
@@ -279,6 +301,10 @@ class DenseTGroup:
         )
         self.T_blocks = blocks
 
+    @property
+    def supports_adjoint(self) -> bool:
+        return True
+
     def apply_subset(self, x_subset: Array) -> Array:
         return np.asarray(
             _apply_shared_dense(
@@ -290,11 +316,9 @@ class DenseTGroup:
         )
 
     def apply_adjoint_subset(self, x_subset: Array) -> Array:
-        if self._T_blocks_adjoint is None:
-            self._T_blocks_adjoint = np.conjugate(self.T_blocks).swapaxes(-1, -2)
         return np.asarray(
-            _apply_shared_dense(
-                self._T_blocks_adjoint,
+            _apply_shared_dense_adjoint(
+                self.T_blocks,
                 self.operator_indices,
                 np.asarray(x_subset, dtype=self.dtype),
             ),
@@ -329,7 +353,6 @@ class AxisymmetricTGroup:
     body_metadata: object | None = None
     dtype: np.dtype = COMPLEX128_DTYPE
     apply_adjoint_subset_fn: Callable[[Array], Array] | None = None
-    _T_blocks_adjoint: Array | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.T_blocks is not None:
@@ -347,6 +370,10 @@ class AxisymmetricTGroup:
         else:
             self.particle_indices = np.asarray(self.particle_indices, dtype=np.int64).reshape(-1)
             self.operator_indices = np.arange(self.particle_indices.size, dtype=np.int64)
+
+    @property
+    def supports_adjoint(self) -> bool:
+        return self.T_blocks is not None or self.apply_adjoint_subset_fn is not None
 
     def apply_subset(self, x_subset: Array) -> Array:
         if self.T_blocks is not None:
@@ -369,11 +396,9 @@ class AxisymmetricTGroup:
 
     def apply_adjoint_subset(self, x_subset: Array) -> Array:
         if self.T_blocks is not None:
-            if self._T_blocks_adjoint is None:
-                self._T_blocks_adjoint = np.conjugate(self.T_blocks).swapaxes(-1, -2)
             return np.asarray(
-                _apply_shared_dense(
-                    self._T_blocks_adjoint,
+                _apply_shared_dense_adjoint(
+                    self.T_blocks,
                     self.operator_indices,
                     np.asarray(x_subset, dtype=self.dtype),
                 ),
@@ -464,7 +489,14 @@ def make_axisymmetric_group_factory(
     rhs_subset: AxisymmetricSubsetApply | None = None,
     metadata_builder: AxisymmetricMetadataBuilder | None = None,
 ) -> ParticleTGroupFactory:
-    """Build an axisymmetric group from high-level per-instance callbacks."""
+    """Build an axisymmetric group from high-level per-instance callbacks.
+
+    ``apply_adjoint_subset`` is optional because a callback-backed group may be
+    intentionally forward-only.  When it is omitted, the prepared particle
+    operator reports ``supports_adjoint=False`` and adjoint-dependent solvers
+    reject the system before execution; no approximate transpose is inferred
+    from the forward callback.
+    """
 
     def factory(
         plan: ParticleTGroupPlan, context: ParticleTPreparationContext

@@ -55,6 +55,9 @@ class ParticleTOperator(Protocol):
     n_particles: int
     dtype: np.dtype
 
+    @property
+    def supports_adjoint(self) -> bool: ...
+
     def apply(self, x: Array) -> Array: ...
 
     def apply_adjoint(self, x: Array) -> Array: ...
@@ -106,6 +109,10 @@ class CompositeParticleTOperator:
     @property
     def n_modes(self) -> int:
         return n_modes(self.lmax)
+
+    @property
+    def supports_adjoint(self) -> bool:
+        return all(bool(group.supports_adjoint) for group in self.groups)
 
     def _reshape_input(self, x: Array) -> tuple[Array, tuple[int, ...]]:
         raw = np.asarray(x, dtype=self.dtype)

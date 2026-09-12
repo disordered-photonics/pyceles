@@ -43,7 +43,10 @@ while `gcrotmk` is SciPy-only. LSQR is a single-RHS
 method and requires an exact Hermitian-adjoint prepared operator. Exact adjoints
 are available for pairwise finite coupling and periodic Rayleigh, Ewald, and
 direct-sum operators when the selected particle-T representation provides its
-forward and adjoint actions (including explicit dense blocks). Finite MLFMM
+forward and adjoint actions (including explicit dense blocks). Built-in
+spheroids use the explicit dense-block path; callback-backed axisymmetric
+groups are adjoint-capable only when their factory supplies an exact
+`apply_adjoint_subset` callback. Finite MLFMM
 coupling provides the same action on NumPy and CuPy; the CuPy multilevel reverse
 keeps its sampled hierarchy during an adjoint apply, while its exact-near reverse
 action reuses prepared device translation tables without a second dense cache.

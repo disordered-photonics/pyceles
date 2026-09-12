@@ -112,12 +112,20 @@ class PreparedOperator:
         tx = self.particle_t.apply(wx)
         return cast(Array, self._subtract_into(x_arr, tx))
 
+    @property
+    def supports_adjoint(self) -> bool:
+        """Whether this prepared operator exposes an exact Hermitian adjoint."""
+
+        return (
+            callable(getattr(self.coupling, "apply_adjoint", None))
+            and callable(getattr(self.particle_t, "apply_adjoint", None))
+            and bool(getattr(self.particle_t, "supports_adjoint", False))
+        )
+
     def make_adjoint(self) -> Callable[[Any], Any]:
         """Return the exact prepared adjoint action when available."""
 
-        coupling_adjoint = getattr(self.coupling, "apply_adjoint", None)
-        particle_adjoint = getattr(self.particle_t, "apply_adjoint", None)
-        if not callable(coupling_adjoint) or not callable(particle_adjoint):
+        if not self.supports_adjoint:
             raise NotImplementedError(
                 "This prepared operator does not expose exact T/W adjoint actions."
             )
@@ -125,12 +133,12 @@ class PreparedOperator:
 
     def apply_adjoint(self, x: Array) -> Array:
         """Apply ``A^H = I - W^H T^H`` while preserving RHS shape and ownership."""
-        coupling_adjoint = getattr(self.coupling, "apply_adjoint", None)
-        particle_adjoint = getattr(self.particle_t, "apply_adjoint", None)
-        if not callable(coupling_adjoint) or not callable(particle_adjoint):
+        if not self.supports_adjoint:
             raise NotImplementedError(
                 "This prepared operator does not expose exact T/W adjoint actions."
             )
+        coupling_adjoint = cast(AdjointCouplingOperator, self.coupling).apply_adjoint
+        particle_adjoint = self.particle_t.apply_adjoint
         values = coerce_array(x, dtype=self.dtype, prefer_cupy=False)
         weighted = particle_adjoint(values)
         adjoint_coupling = coupling_adjoint(weighted)
