@@ -33,15 +33,17 @@ polarized = simulation.run_polarizations(jones_source)
 
 `SimulationConfig.solver_method` accepts `direct`, `gmres`, `fgmres`, `lgmres`,
 `bicgstab`, `gcro`, `gcrotmk`, and `lsqr` (default: `gmres`). NumPy/SciPy provides direct,
-GMRES, BiCGSTAB, LGMRES, and GCROTMK; CuPy provides direct and native GMRES,
-FGMRES, LGMRES, BiCGSTAB, harmonic GCRO-DR, and LSQR. CuPy GMRES also handles a
-two-dimensional right-hand side with native block GMRES. `fgmres` and `gcro`
-are CuPy-only, `gcrotmk` is SciPy-only, and `lsqr` is currently CuPy-only. LSQR
-is a single-RHS method and requires an exact Hermitian-adjoint prepared operator;
-the high-level path currently supports the periodic Rayleigh operator with
-diagonal, dense, and materialized axisymmetric particle blocks. Other coupling
-backends (including MLFMM) remain unavailable for LSQR until their adjoints are
-implemented and validated. LSQR uses `solver_maxiter` as its iteration budget;
+GMRES, BiCGSTAB, LGMRES, GCROTMK, and reference LSQR; CuPy provides direct and
+native GMRES, FGMRES, LGMRES, BiCGSTAB, harmonic GCRO-DR, and LSQR. CuPy GMRES
+also handles a two-dimensional right-hand side with native block GMRES. `fgmres`
+and `gcro` are CuPy-only, while `gcrotmk` is SciPy-only. LSQR is a single-RHS
+method and requires an exact Hermitian-adjoint prepared operator. Exact adjoints
+are available for pairwise finite coupling and periodic Rayleigh, Ewald, and
+direct-sum operators when the selected particle-T representation provides its
+forward and adjoint actions (including explicit dense blocks). MLFMM adjoints
+remain deferred. Periodic direct-sum remains a NumPy/reference-only coupling
+path; CuPy periodic preparation accepts Ewald and Rayleigh. LSQR uses
+`solver_maxiter` as its iteration budget;
 the common `solver_restart` setting has no effect. GCRO is a forward-only
 harmonic-recycling method with a single-RHS recurrence; multi-RHS workflows
 solve each column independently rather than using block GCRO. It exposes only
@@ -52,6 +54,10 @@ explicit (with restarted GMRES as the high-level default); pyceles does not
 guess a method from system size. Explicit `direct` assembles and factorizes the
 full dense operator, so callers are responsible for ensuring that it fits
 available memory.
+
+Backend-native CuPy recurrence functions and result records are implementation
+details. Applications should use the high-level solver functions and their
+common `LinearSolveResult` contract.
 
 `compute_dtype` controls compact operator and contraction arithmetic, while
 `accum_dtype` sets the wider precision budget for reductions on paths that

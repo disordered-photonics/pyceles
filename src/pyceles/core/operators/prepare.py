@@ -264,6 +264,10 @@ def prepare_matvec(
         if k_parallel is None:
             raise ValueError("`k_parallel` is required when preparing a periodic operator.")
         k_parallel_arr = np.asarray(k_parallel, dtype=float).reshape(2)
+        if backend_name == "cupy" and periodic_spec.options.method not in {"ewald", "rayleigh"}:
+            raise NotImplementedError(
+                "CuPy periodic workflows currently support Ewald or Rayleigh coupling."
+            )
 
     k_abs = float(abs(k_f))
     if k_abs <= 0.0:

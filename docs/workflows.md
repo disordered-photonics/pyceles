@@ -425,13 +425,16 @@ Notes:
   single-RHS runs; `SimulationConfig.solver_recycle_dim` controls its bounded
   recycle rank. The common `solver_restart` value is the total augmented
   dimension.
-- `solver_method="lsqr"` selects the native CuPy LSQR solver for single-RHS
-  runs. It requires an exact Hermitian adjoint of the prepared `A = I - T W`
-  action and therefore currently applies to the periodic Rayleigh path with
-  supported particle-T representations. It does not accept a preconditioner;
-  other coupling backends remain capability-limited until their adjoints are
-implemented. LSQR is not restarted; `solver_maxiter` is its iteration budget
-and `solver_restart` is ignored.
+- `solver_method="lsqr"` selects a single-RHS LSQR solver. The NumPy backend
+  delegates to SciPy's reference implementation; CuPy uses the native device
+  recurrence. Both require an exact Hermitian adjoint of the prepared
+  `A = I - T W` action. Pairwise finite coupling and periodic Rayleigh, Ewald,
+  and direct-sum coupling provide this when particle-T groups expose matching
+  forward/adjoint actions, including explicit dense blocks. MLFMM remains
+  unsupported for LSQR. Periodic direct-sum is available on the NumPy/reference
+  backend; CuPy periodic workflows currently use Ewald or Rayleigh. LSQR does
+  not restart; `solver_maxiter` is its iteration budget and `solver_restart` is
+  ignored.
 - For native CuPy restarted GMRES/FGMRES/LGMRES, final-residual checks are
   performed at restart boundaries by default; set the option to `False` only
   for profiling-focused runs.

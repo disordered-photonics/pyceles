@@ -9,7 +9,13 @@ stack into one file.
 
 from __future__ import annotations
 
-from .base import Array, CouplingOperator, PrecomputableCouplingOperator, PreparedOperator
+from .base import (
+    AdjointCouplingOperator,
+    Array,
+    CouplingOperator,
+    PrecomputableCouplingOperator,
+    PreparedOperator,
+)
 from .coupling_dense import (
     assemble_dense_A_numpy,
     estimate_translation_cache_bytes,
@@ -18,6 +24,7 @@ from .coupling_dense import (
 from .coupling_pairwise import (
     PairwiseCouplingOperator,
     apply_A_numpy,
+    apply_W_adjoint_numpy,
     apply_W_numpy,
     require_pairwise_coupling,
 )
@@ -58,6 +65,7 @@ from .single_body import CompositeParticleTOperator, ParticleTOperator, build_T_
 from .single_body_cupy import CuPyDiagonalParticleTOperator
 
 __all__ = [
+    "AdjointCouplingOperator",
     "Array",
     "AxisymmetricTGroup",
     "CompositeParticleTOperator",
@@ -84,6 +92,7 @@ __all__ = [
     "PreparedOperator",
     "PreparedParticleTGroup",
     "apply_A_numpy",
+    "apply_W_adjoint_numpy",
     "apply_W_numpy",
     "assemble_dense_A_numpy",
     "build_T_mode_diagonal",

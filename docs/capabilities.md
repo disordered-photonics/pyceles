@@ -126,6 +126,15 @@ Supported coupling paths include:
 - CuPy high-frequency MLFMM repeated apply for the same hierarchy plan,
 - experimental periodic Ewald coupling for rectangular 2D lattices.
 
+## Linear solvers and exact adjoints
+
+The solver API includes restarted GMRES-family methods, BiCGSTAB, LGMRES,
+GCRO-DR, and single-RHS LSQR. NumPy uses SciPy's reference LSQR, while CuPy
+uses the native device recurrence. LSQR requires an exact Hermitian adjoint of
+the prepared `A = I - T W` action; finite pairwise and periodic Rayleigh,
+Ewald, and NumPy direct-sum coupling provide that action for diagonal and
+explicit dense particle-T groups. MLFMM adjoints are not yet implemented.
+
 ## MLFMM scope
 
 The current MLFMM backend is a high-frequency, matrix-free coupling path for

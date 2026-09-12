@@ -11,11 +11,15 @@ from scipy.sparse.linalg import lsqr as scipy_lsqr
 
 from pyceles.core.indexing import index_vswf, iter_modes, n_modes
 from pyceles.core.lattice import RectangularLattice2D
-from pyceles.core.operators import PeriodicCouplingOperator, prepare_matvec
+from pyceles.core.operators import (
+    PairwiseCouplingOperator,
+    PeriodicCouplingOperator,
+    prepare_matvec,
+)
 from pyceles.core.operators.base import PreparedOperator
 from pyceles.core.particles import Sphere, Spheroid
 from pyceles.core.periodic import PeriodicOptions, PeriodicSpec
-from pyceles.core.translation import translation_ab5_table
+from pyceles.core.translation import RadialLUT, translation_ab5_table
 from pyceles.linear.krylov_cupy import lsqr_cupy_native
 
 
@@ -140,7 +144,8 @@ def test_periodic_rayleigh_coupling_adjoint_matches_stored_operator() -> None:
     assert abs(lhs - rhs) / max(abs(lhs), abs(rhs), 1.0e-300) < 2.0e-12
 
 
-def test_periodic_rayleigh_adjoint_supports_materialized_spheroid_t_blocks() -> None:
+@pytest.mark.parametrize("method", ["rayleigh", "ewald", "directsum"])
+def test_periodic_adjoint_supports_materialized_spheroid_t_blocks(method: str) -> None:
     """Materialized non-diagonal axisymmetric T blocks are covered exactly."""
     lmax = 2
     particles = (
@@ -171,7 +176,7 @@ def test_periodic_rayleigh_adjoint_supports_materialized_spheroid_t_blocks() -> 
         periodic=PeriodicSpec(
             lattice=RectangularLattice2D(520.0, 570.0),
             options=PeriodicOptions(
-                method="rayleigh",
+                method=method,  # type: ignore[arg-type]
                 eta=0.004,
                 real_shells=2,
                 reciprocal_shells=2,
@@ -191,6 +196,65 @@ def test_periodic_rayleigh_adjoint_supports_materialized_spheroid_t_blocks() -> 
     lhs = np.vdot(prepared.apply_A(x), y)
     rhs = np.vdot(x, prepared.apply_adjoint(y))
     assert abs(lhs - rhs) / max(abs(lhs), abs(rhs), 1.0e-300) < 2.0e-12
+
+
+@pytest.mark.parametrize("cache", [False, True])
+def test_pairwise_adjoint_matches_inner_product(cache: bool) -> None:
+    lmax = 1
+    positions = np.asarray([[0.0, 0.0, -20.0], [90.0, 35.0, 40.0], [-60.0, 70.0, 115.0]])
+    coupling = PairwiseCouplingOperator(
+        lmax=lmax,
+        k=2.0 * np.pi / 550.0,
+        positions=positions,
+        ab5=translation_ab5_table(lmax),
+        radial_lut=RadialLUT(lmax, 2.0 * np.pi / 550.0, 250.0, 0.5),
+        cache_translation_blocks=cache,
+    )
+    rng = np.random.default_rng(20260912)
+    x = rng.standard_normal(18) + 1j * rng.standard_normal(18)
+    y = rng.standard_normal(18) + 1j * rng.standard_normal(18)
+    lhs = np.vdot(coupling.apply(x), y)
+    rhs = np.vdot(x, coupling.apply_adjoint(y))
+    assert abs(lhs - rhs) / max(abs(lhs), abs(rhs), 1.0e-300) < 2.0e-12
+
+
+@pytest.mark.parametrize("method", ["directsum", "ewald"])
+@pytest.mark.parametrize("cache", [False, True])
+@pytest.mark.parametrize(
+    ("dtype", "tolerance"),
+    ((np.complex128, 2.0e-12), (np.complex64, 5.0e-5)),
+)
+def test_periodic_nonrayleigh_adjoint_matches_inner_product(
+    method: str, cache: bool, dtype: Any, tolerance: float
+) -> None:
+    lmax = 1
+    positions = np.asarray([[0.0, 0.0, -50.0], [120.0, 20.0, 80.0], [210.0, -110.0, 180.0]])
+    options = PeriodicOptions(
+        method=method,  # type: ignore[arg-type]
+        directsum_window=1,
+        eta=0.003,
+        real_shells=2,
+        reciprocal_shells=2,
+        shell_tolerance=1.0e-7,
+        max_shells=2,
+    )
+    coupling = PeriodicCouplingOperator(
+        lmax=lmax,
+        k=2.0 * np.pi / 550.0,
+        positions=positions,
+        ab5=translation_ab5_table(lmax, dtype=dtype),
+        periodic=PeriodicSpec(RectangularLattice2D(500.0, 520.0), options),
+        k_parallel=np.asarray([0.001, -0.0003]),
+        dtype=np.dtype(dtype),
+        accum_dtype=np.dtype(np.complex128),
+        cache_blocks=cache,
+    )
+    rng = np.random.default_rng(20260912)
+    x = rng.standard_normal(18) + 1j * rng.standard_normal(18)
+    y = rng.standard_normal(18) + 1j * rng.standard_normal(18)
+    lhs = np.vdot(coupling.apply(x), y)
+    rhs = np.vdot(x, coupling.apply_adjoint(y))
+    assert abs(lhs - rhs) / max(abs(lhs), abs(rhs), 1.0e-300) < tolerance
 
 
 @pytest.mark.fake_gpu
@@ -349,17 +413,21 @@ def test_native_lsqr_can_carry_a_known_correction_residual(
     assert not np.allclose(result.x, x0)
 
 
-def test_solve_linear_system_rejects_unvalidated_lsqr_requests() -> None:
+def test_solve_linear_system_accepts_numpy_lsqr_with_exact_adjoint() -> None:
     from pyceles.linear.solvers import solve_linear_system
 
     matrix = np.eye(2, dtype=np.complex128)
-    with pytest.raises(ValueError, match=r"only.*backend='cupy'"):
-        solve_linear_system(
-            lambda values: matrix @ values,
-            np.ones(2, dtype=np.complex128),
-            method="lsqr",
-            backend="numpy",
-        )
+    result = solve_linear_system(
+        lambda values: matrix @ values,
+        np.ones(2, dtype=np.complex128),
+        A_h_mv=lambda values: matrix.conj().T @ values,
+        method="lsqr",
+        backend="numpy",
+        rtol=1.0e-12,
+        show_progress=False,
+    )
+    assert result.method == "lsqr"
+    assert result.relative_residual < 1.0e-12
     with pytest.raises(ValueError, match="requires an exact `A_h_mv`"):
         solve_linear_system(
             lambda values: matrix @ values,

@@ -375,6 +375,66 @@ def apply_structural_sums_to_vector(
     return np.asarray(result, dtype=out_dtype)
 
 
+def apply_structural_sums_to_vector_adjoint(
+    *,
+    lmax: int,
+    structural_sums: Array,
+    ab5: Array,
+    vector: Array,
+    dtype: npt.DTypeLike = np.complex128,
+    contraction_tensor: Array | None = None,
+) -> Array:
+    """Apply the exact adjoint of ``apply_structural_sums_to_vector``.
+
+    ``structural_sums`` is destination-major while ``vector`` contains one
+    source vector per destination.  Contracting the conjugated structural
+    table and translation tensor directly avoids materialising dense blocks
+    when an Ewald matvec is used by an adjoint solver.
+    """
+    out_dtype = np.dtype(dtype)
+    lmax_i = int(lmax)
+    nm = n_modes(lmax_i)
+    order = 2 * lmax_i
+    sums = np.asarray(structural_sums)
+    expected_sums_shape = (order + 1, 2 * order + 1)
+    if sums.ndim != 3 or sums.shape[1:] != expected_sums_shape:
+        raise ValueError(
+            "`structural_sums` must have shape "
+            f"(n_destinations, {expected_sums_shape[0]}, {expected_sums_shape[1]}). "
+            f"Got {sums.shape}."
+        )
+    result_dtype = np.result_type(out_dtype, np.complex64)
+    tensor = (
+        translation_contraction_tensor(lmax=lmax_i, ab5=ab5, dtype=result_dtype)
+        if contraction_tensor is None
+        else np.asarray(contraction_tensor)
+    )
+    expected_tensor_shape = (nm, nm, order + 1, 2 * order + 1)
+    if tensor.shape != expected_tensor_shape:
+        raise ValueError(
+            f"`contraction_tensor` must have shape {expected_tensor_shape}. Got {tensor.shape}."
+        )
+    values = np.asarray(vector, dtype=result_dtype)
+    if values.ndim == 2 and values.shape == (sums.shape[0], nm):
+        values = values[:, :, None]
+        squeezed = True
+    elif values.ndim == 3 and values.shape[:2] == (sums.shape[0], nm):
+        squeezed = False
+    else:
+        raise ValueError(
+            "`vector` must have shape (n_destinations, n_modes) or (n_destinations, n_modes, nrhs)."
+        )
+    result = np.einsum(
+        "dpm,ijpm,dir->jr",
+        np.conjugate(np.asarray(sums, dtype=result_dtype)),
+        np.conjugate(np.asarray(tensor, dtype=result_dtype)),
+        values,
+        optimize=True,
+    )
+    result = np.asarray(result, dtype=out_dtype)
+    return result[:, 0] if squeezed else result
+
+
 def periodic_direct_structural_block(
     *,
     lmax: int,
@@ -410,6 +470,7 @@ def periodic_direct_structural_block(
 
 __all__ = [
     "apply_structural_sums_to_vector",
+    "apply_structural_sums_to_vector_adjoint",
     "block_from_structural_sums",
     "blocks_from_structural_sums",
     "direct_structural_sums_2d",

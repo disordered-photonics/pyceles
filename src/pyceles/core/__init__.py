@@ -27,6 +27,7 @@ from .fields import (
 )
 from .lattice import DiffractionOrder2D, RectangularLattice2D
 from .operators import (
+    AdjointCouplingOperator,
     AxisymmetricTGroup,
     CompositeParticleTOperator,
     CouplingOperator,
@@ -99,6 +100,7 @@ def clear_caches() -> None:
 
 
 __all__ = [
+    "AdjointCouplingOperator",
     "AngularSpectrumSLMSource",
     "AngularSpectrumSource",
     "AxisymmetricTGroup",

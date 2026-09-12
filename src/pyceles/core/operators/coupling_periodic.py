@@ -10,9 +10,13 @@ from tqdm.auto import tqdm
 
 from pyceles.core.indexing import n_modes
 from pyceles.core.periodic import PeriodicSpec
-from pyceles.core.periodic.directsum import apply_periodic_direct_sum
+from pyceles.core.periodic.directsum import (
+    apply_periodic_direct_sum,
+    apply_periodic_direct_sum_adjoint,
+)
 from pyceles.core.periodic.ewald import (
     EwaldShellWorkspace,
+    apply_periodic_ewald_adjoint_sum,
     apply_periodic_ewald_sum,
     ewald_self_correction,
     ewald_structural_sums_2d_batch,
@@ -396,11 +400,40 @@ class PeriodicCouplingOperator:
         return self._flatten_rayleigh_output(y, squeezed=squeezed)
 
     def apply_adjoint(self, x: Array) -> Array:
-        if self.periodic.options.method != "rayleigh":
-            raise NotImplementedError(
-                "Periodic coupling adjoints are currently implemented only for method='rayleigh'."
+        method = self.periodic.options.method
+        if method == "rayleigh":
+            return self._apply_rayleigh_adjoint(x)
+        if method == "directsum":
+            return apply_periodic_direct_sum_adjoint(
+                lmax=int(self.lmax),
+                k=float(self.k),
+                positions=self.positions,
+                x=x,
+                lattice=self.periodic.lattice,
+                k_parallel=self.k_parallel,
+                window=int(self.periodic.options.directsum_window),
+                ab5=self.ab5,
+                dtype=self.dtype,
             )
-        return self._apply_rayleigh_adjoint(x)
+        options = self.periodic.options
+        return apply_periodic_ewald_adjoint_sum(
+            lmax=int(self.lmax),
+            k=float(self.k),
+            positions=self.positions,
+            x=x,
+            lattice=self.periodic.lattice,
+            k_parallel=self.k_parallel,
+            eta=self._ewald_eta(),
+            real_shells=options.real_shells,
+            reciprocal_shells=options.reciprocal_shells,
+            ab5=self.ab5,
+            shell_tolerance=float(options.shell_tolerance),
+            max_shells=int(options.max_shells),
+            dtype=self.dtype,
+            block_cache=self._ewald_block_cache if self.cache_blocks else None,
+            workspace=self._workspace(),
+            contraction_tensor=self._contraction_tensor(),
+        )
 
     def apply(self, x: Array) -> Array:
         """Apply the configured periodic coupling model to stacked coefficients."""

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pickle
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import numpy as np
 import pytest
@@ -10,6 +10,7 @@ import pyceles as pcl
 from pyceles._optional import asnumpy, import_cupy
 from pyceles.core.indexing import n_modes
 from pyceles.core.operators import (
+    AdjointCouplingOperator,
     CuPyMLFMMCouplingOperator,
     CuPyMLFMMHostCachePolicy,
     MLFMMCouplingOperator,
@@ -127,6 +128,35 @@ def test_cupy_pairwise_partial_mode_tiles_match_numpy(
     )
     actual_block = np.asarray(asnumpy(prepared_cupy.apply_W(x_block)), dtype=np.complex128)
     np.testing.assert_allclose(actual_block, reference_block, rtol=tolerance, atol=tolerance)
+
+
+@pytest.mark.parametrize(
+    ("compute_dtype", "tolerance"),
+    ((np.complex64, 5.0e-6), (np.complex128, 1.0e-12)),
+)
+def test_cupy_pairwise_adjoint_matches_inner_product(
+    compute_dtype: type[np.complexfloating[Any, Any]], tolerance: float
+) -> None:
+    particles = _small_cluster_particles()
+    kwargs: dict[str, Any] = dict(
+        lmax=1,
+        k=2.0 * np.pi / 550.0,
+        particles=particles,
+        n_medium=1.0 + 0j,
+        radial_lut_dr=0.5,
+        cache_translation_blocks=False,
+        operator_dtype=compute_dtype,
+        coupling_backend="pairwise",
+    )
+    prepared = prepare_matvec(**kwargs, backend="cupy")
+    rng = np.random.default_rng(20260912)
+    n = len(particles) * n_modes(1)
+    x = np.asarray(rng.standard_normal(n) + 1j * rng.standard_normal(n), dtype=compute_dtype)
+    y = np.asarray(rng.standard_normal(n) + 1j * rng.standard_normal(n), dtype=compute_dtype)
+    coupling = cast(AdjointCouplingOperator, prepared.coupling)
+    lhs = np.vdot(asnumpy(coupling.apply(x)), y)
+    rhs = np.vdot(x, asnumpy(coupling.apply_adjoint(y)))
+    assert abs(lhs - rhs) / max(abs(lhs), abs(rhs), 1.0) < tolerance
 
 
 def _plane_wave_source(wavelength: float, n_medium: complex) -> pcl.PlaneWave:

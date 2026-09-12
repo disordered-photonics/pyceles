@@ -103,4 +103,45 @@ def apply_periodic_direct_sum(
     return y.reshape(ns * nm)
 
 
-__all__ = ["apply_periodic_direct_sum", "periodic_direct_sum_block"]
+def apply_periodic_direct_sum_adjoint(
+    *,
+    lmax: int,
+    k: float,
+    positions: Array,
+    x: Array,
+    lattice: RectangularLattice2D,
+    k_parallel: Array,
+    window: int,
+    ab5: Array,
+    dtype: npt.DTypeLike = np.complex128,
+) -> Array:
+    """Apply the exact Hermitian adjoint of the finite-window image sum."""
+    out_dtype = np.dtype(dtype)
+    pos = np.asarray(positions, dtype=float).reshape(-1, 3)
+    ns = pos.shape[0]
+    nm = n_modes(int(lmax))
+    arr = np.asarray(x, dtype=out_dtype).reshape(ns, nm)
+    y = np.zeros_like(arr, dtype=out_dtype)
+    for i in range(ns):
+        for j in range(ns):
+            wij = periodic_direct_sum_block(
+                lmax=int(lmax),
+                k=float(k),
+                destination=pos[i],
+                source=pos[j],
+                lattice=lattice,
+                k_parallel=k_parallel,
+                window=window,
+                ab5=ab5,
+                dtype=out_dtype,
+                exclude_zero_shift=(i == j),
+            )
+            y[j] += np.conjugate(wij).T @ arr[i]
+    return y.reshape(ns * nm)
+
+
+__all__ = [
+    "apply_periodic_direct_sum",
+    "apply_periodic_direct_sum_adjoint",
+    "periodic_direct_sum_block",
+]

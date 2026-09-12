@@ -174,6 +174,30 @@ def test_periodic_cupy_coupling_cache_apply_parity(cupy_runtime: tuple[Any, Any]
     np.testing.assert_allclose(cp.asnumpy(cached_gpu.apply(x_device)), want, rtol=1e-8, atol=1e-9)
 
 
+@pytest.mark.parametrize("cache_blocks", [False, True])
+@pytest.mark.parametrize(
+    ("dtype", "tolerance"),
+    ((np.complex128, 2.0e-8), (np.complex64, 3.0e-5)),
+)
+def test_periodic_cupy_ewald_adjoint_matches_inner_product(
+    cupy_runtime: tuple[Any, Any], cache_blocks: bool, dtype: Any, tolerance: float
+) -> None:
+    cp, _ = cupy_runtime
+    _cpu, gpu = _small_periodic_case(cache_blocks=cache_blocks, off_plane=True, dtype=dtype)
+    rng = np.random.default_rng(20260912)
+    x = rng.standard_normal(12) + 1j * rng.standard_normal(12)
+    y = rng.standard_normal(12) + 1j * rng.standard_normal(12)
+    x_device = cp.asarray(x, dtype=dtype)
+    y_device = cp.asarray(y, dtype=dtype)
+    forward = gpu.apply(x_device)
+    adjoint = gpu.apply_adjoint(y_device)
+    lhs = cp.vdot(forward, y_device)
+    rhs = cp.vdot(x_device, adjoint)
+    discrepancy = float(cp.asnumpy(cp.abs(lhs - rhs)))
+    scale = max(float(cp.asnumpy(cp.abs(lhs))), float(cp.asnumpy(cp.abs(rhs))), 1.0)
+    assert discrepancy / scale < tolerance
+
+
 def test_periodic_cupy_dense_assembly_from_cached_blocks_matches_matvec(
     cupy_runtime: tuple[Any, Any],
 ) -> None:

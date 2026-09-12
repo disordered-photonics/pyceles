@@ -1160,13 +1160,51 @@ class CuPyPeriodicCouplingOperator:
         self._apply_rayleigh_near_adjoint_reshaped_gpu(arr, target=y)
         return self._flatten_rayleigh_output_device(y, squeezed=squeezed)
 
-    def apply_adjoint(self, x: Array | object) -> Array | object:
-        """Apply ``W^H`` for the exact stored Rayleigh discretization."""
-        if self.periodic.options.method != "rayleigh":
-            raise NotImplementedError(
-                "Periodic coupling adjoints are currently implemented only for method='rayleigh'."
+    def _apply_ewald_adjoint_gpu(self, x: Array | object) -> Any:
+        """Apply the exact adjoint of the fixed-shell Ewald matvec."""
+        cp = self._cupy()
+        arr, squeezed = self._reshape_input_device(x)
+        if self.cache_blocks:
+            self.populate(show_progress=False)
+            matrix = self._dense_w_cache_gpu
+            if matrix is None:
+                raise RuntimeError("Periodic dense block cache population failed.")
+            flat = arr.reshape(self.n_particles * self.n_modes, int(arr.shape[2]))
+            result = matrix.conj().T @ flat
+            if squeezed:
+                return result[:, 0]
+            return result
+
+        y = cp.zeros_like(arr, dtype=self.dtype)
+        tensor = self._contraction_tensor_device()
+        for source_indices in self._source_batches():
+            source_indexer = self._source_index_device(source_indices)
+            sums = self._structural_sums_for_sources(source_indices)
+            # Forward blocks have indices (source batch, destination, out, in).
+            # Contracting their conjugate transpose writes one independent
+            # output source block for each source in this batch.
+            y[source_indexer] = cp.einsum(
+                "sdpm,ijpm,dir->sjr",
+                cp.conjugate(sums.astype(self.dtype, copy=False)),
+                cp.conjugate(tensor),
+                arr,
+                optimize=True,
             )
-        out = self._apply_rayleigh_adjoint_gpu(x)
+        flat = y.reshape(self.n_particles * self.n_modes, int(arr.shape[2]))
+        return flat[:, 0] if squeezed else flat
+
+    def apply_adjoint(self, x: Array | object) -> Array | object:
+        """Apply ``W^H`` for the configured periodic discretization."""
+        method = self.periodic.options.method
+        if method == "rayleigh":
+            out = self._apply_rayleigh_adjoint_gpu(x)
+        elif method == "ewald":
+            out = self._apply_ewald_adjoint_gpu(x)
+        else:
+            raise NotImplementedError(
+                "CuPy periodic coupling adjoints are implemented for methods "
+                "'rayleigh' and 'ewald'."
+            )
         return out if is_cupy_array(x) else asnumpy(out)
 
 

@@ -52,11 +52,12 @@ Current tested scope:
 - selected local-SVWF near-field workflows for homogeneous spheres,
 - direct dense validation paths for controlled cases.
 
-The native CuPy `lsqr` solver is currently limited to single-RHS prepared
-operators with exact Hermitian adjoints. The validated high-level scope is the
-periodic Rayleigh coupling path with diagonal, dense, or materialized
-axisymmetric particle-T blocks; pairwise, generic periodic Ewald, and MLFMM
-adjoints are not yet available.
+LSQR is limited to single-RHS prepared operators with exact Hermitian adjoints.
+Finite pairwise and periodic Rayleigh, Ewald, and direct-sum coupling expose
+those adjoints for diagonal and explicit dense particle-T groups. The NumPy
+backend uses SciPy's reference LSQR and CuPy uses the native implementation.
+Periodic direct-sum remains NumPy/reference-only, and MLFMM adjoints are not
+yet available.
 
 Other periodic limitations include:
 

@@ -39,6 +39,7 @@ from .special import (
 )
 from .structural import (
     apply_structural_sums_to_vector,
+    apply_structural_sums_to_vector_adjoint,
     block_from_structural_sums,
     blocks_from_structural_sums,
 )
@@ -1897,10 +1898,106 @@ def apply_periodic_ewald_sum(
     return y.reshape(ns * nm)
 
 
+def apply_periodic_ewald_adjoint_sum(
+    *,
+    lmax: int,
+    k: float,
+    positions: Array,
+    x: Array,
+    lattice: RectangularLattice2D,
+    k_parallel: Array,
+    eta: float,
+    real_shells: int | None,
+    reciprocal_shells: int | None,
+    ab5: Array,
+    dtype: npt.DTypeLike = np.complex128,
+    shell_tolerance: float = 1.0e-10,
+    max_shells: int = 32,
+    block_cache: dict[tuple[int, int], Array] | None = None,
+    workspace: EwaldShellWorkspace | None = None,
+    contraction_tensor: Array | None = None,
+) -> Array:
+    """Apply the exact Hermitian adjoint of the Ewald image sum.
+
+    The cache-off path uses the transpose of the same structural contraction
+    as the forward matrix-free evaluator.  Cache-on applies conjugate-transpose
+    dense blocks, so both policies represent the identical discretized ``W``.
+    """
+    out_dtype = np.dtype(dtype)
+    pos = np.asarray(positions, dtype=float).reshape(-1, 3)
+    ns = pos.shape[0]
+    nm = n_modes(int(lmax))
+    arr = np.asarray(x, dtype=out_dtype).reshape(ns, nm)
+    y = np.zeros_like(arr, dtype=out_dtype)
+    ws = _ensure_workspace(
+        workspace=workspace,
+        k=float(k),
+        k_parallel=k_parallel,
+        lattice=lattice,
+        eta=float(eta),
+    )
+
+    if block_cache is not None:
+        fill_periodic_ewald_block_cache(
+            cache=block_cache,
+            lmax=int(lmax),
+            k=float(k),
+            positions=pos,
+            lattice=lattice,
+            k_parallel=k_parallel,
+            eta=float(eta),
+            real_shells=real_shells,
+            reciprocal_shells=reciprocal_shells,
+            ab5=ab5,
+            dtype=out_dtype,
+            shell_tolerance=float(shell_tolerance),
+            max_shells=int(max_shells),
+            workspace=ws,
+            contraction_tensor=contraction_tensor,
+        )
+        for i in range(ns):
+            for j in range(ns):
+                y[j] += np.conjugate(block_cache[(i, j)]).T @ arr[i]
+        return y.reshape(ns * nm)
+
+    for source in range(ns):
+        sums = ewald_structural_sums_2d_batch(
+            lmax_struct=int(lmax),
+            k=float(k),
+            destinations=pos,
+            source=pos[source],
+            lattice=lattice,
+            k_parallel=k_parallel,
+            eta=float(eta),
+            real_shells=real_shells,
+            reciprocal_shells=reciprocal_shells,
+            shell_tolerance=float(shell_tolerance),
+            max_shells=int(max_shells),
+            dtype=np.complex128,
+            workspace=ws,
+        )
+        _add_self_correction_to_batched_sums(
+            sums,
+            local_destination_index=source,
+            k=float(k),
+            eta=float(eta),
+        )
+        y[source] = apply_structural_sums_to_vector_adjoint(
+            lmax=int(lmax),
+            structural_sums=sums,
+            ab5=ab5,
+            vector=arr,
+            dtype=out_dtype,
+            contraction_tensor=contraction_tensor,
+        )
+    return y.reshape(ns * nm)
+
+
 __all__ = [
     "EwaldShellCounts",
     "EwaldShellWorkspace",
     "PeriodicEwaldConvergenceError",
+    "apply_periodic_ewald_adjoint_sum",
     "apply_periodic_ewald_sum",
     "default_ewald_eta",
     "ewald_self_correction",

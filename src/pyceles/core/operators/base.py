@@ -26,6 +26,13 @@ class CouplingOperator(Protocol):
 
 
 @runtime_checkable
+class AdjointCouplingOperator(CouplingOperator, Protocol):
+    """Optional coupling protocol for exact Hermitian-adjoint actions."""
+
+    def apply_adjoint(self, x: Array) -> Array: ...
+
+
+@runtime_checkable
 class PrecomputableCouplingOperator(Protocol):
     """Optional coupling protocol for backends that support eager precomputation."""
 

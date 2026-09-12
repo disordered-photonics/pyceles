@@ -1357,6 +1357,111 @@ def lsqr_cupy(
     )
 
 
+def lsqr_scipy(
+    A_mv: Callable[[np.ndarray], np.ndarray],
+    A_h_mv: Callable[[np.ndarray], np.ndarray],
+    b: np.ndarray,
+    *,
+    x0: np.ndarray | None = None,
+    initial_residual: np.ndarray | None = None,
+    rhs_norm: float | None = None,
+    rtol: float = 1e-6,
+    atol: float = 0.0,
+    maxiter: int | None = None,
+    dtype: npt.DTypeLike | None = None,
+    condition_limit: float | None = None,
+    show_progress: bool = True,
+    compute_final_residual: bool = True,
+) -> LinearSolveResult:
+    """Solve one square system with SciPy's reference LSQR implementation.
+
+    This path deliberately delegates the bidiagonalization to SciPy while
+    retaining pyceles' explicit forward/adjoint operator boundary.  When a
+    residual from a previous phase is supplied, LSQR solves for a correction
+    and adds it to ``x0``; this matches the native CuPy continuation contract.
+    ``atol`` and ``rtol`` are combined as SciPy's absolute and relative
+    stopping tolerances.
+    """
+    from scipy.sparse.linalg import LinearOperator, lsqr
+
+    b_arr = np.asarray(b)
+    if b_arr.ndim != 1:
+        raise ValueError("`lsqr_scipy` expects a 1D RHS.")
+    n = int(b_arr.size)
+    op_dtype = np.dtype(dtype if dtype is not None else np.result_type(b_arr.dtype, np.complex64))
+
+    def _mv(v: np.ndarray) -> np.ndarray:
+        return np.asarray(_apply_operator(A_mv, np.asarray(v)), dtype=op_dtype).copy()
+
+    def _rmv(v: np.ndarray) -> np.ndarray:
+        return np.asarray(_apply_operator(A_h_mv, np.asarray(v)), dtype=op_dtype).copy()
+
+    operator = LinearOperator((n, n), matvec=_mv, rmatvec=_rmv, dtype=op_dtype)
+    correction = initial_residual is not None
+    base: np.ndarray | None
+    if correction:
+        rhs = np.asarray(initial_residual, dtype=op_dtype)
+        if rhs.ndim != 1 or rhs.size != n:
+            raise ValueError("`initial_residual` must be a 1D vector with the same size as `b`.")
+        base = np.zeros((n,), dtype=op_dtype) if x0 is None else np.asarray(x0, dtype=op_dtype)
+    else:
+        rhs = np.asarray(b_arr, dtype=op_dtype)
+        base = None if x0 is None else np.asarray(x0, dtype=op_dtype)
+    if base is not None and (base.ndim != 1 or base.size != n):
+        raise ValueError("`x0` must be a 1D vector with the same size as `b`.")
+
+    iter_lim = int(maxiter) if maxiter is not None else max(1, 2 * n)
+    if iter_lim < 1:
+        raise ValueError("`maxiter` must be >= 1 when provided.")
+    result = lsqr(
+        operator,
+        rhs,
+        atol=max(float(atol), float(rtol)),
+        btol=max(float(atol), float(rtol)),
+        conlim=1.0e8 if condition_limit is None else float(condition_limit),
+        iter_lim=iter_lim,
+        show=bool(show_progress),
+        x0=None if correction else base,
+    )
+    x = np.asarray(result[0], dtype=op_dtype)
+    if base is not None and correction:
+        x = np.asarray(base + x, dtype=op_dtype)
+    iterations = int(result[2])
+    istop = int(result[1])
+    info = 0 if istop in {1, 2} else 1
+    converged_reason = "converged" if info == 0 else f"scipy_istop_{istop}"
+    finalized = _finalize_result(
+        A_mv,
+        b_arr,
+        x,
+        info=info,
+        iterations=iterations,
+        method="lsqr",
+        residual_history=None,
+        compute_final_residual=compute_final_residual,
+        converged_reason=converged_reason,
+    )
+    metadata = {
+        # SciPy does not expose callback-level operator counts.  LSQR performs
+        # one forward and one adjoint action per bidiagonalization step (plus
+        # the initial pair), so report the corresponding deterministic budget.
+        "operator_applications": int(2 * iterations + 2),
+        "adjoint_applications": int(iterations + 1),
+        "anorm": float(result[5]),
+        "acond": float(result[6]),
+        "arnorm": float(result[7]),
+        "correction_norm": float(result[8]),
+        # ``rhs`` is the correction right-hand side on a continuation.  The
+        # public result reports the original system norm, matching the native
+        # continuation contract and the denominator used by the final
+        # physical-residual check.
+        "rhs_norm": float(np.linalg.norm(b_arr) if rhs_norm is None else rhs_norm),
+        "scipy_istop": istop,
+        "residual_history_kind": "scipy_lsqr_summary_only",
+    }
+    return replace(finalized, block_metadata=metadata)
+
+
 def fgmres_cupy(
     A_mv: Callable[[np.ndarray], np.ndarray],
     b: np.ndarray,
@@ -2150,7 +2255,7 @@ def solve_linear_system(
         projected systems. When omitted, native solvers retain their robust
         default (complex128 accumulation).
     A_h_mv, initial_residual, rhs_norm:
-        CuPy-native LSQR inputs. ``A_h_mv`` must be the exact Hermitian
+        LSQR inputs for either backend. ``A_h_mv`` must be the exact Hermitian
         adjoint and is required for ``method='lsqr'``. A supplied
         ``initial_residual`` carries ``b - A @ x0`` from a preceding phase;
         ``rhs_norm`` preserves the original right-hand-side norm.
@@ -2308,12 +2413,26 @@ def solve_linear_system(
     x0_vec = None if x0_mat is None else x0_mat[:, 0]
 
     if m == "lsqr":
-        if backend_name != "cupy":
-            raise ValueError("`method='lsqr'` is currently available only with backend='cupy'.")
         if A_h_mv is None:
             raise ValueError("`method='lsqr'` requires an exact `A_h_mv` callable.")
         if preconditioner is not None:
             raise ValueError("`method='lsqr'` does not accept a preconditioner.")
+        if backend_name == "numpy":
+            return lsqr_scipy(
+                A_mv,
+                A_h_mv,
+                b_vec,
+                x0=x0_vec,
+                initial_residual=initial_residual,
+                rhs_norm=rhs_norm,
+                rtol=rtol,
+                atol=atol,
+                maxiter=maxiter,
+                condition_limit=lsqr_condition_limit,
+                dtype=dtype,
+                show_progress=show_progress,
+                compute_final_residual=compute_final_residual,
+            )
         return lsqr_cupy(
             A_mv,
             A_h_mv,

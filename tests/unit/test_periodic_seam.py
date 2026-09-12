@@ -134,6 +134,30 @@ def test_periodic_config_rejects_cupy_directsum_method() -> None:
         SimulationConfig(periodic=spec, operator_backend="cupy", verbose=False)
 
 
+def test_prepare_matvec_rejects_cupy_directsum_before_backend_setup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_import() -> None:
+        raise AssertionError("CuPy import must not run for rejected direct-sum preparation")
+
+    monkeypatch.setattr("pyceles.core.operators.prepare.import_cupy", fail_import)
+    periodic = pcl.PeriodicSpec(
+        lattice=pcl.RectangularLattice2D(300.0, 400.0),
+        options=pcl.PeriodicOptions(method="directsum"),
+    )
+
+    with pytest.raises(NotImplementedError, match="Ewald or Rayleigh"):
+        prepare_matvec(
+            lmax=1,
+            k=2.0 * np.pi / 550.0,
+            particles=[_sphere()],
+            radial_lut_dr=1.0,
+            periodic=periodic,
+            k_parallel=np.zeros(2),
+            backend="cupy",
+        )
+
+
 def test_periodic_config_accepts_cupy_rayleigh_method() -> None:
     spec = pcl.PeriodicSpec(
         lattice=pcl.RectangularLattice2D(300.0, 400.0),

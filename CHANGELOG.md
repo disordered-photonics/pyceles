@@ -11,11 +11,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added an opt-in native CuPy harmonic GCRO-DR solver
   (`solver_method="gcro"`). Its bounded recycle rank is controlled by
   `solver_recycle_dim`.
-- Added an opt-in native CuPy LSQR solver (`solver_method="lsqr"`) for
-  single-RHS systems whose prepared particle and coupling operators expose
-  exact Hermitian adjoints.
+- Added an opt-in single-RHS LSQR solver (`solver_method="lsqr"`): NumPy uses
+  SciPy's reference implementation and CuPy uses the native recurrence.
+- Added exact adjoint actions for finite pairwise and periodic Ewald coupling
+  (NumPy/CuPy), and for NumPy periodic direct-sum coupling, extending the
+  existing Rayleigh path to dense particle-T groups.
 
 ### Changed
+- Backend-native CuPy Krylov result classes and `*_native` entry points are
+  internal implementation details; the stable package surface is the
+  high-level solver functions and `LinearSolveResult`.
 - Reduced memory traffic in native CuPy Krylov reductions by accumulating in
   the requested precision without full-vector promotion.
 - Breaking: solver selection is now explicit. `auto` is no longer accepted,

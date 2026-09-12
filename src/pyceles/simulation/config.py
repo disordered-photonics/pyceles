@@ -277,10 +277,6 @@ class SimulationConfig:
             raise NotImplementedError(
                 "`solver_method='gcro'` is currently available only with `operator_backend='cupy'`."
             )
-        if method == "lsqr" and backend != "cupy":
-            raise NotImplementedError(
-                "`solver_method='lsqr'` is currently available only with `operator_backend='cupy'`."
-            )
 
         coupling_backend = str(self.coupling_backend).lower()
         if coupling_backend not in {"pairwise", "mlfmm"}:
