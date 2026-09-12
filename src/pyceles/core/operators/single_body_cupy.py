@@ -293,6 +293,7 @@ class CuPyCompositeParticleTOperator:
     _particle_to_group: np.ndarray = field(init=False, repr=False)
     _particle_to_local: np.ndarray = field(init=False, repr=False)
     _group_indices_gpu: dict[int, Any] = field(default_factory=dict, init=False, repr=False)
+    _full_group: object | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         ns = int(self.n_particles)
@@ -312,6 +313,10 @@ class CuPyCompositeParticleTOperator:
             raise ValueError("Particle-T operator groups must cover all particles.")
         self._particle_to_group = group_of
         self._particle_to_local = local_of
+        if len(self.groups) == 1:
+            ids = np.asarray(self.groups[0].particle_indices, dtype=np.int64).reshape(-1)
+            if np.array_equal(ids, np.arange(ns, dtype=np.int64)):
+                self._full_group = self.groups[0]
 
     @property
     def n_modes(self) -> int:
@@ -329,6 +334,26 @@ class CuPyCompositeParticleTOperator:
     def _apply_impl(self, x: Array | object, *, group_method: str = "apply_subset") -> object:
         cupy, _ = import_cupy()
         arr_raw = coerce_array(x, dtype=self.dtype, prefer_cupy=True)
+        if self._full_group is not None:
+            expected = self.n_particles * self.n_modes
+            if int(arr_raw.ndim) == 1:
+                if int(arr_raw.size) != expected:
+                    raise ValueError(
+                        "Input length must match n_particles * n_modes. "
+                        f"Got {int(arr_raw.size)} for {expected}."
+                    )
+                subset = arr_raw.reshape(self.n_particles, self.n_modes)
+            elif int(arr_raw.ndim) == 2:
+                if int(arr_raw.shape[0]) != expected:
+                    raise ValueError(
+                        "Input first dimension must match n_particles * n_modes. "
+                        f"Got {int(arr_raw.shape[0])} for {expected}."
+                    )
+                subset = arr_raw.reshape(self.n_particles, self.n_modes, int(arr_raw.shape[1]))
+            else:
+                raise ValueError(f"Input must be 1D or 2D. Got shape {tuple(arr_raw.shape)}.")
+            result = cupy.asarray(getattr(self._full_group, group_method)(subset), dtype=self.dtype)
+            return result.reshape(arr_raw.shape)
         if int(arr_raw.ndim) == 1:
             if int(arr_raw.size) != self.n_particles * self.n_modes:
                 raise ValueError(

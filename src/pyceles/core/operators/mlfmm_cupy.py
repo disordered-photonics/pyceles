@@ -5707,6 +5707,10 @@ def _build_exact_near_adjoint_block(
                 ),
                 dtype=context.near_dtype,
             )
+    # The reverse contraction consumes conjugated W blocks.  Conjugate once
+    # on the compact host block before upload instead of allocating a dense
+    # device-sized conjugation temporary on every adjoint action.
+    np.conjugate(blocks, out=blocks)
     return (
         cupy.asarray(dst_ids, dtype=cupy.int32),
         cupy.asarray(src_ids, dtype=cupy.int32),
@@ -5745,11 +5749,9 @@ def _apply_exact_near_adjoint_streaming(
         dst_ids, src_ids, pair_blocks = block
         if int(dst_ids.size) == 0 or int(src_ids.size) == 0:
             continue
-        # The block stores ``W[dst_mode, src_mode]``.  Contracting its
-        # conjugate with the destination state produces the source state.
-        contribution = cupy.einsum(
-            "abij,air->bjr", cupy.conjugate(pair_blocks), x_states[dst_ids], optimize=True
-        )
+        # The cache stores conjugated ``W[dst_mode, src_mode]``.  Contracting
+        # with the destination state produces the source state.
+        contribution = cupy.einsum("abij,air->bjr", pair_blocks, x_states[dst_ids], optimize=True)
         out[src_ids] += contribution
     return out, int(cache_bytes)
 
@@ -8912,9 +8914,8 @@ class CuPyMLFMMCouplingOperator:
             )
         else:
             raise RuntimeError(f"Unsupported CuPy MLFMM stage {stage!r}.")
-        y_total = cupy.asarray(y_far, dtype=cupy.complex128) + cupy.asarray(
-            y_near, dtype=cupy.complex128
-        )
+        y_total = cupy.asarray(y_far, dtype=cupy.complex128)
+        y_total += cupy.asarray(y_near, dtype=cupy.complex128)
         return _restore_unknown_shape(
             y_total.astype(_cupy_complex_dtype(out_dtype, cupy=cupy), copy=False),
             squeezed=squeezed,

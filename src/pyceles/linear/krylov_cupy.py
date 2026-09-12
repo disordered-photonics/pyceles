@@ -351,6 +351,65 @@ def _givens_complex(a: Any, b: Any, *, cupy: Any, accum_dtype: np.dtype) -> tupl
     return cupy.asarray(c, dtype=accum_dtype), cupy.asarray(s, dtype=accum_dtype)
 
 
+def _solve_rotated_upper(
+    h_rows: Any,
+    g: Any,
+    *,
+    k_used: int,
+    cupy: Any,
+    accum_dtype: np.dtype,
+    breakdown_tol: float,
+) -> Any:
+    """Solve one rotated GMRES projected system without scalar sync loops.
+
+    The Hessenberg coefficients are stored row-wise, i.e. the leading block
+    is lower triangular while the system to solve is its ordinary transpose.
+    CuPy's triangular solve handles that small projected system in one device
+    operation.  The explicit fallback retains the previous breakdown-safe
+    algorithm for fake backends and installations without ``cupyx``.
+    """
+
+    if int(k_used) <= 0:
+        raise ValueError("`k_used` must be positive.")
+    r_upper = cupy.asarray(h_rows[:k_used, :k_used].T, dtype=accum_dtype)
+    rhs = cupy.asarray(g[:k_used], dtype=accum_dtype)
+    use_library = True
+    try:
+        if float(cupy.abs(r_upper[-1, -1])) <= float(breakdown_tol):
+            use_library = False
+    except Exception:
+        use_library = False
+    if use_library:
+        try:
+            cupyx_linalg = __import__("cupyx.scipy.linalg", fromlist=["solve_triangular"])
+            return cupyx_linalg.solve_triangular(
+                r_upper,
+                rhs,
+                lower=False,
+                overwrite_b=False,
+                check_finite=False,
+            )
+        except Exception:
+            # Keep a portable path for fake CuPy test doubles and CUDA stacks
+            # without the optional triangular-solve wrapper.
+            pass
+
+    y = cupy.array(rhs, dtype=accum_dtype)
+    last = int(k_used) - 1
+    if float(cupy.abs(r_upper[last, last])) <= float(breakdown_tol):
+        y[last] = cupy.asarray(0.0 + 0.0j, dtype=accum_dtype)
+    for row in range(last, 0, -1):
+        y_row = y[row].copy()
+        if float(cupy.abs(y_row)) == 0.0:
+            continue
+        y_row = y_row / r_upper[row, row].copy()
+        y[row] = y_row
+        y[:row] = y[:row] - y_row * r_upper[:row, row]
+    if float(cupy.abs(y[0])) > 0.0:
+        y[0] = y[0] / r_upper[0, 0].copy()
+    return y
+
+
 def _normalize_true_residual_mode(mode: str) -> Literal["none", "restart", "final"]:
     out = str(mode).lower()
     if out not in {"none", "restart", "final"}:
@@ -918,20 +977,14 @@ def gmres_cupy_native(
             converged_reason = "breakdown"
             break
 
-        y = cupy.array(g[:k_used], dtype=acc_dtype)
-        last = k_used - 1
-        if float(cupy.abs(H[last, last])) <= max(breakdown_tol_f, eps):
-            y[last] = cupy.asarray(0.0 + 0.0j, dtype=acc_dtype)
-        for k in range(last, 0, -1):
-            yk = y[k].copy()
-            if float(cupy.abs(yk)) == 0.0:
-                continue
-            yk = yk / H[k, k].copy()
-            y[k] = yk
-            h_row = cupy.asarray(H[k, :k], dtype=acc_dtype)
-            y[:k] = y[:k] - yk * h_row
-        if float(cupy.abs(y[0])) > 0.0:
-            y[0] = y[0] / H[0, 0].copy()
+        y = _solve_rotated_upper(
+            H,
+            g,
+            k_used=k_used,
+            cupy=cupy,
+            accum_dtype=acc_dtype,
+            breakdown_tol=max(breakdown_tol_f, eps),
+        )
         # The projected coefficients are solved in accumulation precision, but
         # the stored Arnoldi basis remains in operator precision. Cast the
         # small coefficient vector first; otherwise CuPy promotes the entire
@@ -1252,20 +1305,14 @@ def fgmres_cupy_native(
             converged_reason = "breakdown"
             break
 
-        y = cupy.array(g[:k_used], dtype=acc_dtype)
-        last = k_used - 1
-        if float(cupy.abs(H[last, last])) <= max(breakdown_tol_f, eps):
-            y[last] = cupy.asarray(0.0 + 0.0j, dtype=acc_dtype)
-        for k in range(last, 0, -1):
-            yk = y[k].copy()
-            if float(cupy.abs(yk)) == 0.0:
-                continue
-            yk = yk / H[k, k].copy()
-            y[k] = yk
-            h_row = cupy.asarray(H[k, :k], dtype=acc_dtype)
-            y[:k] = y[:k] - yk * h_row
-        if float(cupy.abs(y[0])) > 0.0:
-            y[0] = y[0] / H[0, 0].copy()
+        y = _solve_rotated_upper(
+            H,
+            g,
+            k_used=k_used,
+            cupy=cupy,
+            accum_dtype=acc_dtype,
+            breakdown_tol=max(breakdown_tol_f, eps),
+        )
         y_op = cupy.asarray(y, dtype=op_dtype)
         x_vec = x_vec + cupy.asarray(y_op @ Z[:k_used, :], dtype=op_dtype)
         r_true = cupy.asarray(g[k_used], dtype=op_dtype) * cupy.asarray(
@@ -1569,20 +1616,14 @@ def lgmres_cupy_native(
             converged_reason = "breakdown"
             break
 
-        y = cupy.array(g[:k_used], dtype=acc_dtype)
-        last = k_used - 1
-        if float(cupy.abs(H[last, last])) <= max(breakdown_tol_f, eps):
-            y[last] = cupy.asarray(0.0 + 0.0j, dtype=acc_dtype)
-        for k in range(last, 0, -1):
-            yk = y[k].copy()
-            if float(cupy.abs(yk)) == 0.0:
-                continue
-            yk = yk / H[k, k].copy()
-            y[k] = yk
-            h_row = cupy.asarray(H[k, :k], dtype=acc_dtype)
-            y[:k] = y[:k] - yk * h_row
-        if float(cupy.abs(y[0])) > 0.0:
-            y[0] = y[0] / H[0, 0].copy()
+        y = _solve_rotated_upper(
+            H,
+            g,
+            k_used=k_used,
+            cupy=cupy,
+            accum_dtype=acc_dtype,
+            breakdown_tol=max(breakdown_tol_f, eps),
+        )
         y_op = cupy.asarray(y, dtype=op_dtype)
         dx = cupy.asarray(y_op @ Z[:k_used, :], dtype=op_dtype)
         x_vec = x_vec + dx

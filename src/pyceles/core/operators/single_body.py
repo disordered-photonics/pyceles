@@ -71,6 +71,7 @@ class CompositeParticleTOperator:
     dtype: np.dtype = COMPLEX128_DTYPE
     _particle_to_group: np.ndarray = field(init=False, repr=False)
     _particle_to_local: np.ndarray = field(init=False, repr=False)
+    _full_group: PreparedParticleTGroup | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         ns = int(self.n_particles)
@@ -90,6 +91,10 @@ class CompositeParticleTOperator:
             raise ValueError("Particle-T operator groups must cover all particles.")
         self._particle_to_group = group_of
         self._particle_to_local = local_of
+        if len(self.groups) == 1:
+            ids = np.asarray(self.groups[0].particle_indices, dtype=np.int64).reshape(-1)
+            if np.array_equal(ids, np.arange(ns, dtype=np.int64)):
+                self._full_group = self.groups[0]
 
     @property
     def n_modes(self) -> int:
@@ -127,6 +132,10 @@ class CompositeParticleTOperator:
 
     def apply(self, x: Array) -> Array:
         arr, output_shape = self._reshape_input(x)
+        if self._full_group is not None:
+            return np.asarray(self._full_group.apply_subset(arr), dtype=self.dtype).reshape(
+                output_shape
+            )
         # Groups are disjoint and exhaustive, so no output element needs a
         # zero default before the group assignments below.
         out = np.empty_like(arr, dtype=self.dtype)
@@ -137,6 +146,10 @@ class CompositeParticleTOperator:
 
     def apply_adjoint(self, x: Array) -> Array:
         arr, output_shape = self._reshape_input(x)
+        if self._full_group is not None:
+            return np.asarray(self._full_group.apply_adjoint_subset(arr), dtype=self.dtype).reshape(
+                output_shape
+            )
         out = np.empty_like(arr, dtype=self.dtype)
         for group in self.groups:
             ids = np.asarray(group.particle_indices, dtype=np.int64)
@@ -145,6 +158,10 @@ class CompositeParticleTOperator:
 
     def rhs(self, b: Array) -> Array:
         arr, output_shape = self._reshape_input(b)
+        if self._full_group is not None:
+            return np.asarray(self._full_group.rhs_subset(arr), dtype=self.dtype).reshape(
+                output_shape
+            )
         out = np.empty_like(arr, dtype=self.dtype)
         for group in self.groups:
             ids = np.asarray(group.particle_indices, dtype=np.int64)
