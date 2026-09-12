@@ -628,10 +628,14 @@ def lsqr_cupy_native(
         cupy.multiply(u, _scalar(alpha).astype(op_dtype), out=scratch)
         cupy.subtract(u_next, scratch, out=u_next)
         beta_next = _norm(u_next, cupy=cupy, accum_dtype=acc_dtype)
+        # Paige--Saunders ||A|| estimate includes the current bidiagonal
+        # alpha even when the newly formed beta is exactly zero.  Keeping the
+        # update outside the normalization branch matters for condition-limit
+        # stopping on exact/happy bidiagonal termination.
+        anorm_sq = anorm_sq + _scalar(alpha) ** 2 + _scalar(beta_next) ** 2
+        anorm = float(cupy.sqrt(cupy.asarray(anorm_sq).real))
         if beta_next > 0.0:
             cupy.divide(u_next, beta_next, out=u_next)
-            anorm_sq = anorm_sq + _scalar(alpha) ** 2 + _scalar(beta_next) ** 2
-            anorm = float(cupy.sqrt(cupy.asarray(anorm_sq).real))
 
         v_next = _apply(A_h_mv, u_next, "A^H(u)")
         adjoint_applications += 1
