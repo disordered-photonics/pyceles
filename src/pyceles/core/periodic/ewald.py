@@ -1955,9 +1955,10 @@ def apply_periodic_ewald_adjoint_sum(
             workspace=ws,
             contraction_tensor=contraction_tensor,
         )
+        arr_conj = np.conjugate(arr)
         for i in range(ns):
             for j in range(ns):
-                y[j] += np.conjugate(block_cache[(i, j)]).T @ arr[i]
+                y[j] += np.conjugate(block_cache[(i, j)].T @ arr_conj[i])
         return y.reshape(ns * nm)
 
     for source in range(ns):

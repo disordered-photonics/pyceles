@@ -121,6 +121,7 @@ def apply_periodic_direct_sum_adjoint(
     ns = pos.shape[0]
     nm = n_modes(int(lmax))
     arr = np.asarray(x, dtype=out_dtype).reshape(ns, nm)
+    arr_conj = np.conjugate(arr)
     y = np.zeros_like(arr, dtype=out_dtype)
     for i in range(ns):
         for j in range(ns):
@@ -136,7 +137,7 @@ def apply_periodic_direct_sum_adjoint(
                 dtype=out_dtype,
                 exclude_zero_shift=(i == j),
             )
-            y[j] += np.conjugate(wij).T @ arr[i]
+            y[j] += np.conjugate(wij.T @ arr_conj[i])
     return y.reshape(ns * nm)
 
 

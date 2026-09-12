@@ -426,11 +426,12 @@ def apply_structural_sums_to_vector_adjoint(
         )
     result = np.einsum(
         "dpm,ijpm,dir->jr",
-        np.conjugate(np.asarray(sums, dtype=result_dtype)),
-        np.conjugate(np.asarray(tensor, dtype=result_dtype)),
-        values,
+        np.asarray(sums, dtype=result_dtype),
+        np.asarray(tensor, dtype=result_dtype),
+        np.conjugate(values),
         optimize=True,
     )
+    np.conjugate(result, out=result)
     result = np.asarray(result, dtype=out_dtype)
     return result[:, 0] if squeezed else result
 

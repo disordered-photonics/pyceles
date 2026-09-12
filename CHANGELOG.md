@@ -43,6 +43,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reverse hierarchy through bounded source frontiers instead of retaining all
   hierarchy levels during LSQR; dense/debug leaf plans keep the resident
   reference traversal.
+- Exact adjoint paths reuse forward dense T/coupling storage and bound
+  Rayleigh reverse-scan metadata, reducing persistent memory for dense and
+  periodic adjoint workloads.
 - Reference LSQR continuation now uses the same physical stopping semantics as
   native LSQR and reports forward/adjoint action counts consistently.
 - Breaking: solver selection is now explicit. `auto` is no longer accepted,

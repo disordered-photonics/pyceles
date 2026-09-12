@@ -77,11 +77,7 @@ class PeriodicCouplingOperator:
         default=None, init=False, repr=False
     )
     _self_block_cache: Array | None = field(default=None, init=False, repr=False)
-    _self_block_adjoint_cache: Array | None = field(default=None, init=False, repr=False)
     _near_contraction_tensor_cache: Array | None = field(default=None, init=False, repr=False)
-    _near_contraction_tensor_adjoint_cache: Array | None = field(
-        default=None, init=False, repr=False
-    )
 
     def __post_init__(self) -> None:
         self.dtype = np.dtype(self.dtype)
@@ -343,11 +339,11 @@ class PeriodicCouplingOperator:
     def _apply_rayleigh_near_adjoint_reshaped(
         self, arr: Array, *, target: Array | None = None
     ) -> Array:
-        self_adjoint = self._self_block_adjoint_cache
-        if self_adjoint is None:
-            self_adjoint = np.ascontiguousarray(np.conjugate(self._self_block()).T)
-            self._self_block_adjoint_cache = self_adjoint
-        self_contribution = np.einsum("ij,ajr->air", self_adjoint, arr, optimize=True)
+        # Apply H actions as conj(M.T @ conj(x)) so the adjoint path can reuse
+        # the exact forward self block, structural sums, and contraction tensor.
+        arr_conj = np.conjugate(arr)
+        self_contribution = np.einsum("ji,ajr->air", self._self_block(), arr_conj, optimize=True)
+        np.conjugate(self_contribution, out=self_contribution)
         y = self_contribution if target is None else target
         if target is not None:
             y += self_contribution
@@ -357,22 +353,21 @@ class PeriodicCouplingOperator:
         sums = self._near_structural_sums
         if sums is None:
             raise RuntimeError("Periodic near Ewald cache population failed.")
-        tensor_adjoint = self._near_contraction_tensor_adjoint_cache
-        if tensor_adjoint is None:
-            tensor_adjoint = np.ascontiguousarray(np.conjugate(self._near_contraction_tensor()))
-            self._near_contraction_tensor_adjoint_cache = tensor_adjoint
+        tensor = self._near_contraction_tensor()
         for source in range(self.n_particles):
             start = int(indptr[source])
             stop = int(indptr[source + 1])
             if start == stop:
                 continue
-            y[source] += np.einsum(
+            contribution = np.einsum(
                 "av,ijv,air->jr",
-                np.conjugate(sums[start:stop]),
-                tensor_adjoint,
-                arr[destinations[start:stop]],
+                sums[start:stop],
+                tensor,
+                arr_conj[destinations[start:stop]],
                 optimize=True,
             )
+            np.conjugate(contribution, out=contribution)
+            y[source] += contribution
         return np.asarray(y, dtype=self.dtype)
 
     def _apply_rayleigh_near(self, x: Array) -> Array:

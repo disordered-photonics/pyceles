@@ -1443,15 +1443,16 @@ def _receive_leaf_boxes_to_particles(
         leaf_ids = np.asarray(group.leaf_ids, dtype=np.int64)
         particle_indices = np.asarray(group.particle_indices, dtype=np.int64)
         if group.aggregation is not None:
-            # Keep only the grouped forward aggregation blocks in persistent
-            # NumPy state and recover the adjoint receive action on demand.
-            receive_adj = np.swapaxes(np.asarray(group.aggregation, dtype=dtype).conj(), 1, 2)
+            # Reuse forward aggregation storage: A^H x = conj(A.T @ conj(x)).
+            # This avoids a full conjugated copy of the grouped leaf blocks.
             contribution = np.einsum(
                 "gmb,gb->gm",
-                receive_adj,
-                incoming[leaf_ids],
+                np.swapaxes(np.asarray(group.aggregation, dtype=dtype), 1, 2),
+                np.conjugate(incoming[leaf_ids]),
                 optimize=True,
-            ).reshape(particle_indices.shape[0], int(group.occupancy), nm)
+            )
+            np.conjugate(contribution, out=contribution)
+            contribution = contribution.reshape(particle_indices.shape[0], int(group.occupancy), nm)
             y_far[particle_indices] += contribution
             continue
         if group.pair_deltas is None:
@@ -1468,10 +1469,11 @@ def _receive_leaf_boxes_to_particles(
         ).reshape(particle_indices.shape[0], int(group.occupancy), box_nm, nm)
         contribution = np.einsum(
             "gqmn,gm->gqn",
-            np.conjugate(pair_blocks),
-            incoming[leaf_ids],
+            pair_blocks,
+            np.conjugate(incoming[leaf_ids]),
             optimize=True,
         )
+        np.conjugate(contribution, out=contribution)
         y_far[particle_indices] += contribution
     return y_far
 
@@ -1561,6 +1563,7 @@ def _exact_leaf_near_adjoint_apply(
 
     nm = n_modes(int(lmax))
     arr = np.asarray(x, dtype=dtype).reshape(np.asarray(positions).shape[0], nm)
+    arr_conj = np.conjugate(arr)
     y = np.zeros_like(arr, dtype=dtype)
     ab5 = translation_ab5_table(int(lmax), dtype=np.complex128)
     positions_arr = np.asarray(positions, dtype=float)
@@ -1590,10 +1593,10 @@ def _exact_leaf_near_adjoint_apply(
                 wij = block(int(i), int(j))
                 # Forward contributes y[i] += W_ij x[j].  Its adjoint adds
                 # W_ij^H x[i] to the source particle j.
-                y[int(j)] += np.conjugate(wij.T) @ arr[int(i)]
+                y[int(j)] += np.conjugate(wij.T @ arr_conj[int(i)])
                 if int(a) != int(b):
                     wji = block(int(j), int(i))
-                    y[int(i)] += np.conjugate(wji.T) @ arr[int(j)]
+                    y[int(i)] += np.conjugate(wji.T @ arr_conj[int(j)])
     return y.reshape(-1)
 
 
@@ -2191,7 +2194,8 @@ def _apply_linear_map_adjoint_to_channel_batches(
     flat = arr.reshape(-1, arr.shape[-1])
     # Keep the reference path sparse as well. Materialising a dense
     # conjugate-transpose is needlessly quadratic in the directional order.
-    mapped = (interpolation.matrix.conjugate().T @ flat.T).T
+    mapped = (interpolation.matrix.T @ np.conjugate(flat).T).T
+    np.conjugate(mapped, out=mapped)
     return np.asarray(mapped, dtype=arr.dtype).reshape(
         *arr.shape[:-1], interpolation.matrix.shape[1]
     )
