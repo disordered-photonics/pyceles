@@ -135,8 +135,9 @@ the prepared `A = I - T W` action; finite pairwise and periodic Rayleigh,
 Ewald, and NumPy direct-sum coupling provide that action for diagonal and
 explicit dense particle-T groups. Finite MLFMM coupling also provides the
 adjoint on both NumPy and CuPy; its CuPy multilevel reverse currently retains
-the sampled hierarchy for the duration of one action, while exact-near reverse
-blocks are bounded by the host-cache policy.
+the sampled hierarchy for the duration of one action, while its exact-near
+reverse action reuses prepared device translation tables without a second
+dense cache.
 
 ## MLFMM scope
 

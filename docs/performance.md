@@ -48,7 +48,9 @@ restart-boundary true-residual checks by default for robust stopping decisions.
   followed by per-RHS true-residual checks when the proxy reaches target.
 - pyceles does not expose a public runtime toggle to swap back to built-in CuPy
   GMRES in the simulation API.
-- `LinearSolveResult.block_metadata` reports whether block adapters were used.
+- `LinearSolveResult.block_metadata` reports block batches and residual
+  summaries; native block operators are required to accept `(n, nrhs)` inputs
+  directly.
 - Check your GPU's `singleToDoublePrecisionPerfRatio` before assuming
   `complex128` is close to a `2x` cost over `complex64`. On many consumer or
   laptop GPUs the ratio is high, and `complex128` slowdowns can be much larger

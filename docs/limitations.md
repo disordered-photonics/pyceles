@@ -60,10 +60,8 @@ Finite MLFMM coupling now exposes the same exact adjoint on NumPy and CuPy.
 Periodic direct-sum remains NumPy/reference-only. The CuPy multilevel MLFMM
 reverse traversal currently retains its sampled hierarchy during one adjoint
 action, so its memory use should be benchmarked separately for large plans.
-Its exact-near reverse blocks use a bounded resident cache (128 MiB by
-default); blocks beyond that budget are rebuilt per leaf pair, trading time
-for predictable device memory. The budget is available through
-`CuPyMLFMMHostCachePolicy.near_adjoint_cache_bytes_budget`.
+Its exact-near reverse action reuses the prepared device translation tables
+directly and therefore does not retain a second dense near-block cache.
 
 Other periodic limitations include:
 

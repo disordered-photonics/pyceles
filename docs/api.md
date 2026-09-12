@@ -35,16 +35,19 @@ polarized = simulation.run_polarizations(jones_source)
 `bicgstab`, `gcro`, `gcrotmk`, and `lsqr` (default: `gmres`). NumPy/SciPy provides direct,
 GMRES, BiCGSTAB, LGMRES, GCROTMK, and reference LSQR; CuPy provides direct and
 native GMRES, FGMRES, LGMRES, BiCGSTAB, harmonic GCRO-DR, and LSQR. CuPy GMRES
-also handles a two-dimensional right-hand side with native block GMRES. `fgmres`
-and `gcro` are CuPy-only, while `gcrotmk` is SciPy-only. LSQR is a single-RHS
+also handles a two-dimensional right-hand side with native block GMRES. For
+this block path, both the operator and an optional preconditioner must accept
+the `(n, nrhs)` input directly; vector-only callables should use one
+independent solve per right-hand side. `fgmres` and `gcro` are CuPy-only,
+while `gcrotmk` is SciPy-only. LSQR is a single-RHS
 method and requires an exact Hermitian-adjoint prepared operator. Exact adjoints
 are available for pairwise finite coupling and periodic Rayleigh, Ewald, and
 direct-sum operators when the selected particle-T representation provides its
 forward and adjoint actions (including explicit dense blocks). Finite MLFMM
 coupling provides the same action on NumPy and CuPy; the CuPy multilevel reverse
-keeps its sampled hierarchy during an adjoint apply, while exact-near reverse
-blocks are bounded by the host-cache policy (128 MiB by default). Periodic
-direct-sum remains a NumPy/reference-only coupling
+keeps its sampled hierarchy during an adjoint apply, while its exact-near reverse
+action reuses prepared device translation tables without a second dense cache.
+Periodic direct-sum remains a NumPy/reference-only coupling
 path; CuPy periodic preparation accepts Ewald and Rayleigh. LSQR uses
 `solver_maxiter` as its iteration budget;
 the common `solver_restart` setting has no effect. GCRO is a forward-only

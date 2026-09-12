@@ -23,9 +23,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Backend-native CuPy Krylov result classes and `*_native` entry points are
   internal implementation details; the stable package surface is the
   high-level solver functions and `LinearSolveResult`.
+- Breaking: native CuPy block GMRES now requires operators and preconditioners
+  to accept `(n, nrhs)` blocks directly; the legacy column-wise adapter was
+  removed. Native vector solver entry points likewise reject matrix inputs
+  instead of silently flattening them.
+- Explicit native solver warm starts are always evaluated as warm starts;
+  `x0=None` is the only implicit zero-start form.
 - Reduced precision-aware allocation and memory traffic in native CuPy Krylov
-  and particle-local operator paths, including device-resident projected solves
-  and bounded finite-MLFMM adjoint near-field storage.
+  and particle-local operator paths, including device-resident projected
+  solves, bounded block-Arnoldi accumulation, and device-resident finite-MLFMM
+  exact-near adjoint evaluation without a second dense reverse cache.
 - Reference LSQR continuation now uses the same physical stopping semantics as
   native LSQR and reports forward/adjoint action counts consistently.
 - Breaking: solver selection is now explicit. `auto` is no longer accepted,
