@@ -57,11 +57,11 @@ Finite pairwise and periodic Rayleigh, Ewald, and direct-sum coupling expose
 those adjoints for diagonal and explicit dense particle-T groups. The NumPy
 backend uses SciPy's reference LSQR and CuPy uses the native implementation.
 Finite MLFMM coupling now exposes the same exact adjoint on NumPy and CuPy.
-Periodic direct-sum remains NumPy/reference-only. The CuPy multilevel MLFMM
-reverse traversal currently retains its sampled hierarchy during one adjoint
-action, so its memory use should be benchmarked separately for large plans.
-Its exact-near reverse action reuses the prepared device translation tables
-directly and therefore does not retain a second dense near-block cache.
+Periodic direct-sum remains NumPy/reference-only. Production CuPy multilevel
+MLFMM plans with on-the-fly leaf maps stream the sampled-far adjoint through
+bounded reverse frontiers; dense/debug leaf plans retain the resident reference
+traversal. Its exact-near reverse action reuses the prepared device translation
+tables directly and therefore does not retain a second dense near-block cache.
 
 Other periodic limitations include:
 

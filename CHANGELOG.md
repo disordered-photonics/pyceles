@@ -39,6 +39,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and particle-local operator paths, including device-resident projected
   solves, bounded block-Arnoldi accumulation, and device-resident finite-MLFMM
   exact-near adjoint evaluation without a second dense reverse cache.
+- CuPy on-the-fly multilevel MLFMM adjoints now stream the sampled-far
+  reverse hierarchy through bounded source frontiers instead of retaining all
+  hierarchy levels during LSQR; dense/debug leaf plans keep the resident
+  reference traversal.
 - Reference LSQR continuation now uses the same physical stopping semantics as
   native LSQR and reports forward/adjoint action counts consistently.
 - Breaking: solver selection is now explicit. `auto` is no longer accepted,
