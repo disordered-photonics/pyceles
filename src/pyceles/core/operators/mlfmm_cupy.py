@@ -3987,25 +3987,48 @@ def _directional_to_box_regular_adjoint_cupy(
     *,
     cupy: Any,
 ) -> Any:
-    """Apply the adjoint of the regular directional receive transform."""
+    """Apply the adjoint of the regular directional receive transform.
+
+    This is the algebraic equivalent of applying the outgoing transform to
+    zero-padded electric/magnetic box states and combining the two four-channel
+    results, but writes directly into the final directional buffer.  Avoiding
+    those padded states and intermediate channel arrays is important for the
+    bounded streamed-adjoint memory contract.
+    """
 
     states = cupy.asarray(box_states, dtype=cupy.complex128)
     nscl = int(directional.nscl)
     if states.ndim != 3 or int(states.shape[1]) != 2 * nscl:
         raise ValueError("Regular-transform adjoint input must have shape (batch, 2*nscl, nrhs).")
-    zeros = cupy.zeros_like(states)
-    a_state = cupy.concatenate((states[:, :nscl, :], zeros[:, nscl:, :]), axis=1)
-    b_state = cupy.concatenate((zeros[:, :nscl, :], states[:, nscl:, :]), axis=1)
-    a_channels = _box_outgoing_to_directional_cupy(directional, a_state, cupy=cupy)
-    b_channels = _box_outgoing_to_directional_cupy(directional, b_state, cupy=cupy)
-    out = cupy.empty(
-        (int(states.shape[0]), 4, int(directional.grid.n_directions), int(states.shape[2])),
-        dtype=cupy.complex128,
-    )
-    out[:, 0] = a_channels[:, 0] + 1j * b_channels[:, 3]
-    out[:, 1] = a_channels[:, 1] - 1j * b_channels[:, 2]
-    out[:, 2] = 1j * a_channels[:, 1] + b_channels[:, 2]
-    out[:, 3] = -1j * a_channels[:, 0] + b_channels[:, 3]
+    n_batch = int(states.shape[0])
+    n_rhs = int(states.shape[2])
+    n_alpha = int(directional.grid.n_alpha)
+    n_beta = int(directional.grid.n_beta)
+    ndir = int(directional.grid.n_directions)
+    top = states[:, :nscl, :]
+    bottom = states[:, nscl:, :]
+    out = cupy.zeros((n_batch, 4, ndir, n_rhs), dtype=cupy.complex128)
+    work = out.reshape(n_batch, 4, n_alpha, n_beta, n_rhs)
+    beta_perm = directional.grid.beta_reflection_permutation
+    fth_reflected = directional.fth_beta[beta_perm]
+    fph_reflected = directional.fph_beta[beta_perm]
+
+    for im, mode_idx in enumerate(directional.mode_indices_by_m):
+        if int(mode_idx.size) == 0:
+            continue
+        fth_m = fth_reflected[:, mode_idx]
+        fph_m = fph_reflected[:, mode_idx]
+        top_m = top[:, mode_idx, :]
+        bottom_m = bottom[:, mode_idx, :]
+        top_theta = cupy.matmul(fth_m[None, :, :], top_m)
+        top_phi = cupy.matmul(fph_m[None, :, :], top_m)
+        bottom_theta = cupy.matmul(fth_m[None, :, :], bottom_m)
+        bottom_phi = cupy.matmul(fph_m[None, :, :], bottom_m)
+        phase = directional.phase_by_m[:, im].reshape(1, n_alpha, 1, 1)
+        work[:, 0] += phase * (top_theta[:, None, :, :] + 1j * bottom_phi[:, None, :, :])
+        work[:, 1] += phase * (top_phi[:, None, :, :] - 1j * bottom_theta[:, None, :, :])
+        work[:, 2] += phase * (1j * top_phi[:, None, :, :] + bottom_theta[:, None, :, :])
+        work[:, 3] += phase * (-1j * top_theta[:, None, :, :] + bottom_phi[:, None, :, :])
     return out
 
 
@@ -4033,27 +4056,32 @@ def _apply_directional_map_adjoint(
     if str(map_data.storage) == "dense":
         matrix = cupy.asarray(map_data.matrix, dtype=cupy.complex128)
         mapped = flat @ cupy.conjugate(matrix)
-    elif str(map_data.storage) == "sparse":
-        sparse = map_data.matrix
-        mapped = (sparse.conjugate().T @ flat.T).T
-    elif str(map_data.storage) == "packed_stencil":
+    elif str(map_data.storage) in {"sparse", "packed_stencil"}:
         key = id(map_data)
-        sparse = None if cache is None else cache.get(key)
-        if sparse is None:
-            cupyx_sparse = import_module("cupyx.scipy.sparse")
-            packed_cols, packed_vals, width_i32 = map_data.matrix
-            width = int(width_i32)
-            rows = cupy.repeat(cupy.arange(target_order, dtype=cupy.int32), width)
-            cols = cupy.asarray(packed_cols, dtype=cupy.int32).reshape(-1)
-            vals = cupy.asarray(packed_vals, dtype=cupy.complex128).reshape(-1)
-            valid = cols >= 0
-            sparse = cupyx_sparse.coo_matrix(
-                (vals[valid], (rows[valid], cols[valid])),
-                shape=(target_order, source_order),
-            ).tocsr()
+        adjoint_sparse = None if cache is None else cache.get(key)
+        if adjoint_sparse is None:
+            if str(map_data.storage) == "sparse":
+                sparse = map_data.matrix
+            else:
+                cupyx_sparse = import_module("cupyx.scipy.sparse")
+                packed_cols, packed_vals, width_i32 = map_data.matrix
+                width = int(width_i32)
+                rows = cupy.repeat(cupy.arange(target_order, dtype=cupy.int32), width)
+                cols = cupy.asarray(packed_cols, dtype=cupy.int32).reshape(-1)
+                vals = cupy.asarray(packed_vals, dtype=cupy.complex128).reshape(-1)
+                valid = cols >= 0
+                sparse = cupyx_sparse.coo_matrix(
+                    (vals[valid], (rows[valid], cols[valid])),
+                    shape=(target_order, source_order),
+                ).tocsr()
+            # Cache the matrix actually consumed by the reverse traversal.
+            # Re-forming ``sparse.conjugate().T`` in every streamed chunk
+            # creates avoidable sparse data/index temporaries and can leave a
+            # large allocator-pool footprint across LSQR iterations.
+            adjoint_sparse = sparse.conjugate().T.tocsr()
             if cache is not None:
-                cache[key] = sparse
-        mapped = (sparse.conjugate().T @ flat.T).T
+                cache[key] = adjoint_sparse
+        mapped = (adjoint_sparse @ flat.T).T
     else:
         raise ValueError(f"Unsupported directional map storage {map_data.storage!r}.")
     return mapped.reshape(int(arr.shape[0]), 4, int(arr.shape[3]), source_order).transpose(
