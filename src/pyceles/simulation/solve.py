@@ -568,7 +568,7 @@ def _solve_sources_impl(
             raise RuntimeError(
                 "Internal error: LSQR adjoint requested before operator preparation."
             )
-        adjoint_operator = prepared.make_adjoint(backend=operator_backend)
+        adjoint_operator = prepared.make_adjoint()
 
     rhs_matrix = np.column_stack([rhs_flat[label] for label in labels])
     rhs_arg = rhs_matrix[:, 0] if n_channels == 1 else rhs_matrix

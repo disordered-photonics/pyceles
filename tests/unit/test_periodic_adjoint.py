@@ -97,7 +97,7 @@ def test_periodic_rayleigh_adjoint_matches_synthetic_action() -> None:
 
 def test_prepared_operator_exposes_shape_preserving_adjoint() -> None:
     prepared = _synthetic_prepared()
-    first = prepared.make_adjoint(backend="numpy")
+    first = prepared.make_adjoint()
     assert callable(first)
     values = np.ones((12, 2), dtype=np.complex128)
     actual = first(values)
@@ -278,6 +278,7 @@ def test_native_lsqr_forwards_operator_and_accumulation_dtypes(
         multiply=np.multiply,
         add=np.add,
         subtract=np.subtract,
+        divide=np.divide,
         sqrt=np.sqrt,
         conj=np.conj,
         vdot=np.vdot,
@@ -381,6 +382,7 @@ def test_native_lsqr_can_carry_a_known_correction_residual(
         multiply=np.multiply,
         add=np.add,
         subtract=np.subtract,
+        divide=np.divide,
         sqrt=np.sqrt,
         conj=np.conj,
         vdot=np.vdot,

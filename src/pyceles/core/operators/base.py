@@ -112,29 +112,15 @@ class PreparedOperator:
         tx = self.particle_t.apply(wx)
         return cast(Array, self._subtract_into(x_arr, tx))
 
-    def make_adjoint(self, *, backend: str | None = None) -> Callable[[Any], Any]:
-        """Return the exact prepared adjoint action when the operator provides it.
+    def make_adjoint(self) -> Callable[[Any], Any]:
+        """Return the exact prepared adjoint action when available."""
 
-        Adjoint ownership belongs to the prepared ``T`` and ``W`` operators,
-        not to the linear-solver package. ``backend`` is retained as an
-        optional consistency assertion for low-level callers.
-        """
         coupling_adjoint = getattr(self.coupling, "apply_adjoint", None)
         particle_adjoint = getattr(self.particle_t, "apply_adjoint", None)
         if not callable(coupling_adjoint) or not callable(particle_adjoint):
             raise NotImplementedError(
                 "This prepared operator does not expose exact T/W adjoint actions."
             )
-        if backend is not None:
-            requested = str(backend).lower()
-            if requested not in {"numpy", "cupy"}:
-                raise ValueError(f"Unsupported adjoint backend {backend!r}.")
-            coupling_name = type(self.coupling).__name__
-            actual = "cupy" if coupling_name.startswith("CuPy") else "numpy"
-            if requested != actual:
-                raise TypeError(
-                    f"backend={requested!r} does not match the prepared {actual!r} coupling."
-                )
         return self.apply_adjoint
 
     def apply_adjoint(self, x: Array) -> Array:
