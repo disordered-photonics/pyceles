@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Added an opt-in native CuPy harmonic GCRO-DR solver
   (`solver_method="gcro"`). Its bounded recycle rank is controlled by
-  `solver_recycle_dim`.
+  `solver_gcro_recycle_dim`.
 - Added an opt-in single-RHS LSQR solver (`solver_method="lsqr"`): NumPy uses
   SciPy's reference implementation and CuPy uses the native recurrence.
 - Added exact adjoint actions for finite pairwise and periodic Ewald coupling
@@ -23,6 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Backend-native CuPy Krylov result classes and `*_native` entry points are
   internal implementation details; the stable package surface is the
   high-level solver functions and `LinearSolveResult`.
+- Breaking: the GCRO recycle control is named `solver_gcro_recycle_dim` at
+  `SimulationConfig` level and `gcro_recycle_dim` in the generic solver
+  dispatcher; stale generic/public aliases were removed rather than retained.
+- Solver/backend/preconditioner compatibility is validated at configuration or
+  dispatcher entry instead of accepting combinations that fail later or are
+  silently ignored.
 - Breaking: native CuPy block GMRES now requires operators and preconditioners
   to accept `(n, nrhs)` blocks directly; the legacy column-wise adapter was
   removed. Native vector solver entry points likewise reject matrix inputs

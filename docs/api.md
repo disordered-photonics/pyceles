@@ -53,7 +53,7 @@ path; CuPy periodic preparation accepts Ewald and Rayleigh. LSQR uses
 the common `solver_restart` setting has no effect. GCRO is a forward-only
 harmonic-recycling method with a single-RHS recurrence; multi-RHS workflows
 solve each column independently rather than using block GCRO. It exposes only
-`solver_recycle_dim` in addition to the common restart/tolerance/budget
+`solver_gcro_recycle_dim` in addition to the common restart/tolerance/budget
 controls, while its extraction policy remains fixed internally. The initial
 GCRO path does not accept a custom preconditioner. Solver selection is always
 explicit (with restarted GMRES as the high-level default); pyceles does not

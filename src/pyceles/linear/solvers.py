@@ -78,7 +78,6 @@ class LinearSolveResult:
         )
 
 
-GmresResult = LinearSolveResult
 DenseLUFactorization = tuple[object, object]
 _BACKEND_SOLUTION_CAPTURE: ContextVar[dict[str, Any] | None] = ContextVar(
     "_BACKEND_SOLUTION_CAPTURE", default=None
@@ -959,7 +958,7 @@ def gmres_scipy(
     callback: Callable[[float], None] | None = None,
     show_progress: bool = True,
     compute_final_residual: bool = True,
-) -> GmresResult:
+) -> LinearSolveResult:
     """Solve Ax=b via SciPy GMRES using a matvec callable.
 
     Parameters
@@ -1066,7 +1065,7 @@ def gmres_cupy(
     happy_breakdown_tol: float = 0.0,
     show_progress: bool = True,
     compute_final_residual: bool = True,
-) -> GmresResult:
+) -> LinearSolveResult:
     """Solve Ax=b via native CuPy restarted GMRES.
 
     The Arnoldi basis, Hessenberg system, and Givens updates stay device-side.
@@ -1562,7 +1561,7 @@ def fgmres_cupy(
     happy_breakdown_tol: float = 0.0,
     show_progress: bool = True,
     compute_final_residual: bool = True,
-) -> GmresResult:
+) -> LinearSolveResult:
     """Solve Ax=b via native CuPy restarted flexible GMRES.
 
     FGMRES uses a separate preconditioned basis `Z` and supports variable
@@ -1658,7 +1657,7 @@ def lgmres_cupy(
     happy_breakdown_tol: float = 0.0,
     show_progress: bool = True,
     compute_final_residual: bool = True,
-) -> GmresResult:
+) -> LinearSolveResult:
     """Solve Ax=b via native CuPy restarted LGMRES.
 
     LGMRES reuses a small set of correction vectors across restart cycles,
@@ -2290,7 +2289,7 @@ def solve_linear_system(
     gmres_block_reorthogonalize: bool = True,
     lgmres_outer_k: int = 3,
     lgmres_store_outer_av: bool = True,
-    recycle_dim: int = 8,
+    gcro_recycle_dim: int = 8,
     dtype: npt.DTypeLike = np.complex128,
     accum_dtype: npt.DTypeLike | None = None,
     backend: Literal["numpy", "cupy"] = "numpy",
@@ -2345,10 +2344,10 @@ def solve_linear_system(
     lsqr_condition_limit, lsqr_true_residual_every:
         Optional LSQR safeguards and true-residual check interval. The latter
         is zero by default because a true check costs another forward action.
-    recycle_dim:
+    gcro_recycle_dim:
         CuPy-native GCRO-DR harmonic recycle dimension. ``restart`` is the
         total augmented dimension, so recycled cycles generate at most
-        ``restart-recycle_dim`` new Arnoldi vectors.
+        ``restart-gcro_recycle_dim`` new Arnoldi vectors.
     lgmres_outer_k, lgmres_store_outer_av:
         CuPy-native LGMRES recycle controls. ``lgmres_outer_k`` is the number
         of correction directions retained across restart cycles; enabling
@@ -2376,7 +2375,9 @@ def solve_linear_system(
 
     nrhs = b_mat.shape[1]
     m = str(method).lower()
-    backend_name = backend
+    backend_name = str(backend).lower()
+    if backend_name not in {"numpy", "cupy"}:
+        raise ValueError(f"`backend` must be 'numpy' or 'cupy'. Got {backend!r}.")
     if backend_name == "cupy" and m not in {
         "gmres",
         "fgmres",
@@ -2404,6 +2405,8 @@ def solve_linear_system(
 
     if m == "lsqr" and nrhs != 1:
         raise ValueError("`method='lsqr'` currently supports one RHS only.")
+    if m == "direct" and preconditioner is not None:
+        raise ValueError("`method='direct'` does not use a preconditioner.")
 
     if m == "direct":
         direct_impl = direct_dense_cupy if backend_name == "cupy" else direct_dense_scipy
@@ -2472,7 +2475,7 @@ def solve_linear_system(
                     gmres_block_reorthogonalize=gmres_block_reorthogonalize,
                     lgmres_outer_k=lgmres_outer_k,
                     lgmres_store_outer_av=lgmres_store_outer_av,
-                    recycle_dim=recycle_dim,
+                    gcro_recycle_dim=gcro_recycle_dim,
                     dtype=dtype,
                     accum_dtype=accum_dtype,
                     backend=backend_name,
@@ -2660,7 +2663,7 @@ def solve_linear_system(
             atol=atol,
             restart=restart,
             maxiter=maxiter,
-            recycle_dim=recycle_dim,
+            recycle_dim=gcro_recycle_dim,
             accum_dtype=accum_dtype,
             monitor=gmres_monitor,
             progress_residual=gmres_progress_residual,

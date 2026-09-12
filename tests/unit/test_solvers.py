@@ -190,6 +190,18 @@ def test_direct_dense_uses_precomputed_lu_factorization():
     assert out.method == "direct"
 
 
+def test_solve_linear_system_rejects_direct_preconditioner() -> None:
+    b = np.asarray([1.0 + 0.0j], dtype=np.complex128)
+    with pytest.raises(ValueError, match="does not use a preconditioner"):
+        solve_linear_system(
+            lambda x: np.asarray(x),
+            b,
+            method="direct",
+            preconditioner=lambda x: x,
+            show_progress=False,
+        )
+
+
 def test_solve_linear_system_defaults_to_gmres():
     b = np.array([1.0 + 0j, 2.0 + 0j])
     out = solve_linear_system(lambda x: x.copy(), b, show_progress=False)
@@ -632,7 +644,7 @@ def test_gcro_cupy_harmonic_recycling_solves_toy_system(
         method="gcro",
         backend="cupy",
         restart=5,
-        recycle_dim=2,
+        gcro_recycle_dim=2,
         maxiter=100,
         rtol=1e-10,
         accum_dtype=np.complex128,
@@ -654,7 +666,7 @@ def test_gcro_cupy_harmonic_recycling_solves_toy_system(
         method="gcro",
         backend="cupy",
         restart=5,
-        recycle_dim=2,
+        gcro_recycle_dim=2,
         maxiter=5,
         rtol=1e-10,
         accum_dtype=np.complex128,
@@ -671,7 +683,7 @@ def test_gcro_cupy_harmonic_recycling_solves_toy_system(
         method="gcro",
         backend="cupy",
         restart=5,
-        recycle_dim=2,
+        gcro_recycle_dim=2,
         maxiter=100,
         rtol=1e-10,
         accum_dtype=np.complex128,

@@ -53,16 +53,53 @@ def test_simulation_config_accepts_cupy_gcro_and_recycle_dimension() -> None:
         operator_backend="cupy",
         solver_method="gcro",
         solver_restart=16,
-        solver_recycle_dim=4,
+        solver_gcro_recycle_dim=4,
         verbose=False,
     )
     assert cfg.solver_method == "gcro"
-    assert cfg.solver_recycle_dim == 4
+    assert cfg.solver_gcro_recycle_dim == 4
 
 
 def test_simulation_config_rejects_gcro_on_numpy_backend() -> None:
     with pytest.raises(NotImplementedError, match="only with"):
         SimulationConfig(solver_method="gcro", verbose=False)
+
+
+def test_simulation_config_rejects_fgmres_on_numpy_backend() -> None:
+    with pytest.raises(NotImplementedError, match="only with"):
+        SimulationConfig(solver_method="fgmres", verbose=False)
+
+
+def test_simulation_config_rejects_gcrotmk_on_cupy_backend() -> None:
+    with pytest.raises(NotImplementedError, match="only with"):
+        SimulationConfig(
+            operator_backend="cupy",
+            solver_method="gcrotmk",
+            verbose=False,
+        )
+
+
+@pytest.mark.parametrize("method", ["direct", "lsqr", "gcro"])
+def test_simulation_config_rejects_unsupported_solver_preconditioners(method: str) -> None:
+    kwargs: dict[str, object] = {
+        "solver_method": method,
+        "solver_preconditioner": lambda x: x,
+        "verbose": False,
+    }
+    if method == "gcro":
+        kwargs["operator_backend"] = "cupy"
+    with pytest.raises(NotImplementedError, match="preconditioner"):
+        SimulationConfig(**kwargs)  # type: ignore[arg-type]
+
+
+def test_simulation_config_rejects_custom_cupy_preconditioner() -> None:
+    with pytest.raises(NotImplementedError, match="CuPy.*preconditioner"):
+        SimulationConfig(
+            operator_backend="cupy",
+            solver_method="gmres",
+            solver_preconditioner=lambda x: x,
+            verbose=False,
+        )
 
 
 def test_simulation_config_accepts_cupy_lsqr() -> None:
@@ -81,7 +118,7 @@ def test_simulation_config_rejects_gcros_full_restart_recycle_space() -> None:
             operator_backend="cupy",
             solver_method="gcro",
             solver_restart=8,
-            solver_recycle_dim=8,
+            solver_gcro_recycle_dim=8,
             verbose=False,
         )
 
@@ -202,7 +239,7 @@ def test_simulation_config_accepts_mlfmm_complex64(backend: str) -> None:
         ({"solver_rtol": 0.0}, "solver_rtol"),
         ({"solver_compute_final_residual": "yes"}, "boolean"),
         ({"solver_restart": 0}, "solver_restart"),
-        ({"solver_recycle_dim": 0}, "solver_recycle_dim"),
+        ({"solver_gcro_recycle_dim": 0}, "solver_gcro_recycle_dim"),
         ({"solver_maxiter": 0}, "solver_maxiter"),
         ({"solver_method": "auto"}, "solver_method"),
         ({"solver_preconditioner": object()}, "callable"),

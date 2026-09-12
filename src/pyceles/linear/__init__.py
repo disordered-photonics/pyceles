@@ -1,7 +1,6 @@
 from .solvers import (
     BlockKrylovCallbackPayload,
     DenseLUFactorization,
-    GmresResult,
     LinearSolveResult,
     bicgstab_cupy,
     bicgstab_scipy,
@@ -24,7 +23,6 @@ from .solvers import (
 __all__ = [
     "BlockKrylovCallbackPayload",
     "DenseLUFactorization",
-    "GmresResult",
     "LinearSolveResult",
     "bicgstab_cupy",
     "bicgstab_scipy",

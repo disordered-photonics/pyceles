@@ -62,7 +62,6 @@ from .mlfmm_cupy import (
 )
 from .prepare import precompute_T_diagonal, prepare_matvec, rhs_Tb_numpy
 from .single_body import CompositeParticleTOperator, ParticleTOperator, build_T_mode_diagonal
-from .single_body_cupy import CuPyDiagonalParticleTOperator
 
 __all__ = [
     "AdjointCouplingOperator",
@@ -70,7 +69,6 @@ __all__ = [
     "AxisymmetricTGroup",
     "CompositeParticleTOperator",
     "CouplingOperator",
-    "CuPyDiagonalParticleTOperator",
     "CuPyMLFMMCouplingOperator",
     "CuPyMLFMMHostCacheData",
     "CuPyMLFMMHostCachePolicy",

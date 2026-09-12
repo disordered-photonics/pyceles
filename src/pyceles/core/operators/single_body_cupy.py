@@ -532,38 +532,9 @@ def wrap_particle_t_groups_cupy(
     )
 
 
-class CuPyDiagonalParticleTOperator(CuPyCompositeParticleTOperator):
-    """Compatibility alias for diagonal-only CuPy `T` preparation."""
-
-    def __init__(
-        self,
-        lmax: int,
-        n_particles: int,
-        T_diag: Array,
-        T_M: Array,
-        T_N: Array,
-        dtype: np.dtype = DEFAULT_COMPLEX_DTYPE,
-    ) -> None:
-        super().__init__(
-            lmax=lmax,
-            n_particles=n_particles,
-            groups=(
-                CuPyDiagonalTGroup(
-                    particle_indices=np.arange(int(n_particles), dtype=np.int64),
-                    T_M=T_M,
-                    T_N=T_N,
-                    T_diag=T_diag,
-                    dtype=dtype,
-                ),
-            ),
-            dtype=dtype,
-        )
-
-
 __all__ = [
     "CuPyCompositeParticleTOperator",
     "CuPyDenseTGroup",
-    "CuPyDiagonalParticleTOperator",
     "CuPyDiagonalTGroup",
     "wrap_particle_t_groups_cupy",
 ]

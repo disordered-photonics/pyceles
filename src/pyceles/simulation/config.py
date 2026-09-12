@@ -189,7 +189,7 @@ class SimulationConfig:
     solver_rtol: float = 1e-5
     solver_compute_final_residual: bool = True
     solver_restart: int = 100
-    solver_recycle_dim: int = 8
+    solver_gcro_recycle_dim: int = 8
     solver_maxiter: int = 1000
     solver_preconditioner: Callable[[np.ndarray], np.ndarray] | None = None
     operator_backend: Literal["numpy", "cupy"] = "numpy"
@@ -231,13 +231,18 @@ class SimulationConfig:
             raise ValueError("`solver_compute_final_residual` must be a boolean.")
         if int(self.solver_restart) < 1:
             raise ValueError(f"`solver_restart` must be >= 1. Got {self.solver_restart!r}.")
-        if int(self.solver_recycle_dim) < 1:
-            raise ValueError(f"`solver_recycle_dim` must be >= 1. Got {self.solver_recycle_dim!r}.")
-        if str(self.solver_method).lower() == "gcro" and int(self.solver_recycle_dim) >= int(
+        if int(self.solver_gcro_recycle_dim) < 1:
+            raise ValueError(
+                "`solver_gcro_recycle_dim` must be >= 1. "
+                f"Got {self.solver_gcro_recycle_dim!r}."
+            )
+        if str(self.solver_method).lower() == "gcro" and int(
+            self.solver_gcro_recycle_dim
+        ) >= int(
             self.solver_restart
         ):
             raise ValueError(
-                "`solver_recycle_dim` must be smaller than `solver_restart` so GCRO "
+                "`solver_gcro_recycle_dim` must be smaller than `solver_restart` so GCRO "
                 "retains room for new Arnoldi directions."
             )
         if int(self.solver_maxiter) < 1:
@@ -273,9 +278,30 @@ class SimulationConfig:
                 f"Got {self.operator_backend!r}."
             )
         object.__setattr__(self, "operator_backend", backend)
-        if method == "gcro" and backend != "cupy":
+        if method in {"fgmres", "gcro"} and backend != "cupy":
             raise NotImplementedError(
-                "`solver_method='gcro'` is currently available only with `operator_backend='cupy'`."
+                f"`solver_method={method!r}` is currently available only with "
+                "`operator_backend='cupy'`."
+            )
+        if method == "gcrotmk" and backend != "numpy":
+            raise NotImplementedError(
+                "`solver_method='gcrotmk'` is currently available only with "
+                "`operator_backend='numpy'`."
+            )
+        if method == "lsqr" and self.solver_preconditioner is not None:
+            raise NotImplementedError("`solver_method='lsqr'` does not accept a preconditioner.")
+        if method == "direct" and self.solver_preconditioner is not None:
+            raise NotImplementedError(
+                "`solver_method='direct'` does not use a preconditioner."
+            )
+        if method == "gcro" and self.solver_preconditioner is not None:
+            raise NotImplementedError(
+                "`solver_method='gcro'` does not currently accept a preconditioner."
+            )
+        if backend == "cupy" and self.solver_preconditioner is not None:
+            raise NotImplementedError(
+                "The high-level CuPy simulation path does not support custom "
+                "preconditioner callables yet."
             )
 
         coupling_backend = str(self.coupling_backend).lower()

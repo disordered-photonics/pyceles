@@ -31,7 +31,7 @@ For single-RHS iterative solves on the CuPy backend, pyceles also ships native
 `fgmres[cupy]`, `lgmres[cupy]`, `bicgstab[cupy]`, harmonic `gcro[cupy]`, and
 `lsqr[cupy]` and reference `lsqr` paths. The native path keeps the main Krylov
 state on device; the NumPy path delegates to SciPy. GCRO retains a bounded
-harmonic recycle space controlled by `solver_recycle_dim`; LSQR keeps only its
+harmonic recycle space controlled by `solver_gcro_recycle_dim`; LSQR keeps only its
 bidiagonal recurrence but requires an exact Hermitian-adjoint action and
 currently supports one RHS. Multi-RHS workflows solve columns independently.
 Restarted GMRES-family methods use

@@ -422,7 +422,7 @@ Notes:
 - `SimulationConfig.solver_compute_final_residual` controls true-residual
   verification/diagnostics policy.
 - `solver_method="gcro"` selects the native CuPy harmonic recycling solver for
-  single-RHS runs; `SimulationConfig.solver_recycle_dim` controls its bounded
+  single-RHS runs; `SimulationConfig.solver_gcro_recycle_dim` controls its bounded
   recycle rank. The common `solver_restart` value is the total augmented
   dimension.
 - `solver_method="lsqr"` selects a single-RHS LSQR solver. The NumPy backend
