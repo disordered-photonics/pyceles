@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Added provider-neutral import of published spectral `.tmat.h5` dense
+  T-matrices through `load_tmatrix_h5` and the `TMatrixParticle` descriptor,
+  including CELES ordering conversion and geometry persistence.
+- Added a loader-only inspection example and stricter validation of imported
+  spectral axes, mode arrays, metadata, and particle coordinates.
 - Added an opt-in native CuPy harmonic GCRO-DR solver
   (`solver_method="gcro"`). Its bounded recycle rank is controlled by
   `solver_gcro_recycle_dim`.

@@ -313,9 +313,25 @@ expanding them into a mutable list:
 particles = pcl.ParticleCollection.concatenate(batch_a, batch_b)
 ```
 
-For third-party or imported particle descriptions, construct the same layout
-directly with `ParticleCollection.from_archetypes(...)`. Scaling then follows
-the number of unique archetypes/operators, not a special-case particle class.
+For third-party dense T matrices, load one wavelength from a published
+`.tmat.h5` file and wrap it as an explicit particle:
+
+```python
+data = pcl.load_tmatrix_h5("particle.tmat.h5", wavelength=550.0)
+particle = data.as_particle(position=(0.0, 0.0, 0.0), radius=300.0)
+sim = pcl.Simulation(cfg, particles=[particle])
+```
+
+Additional copies can reuse the immutable matrix (and may use an explicitly
+rotated block). Other imported particle descriptions can construct the same
+layout directly with `ParticleCollection.from_archetypes(...)`. Scaling then
+follows the number of unique archetypes/operators, not a special-case particle
+class.
+
+The imported matrix is opaque only for hidden geometry and internal fields. Its
+explicit square block still supplies an exact conjugate-transpose action, so
+adjoint-based solvers can use it whenever the coupling backend supports an
+adjoint. This does not create shape, material, or internal-field derivatives.
 
 ## Periodic Rayleigh/Wood safety checks
 

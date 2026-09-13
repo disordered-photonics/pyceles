@@ -23,6 +23,18 @@ This page records current limitations.
 - Fully unique arbitrary dense T matrices are inherently `O(N * Nm^2)` unless a
   future backend provides additional block-sparse, low-rank, or on-the-fly
   structure.
+- `TMatrixParticle` imports one square electric/magnetic parity block selected
+  from a published `.tmat.h5` spectrum. Positive/negative helicity files are
+  converted to pyceles' electric/magnetic parity basis; rectangular
+  incident/scattered mode sets and spectral interpolation are not currently
+  supported. The importer exposes the file's wavelength and embedding
+  metadata, and `TMatrixData.validate_context` can reject a mismatch before
+  construction (the user remains responsible for selecting a physically
+  consistent matrix). The stored square block still has an exact algebraic
+  conjugate transpose, so opaque particles do not by themselves disable LSQR
+  or other adjoint-based operator methods. They do disable reconstruction of
+  hidden internal fields and shape/material derivatives; near-field samples
+  inside the supplied circumscribing sphere are explicit `NaN` values.
 
 ## Spheroids
 
@@ -110,8 +122,8 @@ Dense/direct periodic validation can remain memory-sensitive on small GPUs. Even
 pyceles is pre-1.0. The intended public surface is:
 
 - `Simulation`, `SimulationConfig`, and result objects,
-- particle descriptors such as `Sphere`, `PECSphere`, `LayeredSphere`, and
-  `Spheroid`,
+- particle descriptors such as `Sphere`, `PECSphere`, `LayeredSphere`,
+  `Spheroid`, and `TMatrixParticle`,
 - source descriptors such as `PlaneWave`, Gaussian/Laguerre-Gaussian/Bessel sources, SLM wrappers, and dipole sources,
 - HDF5 save/load helpers,
 - near-field and far-field user-facing helpers.

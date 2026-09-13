@@ -1,8 +1,8 @@
 # Validation and reproducibility
 
-pyceles is developed around reproducible numerical checks combining unit tests for
-individual numerical kernels, physics-oriented invariants, regression tests against
-independent references, and larger benchmark scripts.
+pyceles is developed around reproducible numerical checks combining unit tests
+for individual numerical kernels, physics-oriented invariants, regression tests
+against independent references, and larger benchmark scripts.
 
 ## Automated tests
 
@@ -13,10 +13,11 @@ The test suite is organized by pytest markers:
 - `regression`: locked behavior and reference cases,
 - `io`: HDF5, plotting, and workflow-oriented tests,
 - `gpu`: tests requiring a real CuPy/CUDA runtime,
-- `fake_gpu`: deterministic CuPy-dispatch tests using controlled test doubles; these remain part of CPU-only gates,
+- `fake_gpu`: deterministic CuPy-dispatch tests using controlled test doubles,
 - `slow`: longer-running tests kept out of fast local gates,
 - `filesystem` and `hdf5`: tests touching temporary files or HDF5 payloads,
-- `reference`: comparisons against independent formulas, fixed oracle data, or external references,
+- `reference`: comparisons against independent formulas, fixed oracle data, or
+  external references,
 - `api_contract`: public-shape and protocol checks.
 
 Useful commands:
@@ -41,9 +42,12 @@ The current tests cover, among other areas:
 - NumPy and CuPy backend agreement for selected operators,
 - near-field and far-field helper contracts,
 - energy/power consistency checks,
-- translation, rotation, inversion-parity, particle-order, and Lorentz-reciprocity invariants,
+- translation, rotation, inversion-parity, particle-order, and Lorentz-
+  reciprocity invariants,
 - local absorption and dipole diagnostics,
 - HDF5 workflow persistence,
+- published spectral `.tmat.h5` mode conversion and opaque-particle near-field
+  behavior,
 - periodic Ewald helper routines and CuPy parity checks,
 - spheroid regression cases against external references.
 
@@ -71,6 +75,14 @@ Profiling entry points:
 - `examples/profile_pyceles_phases.py`
 - `examples/profile_pyceles_periodic_phases.py`
 
-These scripts are intended to produce reproducible local timing and comparison
-artifacts. Exact numbers depend strongly on CPU, GPU, CUDA, BLAS, and driver
-versions.
+For a loader-only check of a published dense T-matrix file that does not run a
+solver, use:
+
+```bash
+python examples/inspect_standard_tmatrix.py \
+  --tmatrix <particle.tmat.h5> --wavelength 600
+```
+
+Exact numerical comparisons against external T-matrix providers are maintained
+as private validation harnesses rather than public usage examples. Exact
+numbers depend strongly on CPU, GPU, CUDA, BLAS, and driver versions.

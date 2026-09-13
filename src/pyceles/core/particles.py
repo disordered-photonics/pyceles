@@ -7,6 +7,8 @@ from typing import Literal, overload
 
 import numpy as np
 
+from .indexing import n_modes
+
 ParticleTRepresentation = Literal["diagonal", "axisymmetric", "dense"]
 
 
@@ -16,9 +18,9 @@ class Particle:
 
     Notes
     -----
-    `Sphere`, `PECSphere`, `LayeredSphere`, and `Spheroid` are supported by
-    active solver kernels, though not every downstream postprocessing path is
-    equally mature for every particle family.
+    `Sphere`, `PECSphere`, `LayeredSphere`, `Spheroid`, and
+    `TMatrixParticle` are supported by active solver kernels, though not every
+    downstream postprocessing path is equally mature for every particle family.
     """
 
     position: tuple[float, float, float]
@@ -145,6 +147,56 @@ class Spheroid(Particle):
         return "axisymmetric"
 
 
+@dataclass(frozen=True, slots=True)
+class TMatrixParticle(Particle):
+    """Particle represented by an explicit spherical-basis T-matrix.
+
+    The matrix maps regular incident SVWF coefficients to outgoing scattered
+    coefficients in the CELES mode ordering used by :mod:`pyceles`.  This is
+    the representation used for imported third-party particles whose internal
+    geometry is not available to pyceles.  ``radius`` is only a circumscribing
+    radius: it is used for overlap checks and geometric plotting, not for
+    evaluating an internal field.  Because the imported block is explicit, its
+    exact conjugate-transpose action remains available to prepared adjoint
+    operators; opacity limits geometry-dependent fields and derivatives, not
+    the algebraic T-matrix adjoint.
+    """
+
+    radius: float
+    lmax: int
+    t_matrix: np.ndarray
+
+    def __post_init__(self) -> None:
+        radius = float(self.radius)
+        if not np.isfinite(radius) or radius <= 0.0:
+            raise ValueError("radius must be finite and strictly positive.")
+        lmax = int(self.lmax)
+        if lmax < 1:
+            raise ValueError("lmax must be >= 1.")
+        matrix = np.asarray(self.t_matrix)
+        if matrix.ndim != 2 or matrix.shape != (n_modes(lmax), n_modes(lmax)):
+            raise ValueError(
+                "t_matrix must have shape "
+                f"({n_modes(lmax)}, {n_modes(lmax)}) for lmax={lmax}. Got {matrix.shape}."
+            )
+        if not np.issubdtype(matrix.dtype, np.complexfloating) or matrix.dtype not in {
+            np.dtype(np.complex64),
+            np.dtype(np.complex128),
+        }:
+            matrix = np.asarray(matrix, dtype=np.complex128)
+        if not np.all(np.isfinite(matrix.real)) or not np.all(np.isfinite(matrix.imag)):
+            raise ValueError("t_matrix must contain only finite values.")
+        owned = np.array(matrix, dtype=matrix.dtype, copy=True, order="C")
+        owned.setflags(write=False)
+        object.__setattr__(self, "radius", radius)
+        object.__setattr__(self, "lmax", lmax)
+        object.__setattr__(self, "t_matrix", owned)
+
+    def circumscribing_radius(self) -> float:
+        """Return the user-supplied enclosing-sphere radius."""
+        return float(self.radius)
+
+
 def _rotation_matrix_zyz_lab_to_body(euler_angles: tuple[float, float, float]) -> np.ndarray:
     """Return the lab-to-body rotation matrix for particle Euler angles.
 
@@ -193,7 +245,7 @@ def particle_contains_points(
     center = np.asarray(particle.position, dtype=float).reshape(3)
     rel = pts - center[None, :]
 
-    if isinstance(particle, (Sphere, PECSphere)):
+    if isinstance(particle, (Sphere, PECSphere, TMatrixParticle)):
         radius = float(particle.radius)
         return np.asarray(np.sum(rel * rel, axis=1) < (radius**2), dtype=bool)
 
@@ -702,6 +754,10 @@ class ParticleCollection(Sequence[Particle]):
                 values.append(complex(particle.layer_refractive_indices[-1]))
             elif isinstance(particle, Spheroid):
                 values.append(complex(particle.refractive_index))
+            elif isinstance(particle, TMatrixParticle):
+                # An imported dense T matrix carries no material model from
+                # which an outer refractive index could be inferred.
+                continue
             else:
                 raise TypeError(
                     f"Unsupported particle type {type(particle).__name__!r} "

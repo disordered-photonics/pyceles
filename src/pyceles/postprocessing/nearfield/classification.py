@@ -12,6 +12,7 @@ from pyceles.core.particles import (
     PECSphere,
     Sphere,
     Spheroid,
+    TMatrixParticle,
     particle_contains_points,
 )
 
@@ -82,7 +83,7 @@ class InternalPointClassification:
 
 
 def _supported_particle_archetypes(part: ParticleCollection) -> None:
-    supported = (Sphere, PECSphere, LayeredSphere, Spheroid)
+    supported = (Sphere, PECSphere, LayeredSphere, Spheroid, TMatrixParticle)
     bad = [
         type(particle).__name__
         for particle in part.archetypes
@@ -91,7 +92,7 @@ def _supported_particle_archetypes(part: ParticleCollection) -> None:
     if bad:
         raise TypeError(
             "Internal point classification currently supports Sphere, PECSphere, LayeredSphere, "
-            f"and Spheroid. Got {bad}."
+            f"Spheroid, and TMatrixParticle. Got {bad}."
         )
 
 
@@ -100,7 +101,9 @@ def _active_particle_mask(part: ParticleCollection, *, n_medium: complex) -> np.
     n_medium_c = complex(n_medium)
     active_archetypes = np.asarray(
         [
-            not (
+            True
+            if isinstance(particle, TMatrixParticle)
+            else not (
                 (isinstance(particle, Sphere) and complex(particle.refractive_index) == n_medium_c)
                 or (
                     isinstance(particle, Spheroid)

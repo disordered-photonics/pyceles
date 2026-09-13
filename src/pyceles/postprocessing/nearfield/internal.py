@@ -18,6 +18,7 @@ from pyceles.core.particles import (
     PECSphere,
     Sphere,
     Spheroid,
+    TMatrixParticle,
     particle_contains_points,
 )
 from pyceles.core.spherical import spherical_functions_trigon
@@ -1175,6 +1176,24 @@ def _compute_internal_field_particles(
         if pec_idx.size == n_particles:
             return e, h, inside
 
+    imported_idx = part.indices_of_type(TMatrixParticle)
+    if imported_idx.size:
+        # An imported T matrix intentionally carries no interior material
+        # model. Preserve the ownership mask but make those samples explicit
+        # NaNs rather than silently presenting the host or a zero field.
+        for index in imported_idx:
+            if classification is None:
+                idx = np.flatnonzero(particle_contains_points(part[int(index)], pts)).astype(
+                    np.intp, copy=False
+                )
+            else:
+                idx = classification.points_for_particle(int(index))
+            inside[idx] = True
+            e[idx] = np.nan + 0j
+            h[idx] = np.nan + 0j
+        if imported_idx.size == n_particles or (imported_idx.size + pec_idx.size == n_particles):
+            return e, h, inside
+
     sphere_arrays = part.homogeneous_sphere_arrays()
     if sphere_arrays is not None:
         positions, radii, n_particle = sphere_arrays
@@ -1194,11 +1213,12 @@ def _compute_internal_field_particles(
             accum_dtype=accum_dtype,
         )
 
-    supported = (Sphere, PECSphere, LayeredSphere, Spheroid)
+    supported = (Sphere, PECSphere, LayeredSphere, Spheroid, TMatrixParticle)
     bad = [type(p).__name__ for p in part.archetypes if not isinstance(p, supported)]
     if bad:
         raise TypeError(
-            "compute_internal_field currently supports Sphere, PECSphere, LayeredSphere, and Spheroid in "
+            "compute_internal_field currently supports Sphere, PECSphere, LayeredSphere, Spheroid, "
+            "and circumscribing-mask handling for TMatrixParticle in "
             f"particle-dispatch mode. Got {bad}."
         )
 

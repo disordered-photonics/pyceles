@@ -14,6 +14,10 @@ multiple-scattering literature and ideas demonstrated in earlier implementations
 
 ## Other T-matrix related references
 
+- Asadova et al., *T-matrix representation of optical scattering response:
+  Suggestion for a data format*, JQSRT 333 (2025) 109310.
+  https://doi.org/10.1016/j.jqsrt.2024.109310
+
 - Auguie et al., *SMARTIES: User-friendly codes for fast and accurate
   calculations of light scattering by spheroids*, JQSRT 174 (2016) 39-55.
   https://doi.org/10.1016/j.jqsrt.2016.01.005

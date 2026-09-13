@@ -29,9 +29,11 @@ from .plotting import (
     unpolarized_far_field_intensity,
     unpolarized_near_field_intensity,
 )
+from .standard_tmatrix import TMatrixData, load_tmatrix_h5
 from .workflows import load_simulation_h5, save_simulation_h5
 
 __all__ = [
+    "TMatrixData",
     "far_field_intensity",
     "far_field_intensity_from_result",
     "load_far_field_h5",
@@ -41,6 +43,7 @@ __all__ = [
     "load_periodic_h5",
     "load_simulation_h5",
     "load_solution_h5",
+    "load_tmatrix_h5",
     "near_field_component",
     "plot_farfield_hemispheres",
     "plot_field_component",

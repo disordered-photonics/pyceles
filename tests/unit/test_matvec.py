@@ -36,6 +36,7 @@ from pyceles.core.particles import (
     PECSphere,
     Sphere,
     Spheroid,
+    TMatrixParticle,
     pec_spheres_from_arrays,
     spheres_from_arrays,
 )
@@ -523,6 +524,37 @@ def test_prepare_matvec_accepts_custom_dense_group_factory():
     y_mv = prepared.apply_A(x[: 2 * n_modes(lmax)])
     np.testing.assert_allclose(y_mv, y_dense, rtol=1e-12, atol=1e-12)
     assert rhs.shape == (2 * n_modes(lmax),)
+
+
+def test_imported_tmatrix_particle_has_exact_prepared_adjoint():
+    """An opaque imported block still supports the algebraic T-matrix adjoint."""
+
+    lmax = 1
+    size = n_modes(lmax)
+    rng = np.random.default_rng(31)
+    matrix = rng.standard_normal((size, size)) + 1j * rng.standard_normal((size, size))
+    particles = (
+        TMatrixParticle(position=(0.0, 0.0, 0.0), radius=4.0, lmax=lmax, t_matrix=matrix),
+        TMatrixParticle(position=(30.0, -10.0, 20.0), radius=4.0, lmax=lmax, t_matrix=matrix),
+    )
+    prepared = prepare_matvec(
+        lmax=lmax,
+        k=2.0 * np.pi / 550.0,
+        particles=particles,
+        n_medium=1.0 + 0.0j,
+        radial_lut_dr=0.5,
+        operator_dtype=np.complex128,
+    )
+
+    assert prepared.supports_adjoint
+    x = rng.standard_normal(2 * size) + 1j * rng.standard_normal(2 * size)
+    y = rng.standard_normal(2 * size) + 1j * rng.standard_normal(2 * size)
+    np.testing.assert_allclose(
+        np.vdot(prepared.apply_A(x), y),
+        np.vdot(x, prepared.apply_adjoint(y)),
+        rtol=2.0e-12,
+        atol=2.0e-12,
+    )
 
 
 def test_prepare_matvec_accepts_custom_axisymmetric_group_factory():

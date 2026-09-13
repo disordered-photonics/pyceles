@@ -14,6 +14,7 @@ from pyceles.core.particles import (
     PECSphere,
     Sphere,
     Spheroid,
+    TMatrixParticle,
 )
 from pyceles.core.plane_wave_spectrum import PlaneWaveSpectrum
 from pyceles.postprocessing.farfield.patterns import FarFieldPatterns
@@ -111,6 +112,11 @@ def _write_particle_payload(
             np.asarray(particle.euler_angles, dtype=float),
             compression=None,
         )
+    elif isinstance(particle, TMatrixParticle):
+        pgroup.attrs["type"] = "TMatrixParticle"
+        _write_dataset(pgroup, "radius", float(particle.radius), compression=None)
+        _write_dataset(pgroup, "lmax", int(particle.lmax), compression=None)
+        _write_dataset(pgroup, "t_matrix", particle.t_matrix, compression=compression)
     else:
         raise TypeError(f"Unsupported particle type {type(particle).__name__!r}.")
 
@@ -181,6 +187,13 @@ def _load_particle_payload(pgroup: h5py.Group, *, position: tuple[float, float, 
             polar_radius=float(np.asarray(pgroup["polar_radius"][...], dtype=float).reshape(())),
             refractive_index=complex(np.asarray(pgroup["refractive_index"][...]).reshape(())),
             euler_angles=(float(euler_arr[0]), float(euler_arr[1]), float(euler_arr[2])),
+        )
+    if kind == "TMatrixParticle":
+        return TMatrixParticle(
+            position=position,
+            radius=float(np.asarray(pgroup["radius"][...], dtype=float).reshape(())),
+            lmax=int(np.asarray(pgroup["lmax"][...], dtype=int).reshape(())),
+            t_matrix=np.asarray(pgroup["t_matrix"][...]),
         )
     raise ValueError(f"Unsupported or missing particle type attribute: {kind!r}.")
 

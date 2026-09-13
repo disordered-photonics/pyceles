@@ -44,6 +44,7 @@ from .particles import (
     PECSphere,
     Sphere,
     Spheroid,
+    TMatrixParticle,
     particle_intrinsic_t_signature,
     particle_t_signature,
 )
@@ -636,6 +637,16 @@ def particle_T_matrix_block(
             int(lmax),
             angles,
         )
+
+    if isinstance(particle, TMatrixParticle):
+        if int(lmax) != int(particle.lmax):
+            raise ValueError(
+                "Imported T-matrix lmax must match the simulation lmax: "
+                f"particle has lmax={particle.lmax}, requested lmax={lmax}."
+            )
+        # The imported matrix is already in CELES ordering and carries its
+        # physical sign convention; ``sign`` only controls analytic Mie paths.
+        return np.array(particle.t_matrix, dtype=np.complex128, copy=True, order="C")
 
     Td = particle_T_diagonal(
         lmax=lmax,

@@ -67,7 +67,11 @@ mixed supported particle families:
 - `Sphere`,
 - `PECSphere`,
 - `LayeredSphere`,
-- `Spheroid`.
+- `Spheroid`,
+- `TMatrixParticle`, an explicit dense spherical-basis block imported from a
+  published `.tmat.h5` file with `pyceles.load_tmatrix_h5`; both documented
+  parity and helicity polarization labels are accepted (helicity is converted
+  at import).
 
 `Simulation` normalizes these inputs into an immutable `ParticleCollection`.
 `Simulation.n_particles` and `ChannelResult.n_particles` provide canonical
@@ -94,6 +98,21 @@ than per particle. See [particle_storage.md](particle_storage.md).
 `PECSphere` uses the analytic perfect-conductor Mie limit instead of an
 artificial large complex refractive index. Near-field points inside PEC spheres
 are treated as particle-internal points with zero physical field.
+
+Published dense T-matrix files can be selected at one exact wavelength and
+wrapped as reusable particle archetypes. The importer converts the file's
+parity or helicity labels and normalization to CELES ordering; it does not
+interpolate a spectral file or guess a nearest wavelength. See
+[particle_storage.md](particle_storage.md) for the import contract.
+
+An imported block is opaque only with respect to the particle's hidden shape,
+material model, and interior field. It is still an explicit square operator, so
+prepared dense particle groups provide its exact conjugate transpose. LSQR and
+other adjoint-based operator workflows can therefore use imported particles
+whenever the selected coupling backend also exposes an exact adjoint. This
+does not provide shape/material derivatives or internal-field reconstruction;
+those require information that is not present in an opaque standard-format
+block.
 
 ## Spheroids
 

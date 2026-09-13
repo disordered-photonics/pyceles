@@ -41,6 +41,53 @@ large; no storage container can compress them without additional structure.
 Future representations can add body-frame rotations, block sparsity, low-rank
 forms, or on-the-fly operators behind the same instance/archetype contract.
 
+## Imported dense T matrices
+
+`load_tmatrix_h5` reads the published spectral `.tmat.h5` representation and
+returns one wavelength-selected, immutable dense block in CELES ordering. A
+selection is mandatory for multi-wavelength files and is exact within floating
+point storage tolerance; no nearest-neighbour wavelength is chosen:
+
+```python
+import pyceles as pcl
+
+data = pcl.load_tmatrix_h5("particle.tmat.h5", wavelength=550.0)
+particle = data.as_particle(position=(0.0, 0.0, 0.0), radius=300.0)
+simulation = pcl.Simulation(config, particles=[particle])
+```
+
+Wavelength axes retain their file length unit. Frequency and angular-frequency
+axes are converted to vacuum wavelength in metres, so geometry passed to that
+simulation must use the same length unit.
+
+The standard file's electric/magnetic parity or positive/negative helicity
+convention is translated at the I/O boundary, so callers do not need to
+reorder modes or perform the basis conversion themselves. The
+`radius` argument is the particle's circumscribing radius for overlap checks
+and plotting; the imported file is otherwise treated as an opaque scatterer.
+Consequently its interior near field is reported as unavailable (`NaN`) while
+its enclosing sphere can still be drawn. Helicity-basis files and separate
+incident/scattered mode sets are handled differently: helicity is converted to
+the square parity form, while separate mode sets remain unsupported. Multiple
+copies share the immutable block; use
+`pyceles.core.rotate_svwf_tmatrix_block` once per desired orientation.
+
+The file's `embedding` metadata contains relative permittivity and permeability
+when supplied by the producer. Use `TMatrixData.embedding_refractive_index`
+and `TMatrixData.validate_context(...)` to check the selected matrix against
+the simulation wavelength and host index. pyceles does not interpolate a
+spectrum or silently choose a nearest wavelength; a missing or incompatible
+context must be handled explicitly (`allow_mismatch=True` is intended only for
+exploratory work).
+
+An imported block is opaque with respect to hidden geometry and internal-field
+material data, but it is not forward-only: the prepared dense particle group
+applies the exact conjugate transpose of the stored block. Consequently LSQR
+and other adjoint-based operator algorithms remain available when the coupling
+backend has a matching adjoint. The import alone cannot supply derivatives with
+respect to an unknown shape, material, or wavelength-dependent model, and it
+cannot reconstruct the particle's interior field.
+
 ## Construction
 
 Use the built-in array helpers when their schemas fit. Use

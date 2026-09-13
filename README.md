@@ -60,6 +60,7 @@ Current tested capabilities include:
   `initial`, `scattered`, `internal`, and `total` near-field maps,
 - local absorption and dipole power/LDOS diagnostics,
 - HDF5 save/load workflows,
+- provider-neutral import of published spectral `.tmat.h5` dense T matrices,
 - experimental rectangular 2D periodic workflows with diffraction-order
   payloads, `R/T/A`, periodic near-field slices, and an opt-in hybrid
   exact-near/Rayleigh-far repeated-apply operator for vertically extended cells.
@@ -71,6 +72,10 @@ See [docs/capabilities.md](docs/capabilities.md) for the full feature inventory.
 pyceles is pre-1.0, and some boundaries are still intentional:
 
 - particles in one simulation currently share the same `lmax`,
+- imported dense T matrices currently use one selected wavelength and are
+  converted from the standard parity or helicity basis; their internal
+  geometry is not available to pyceles near-field postprocessing, although the
+  explicit block remains usable by exact adjoint operator paths,
 - homogeneous-medium workflows currently assume a real host refractive index,
 - T-matrix superposition requires disjoint particle circumscribing spheres by
   default,
@@ -86,7 +91,6 @@ See [docs/limitations.md](docs/limitations.md) for more detail.
 
 These are reminders for future development, not a release commitment:
 
-- import dense T-matrix data from external T-matrix databases,
 - optical force and torque postprocessing,
 - spectral-sweep workflows for dispersion studies and approximate time-domain
   reconstruction,

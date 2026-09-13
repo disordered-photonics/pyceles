@@ -50,6 +50,10 @@ groups are adjoint-capable only when their factory supplies an exact
 coupling provides the same action on NumPy and CuPy; the CuPy multilevel reverse
 keeps its sampled hierarchy during an adjoint apply, while its exact-near reverse
 action reuses prepared device translation tables without a second dense cache.
+Imported `TMatrixParticle` blocks are explicit dense groups, so their exact
+conjugate-transpose action is available even though their underlying geometry
+and internal fields are opaque. This algebraic capability should not be
+confused with shape/material derivatives, which require additional model data.
 Periodic direct-sum remains a NumPy/reference-only coupling
 path; CuPy periodic preparation accepts Ewald and Rayleigh. LSQR uses
 `solver_maxiter` as its iteration budget;
@@ -83,6 +87,7 @@ Particle descriptors are passed to `Simulation`:
 - `pyceles.PECSphere`
 - `pyceles.LayeredSphere`
 - `pyceles.Spheroid`
+- `pyceles.TMatrixParticle`
 - `pyceles.ParticleCollection`
 - `pyceles.spheres_from_arrays`
 - `pyceles.pec_spheres_from_arrays`
@@ -93,6 +98,12 @@ Particle descriptors are passed to `Simulation`:
 instances that reuse immutable particle metadata. See
 [particle_storage.md](particle_storage.md) for storage and preparation
 semantics.
+
+Use `pyceles.load_tmatrix_h5(path, wavelength=...)` (or
+`wavelength_index=...`) to import a standard spectral dense T-matrix file. The
+returned `TMatrixData.as_particle(...)` descriptor can be reused for multiple
+instances; callers provide the circumscribing radius and may rotate the dense
+block explicitly with `pyceles.core.rotate_svwf_tmatrix_block`.
 
 ## Sources
 

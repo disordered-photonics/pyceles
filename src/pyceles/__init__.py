@@ -24,6 +24,7 @@ from pyceles.core.particles import (
     PECSphere,
     Sphere,
     Spheroid,
+    TMatrixParticle,
     layered_spheres_from_arrays,
     pec_spheres_from_arrays,
     spheres_from_arrays,
@@ -31,6 +32,7 @@ from pyceles.core.particles import (
 )
 from pyceles.core.periodic import PeriodicOptions, PeriodicSpec
 from pyceles.core.plane_wave_spectrum import PlaneWaveSpectrum
+from pyceles.io.standard_tmatrix import TMatrixData, load_tmatrix_h5
 from pyceles.io.workflows import load_simulation_h5, save_simulation_h5
 from pyceles.postprocessing.dipole_metrics import (
     DipolePowerLDOSResult,
@@ -103,6 +105,8 @@ __all__ = [
     "SimulationResult",
     "Sphere",
     "Spheroid",
+    "TMatrixData",
+    "TMatrixParticle",
     "UnpolarizedDiagnostics",
     "__version__",
     "compute_dipole_ldos_enhancement",
@@ -117,6 +121,7 @@ __all__ = [
     "layered_spheres_from_arrays",
     "linear",
     "load_simulation_h5",
+    "load_tmatrix_h5",
     "mix_near_field_components",
     "mix_near_field_slices",
     "pec_spheres_from_arrays",
