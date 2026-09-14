@@ -28,10 +28,11 @@ This page records current limitations.
   converted to pyceles' electric/magnetic parity basis; rectangular
   incident/scattered mode sets and spectral interpolation are not currently
   supported. The importer exposes the file's wavelength and embedding
-  metadata, and `TMatrixData.validate_context` can reject a mismatch before
-  construction (the user remains responsible for selecting a physically
-  consistent matrix). The stored square block still has an exact algebraic
-  conjugate transpose, so opaque particles do not by themselves disable LSQR
+  metadata, and `TMatrixData.as_particle` requires the intended wavelength and
+  host index before discarding that context (the user remains responsible for
+  selecting a physically consistent matrix). The stored square block still has
+  an exact algebraic conjugate transpose, so opaque particles do not by
+  themselves disable LSQR
   or other adjoint-based operator methods. They do disable reconstruction of
   hidden internal fields and shape/material derivatives; near-field samples
   inside the supplied circumscribing sphere are explicit `NaN` values.

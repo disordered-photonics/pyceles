@@ -318,9 +318,21 @@ For third-party dense T matrices, load one wavelength from a published
 
 ```python
 data = pcl.load_tmatrix_h5("particle.tmat.h5", wavelength=550.0)
-particle = data.as_particle(position=(0.0, 0.0, 0.0), radius=300.0)
+particle = data.as_particle(
+    position=(0.0, 0.0, 0.0),
+    radius=300.0,
+    wavelength=cfg.wavelength,
+    n_medium=cfg.n_medium,
+)
 sim = pcl.Simulation(cfg, particles=[particle])
 ```
+
+The standard file may carry an explicit spectral unit, but pyceles does not
+attach units to `SimulationConfig`. Imported metadata is used only to expose a
+selected numerical vacuum wavelength and to check it against `cfg.wavelength`;
+geometry and simulation inputs are never rescaled. Keep all length-like inputs
+and imported matrices in one consistent numerical length convention before
+constructing the simulation.
 
 Additional copies can reuse the immutable matrix (and may use an explicitly
 rotated block). Other imported particle descriptions can construct the same

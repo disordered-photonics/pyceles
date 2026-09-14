@@ -25,6 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   coupling, including single-level and multilevel sampled-far traversals.
 
 ### Changed
+- Dense T-matrix preparation now preserves supported input precision and shares
+  immutable archetype blocks, reducing memory for repeated imports.
+- Breaking: `TMatrixData.as_particle(...)` now requires the intended wavelength
+  and host index before source metadata is discarded; unsupported displaced,
+  multi-center, split-basis, or magnetic/chiral inputs are rejected explicitly.
+  Standard-file unit labels remain informational: pyceles does not attach units
+  to simulation geometry or silently rescale user inputs.
 - Backend-native CuPy Krylov result classes and `*_native` entry points are
   internal implementation details; the stable package surface is the
   high-level solver functions and `LinearSolveResult`.

@@ -75,13 +75,41 @@ def _metadata_value(value: object) -> object:
     return owned
 
 
-def _group_metadata(group: h5py.Group) -> Mapping[str, object]:
+def _scalar_complex_metadata(value: object | None) -> complex | None:
+    """Return one finite complex metadata value, or ``None`` otherwise."""
+    if value is None:
+        return None
+    array = np.asarray(value)
+    if array.size != 1:
+        return None
+    try:
+        scalar = complex(array.reshape(()).item())
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(scalar.real) or not np.isfinite(scalar.imag):
+        return None
+    return scalar
+
+
+_SPECTRAL_EMBEDDING_SCALARS = frozenset(
+    {"relative_permittivity", "relative_permeability", "chirality", "chirality_parameter"}
+)
+
+
+def _embedding_metadata(
+    group: h5py.Group, *, count: int, selected_index: int
+) -> Mapping[str, object]:
+    """Copy embedding metadata, selecting scalar spectral material arrays."""
     values: dict[str, object] = {
         str(key): _metadata_value(value) for key, value in group.attrs.items()
     }
     for key, dataset in group.items():
-        if isinstance(dataset, h5py.Dataset):
-            values[str(key)] = _metadata_value(dataset[...])
+        if not isinstance(dataset, h5py.Dataset):
+            continue
+        raw = np.asarray(dataset[...])
+        if str(key) in _SPECTRAL_EMBEDDING_SCALARS and raw.ndim == 1 and raw.shape[0] == int(count):
+            raw = np.asarray(raw[int(selected_index)])
+        values[str(key)] = _metadata_value(raw)
     return MappingProxyType(values)
 
 
@@ -128,13 +156,18 @@ class TMatrixData:
         *,
         position: Sequence[float],
         radius: float,
+        wavelength: float,
+        n_medium: complex,
     ) -> TMatrixParticle:
-        """Wrap this matrix as a solver-ready particle descriptor."""
-        values = tuple(float(value) for value in position)
-        if len(values) != 3:
-            raise ValueError(f"position must contain exactly three coordinates. Got {len(values)}.")
-        if not np.all(np.isfinite(values)):
-            raise ValueError("position must contain only finite coordinates.")
+        """Wrap this matrix after checking its simulation context."""
+        self.validate_context(
+            wavelength=float(wavelength),
+            n_medium=complex(n_medium),
+        )
+        values_tuple = tuple(float(value) for value in position)
+        if len(values_tuple) != 3 or not np.all(np.isfinite(values_tuple)):
+            raise ValueError("position must contain exactly three finite coordinates.")
+        values = (values_tuple[0], values_tuple[1], values_tuple[2])
         return TMatrixParticle(
             position=values,
             radius=float(radius),
@@ -152,17 +185,11 @@ class TMatrixData:
         left as ``None`` so callers do not accidentally infer a host medium.
         """
 
-        epsilon = self.embedding.get("relative_permittivity")
-        permeability = self.embedding.get("relative_permeability")
+        epsilon = _scalar_complex_metadata(self.embedding.get("relative_permittivity"))
+        permeability = _scalar_complex_metadata(self.embedding.get("relative_permeability"))
         if epsilon is None or permeability is None:
             return None
-        epsilon_array = np.asarray(epsilon)
-        permeability_array = np.asarray(permeability)
-        if epsilon_array.size != 1 or permeability_array.size != 1:
-            return None
-        value = complex(epsilon_array.reshape(()).item()) * complex(
-            permeability_array.reshape(()).item()
-        )
+        value = epsilon * permeability
         if not np.isfinite(value.real) or not np.isfinite(value.imag):
             return None
         return complex(np.sqrt(value))
@@ -172,17 +199,17 @@ class TMatrixData:
         *,
         wavelength: float | None = None,
         n_medium: complex | None = None,
-        wavelength_unit: str | None = None,
         rtol: float = 1.0e-10,
         atol: float = 1.0e-12,
-        allow_mismatch: bool = False,
     ) -> None:
         """Check available file metadata against a simulation context.
 
         ``SimulationConfig`` is intentionally unit-agnostic, so callers must
-        express ``wavelength`` in the same unit as the geometry and the loaded
-        file.  Missing metadata is not treated as a match.  Set
-        ``allow_mismatch=True`` only for an explicitly exploratory run.
+        express ``wavelength`` in the same numerical length convention as the
+        geometry and the selected matrix. The file's wavelength-unit metadata
+        is informational only: pyceles does not attach a unit to simulation
+        coordinates or convert simulation inputs. Missing metadata is not
+        treated as a match.
         """
 
         mismatches: list[str] = []
@@ -196,31 +223,53 @@ class TMatrixData:
                         f"wavelength {self.wavelength!r} ({self.wavelength_unit or 'unspecified'}) "
                         f"!= requested {target!r}"
                     )
-                if (
-                    wavelength_unit is not None
-                    and str(wavelength_unit).strip() != str(self.wavelength_unit).strip()
+        if n_medium is not None:
+            epsilon_r = _scalar_complex_metadata(self.embedding.get("relative_permittivity"))
+            mu_r = _scalar_complex_metadata(self.embedding.get("relative_permeability"))
+            host_is_supported = True
+            if epsilon_r is None:
+                mismatches.append("the file has no finite scalar embedding permittivity")
+                host_is_supported = False
+            if mu_r is None:
+                mismatches.append(
+                    "the file has no finite scalar embedding permeability; pyceles requires "
+                    "an explicitly nonmagnetic host"
+                )
+                host_is_supported = False
+            elif not np.isclose(mu_r, 1.0 + 0.0j, rtol=float(rtol), atol=float(atol)):
+                mismatches.append(
+                    f"embedding relative permeability {mu_r!r} is unsupported; "
+                    "pyceles assumes mu_r=1"
+                )
+                host_is_supported = False
+            for key in ("chirality", "chirality_parameter"):
+                if key not in self.embedding:
+                    continue
+                chirality = _scalar_complex_metadata(self.embedding[key])
+                if chirality is None or not np.isclose(
+                    chirality, 0.0 + 0.0j, rtol=float(rtol), atol=float(atol)
                 ):
                     mismatches.append(
-                        f"wavelength unit {self.wavelength_unit!r} != requested {wavelength_unit!r}"
+                        f"embedding {key} is nonzero or non-scalar; pyceles assumes "
+                        "a nonchiral host"
                     )
-        if n_medium is not None:
-            embedded = self.embedding_refractive_index
-            if embedded is None:
-                mismatches.append("the file has no scalar embedding-medium metadata")
-            elif not np.isclose(
-                embedded,
-                complex(n_medium),
-                rtol=float(rtol),
-                atol=float(atol),
-            ):
-                mismatches.append(
-                    f"embedding index {embedded!r} != requested {complex(n_medium)!r}"
-                )
-        if mismatches and not allow_mismatch:
+                    host_is_supported = False
+                    break
+            if host_is_supported and epsilon_r is not None and mu_r is not None:
+                embedded = complex(np.sqrt(epsilon_r * mu_r))
+                if not np.isclose(
+                    embedded,
+                    complex(n_medium),
+                    rtol=float(rtol),
+                    atol=float(atol),
+                ):
+                    mismatches.append(
+                        f"embedding index {embedded!r} != requested {complex(n_medium)!r}"
+                    )
+        if mismatches:
             raise ValueError(
                 "T-matrix metadata is incompatible with the requested simulation context: "
                 + "; ".join(mismatches)
-                + ". Pass allow_mismatch=True only when this is intentional."
             )
 
 
@@ -277,8 +326,13 @@ def _wavelength_axis(
     if axis_name == "angular_vacuum_wavenumber":
         return 2.0 * np.pi / values, _inverse_length_unit(unit)
     if axis_name in {"frequency", "angular_frequency"}:
+        if unit is None or not str(unit).strip():
+            raise ValueError(
+                f"Spectral axis {axis_name!r} requires an explicit frequency unit; "
+                "pyceles does not assume Hz."
+            )
         unit_text = (
-            (unit or "Hz")
+            str(unit)
             .replace("\u00c2\u00b5", "u")
             .replace("\u03bc", "u")
             .replace("\u00b5", "u")
@@ -286,16 +340,20 @@ def _wavelength_axis(
         )
         if unit_text.endswith("Hz"):
             prefix = unit_text[:-2]
+            inverse_time = False
         elif unit_text.endswith("s^{-1}"):
             prefix = unit_text[: -len("s^{-1}")]
+            inverse_time = True
         elif unit_text.endswith("s^-1"):
             prefix = unit_text[: -len("s^-1")]
+            inverse_time = True
         else:
             raise ValueError(f"Unsupported frequency unit {unit!r}; use an SI Hz or s^-1 unit.")
         try:
-            scale = _SI_PREFIXES[prefix]
+            prefix_scale = _SI_PREFIXES[prefix]
         except KeyError as exc:
             raise ValueError(f"Unsupported frequency unit {unit!r}.") from exc
+        scale = 1.0 / prefix_scale if inverse_time else prefix_scale
         frequency_hz = values * scale
         if np.any(frequency_hz <= 0.0):
             raise ValueError("Frequency values must be strictly positive.")
@@ -344,6 +402,11 @@ def _select_index(
                 f"[{float(np.min(wavelengths))!r}, {float(np.max(wavelengths))!r}]. "
                 "The importer never selects a nearest neighbour."
             )
+        if matches.size != 1:
+            raise ValueError(
+                f"Wavelength {target!r} matches {matches.size} spectral entries within "
+                "the import tolerance; select the intended matrix with wavelength_index."
+            )
         return int(matches[0])
     if count != 1:
         raise ValueError(
@@ -387,6 +450,36 @@ def _polarization_basis(labels: Sequence[str]) -> str:
         "modes/polarization must contain exactly electric/magnetic parity or "
         f"positive/negative helicity labels; got {sorted(kinds)!r}."
     )
+
+
+def _validate_single_origin_modes(modes: h5py.Group) -> None:
+    """Reject bases with displaced or multiple spherical-wave centers."""
+    if "positions" in modes:
+        positions = np.asarray(modes["positions"][...], dtype=float)
+        if positions.shape != (1, 3) or not np.all(np.isfinite(positions)):
+            raise NotImplementedError(
+                "TMatrixParticle supports exactly one finite spherical-wave expansion center."
+            )
+        if np.any(positions != 0.0):
+            raise NotImplementedError(
+                "Displaced modes/positions are not supported: imported modes must be centered at the origin."
+            )
+    for name in (
+        "index",
+        "position_index",
+        "positions_index",
+        "position_index_incident",
+        "position_index_scattered",
+        "positions_index_incident",
+        "positions_index_scattered",
+    ):
+        if name not in modes:
+            continue
+        indices = _integer_labels(np.asarray(modes[name][...]), name)
+        if np.any(indices != 0):
+            raise NotImplementedError(
+                "Multi-center spherical-wave mode indices are not supported by TMatrixParticle."
+            )
 
 
 def _integer_labels(values: np.ndarray, name: str) -> np.ndarray:
@@ -444,12 +537,19 @@ def _convert_storage_matrix(
         for m in range(-l, l + 1)
     )
     stored_indices = np.asarray([lookup[label] for label in native_labels], dtype=np.int64)
+    stored_array = np.asarray(stored)
+    out_dtype = (
+        stored_array.dtype
+        if stored_array.dtype in {np.dtype(np.complex64), np.dtype(np.complex128)}
+        else np.dtype(np.complex128)
+    )
     native_m = np.asarray([label[1] for label in native_labels], dtype=float)
-    phase = (1j / np.sqrt(np.pi)) * np.where(native_m > 0.0, (-1.0) ** native_m, 1.0)
-    selected = np.asarray(stored, dtype=np.complex128)[np.ix_(stored_indices, stored_indices)]
+    signs = np.where(native_m > 0.0, (-1.0) ** native_m, 1.0).astype(out_dtype)
+    phase = np.asarray(1j / np.sqrt(np.pi), dtype=out_dtype) * signs
+    selected = np.asarray(stored_array, dtype=out_dtype)[np.ix_(stored_indices, stored_indices)]
     native_source = phase[:, None] * selected / phase[None, :]
     if basis == "parity":
-        return np.asarray(native_source, dtype=np.complex128), basis
+        return np.asarray(native_source, dtype=out_dtype), basis
 
     # Rows/columns of native_source are ordered (+, -) by (l, m) blocks.  The
     # CELES parity order is all magnetic modes followed by all electric modes.
@@ -460,14 +560,14 @@ def _convert_storage_matrix(
         for l in range(1, int(lmax) + 1)
         for m in range(-l, l + 1)
     )
-    change = np.zeros((len(parity_labels), len(native_labels)), dtype=np.float64)
-    inv_sqrt2 = 1.0 / np.sqrt(2.0)
+    change = np.zeros((len(parity_labels), len(native_labels)), dtype=out_dtype)
+    inv_sqrt2 = np.asarray(1.0 / np.sqrt(2.0), dtype=out_dtype).item()
     for row, (l, m, pol) in enumerate(parity_labels):
         positive = source_lookup[(l, m, "positive")]
         negative = source_lookup[(l, m, "negative")]
         change[row, positive] = inv_sqrt2
         change[row, negative] = inv_sqrt2 if pol == "electric" else -inv_sqrt2
-    return np.asarray(change @ native_source @ change.T, dtype=np.complex128), basis
+    return np.asarray(change @ native_source @ change.T, dtype=out_dtype), basis
 
 
 def load_tmatrix_h5(
@@ -514,10 +614,21 @@ def load_tmatrix_h5(
         modes = root.get("modes")
         if modes is None or any(name not in modes for name in ("l", "m", "polarization")):
             raise ValueError("Missing required modes/l, modes/m, or modes/polarization dataset.")
-        if any(name in modes for name in ("l_incident", "m_incident", "polarization_incident")):
+        if any(
+            name in modes
+            for name in (
+                "l_incident",
+                "m_incident",
+                "polarization_incident",
+                "l_scattered",
+                "m_scattered",
+                "polarization_scattered",
+            )
+        ):
             raise NotImplementedError(
                 "Separate incident/scattered mode sets are not supported by TMatrixParticle yet."
             )
+        _validate_single_origin_modes(modes)
         l_values = _integer_labels(np.asarray(modes["l"][...]), "l")
         m_values = _integer_labels(np.asarray(modes["m"][...]), "m")
         pol_values = np.asarray(modes["polarization"][...])
@@ -549,7 +660,9 @@ def load_tmatrix_h5(
         stored = np.asarray(raw[...] if raw.ndim == 2 else raw[selected_index, ...])
         matrix, source_basis = _convert_storage_matrix(stored, lmax=lmax, mode_labels=labels)
         embedding = (
-            _group_metadata(root["embedding"]) if "embedding" in root else MappingProxyType({})
+            _embedding_metadata(root["embedding"], count=count, selected_index=selected_index)
+            if "embedding" in root
+            else MappingProxyType({})
         )
         attrs = MappingProxyType(
             {str(key): _metadata_value(value) for key, value in root.attrs.items()}

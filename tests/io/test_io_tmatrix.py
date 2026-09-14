@@ -98,6 +98,17 @@ def test_standard_tmatrix_import_reorders_and_normalizes(tmp_path):
     assert data.embedding_refractive_index == 1.0 + 0j
 
 
+def test_standard_tmatrix_preserves_complex64_storage_dtype(tmp_path):
+    path = tmp_path / "complex64.tmat.h5"
+    _write_standard_file(path, np.eye(n_modes(1), dtype=np.complex128), 1)
+    with h5py.File(path, "r+") as root:
+        stored = np.asarray(root["tmatrix"][...], dtype=np.complex64)
+        del root["tmatrix"]
+        root.create_dataset("tmatrix", data=stored)
+    data = pcl.load_tmatrix_h5(path, wavelength=600.0)
+    assert data.t_matrix.dtype == np.dtype(np.complex64)
+
+
 def test_standard_tmatrix_uses_published_mode_order_and_phase(tmp_path):
     path = tmp_path / "literal.tmat.h5"
     stored = np.zeros((6, 6), dtype=np.complex128)
@@ -137,15 +148,67 @@ def test_tmatrix_context_validation_requires_matching_metadata(tmp_path):
     data = pcl.load_tmatrix_h5(path, wavelength_index=0)
 
     data.validate_context(wavelength=600.0, n_medium=1.0 + 0j)
-    data.validate_context(wavelength=600.0, n_medium=1.0 + 0j, wavelength_unit="nm")
     with pytest.raises(ValueError, match="incompatible"):
         data.validate_context(wavelength=601.0, n_medium=1.0 + 0j)
-    with pytest.raises(ValueError, match="wavelength unit"):
-        data.validate_context(wavelength=600.0, wavelength_unit="um")
-    data.validate_context(wavelength=601.0, n_medium=1.0 + 0j, allow_mismatch=True)
-
     with pytest.raises(ValueError, match="finite"):
-        data.as_particle(position=(0.0, np.nan, 0.0), radius=1.0)
+        data.as_particle(
+            position=(0.0, np.nan, 0.0),
+            radius=1.0,
+            wavelength=600.0,
+            n_medium=1.0,
+        )
+
+
+def test_as_particle_validates_context_and_owns_selected_block(tmp_path):
+    path = tmp_path / "particle.tmat.h5"
+    _write_standard_file(path, np.eye(n_modes(1), dtype=np.complex128), 1)
+    data = pcl.load_tmatrix_h5(path, wavelength=600.0)
+
+    particle = data.as_particle(
+        position=(0.0, 0.0, 0.0),
+        radius=1.0,
+        wavelength=600.0,
+        n_medium=1.0,
+    )
+    assert particle.t_matrix is not data.t_matrix
+    with pytest.raises(ValueError, match="incompatible"):
+        data.as_particle(
+            position=(0.0, 0.0, 0.0),
+            radius=1.0,
+            wavelength=601.0,
+            n_medium=1.0,
+        )
+
+
+def test_spectral_embedding_metadata_follows_selected_matrix(tmp_path):
+    path = tmp_path / "spectral-embedding.tmat.h5"
+    _write_standard_file(
+        path, np.eye(n_modes(1), dtype=np.complex128), 1, wavelengths=(500.0, 600.0)
+    )
+    with h5py.File(path, "r+") as root:
+        embedding = root["embedding"]
+        del embedding["relative_permittivity"]
+        del embedding["relative_permeability"]
+        embedding.create_dataset("relative_permittivity", data=np.asarray([1.0, 4.0]))
+        embedding.create_dataset("relative_permeability", data=np.asarray([1.0, 1.0]))
+    data = pcl.load_tmatrix_h5(path, wavelength=600.0)
+    assert data.embedding_refractive_index == 2.0 + 0j
+    data.validate_context(wavelength=600.0, n_medium=2.0)
+
+
+def test_standard_import_rejects_displaced_and_split_mode_sets(tmp_path):
+    path = tmp_path / "unsupported-modes.tmat.h5"
+    _write_standard_file(path, np.eye(n_modes(1), dtype=np.complex128), 1)
+    with h5py.File(path, "r+") as root:
+        root["modes"].create_dataset("positions", data=np.asarray([[1.0, 0.0, 0.0]]))
+    with pytest.raises(NotImplementedError, match="center"):
+        pcl.load_tmatrix_h5(path)
+
+    _write_standard_file(path, np.eye(n_modes(1), dtype=np.complex128), 1)
+    with h5py.File(path, "r+") as root:
+        root["modes"].create_dataset("l_incident", data=np.asarray([1]))
+    with pytest.raises(NotImplementedError, match="incident/scattered"):
+        pcl.load_tmatrix_h5(path)
 
 
 def test_standard_tmatrix_requires_unambiguous_spectral_selection(tmp_path):
@@ -159,6 +222,10 @@ def test_standard_tmatrix_requires_unambiguous_spectral_selection(tmp_path):
         pcl.load_tmatrix_h5(path, wavelength=550.0)
     with pytest.raises(ValueError, match="only one"):
         pcl.load_tmatrix_h5(path, wavelength=600.0, wavelength_index=1)
+
+    _write_standard_file(path, native, 1, wavelengths=(600.0, 600.0 + 1.0e-12))
+    with pytest.raises(ValueError, match="matches 2"):
+        pcl.load_tmatrix_h5(path, wavelength=600.0)
 
 
 def test_frequency_axis_is_reported_as_si_wavelength(tmp_path):
@@ -174,6 +241,32 @@ def test_frequency_axis_is_reported_as_si_wavelength(tmp_path):
     assert data.wavelength_unit == "m"
     assert data.wavelength is not None
     np.testing.assert_allclose(data.wavelength, 299_792_458.0 / (500.0e12))
+
+
+def test_inverse_time_frequency_unit_uses_reciprocal_prefix_scale(tmp_path):
+    path = tmp_path / "inverse-time-frequency.tmat.h5"
+    _write_standard_file(path, np.eye(n_modes(1), dtype=np.complex128), 1)
+    with h5py.File(path, "r+") as root:
+        root.move("vacuum_wavelength", "frequency")
+        root["frequency"][...] = np.asarray([2.0])
+        root["frequency"].attrs["unit"] = "ps^{-1}"
+
+    data = pcl.load_tmatrix_h5(path, wavelength_index=0)
+
+    assert data.wavelength_unit == "m"
+    assert data.wavelength is not None
+    np.testing.assert_allclose(data.wavelength, 299_792_458.0 / (2.0e12))
+
+
+def test_frequency_axis_requires_explicit_unit(tmp_path):
+    path = tmp_path / "unitless-frequency.tmat.h5"
+    _write_standard_file(path, np.eye(n_modes(1), dtype=np.complex128), 1)
+    with h5py.File(path, "r+") as root:
+        root.move("vacuum_wavelength", "frequency")
+        root["frequency"][...] = np.asarray([500.0])
+
+    with pytest.raises(ValueError, match="explicit frequency unit"):
+        pcl.load_tmatrix_h5(path, wavelength_index=0)
 
 
 def test_reciprocal_length_unit_is_normalized(tmp_path):

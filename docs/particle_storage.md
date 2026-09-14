@@ -51,14 +51,24 @@ point storage tolerance; no nearest-neighbour wavelength is chosen:
 ```python
 import pyceles as pcl
 
-data = pcl.load_tmatrix_h5("particle.tmat.h5", wavelength=550.0)
-particle = data.as_particle(position=(0.0, 0.0, 0.0), radius=300.0)
+config = pcl.SimulationConfig(wavelength=550.0, n_medium=1.0)
+data = pcl.load_tmatrix_h5("particle.tmat.h5", wavelength=config.wavelength)
+particle = data.as_particle(
+    position=(0.0, 0.0, 0.0),
+    radius=300.0,
+    wavelength=config.wavelength,
+    n_medium=config.n_medium,
+)
 simulation = pcl.Simulation(config, particles=[particle])
 ```
 
-Wavelength axes retain their file length unit. Frequency and angular-frequency
-axes are converted to vacuum wavelength in metres, so geometry passed to that
-simulation must use the same length unit.
+pyceles remains unit-agnostic here. Wavelength axes retain their file length
+unit, reciprocal-length axes retain the corresponding length unit, and
+frequency/angular-frequency axes are represented as vacuum wavelength in
+metres for selection and context checking. No simulation coordinate, radius,
+or wavelength is converted automatically. The caller is responsible for using
+one consistent numerical length convention across the simulation and all
+imported matrices.
 
 The standard file's electric/magnetic parity or positive/negative helicity
 convention is translated at the I/O boundary, so callers do not need to
@@ -75,10 +85,12 @@ copies share the immutable block; use
 The file's `embedding` metadata contains relative permittivity and permeability
 when supplied by the producer. Use `TMatrixData.embedding_refractive_index`
 and `TMatrixData.validate_context(...)` to check the selected matrix against
-the simulation wavelength and host index. pyceles does not interpolate a
-spectrum or silently choose a nearest wavelength; a missing or incompatible
-context must be handled explicitly (`allow_mismatch=True` is intended only for
-exploratory work).
+the simulation wavelength and host index. The stored `wavelength_unit` is
+informational; there is deliberately no simulation-wide unit registry or
+automatic conversion layer. pyceles does not interpolate a spectrum or
+silently choose a nearest wavelength; a missing or incompatible numerical
+context causes `as_particle` to fail. Direct `TMatrixParticle` construction is
+the explicit escape hatch when the caller is managing provenance separately.
 
 An imported block is opaque with respect to hidden geometry and internal-field
 material data, but it is not forward-only: the prepared dense particle group

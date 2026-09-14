@@ -102,8 +102,10 @@ semantics.
 Use `pyceles.load_tmatrix_h5(path, wavelength=...)` (or
 `wavelength_index=...`) to import a standard spectral dense T-matrix file. The
 returned `TMatrixData.as_particle(...)` descriptor can be reused for multiple
-instances; callers provide the circumscribing radius and may rotate the dense
-block explicitly with `pyceles.core.rotate_svwf_tmatrix_block`.
+instances; callers provide the simulation wavelength, host index, and
+circumscribing radius. The conversion validates that context before metadata
+is discarded. Callers may rotate the dense block explicitly with
+`pyceles.core.rotate_svwf_tmatrix_block`.
 
 ## Sources
 
