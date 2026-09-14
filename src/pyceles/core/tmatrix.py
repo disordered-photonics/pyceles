@@ -728,6 +728,7 @@ def particle_T_matrix_blocks(
     n_medium: complex = 1.0 + 0j,
     *,
     sign: int = -1,
+    dtype: np.dtype | type[np.complexfloating] = np.complex128,
 ) -> np.ndarray:
     """Return stacked spherical-basis T blocks for a particle subset.
 
@@ -743,10 +744,15 @@ def particle_T_matrix_blocks(
     every repeated particle would be avoidable overhead.
     """
 
+    out_dtype = np.dtype(dtype)
+    if out_dtype not in {np.dtype(np.complex64), np.dtype(np.complex128)}:
+        raise TypeError(f"Dense T blocks require complex64 or complex128, got {out_dtype}.")
+    count = len(particles)
+    nm = n_modes(int(lmax))
+    out = np.empty((count, nm, nm), dtype=out_dtype)
     memo: dict[tuple[object, ...], np.ndarray] = {}
     intrinsic_memo: dict[tuple[object, ...], np.ndarray] = {}
-    blocks: list[np.ndarray] = []
-    for particle in particles:
+    for block_index, particle in enumerate(particles):
         key = (
             particle_t_signature(particle),
             int(lmax),
@@ -782,6 +788,13 @@ def particle_T_matrix_blocks(
                         float(particle.euler_angles[2]),
                     ),
                 )
+            elif isinstance(particle, TMatrixParticle):
+                if int(lmax) != int(particle.lmax):
+                    raise ValueError(
+                        "Imported T-matrix lmax must match the simulation lmax: "
+                        f"particle has lmax={particle.lmax}, requested lmax={lmax}."
+                    )
+                block = np.asarray(particle.t_matrix)
             else:
                 block = particle_T_matrix_block(
                     lmax=lmax,
@@ -791,9 +804,9 @@ def particle_T_matrix_blocks(
                     sign=sign,
                 )
             memo[key] = block
-        blocks.append(block)
+        out[block_index] = block
 
-    return np.stack(blocks, axis=0)
+    return out
 
 
 def particle_internal_ratios(

@@ -153,7 +153,29 @@ def _mapped_rows(values: Array, operator_indices: Array) -> Array:
     return rows[ids]
 
 
-def _apply_shared_diagonal(values: Array, operator_indices: Array, x_subset: Array) -> Array:
+def _operator_local_indices(operator_indices: Array, n_operators: int) -> tuple[Array, ...]:
+    """Precompute compact instance ids grouped by shared operator."""
+    ids = np.asarray(operator_indices, dtype=np.int64).reshape(-1)
+    n_ops = int(n_operators)
+    if ids.size == 0 or n_ops <= 1:
+        return ()
+    if n_ops == ids.size and np.array_equal(ids, np.arange(ids.size)):
+        return ()
+    counts = np.bincount(ids, minlength=n_ops)
+    order = np.argsort(ids, kind="stable").astype(np.intp, copy=False)
+    offsets = np.empty(n_ops + 1, dtype=np.intp)
+    offsets[0] = 0
+    np.cumsum(counts, dtype=np.intp, out=offsets[1:])
+    return tuple(order[offsets[i] : offsets[i + 1]] for i in range(n_ops))
+
+
+def _apply_shared_diagonal(
+    values: Array,
+    operator_indices: Array,
+    x_subset: Array,
+    *,
+    local_indices: tuple[Array, ...] | None = None,
+) -> Array:
     """Apply shared diagonal rows without retaining an expanded diagonal table."""
     rows = np.asarray(values)
     ids = np.asarray(operator_indices, dtype=np.int64)
@@ -165,13 +187,19 @@ def _apply_shared_diagonal(values: Array, operator_indices: Array, x_subset: Arr
         return cast(Array, rows.reshape((*rows.shape, *trailing)) * arr)
     out = np.empty_like(arr)
     row_shape = (1, rows.shape[1], *trailing)
-    for operator_index in range(rows.shape[0]):
-        selected = ids == operator_index
+    selections = local_indices or _operator_local_indices(ids, rows.shape[0])
+    for operator_index, selected in enumerate(selections):
         out[selected] = rows[operator_index].reshape(row_shape) * arr[selected]
     return out
 
 
-def _apply_shared_dense(blocks: Array, operator_indices: Array, x_subset: Array) -> Array:
+def _apply_shared_dense(
+    blocks: Array,
+    operator_indices: Array,
+    x_subset: Array,
+    *,
+    local_indices: tuple[Array, ...] | None = None,
+) -> Array:
     """Apply shared dense blocks without constructing ``blocks[operator_indices]``."""
     block_rows = np.asarray(blocks)
     ids = np.asarray(operator_indices, dtype=np.int64)
@@ -188,8 +216,8 @@ def _apply_shared_dense(blocks: Array, operator_indices: Array, x_subset: Array)
     if block_rows.shape[0] == ids.size and np.array_equal(ids, np.arange(ids.size)):
         return cast(Array, np.einsum(mapped_subscripts, block_rows, arr, optimize=True))
     out = np.empty_like(arr)
-    for operator_index in range(block_rows.shape[0]):
-        selected = ids == operator_index
+    selections = local_indices or _operator_local_indices(ids, block_rows.shape[0])
+    for operator_index, selected in enumerate(selections):
         out[selected] = np.einsum(
             shared_subscripts,
             block_rows[operator_index],
@@ -203,6 +231,8 @@ def _apply_shared_dense_adjoint(
     block_rows: Array,
     operator_indices: Array,
     values: Array,
+    *,
+    local_indices: tuple[Array, ...] | None = None,
 ) -> Array:
     """Apply dense Hermitian adjoints without storing conjugated block copies."""
 
@@ -210,6 +240,7 @@ def _apply_shared_dense_adjoint(
         np.swapaxes(block_rows, -1, -2),
         operator_indices,
         np.conjugate(values),
+        local_indices=local_indices,
     )
     np.conjugate(mapped, out=mapped)
     return mapped
@@ -224,6 +255,7 @@ class DiagonalTGroup:
     operator_indices: Array = field(default_factory=lambda: np.zeros((0,), dtype=np.int64))
     dtype: np.dtype = COMPLEX128_DTYPE
     _T_diag_adjoint: Array | None = field(default=None, init=False, repr=False)
+    _local_indices: tuple[Array, ...] = field(default=(), init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.T_M = np.asarray(self.T_M, dtype=self.dtype)
@@ -236,6 +268,7 @@ class DiagonalTGroup:
             None if self.operator_indices.size == 0 else self.operator_indices,
             n_operators=self.T_diag.shape[0],
         )
+        self._local_indices = _operator_local_indices(self.operator_indices, self.T_diag.shape[0])
 
     @property
     def supports_adjoint(self) -> bool:
@@ -247,6 +280,7 @@ class DiagonalTGroup:
                 self.T_diag,
                 self.operator_indices,
                 np.asarray(x_subset, dtype=self.dtype),
+                local_indices=self._local_indices,
             ),
             dtype=self.dtype,
         )
@@ -259,6 +293,7 @@ class DiagonalTGroup:
                 self._T_diag_adjoint,
                 self.operator_indices,
                 np.asarray(x_subset, dtype=self.dtype),
+                local_indices=self._local_indices,
             ),
             dtype=self.dtype,
         )
@@ -289,6 +324,7 @@ class DenseTGroup:
     T_blocks: Array
     operator_indices: Array = field(default_factory=lambda: np.zeros((0,), dtype=np.int64))
     dtype: np.dtype = COMPLEX128_DTYPE
+    _local_indices: tuple[Array, ...] = field(default=(), init=False, repr=False)
 
     def __post_init__(self) -> None:
         blocks = np.asarray(self.T_blocks, dtype=self.dtype)
@@ -300,6 +336,7 @@ class DenseTGroup:
             n_operators=blocks.shape[0],
         )
         self.T_blocks = blocks
+        self._local_indices = _operator_local_indices(self.operator_indices, blocks.shape[0])
 
     @property
     def supports_adjoint(self) -> bool:
@@ -311,6 +348,7 @@ class DenseTGroup:
                 self.T_blocks,
                 self.operator_indices,
                 np.asarray(x_subset, dtype=self.dtype),
+                local_indices=self._local_indices,
             ),
             dtype=self.dtype,
         )
@@ -321,6 +359,7 @@ class DenseTGroup:
                 self.T_blocks,
                 self.operator_indices,
                 np.asarray(x_subset, dtype=self.dtype),
+                local_indices=self._local_indices,
             ),
             dtype=self.dtype,
         )
@@ -353,6 +392,7 @@ class AxisymmetricTGroup:
     body_metadata: object | None = None
     dtype: np.dtype = COMPLEX128_DTYPE
     apply_adjoint_subset_fn: Callable[[Array], Array] | None = None
+    _local_indices: tuple[Array, ...] = field(default=(), init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.T_blocks is not None:
@@ -367,6 +407,7 @@ class AxisymmetricTGroup:
                 n_operators=blocks.shape[0],
             )
             self.T_blocks = blocks
+            self._local_indices = _operator_local_indices(self.operator_indices, blocks.shape[0])
         else:
             self.particle_indices = np.asarray(self.particle_indices, dtype=np.int64).reshape(-1)
             self.operator_indices = np.arange(self.particle_indices.size, dtype=np.int64)
@@ -382,6 +423,7 @@ class AxisymmetricTGroup:
                     self.T_blocks,
                     self.operator_indices,
                     np.asarray(x_subset, dtype=self.dtype),
+                    local_indices=self._local_indices,
                 ),
                 dtype=self.dtype,
             )
@@ -401,6 +443,7 @@ class AxisymmetricTGroup:
                     self.T_blocks,
                     self.operator_indices,
                     np.asarray(x_subset, dtype=self.dtype),
+                    local_indices=self._local_indices,
                 ),
                 dtype=self.dtype,
             )

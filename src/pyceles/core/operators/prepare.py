@@ -115,6 +115,7 @@ def _default_group_factory(
                 k_medium=context.k,
                 particles=archetypes,
                 n_medium=context.n_medium,
+                dtype=context.dtype,
             )
         except NotImplementedError as exc:
             raise NotImplementedError(str(exc)) from exc
@@ -126,7 +127,7 @@ def _default_group_factory(
         return DenseTGroup(
             particle_indices=ids,
             operator_indices=np.asarray(plan.operator_indices, dtype=np.int64),
-            T_blocks=blocks.astype(context.dtype, copy=False),
+            T_blocks=blocks,
             dtype=context.dtype,
         )
 
@@ -139,6 +140,7 @@ def _default_group_factory(
                 k_medium=context.k,
                 particles=archetypes,
                 n_medium=context.n_medium,
+                dtype=context.dtype,
             )
         except NotImplementedError as exc:
             raise NotImplementedError(str(exc)) from exc
@@ -150,7 +152,7 @@ def _default_group_factory(
         return AxisymmetricTGroup(
             particle_indices=ids,
             operator_indices=np.asarray(plan.operator_indices, dtype=np.int64),
-            T_blocks=blocks.astype(context.dtype, copy=False),
+            T_blocks=blocks,
             body_metadata={
                 "storage": "shared_spherical_basis_dense_blocks",
                 "n_unique_archetypes": len(archetypes),

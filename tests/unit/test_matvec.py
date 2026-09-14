@@ -1178,6 +1178,27 @@ def test_shared_operator_maps_handle_repeated_noncontiguous_archetypes():
     np.testing.assert_allclose(particle_t.rhs(block), expected_block)
 
 
+def test_dense_shared_operator_maps_handle_repeated_noncontiguous_archetypes():
+    blocks = np.stack(
+        [
+            np.diag([1.0 + 0.5j, 2.0 - 0.25j]),
+            np.array([[0.5 - 0.1j, 0.2], [0.3j, 1.5 + 0.2j]]),
+        ]
+    )
+    group = DenseTGroup(
+        particle_indices=np.arange(3, dtype=np.int64),
+        operator_indices=np.array([0, 1, 0], dtype=np.int64),
+        T_blocks=blocks,
+    )
+    x = np.arange(6, dtype=float).reshape(3, 2).astype(np.complex128)
+    expected = np.einsum("gij,gj->gi", blocks[group.operator_indices], x)
+    np.testing.assert_allclose(group.apply_subset(x), expected)
+    np.testing.assert_allclose(
+        group.apply_adjoint_subset(x),
+        np.einsum("gji,gj->gi", np.conjugate(blocks[group.operator_indices]), x),
+    )
+
+
 @pytest.mark.fake_gpu
 def test_cupy_group_wrappers_preserve_shared_operator_maps(monkeypatch):
     from pyceles.core.operators import single_body_cupy

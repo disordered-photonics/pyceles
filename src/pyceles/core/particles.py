@@ -147,7 +147,7 @@ class Spheroid(Particle):
         return "axisymmetric"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, eq=False)
 class TMatrixParticle(Particle):
     """Particle represented by an explicit spherical-basis T-matrix.
 
@@ -191,6 +191,32 @@ class TMatrixParticle(Particle):
         object.__setattr__(self, "radius", radius)
         object.__setattr__(self, "lmax", lmax)
         object.__setattr__(self, "t_matrix", owned)
+
+    def _with_position(self, position: tuple[float, float, float]) -> TMatrixParticle:
+        """Move an already-owned descriptor without recopying its dense block."""
+        particle = object.__new__(type(self))
+        object.__setattr__(particle, "position", position)
+        object.__setattr__(particle, "radius", self.radius)
+        object.__setattr__(particle, "lmax", self.lmax)
+        object.__setattr__(particle, "t_matrix", self.t_matrix)
+        return particle
+
+    def __eq__(self, other: object) -> bool:
+        """Compare dense descriptors without NumPy's ambiguous array truth value."""
+        if not isinstance(other, TMatrixParticle):
+            return NotImplemented
+        return bool(
+            self.position == other.position
+            and self.radius == other.radius
+            and self.lmax == other.lmax
+            and self.t_matrix.dtype == other.t_matrix.dtype
+            and self.t_matrix.shape == other.t_matrix.shape
+            and np.array_equal(self.t_matrix, other.t_matrix)
+        )
+
+    def __hash__(self) -> int:
+        """Dense descriptors are value-comparable but intentionally unhashable."""
+        raise TypeError("TMatrixParticle instances are unhashable.")
 
     def circumscribing_radius(self) -> float:
         """Return the user-supplied enclosing-sphere radius."""
@@ -267,6 +293,9 @@ def _freeze_signature_value(value: object) -> object:
     """Convert descriptor metadata into a deterministic hashable cache key."""
     if isinstance(value, np.ndarray):
         array = np.ascontiguousarray(value)
+        # Keep exact content identity for now. A fixed digest would reduce key
+        # size, but collision handling and the hashing cost deserve a separate
+        # benchmark before changing this correctness-sensitive cache key.
         return ("ndarray", array.dtype.str, array.shape, array.tobytes())
     if isinstance(value, np.generic):
         return value.item()
@@ -398,6 +427,15 @@ def _owned_archetype_value(value: object) -> object:
 
 def _particle_at_origin(particle: Particle) -> Particle:
     """Return a collection-owned position-independent immutable archetype."""
+    if isinstance(particle, TMatrixParticle):
+        # Take one collection-owned copy of the dense block. Materialized
+        # instances can then share this immutable archetype storage safely.
+        return TMatrixParticle(
+            position=(0.0, 0.0, 0.0),
+            radius=particle.radius,
+            lmax=particle.lmax,
+            t_matrix=particle.t_matrix,
+        )
     overrides = {
         field.name: _owned_archetype_value(getattr(particle, field.name))
         for field in fields(type(particle))
@@ -626,10 +664,10 @@ class ParticleCollection(Sequence[Particle]):
             raise IndexError("particle index out of range")
         position = self._positions[idx]
         archetype = self._archetypes[int(self._archetype_indices[idx])]
-        return replace(
-            archetype,
-            position=(float(position[0]), float(position[1]), float(position[2])),
-        )
+        values = (float(position[0]), float(position[1]), float(position[2]))
+        if isinstance(archetype, TMatrixParticle):
+            return archetype._with_position(values)
+        return replace(archetype, position=values)
 
     def __iter__(self) -> Iterator[Particle]:
         for index in range(len(self)):

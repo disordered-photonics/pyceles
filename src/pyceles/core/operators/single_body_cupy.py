@@ -18,7 +18,7 @@ import numpy as np
 from pyceles._optional import asnumpy, coerce_array, import_cupy, is_cupy_array
 from pyceles.core.indexing import n_modes
 
-from .groups import AxisymmetricTGroup, DenseTGroup, DiagonalTGroup
+from .groups import AxisymmetricTGroup, DenseTGroup, DiagonalTGroup, _operator_local_indices
 
 Array = np.ndarray
 DEFAULT_COMPLEX_DTYPE = np.dtype(np.complex128)
@@ -172,6 +172,7 @@ class CuPyDenseTGroup:
     dtype: np.dtype = DEFAULT_COMPLEX_DTYPE
     body_metadata: object | None = None
     _T_blocks_gpu: object | None = field(default=None, init=False, repr=False)
+    _local_indices_host: tuple[Array, ...] = field(default=(), init=False, repr=False)
     _local_indices_gpu: dict[int, object] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -186,6 +187,9 @@ class CuPyDenseTGroup:
             self.operator_indices = np.asarray(self.operator_indices, dtype=np.int64).reshape(-1)
         if self.operator_indices.size != self.particle_indices.size:
             raise ValueError("`operator_indices` must align with `particle_indices`.")
+        self._local_indices_host = _operator_local_indices(
+            self.operator_indices, self.T_blocks.shape[0]
+        )
 
     @property
     def supports_adjoint(self) -> bool:
@@ -201,7 +205,7 @@ class CuPyDenseTGroup:
         cupy, _ = import_cupy()
         cached = self._local_indices_gpu.get(operator_index)
         if cached is None:
-            local = np.flatnonzero(self.operator_indices == operator_index).astype(np.int64)
+            local = self._local_indices_host[int(operator_index)]
             cached = cupy.asarray(local, dtype=np.int64)
             self._local_indices_gpu[operator_index] = cached
         return cached
