@@ -60,6 +60,15 @@ def test_self_correction_uses_half_integer_origin_term() -> None:
     assert _self_correction(k, eta) == pytest.approx(expected, rel=1e-15, abs=1e-15)
 
 
+def test_eta_probe_relative_difference_scales_large_finite_rows() -> None:
+    """Finite large probe values must not become an inf/inf comparison."""
+    lhs = np.full((1, 32), complex(1.0e308, 1.0e308), dtype=np.complex128)
+    rhs = np.full((1, 32), complex(5.0e307, 5.0e307), dtype=np.complex128)
+    with np.errstate(over="raise", invalid="raise"):
+        relative_difference = ewald_module._eta_probe_relative_difference(lhs, rhs)
+    assert relative_difference == pytest.approx(0.5, rel=1.0e-14)
+
+
 @pytest.mark.reference
 def test_off_plane_ewald_structural_constants_match_stabilized_references() -> None:
     k = 2.0 * np.pi / 550.0

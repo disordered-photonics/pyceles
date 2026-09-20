@@ -389,10 +389,24 @@ def _eta_probe_vector(
 def _eta_probe_relative_difference(a: Array, b: Array) -> float:
     lhs = np.asarray(a, dtype=np.complex128).reshape(a.shape[0], -1)
     rhs = np.asarray(b, dtype=np.complex128).reshape(b.shape[0], -1)
-    diff = np.linalg.norm(lhs - rhs, axis=1)
-    lhs_norm = np.linalg.norm(lhs, axis=1)
-    rhs_norm = np.linalg.norm(rhs, axis=1)
-    scale = np.maximum.reduce((lhs_norm, rhs_norm, np.ones_like(diff)))
+    # Scale each row before taking its norm.  Ewald policy probes can contain
+    # very large, but still finite, intermediate values; linalg.norm squares
+    # them and otherwise turns a finite comparison into inf/inf.
+    lhs_scale = np.maximum(
+        np.max(np.abs(lhs.real), axis=1),
+        np.max(np.abs(lhs.imag), axis=1),
+    )
+    rhs_scale = np.maximum(
+        np.max(np.abs(rhs.real), axis=1),
+        np.max(np.abs(rhs.imag), axis=1),
+    )
+    row_scale = np.maximum.reduce((lhs_scale, rhs_scale, np.ones_like(lhs_scale)))
+    lhs_scaled = lhs / row_scale[:, None]
+    rhs_scaled = rhs / row_scale[:, None]
+    diff = np.linalg.norm(lhs_scaled - rhs_scaled, axis=1)
+    lhs_norm = np.linalg.norm(lhs_scaled, axis=1)
+    rhs_norm = np.linalg.norm(rhs_scaled, axis=1)
+    scale = np.maximum.reduce((lhs_norm, rhs_norm, 1.0 / row_scale))
     return float(np.max(diff / scale))
 
 
