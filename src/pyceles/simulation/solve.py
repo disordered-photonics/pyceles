@@ -429,7 +429,8 @@ def _prepare_linear_system(
         rhs_flat[label] = prepared.rhs_Tb(initial_coeffs[label].reshape(unknowns))
     phase_timings["rhs_Tb_s"] = time.perf_counter() - rhs_t0
 
-    rayleigh_preparation = cfg.periodic is not None and cfg.periodic.options.method == "rayleigh"
+    periodic_method = None if cfg.periodic is None else cfg.periodic.options.method
+    rayleigh_preparation = periodic_method == "rayleigh"
     if (bool(cfg.cache_translation_blocks) and not will_use_direct) or rayleigh_preparation:
         populate_t0 = time.perf_counter()
         prepared.populate_coupling(show_progress=bool(cfg.verbose))
@@ -437,7 +438,11 @@ def _prepare_linear_system(
         timing_key = (
             "periodic_rayleigh_preparation_s"
             if rayleigh_preparation
-            else "periodic_w_block_generation_s"
+            else (
+                "periodic_ewald_preparation_s"
+                if periodic_method == "ewald"
+                else "periodic_w_block_generation_s"
+            )
         )
         phase_timings[timing_key] = populate_elapsed
 
