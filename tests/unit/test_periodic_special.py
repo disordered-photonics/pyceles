@@ -92,6 +92,23 @@ def test_shifted_delta_sequence_returns_finite_recurrence_values() -> None:
     assert np.all(np.isfinite(delta.imag))
 
 
+def test_shifted_delta_sequence_stays_finite_for_large_propagating_height() -> None:
+    # The lower-half-plane Faddeeva branch and its exponentially small
+    # prefactor otherwise form a 0*inf product for a perfectly valid tall-cell
+    # reciprocal offset.
+    k = 2.0 * math.pi / 550.0
+    delta = shifted_delta_sequence(3, np.asarray([k + 0.0j]), 10550.4, 2.67125e-3)
+
+    assert np.all(np.isfinite(delta.real))
+    assert np.all(np.isfinite(delta.imag))
+    np.testing.assert_allclose(
+        delta,
+        shifted_delta_sequence(3, np.asarray([k + 0.0j]), -10550.4, 2.67125e-3),
+        rtol=1.0e-13,
+        atol=1.0e-13,
+    )
+
+
 def test_shifted_delta_sequence_rejects_same_plane_limit() -> None:
     with pytest.raises(ValueError, match="same-plane reciprocal formula"):
         shifted_delta_sequence(2, np.array([0.7 + 0.1j]), z_offset=0.0, eta=1.2)

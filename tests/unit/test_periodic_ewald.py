@@ -647,7 +647,7 @@ def test_rayleigh_eta_preflight_is_limited_to_the_exact_near_band() -> None:
     assert tall_eta > 2.0 * default_ewald_eta(lattice)
 
 
-def test_automatic_ewald_eta_rejects_unstable_tall_cell() -> None:
+def test_automatic_ewald_eta_accepts_stable_tall_cell_after_large_height_fix() -> None:
     k = 2.0 * np.pi / 366.6666666666667
     lattice = pcl.RectangularLattice2D(ax=3544.8765, ay=3544.8765)
     periodic = pcl.PeriodicSpec(
@@ -659,14 +659,19 @@ def test_automatic_ewald_eta_rejects_unstable_tall_cell() -> None:
         dtype=float,
     )
 
-    with pytest.raises(FloatingPointError, match="prefer the hybrid Rayleigh operator"):
-        resolve_ewald_eta(
-            periodic=periodic,
-            k=k,
-            k_parallel=np.zeros(2),
-            positions=positions,
-            lmax=2,
-        )
+    eta = resolve_ewald_eta(
+        periodic=periodic,
+        k=k,
+        k_parallel=np.zeros(2),
+        positions=positions,
+        lmax=2,
+    )
+
+    # The tall offset is valid; the former rejection was caused by an
+    # overflow in the lower-half-plane Faddeeva product rather than by an
+    # unresolved eta split.
+    assert eta > 2.0 * default_ewald_eta(lattice)
+    assert np.isfinite(eta)
 
 
 @pytest.mark.reference

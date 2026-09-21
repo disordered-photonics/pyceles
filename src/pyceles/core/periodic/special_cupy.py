@@ -277,12 +277,86 @@ def _shifted_delta_sequence_cupy_raw(
     root_b = root_x[None, :]
     exp_term = cp.exp(-x_b + z_sq / (4.0 * x_b))
     out = cp.zeros((int(z_arr.size), int(gamma_arr.size), n_max + 1), dtype=cp.complex128)
-    w_minus = wofz_cupy(-z_arg / (2.0 * root_b) + 1j * root_b, terms=int(terms), cupy=cp)
-    w_plus = wofz_cupy(z_arg / (2.0 * root_b) + 1j * root_b, terms=int(terms), cupy=cp)
-    out[:, :, 0] = 0.5 * math.sqrt(math.pi) * exp_term * (w_minus + w_plus)
+    propagating = x.real < 0.0
+    ordinary = ~propagating
+    if bool(cp.any(propagating).get()):
+        prop_indices = cp.flatnonzero(propagating)
+        a = cp.sqrt(cp.abs(x[prop_indices]))
+        scaled_abs = cp.abs(scaled[:, prop_indices].real)
+        b = scaled_abs / (2.0 * a[None, :])
+        upper_w = wofz_cupy(
+            a[None, :] + 1j * b,
+            terms=int(terms),
+            cupy=cp,
+        )
+        prop_exp = cp.exp(a[None, :] * a[None, :] - b * b)
+        phase = cp.exp(1j * scaled_abs)
+        out[:, prop_indices, 0] = math.sqrt(math.pi) * (phase + 1j * prop_exp * upper_w.imag)
+        if n_max >= 1:
+            out[:, prop_indices, 1] = (2j * math.sqrt(math.pi) / scaled_abs) * (
+                phase - prop_exp * upper_w.real
+            )
+
+    if bool(cp.any(ordinary).get()):
+        ordinary_indices = cp.flatnonzero(ordinary)
+        ordinary_x = x[ordinary_indices]
+        ordinary_root = root_x[ordinary_indices]
+        ordinary_z_arg = z_arg[:, ordinary_indices]
+        ordinary_exp = exp_term[:, ordinary_indices]
+        evanescent = ordinary_x.real > 0.0
+        if bool(cp.any(evanescent).get()):
+            ev_indices = cp.flatnonzero(evanescent)
+            a = cp.sqrt(ordinary_x.real[ev_indices])
+            scaled_abs = cp.abs(ordinary_z_arg[:, ev_indices].imag)
+            c = scaled_abs / (2.0 * a[None, :])
+            ev_exp = cp.exp(-a[None, :] * a[None, :] - c * c)
+            w_plus = wofz_cupy(1j * (a[None, :] + c), terms=int(terms), cupy=cp)
+            w_lower_reflected = wofz_cupy(1j * (c - a[None, :]), terms=int(terms), cupy=cp)
+            lower = c > a[None, :]
+            lower_term = 2.0 * cp.exp(-scaled_abs)
+            w_minus_upper = wofz_cupy(1j * (a[None, :] - c), terms=int(terms), cupy=cp)
+            product_sum = cp.where(
+                lower,
+                lower_term - ev_exp * w_lower_reflected + ev_exp * w_plus,
+                ev_exp * (w_minus_upper + w_plus),
+            )
+            product_diff = cp.where(
+                lower,
+                lower_term - ev_exp * w_lower_reflected - ev_exp * w_plus,
+                ev_exp * (w_minus_upper - w_plus),
+            )
+            out[:, ordinary_indices[ev_indices], 0] = 0.5 * math.sqrt(math.pi) * product_sum
+            if n_max >= 1:
+                out[:, ordinary_indices[ev_indices], 1] = (
+                    math.sqrt(math.pi) / scaled_abs * product_diff
+                )
+
+        generic = ~evanescent
+        if bool(cp.any(generic).get()):
+            gen_indices = cp.flatnonzero(generic)
+            generic_root = ordinary_root[gen_indices]
+            generic_z_arg = ordinary_z_arg[:, gen_indices]
+            generic_exp = ordinary_exp[:, gen_indices]
+            w_minus = wofz_cupy(
+                -generic_z_arg / (2.0 * generic_root) + 1j * generic_root,
+                terms=int(terms),
+                cupy=cp,
+            )
+            w_plus = wofz_cupy(
+                generic_z_arg / (2.0 * generic_root) + 1j * generic_root,
+                terms=int(terms),
+                cupy=cp,
+            )
+            out[:, ordinary_indices[gen_indices], 0] = (
+                0.5 * math.sqrt(math.pi) * generic_exp * (w_minus + w_plus)
+            )
+            if n_max >= 1:
+                out[:, ordinary_indices[gen_indices], 1] = (
+                    1j * math.sqrt(math.pi) / generic_z_arg * generic_exp * (w_minus - w_plus)
+                )
+
     if n_max == 0:
         return out
-    out[:, :, 1] = 1j * math.sqrt(math.pi) / z_arg * exp_term * (w_minus - w_plus)
     x_power = 1.0 / x_b
     for index in range(2, n_max + 1):
         out[:, :, index] = (

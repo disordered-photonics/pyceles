@@ -42,6 +42,29 @@ def test_shifted_delta_sequence_cupy_matches_numpy_reference(
     np.testing.assert_allclose(got, want, rtol=1e-14, atol=1e-14)
 
 
+def test_shifted_delta_sequence_cupy_stays_finite_for_tall_cell(
+    cupy_runtime: tuple[Any, Any],
+) -> None:
+    cp, _ = cupy_runtime
+    from pyceles.core.periodic.special import shifted_delta_sequence
+    from pyceles.core.periodic.special_cupy import shifted_delta_sequence_cupy
+
+    k = 2.0 * np.pi / 550.0
+    got = cp.asnumpy(
+        shifted_delta_sequence_cupy(
+            3,
+            cp.asarray([k + 0.0j]),
+            10550.4,
+            2.67125e-3,
+            cupy=cp,
+        )
+    )
+    want = shifted_delta_sequence(3, np.asarray([k + 0.0j]), 10550.4, 2.67125e-3)
+    np.testing.assert_allclose(got, want, rtol=2e-12, atol=2e-12)
+    assert np.all(np.isfinite(got.real))
+    assert np.all(np.isfinite(got.imag))
+
+
 def test_real_integral_sequence_cupy_matches_numpy_reference(
     cupy_runtime: tuple[Any, Any],
 ) -> None:

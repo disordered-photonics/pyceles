@@ -556,25 +556,82 @@ __device__ void _pyceles_shifted_delta_sequence(
     const complex<double> z_arg =
         x.real() < 0.0 ? scaled : complex<double>(0.0, abs(scaled));
     const complex<double> exp_term = exp(-x + z_sq / (4.0 * x));
-    const complex<double> w_minus = _wtrap_wofz_one(
-        -z_arg / (2.0 * root_x) + complex<double>(0.0, 1.0) * root_x,
-        quadrature,
-        terms,
-        h,
-        H
-    );
-    const complex<double> w_plus = _wtrap_wofz_one(
-        z_arg / (2.0 * root_x) + complex<double>(0.0, 1.0) * root_x,
-        quadrature,
-        terms,
-        h,
-        H
-    );
-    delta[0] = 0.5 * sqrt(PYCELES_PI) * exp_term * (w_minus + w_plus);
+    if (x.real() < 0.0) {
+        // The two Faddeeva arguments are conjugates.  Reflect the lower
+        // half-plane value analytically before multiplying by exp_term; the
+        // direct product otherwise becomes 0*inf for tall cells.
+        const double a = fabs(root_x.imag());
+        const double scaled_abs = fabs(scaled.real());
+        const double b = scaled_abs / (2.0 * a);
+        const complex<double> upper_w = _wtrap_wofz_one(
+            complex<double>(a, b), quadrature, terms, h, H
+        );
+        const double prop_exp = exp(a * a - b * b);
+        const complex<double> phase(cos(scaled_abs), sin(scaled_abs));
+        delta[0] = sqrt(PYCELES_PI) * (
+            phase + complex<double>(0.0, prop_exp * upper_w.imag())
+        );
+        if (order >= 1) {
+            delta[1] = complex<double>(0.0, 2.0 * sqrt(PYCELES_PI) / scaled_abs) * (
+                phase - complex<double>(prop_exp * upper_w.real(), 0.0)
+            );
+        }
+    } else if (x.real() > 0.0) {
+        // For evanescent orders z_arg is imaginary.  Once its lower argument
+        // crosses the real axis, use the same Faddeeva reflection identity;
+        // the physical Ewald product is exponentially decaying.
+        const double a = sqrt(x.real());
+        const double scaled_abs = fabs(z_arg.imag());
+        const double c = scaled_abs / (2.0 * a);
+        const double ev_exp = exp(-a * a - c * c);
+        const complex<double> w_plus = _wtrap_wofz_one(
+            complex<double>(0.0, a + c), quadrature, terms, h, H
+        );
+        complex<double> product_sum;
+        complex<double> product_diff;
+        if (c > a) {
+            const complex<double> w_lower_reflected = _wtrap_wofz_one(
+                complex<double>(0.0, c - a), quadrature, terms, h, H
+            );
+            const double lower_term = 2.0 * exp(-scaled_abs);
+            product_sum = complex<double>(lower_term, 0.0)
+                - ev_exp * w_lower_reflected + ev_exp * w_plus;
+            product_diff = complex<double>(lower_term, 0.0)
+                - ev_exp * w_lower_reflected - ev_exp * w_plus;
+        } else {
+            const complex<double> w_minus = _wtrap_wofz_one(
+                complex<double>(0.0, a - c), quadrature, terms, h, H
+            );
+            product_sum = ev_exp * (w_minus + w_plus);
+            product_diff = ev_exp * (w_minus - w_plus);
+        }
+        delta[0] = 0.5 * sqrt(PYCELES_PI) * product_sum;
+        if (order >= 1) {
+            delta[1] = sqrt(PYCELES_PI) / scaled_abs * product_diff;
+        }
+    } else {
+        const complex<double> w_minus = _wtrap_wofz_one(
+            -z_arg / (2.0 * root_x) + complex<double>(0.0, 1.0) * root_x,
+            quadrature,
+            terms,
+            h,
+            H
+        );
+        const complex<double> w_plus = _wtrap_wofz_one(
+            z_arg / (2.0 * root_x) + complex<double>(0.0, 1.0) * root_x,
+            quadrature,
+            terms,
+            h,
+            H
+        );
+        delta[0] = 0.5 * sqrt(PYCELES_PI) * exp_term * (w_minus + w_plus);
+        if (order >= 1) {
+            delta[1] = complex<double>(0.0, sqrt(PYCELES_PI)) / z_arg * exp_term * (w_minus - w_plus);
+        }
+    }
     if (order == 0) {
         return;
     }
-    delta[1] = complex<double>(0.0, sqrt(PYCELES_PI)) / z_arg * exp_term * (w_minus - w_plus);
     complex<double> x_power = complex<double>(1.0, 0.0) / x;
     for (int idx = 2; idx <= order; ++idx) {
         delta[idx] = 4.0 / z_sq * (

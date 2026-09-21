@@ -363,12 +363,89 @@ def _shifted_delta_sequence_batched_raw(
     root_b = root_x[None, :]
     exp_term = np.exp(-x_b + z_sq / (4.0 * x_b))
 
-    w_minus = special.wofz(-z_arg / (2.0 * root_b) + 1j * root_b)
-    w_plus = special.wofz(z_arg / (2.0 * root_b) + 1j * root_b)
-    out[:, :, 0] = 0.5 * math.sqrt(math.pi) * exp_term * (w_minus + w_plus)
+    # For propagating reciprocal orders ``x < 0`` the two Faddeeva
+    # arguments are conjugates, with one in the lower half-plane.  Directly
+    # evaluating that lower-half-plane value and multiplying by ``exp_term``
+    # creates the indeterminate ``0 * inf`` for large |gamma*z|, although the
+    # analytic product is perfectly finite.  Use the reflection identity for
+    # the lower-half-plane term and keep the upper-half-plane evaluation only.
+    # The reciprocal gamma values produced by this module are real on this
+    # branch; the absolute scaled height also preserves the established even
+    # parity of the shifted sequence.
+    propagating = np.asarray(x.real < 0.0, dtype=bool)
+    ordinary = ~propagating
+    if np.any(propagating):
+        prop_indices = np.flatnonzero(propagating)
+        a = np.sqrt(np.abs(x[prop_indices]))
+        scaled_abs = np.abs(scaled[:, prop_indices].real)
+        b = scaled_abs / (2.0 * a[None, :])
+        upper_arg = a[None, :] + 1j * b
+        upper_w = special.wofz(upper_arg)
+        prop_exp = np.exp(a[None, :] * a[None, :] - b * b)
+        phase = np.exp(1j * scaled_abs)
+        out[:, prop_indices, 0] = math.sqrt(math.pi) * (phase + 1j * prop_exp * upper_w.imag)
+        if n_max >= 1:
+            out[:, prop_indices, 1] = (2j * math.sqrt(math.pi) / scaled_abs) * (
+                phase - prop_exp * upper_w.real
+            )
+
+    if np.any(ordinary):
+        ordinary_indices = np.flatnonzero(ordinary)
+        ordinary_x = x[ordinary_indices]
+        ordinary_root = root_x[ordinary_indices]
+        ordinary_z_arg = z_arg[:, ordinary_indices]
+        ordinary_exp = exp_term[:, ordinary_indices]
+        # Evanescent orders have ``x > 0`` and purely imaginary z_arg.  At a
+        # sufficiently large height the first Faddeeva argument crosses into
+        # the lower half-plane, where direct evaluation overflows even though
+        # the Ewald product decays.  Reflect that term back to the upper
+        # half-plane before multiplying by the common exponential.
+        evanescent = ordinary_x.real > 0.0
+        if np.any(evanescent):
+            ev_indices = np.flatnonzero(evanescent)
+            a = np.sqrt(ordinary_x.real[ev_indices])
+            scaled_abs = np.abs(ordinary_z_arg[:, ev_indices].imag)
+            c = scaled_abs / (2.0 * a[None, :])
+            ev_exp = np.exp(-a[None, :] * a[None, :] - c * c)
+            w_plus = special.wofz(1j * (a[None, :] + c))
+            w_lower_reflected = special.wofz(1j * (c - a[None, :]))
+            lower = c > a[None, :]
+            lower_term = 2.0 * np.exp(-scaled_abs)
+            w_minus_upper = special.wofz(1j * (a[None, :] - c))
+            product_sum = np.where(
+                lower,
+                lower_term - ev_exp * w_lower_reflected + ev_exp * w_plus,
+                ev_exp * (w_minus_upper + w_plus),
+            )
+            product_diff = np.where(
+                lower,
+                lower_term - ev_exp * w_lower_reflected - ev_exp * w_plus,
+                ev_exp * (w_minus_upper - w_plus),
+            )
+            out[:, ordinary_indices[ev_indices], 0] = 0.5 * math.sqrt(math.pi) * product_sum
+            if n_max >= 1:
+                out[:, ordinary_indices[ev_indices], 1] = (
+                    math.sqrt(math.pi) / scaled_abs * product_diff
+                )
+
+        generic = ~evanescent
+        if np.any(generic):
+            gen_indices = np.flatnonzero(generic)
+            generic_root = ordinary_root[gen_indices]
+            generic_z_arg = ordinary_z_arg[:, gen_indices]
+            generic_exp = ordinary_exp[:, gen_indices]
+            w_minus = special.wofz(-generic_z_arg / (2.0 * generic_root) + 1j * generic_root)
+            w_plus = special.wofz(generic_z_arg / (2.0 * generic_root) + 1j * generic_root)
+            out[:, ordinary_indices[gen_indices], 0] = (
+                0.5 * math.sqrt(math.pi) * generic_exp * (w_minus + w_plus)
+            )
+            if n_max >= 1:
+                out[:, ordinary_indices[gen_indices], 1] = (
+                    1j * math.sqrt(math.pi) / generic_z_arg * generic_exp * (w_minus - w_plus)
+                )
+
     if n_max == 0:
         return out
-    out[:, :, 1] = 1j * math.sqrt(math.pi) / z_arg * exp_term * (w_minus - w_plus)
     x_power = 1.0 / x_b
     for index in range(2, n_max + 1):
         out[:, :, index] = (
