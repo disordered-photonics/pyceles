@@ -592,12 +592,12 @@ def test_gmres_cupy_final_flag_does_not_skip_restart_residuals(monkeypatch):
         compute_final_residual=False,
     )
 
-    # Each restarted cycle needs one Arnoldi matvec and one physical residual
-    # matvec.  The public scalar is omitted, but the true history remains useful
-    # for diagnostics and proves that both restart checks took place.
-    assert matvec_calls == 4
+    # Two Arnoldi matvecs are required.  Only the first cycle boundary needs
+    # another physical residual because a second restarted cycle follows; the
+    # terminal residual is exactly what the cheap-result flag is allowed to omit.
+    assert matvec_calls == 3
     assert out.true_residual_history is not None
-    assert len(np.asarray(out.true_residual_history)) == 3
+    assert len(np.asarray(out.true_residual_history)) == 2
     assert np.isnan(float(out.relative_residual))
 
 
@@ -711,7 +711,7 @@ def test_gcro_cupy_harmonic_recycling_solves_toy_system(
     )
     assert np.isnan(float(proxy_only.relative_residual))
     assert proxy_only.true_residual_history is not None
-    assert proxy_only.true_residual_history.size >= 2
+    assert proxy_only.true_residual_history.size == 1
 
     multi = solvers.solve_linear_system(
         lambda x: cupy.asarray(A, dtype=cupy.complex128) @ x,
@@ -1513,7 +1513,7 @@ def test_solve_linear_system_cupy_restart_solvers_verify_true_residual_each_rest
 
 
 @pytest.mark.fake_gpu
-def test_solve_linear_system_lgmres_cupy_skip_final_residual_keeps_restart_apply(monkeypatch):
+def test_solve_linear_system_lgmres_cupy_skip_final_residual_avoids_terminal_apply(monkeypatch):
     monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
     A = np.asarray([[2.0 + 0.0j, 0.25 + 0.0j], [0.0 + 0.0j, 3.0 + 0.0j]], dtype=np.complex128)
     b = np.asarray([1.0 + 0.0j, -1.5 + 0.0j], dtype=np.complex128)
@@ -1536,9 +1536,9 @@ def test_solve_linear_system_lgmres_cupy_skip_final_residual_keeps_restart_apply
         show_progress=False,
         compute_final_residual=False,
     )
-    # The terminal scalar is omitted, but the restart-boundary physical
-    # residual is still required to preserve the restarted Krylov method.
-    assert calls == 2
+    # No restart follows this one-step solve, so the terminal physical residual
+    # is the one application that the flag is allowed to omit.
+    assert calls == 1
     assert int(out.iterations) == 1
     assert np.isnan(float(out.residual_norm))
     assert np.isnan(float(out.relative_residual))

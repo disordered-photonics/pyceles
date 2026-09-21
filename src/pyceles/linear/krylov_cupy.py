@@ -434,13 +434,6 @@ def _solve_rotated_upper(
     return cupy.linalg.lstsq(r_upper, rhs, rcond=None)[0]
 
 
-def _normalize_true_residual_mode(mode: str) -> Literal["none", "restart", "final"]:
-    out = str(mode).lower()
-    if out not in {"none", "restart", "final"}:
-        raise ValueError("`true_residual_mode` must be 'none', 'restart', or 'final'.")
-    return out  # type: ignore[return-value]
-
-
 def lsqr_cupy_native(
     A_mv: Callable[[Any], Any],
     A_h_mv: Callable[[Any], Any],
@@ -790,14 +783,13 @@ def gmres_cupy_native(
     breakdown_tol: float = 1e-30,
     happy_breakdown_tol: float = 0.0,
     compute_final_residual: bool = True,
-    true_residual_mode: Literal["none", "restart", "final"] = "restart",
 ) -> CuPyGMRESNativeResult:
     """Run restarted left-preconditioned GMRES fully on CuPy arrays.
 
     Inner-iteration callbacks receive the GMRES preconditioned residual proxy
-    from the Arnoldi/Givens recurrence. True-residual checks are controlled by
-    `true_residual_mode`: `none` (skip), `restart` (verify every restart
-    boundary), `final` (verify only terminal decisions).
+    from the Arnoldi/Givens recurrence. A physical residual is rebuilt whenever
+    another restarted cycle is required. ``compute_final_residual=False`` skips
+    only a terminal residual evaluation when no further cycle will be started.
     """
     b_dtype_obj = getattr(b, "dtype", None)
     b_dtype = np.dtype(np.asarray(b).dtype if b_dtype_obj is None else b_dtype_obj)
@@ -810,12 +802,9 @@ def gmres_cupy_native(
     if float(happy_breakdown_tol) < 0.0:
         raise ValueError("`happy_breakdown_tol` must be >= 0.")
     # ``compute_final_residual`` controls only the optional terminal diagnostic.
-    # In particular, it must not disable the true residual needed to rebuild
-    # the restart state.  ``true_residual_mode`` is the independent policy for
-    # those physical checks.
-    tr_mode: Literal["none", "restart", "final"] = _normalize_true_residual_mode(
-        str(true_residual_mode)
-    )
+    # A physical residual is always rebuilt when another restarted cycle is
+    # required; otherwise the next Krylov space would start from the wrong
+    # vector even if the Arnoldi residual norm proxy were accurate.
     op_dtype = _dtype_complex(
         operator_dtype if operator_dtype is not None else np.result_type(b_dtype, np.complex64),
         name="operator_dtype",
@@ -871,7 +860,6 @@ def gmres_cupy_native(
     residual_norm: float
     relative_residual: float
     need_pr_rel = bool(callback is not None or record_preconditioned_history)
-    restart_z = None
 
     def _record_true_residual(rel_norm: float) -> None:
         true_hist.append(float(rel_norm))
@@ -885,18 +873,13 @@ def gmres_cupy_native(
         x0_is_zero = False
     else:
         residual_norm, relative_residual, r_true = _true_residual_stats(x_vec)
-    if tr_mode != "none":
-        _record_true_residual(relative_residual)
+    _record_true_residual(relative_residual)
     if residual_norm <= target_abs:
         info = 0
         converged_reason = "converged"
 
     while iterations < maxiter_total and info != 0:
-        if restart_z is None:
-            z0 = _apply_minv(r_true)
-        else:
-            z0 = cupy.asarray(restart_z, dtype=op_dtype)
-            restart_z = None
+        z0 = _apply_minv(r_true)
         beta = _norm(z0, cupy=cupy, accum_dtype=acc_dtype)
         if beta <= breakdown_tol_f:
             info = iterations if iterations > 0 else maxiter_total
@@ -1019,19 +1002,17 @@ def gmres_cupy_native(
         # ``(k_used, n)`` basis to complex128 for this product.
         y_op = cupy.asarray(y, dtype=op_dtype)
         x_vec = x_vec + cupy.asarray(y_op @ V[:k_used, :], dtype=op_dtype)
-        restart_z = cupy.asarray(g[k_used], dtype=op_dtype) * cupy.asarray(
-            V[k_used, :], dtype=op_dtype
-        )
         # The next restart allocates a fresh basis.  Drop the completed cycle
-        # before a true-residual matvec or the next allocation so two full
-        # Arnoldi bases cannot overlap at the restart boundary.
+        # before any physical-residual matvec so two full Arnoldi bases cannot
+        # overlap at the restart boundary.
         del V, H, cs, sn, g, y, z0
-        should_verify_true = (tr_mode == "restart") or (
-            tr_mode == "final"
-            and bool(compute_final_residual)
-            and (cycle_presid <= ptol or iterations >= maxiter_total or cycle_breakdown)
+        terminal_by_proxy = bool(
+            cycle_breakdown or cycle_presid <= ptol or iterations >= maxiter_total
         )
-        if should_verify_true:
+        # A physical residual is mandatory whenever another restarted cycle may
+        # follow.  At a terminal boundary it is optional and controlled by the
+        # public ``compute_final_residual`` policy.
+        if (not terminal_by_proxy) or bool(compute_final_residual):
             residual_norm, relative_residual, r_true = _true_residual_stats(x_vec)
             _record_true_residual(relative_residual)
             if residual_norm <= target_abs:
@@ -1046,26 +1027,19 @@ def gmres_cupy_native(
                 info = iterations
                 converged_reason = "maxiter_reached"
                 break
-            restart_z = None
             continue
+        residual_norm = float("nan")
+        relative_residual = float("nan")
         if cycle_breakdown:
-            residual_norm = float("nan")
-            relative_residual = float("nan")
             info = iterations if iterations > 0 else maxiter_total
             converged_reason = cycle_breakdown_reason
-            break
-        if cycle_presid <= ptol:
-            residual_norm = float("nan")
-            relative_residual = float("nan")
+        elif cycle_presid <= ptol:
             info = 0
             converged_reason = "converged"
-            break
-        if iterations >= maxiter_total:
-            residual_norm = float("nan")
-            relative_residual = float("nan")
+        else:
             info = iterations
             converged_reason = "maxiter_reached"
-            break
+        break
 
     return CuPyGMRESNativeResult(
         x=x_vec,
@@ -1121,15 +1095,14 @@ def fgmres_cupy_native(
     breakdown_tol: float = 1e-30,
     happy_breakdown_tol: float = 0.0,
     compute_final_residual: bool = True,
-    true_residual_mode: Literal["none", "restart", "final"] = "restart",
 ) -> CuPyGMRESNativeResult:
     """Run restarted right-preconditioned flexible GMRES on CuPy arrays.
 
     Compared with standard GMRES, FGMRES stores both Krylov basis vectors `V`
     and preconditioned vectors `Z_j = M_j^{-1} V_j`, allowing the
-    preconditioner to vary by iteration. True-residual checks are controlled
-    by `true_residual_mode`: `none` (skip), `restart` (verify every restart
-    boundary), `final` (verify only terminal decisions).
+    preconditioner to vary by iteration. A physical residual is rebuilt whenever
+    another restarted cycle is required. ``compute_final_residual=False`` skips
+    only a terminal residual evaluation when no further cycle will be started.
     """
     b_dtype_obj = getattr(b, "dtype", None)
     b_dtype = np.dtype(np.asarray(b).dtype if b_dtype_obj is None else b_dtype_obj)
@@ -1141,9 +1114,6 @@ def fgmres_cupy_native(
         raise ValueError("`cgs_refinement` must be 'never', 'ifneeded', or 'always'.")
     if float(happy_breakdown_tol) < 0.0:
         raise ValueError("`happy_breakdown_tol` must be >= 0.")
-    tr_mode: Literal["none", "restart", "final"] = _normalize_true_residual_mode(
-        str(true_residual_mode)
-    )
     op_dtype = _dtype_complex(
         operator_dtype if operator_dtype is not None else np.result_type(b_dtype, np.complex64),
         name="operator_dtype",
@@ -1217,8 +1187,7 @@ def fgmres_cupy_native(
         x0_is_zero = False
     else:
         residual_norm, relative_residual, r_true = _true_residual_stats(x_vec)
-    if tr_mode != "none":
-        _record_true_residual(relative_residual)
+    _record_true_residual(relative_residual)
     if residual_norm <= target_abs:
         info = 0
         converged_reason = "converged"
@@ -1342,16 +1311,17 @@ def fgmres_cupy_native(
         )
         y_op = cupy.asarray(y, dtype=op_dtype)
         x_vec = x_vec + cupy.asarray(y_op @ Z[:k_used, :], dtype=op_dtype)
-        r_true = cupy.asarray(g[k_used], dtype=op_dtype) * cupy.asarray(
-            V[k_used, :], dtype=op_dtype
-        )
+        # The next restart allocates a fresh basis.  Drop the completed cycle
+        # before any physical-residual matvec so two full Arnoldi bases cannot
+        # overlap at the restart boundary.
         del V, Z, H, cs, sn, g, y
-        should_verify_true = (tr_mode == "restart") or (
-            tr_mode == "final"
-            and bool(compute_final_residual)
-            and (cycle_presid <= ptol or iterations >= maxiter_total or cycle_breakdown)
+        terminal_by_proxy = bool(
+            cycle_breakdown or cycle_presid <= ptol or iterations >= maxiter_total
         )
-        if should_verify_true:
+        # A physical residual is mandatory whenever another restarted cycle may
+        # follow.  At a terminal boundary it is optional and controlled by the
+        # public ``compute_final_residual`` policy.
+        if (not terminal_by_proxy) or bool(compute_final_residual):
             residual_norm, relative_residual, r_true = _true_residual_stats(x_vec)
             _record_true_residual(relative_residual)
             if residual_norm <= target_abs:
@@ -1367,24 +1337,18 @@ def fgmres_cupy_native(
                 converged_reason = "maxiter_reached"
                 break
             continue
+        residual_norm = float("nan")
+        relative_residual = float("nan")
         if cycle_breakdown:
-            residual_norm = float("nan")
-            relative_residual = float("nan")
             info = iterations if iterations > 0 else maxiter_total
             converged_reason = cycle_breakdown_reason
-            break
-        if cycle_presid <= ptol:
-            residual_norm = float("nan")
-            relative_residual = float("nan")
+        elif cycle_presid <= ptol:
             info = 0
             converged_reason = "converged"
-            break
-        if iterations >= maxiter_total:
-            residual_norm = float("nan")
-            relative_residual = float("nan")
+        else:
             info = iterations
             converged_reason = "maxiter_reached"
-            break
+        break
 
     return CuPyGMRESNativeResult(
         x=x_vec,
@@ -1423,16 +1387,15 @@ def lgmres_cupy_native(
     breakdown_tol: float = 1e-30,
     happy_breakdown_tol: float = 0.0,
     compute_final_residual: bool = True,
-    true_residual_mode: Literal["none", "restart", "final"] = "restart",
 ) -> CuPyGMRESNativeResult:
     """Run restarted right-preconditioned LGMRES on CuPy arrays.
 
     LGMRES augments each restarted cycle with up to ``outer_k`` normalized
     correction directions from previous cycles, which often mitigates restart
-    stagnation versus plain restarted GMRES at similar memory footprint.
-    True-residual checks are controlled by `true_residual_mode`: `none` (skip),
-    `restart` (verify every restart boundary), `final` (verify only terminal
-    decisions).
+    stagnation versus plain restarted GMRES at similar memory footprint. A
+    physical residual is rebuilt whenever another restarted cycle is required.
+    ``compute_final_residual=False`` skips only a terminal residual evaluation
+    when no further cycle will be started.
     """
     if prepend_outer_v:
         raise ValueError("`prepend_outer_v=True` is not supported in the native CuPy LGMRES path.")
@@ -1446,9 +1409,6 @@ def lgmres_cupy_native(
         raise ValueError("`cgs_refinement` must be 'never', 'ifneeded', or 'always'.")
     if float(happy_breakdown_tol) < 0.0:
         raise ValueError("`happy_breakdown_tol` must be >= 0.")
-    tr_mode: Literal["none", "restart", "final"] = _normalize_true_residual_mode(
-        str(true_residual_mode)
-    )
     outer_keep = max(0, int(outer_k))
     op_dtype = _dtype_complex(
         operator_dtype if operator_dtype is not None else np.result_type(b_dtype, np.complex64),
@@ -1518,8 +1478,7 @@ def lgmres_cupy_native(
         x0_is_zero = False
     else:
         residual_norm, relative_residual, r_true = _true_residual_stats(x_vec)
-    if tr_mode != "none":
-        _record_true_residual(relative_residual)
+    _record_true_residual(relative_residual)
     if residual_norm <= target_abs:
         info = 0
         converged_reason = "converged"
@@ -1663,16 +1622,17 @@ def lgmres_cupy_native(
                 while len(outer_v) > outer_keep:
                     del outer_v[0]
 
-        r_true = cupy.asarray(g[k_used], dtype=op_dtype) * cupy.asarray(
-            V[k_used, :], dtype=op_dtype
-        )
+        # The next restart allocates a fresh basis.  Drop the completed cycle
+        # before any physical-residual matvec so two full Arnoldi bases cannot
+        # overlap at the restart boundary.
         del V, Z, H, cs, sn, g, y, z0
-        should_verify_true = (tr_mode == "restart") or (
-            tr_mode == "final"
-            and bool(compute_final_residual)
-            and (cycle_presid <= ptol or iterations >= maxiter_total or cycle_breakdown)
+        terminal_by_proxy = bool(
+            cycle_breakdown or cycle_presid <= ptol or iterations >= maxiter_total
         )
-        if should_verify_true:
+        # A physical residual is mandatory whenever another restarted cycle may
+        # follow.  At a terminal boundary it is optional and controlled by the
+        # public ``compute_final_residual`` policy.
+        if (not terminal_by_proxy) or bool(compute_final_residual):
             residual_norm, relative_residual, r_true = _true_residual_stats(x_vec)
             _record_true_residual(relative_residual)
             if residual_norm <= target_abs:
@@ -1688,24 +1648,18 @@ def lgmres_cupy_native(
                 converged_reason = "maxiter_reached"
                 break
             continue
+        residual_norm = float("nan")
+        relative_residual = float("nan")
         if cycle_breakdown:
-            residual_norm = float("nan")
-            relative_residual = float("nan")
             info = iterations if iterations > 0 else maxiter_total
             converged_reason = cycle_breakdown_reason
-            break
-        if cycle_presid <= ptol:
-            residual_norm = float("nan")
-            relative_residual = float("nan")
+        elif cycle_presid <= ptol:
             info = 0
             converged_reason = "converged"
-            break
-        if iterations >= maxiter_total:
-            residual_norm = float("nan")
-            relative_residual = float("nan")
+        else:
             info = iterations
             converged_reason = "maxiter_reached"
-            break
+        break
 
     return CuPyGMRESNativeResult(
         x=x_vec,

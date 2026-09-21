@@ -532,21 +532,32 @@ def gcro_cupy_native(
             correction -= recycle_space.U @ cupy.asarray(coupling[:, :k_used] @ y, dtype=op_dtype)
         x += cupy.asarray(correction, dtype=op_dtype)
 
-        residual = b_vec - apply(x)
-        residual_norm = _norm(residual, cupy=cupy, accum_dtype=acc_dtype)
-        relative_residual = residual_norm / b_norm if b_norm > 0.0 else residual_norm
-        true_history.append(float(relative_residual))
+        terminal_by_proxy = bool(
+            cycle_breakdown or proxy_abs <= target_abs or iterations >= maxiter_total
+        )
+        # GCRO needs the physical residual whenever another augmented cycle may
+        # follow.  At a terminal boundary the public flag may omit only that
+        # final diagnostic/application.
+        verify_true = (not terminal_by_proxy) or bool(compute_final_residual)
+        if verify_true:
+            residual = b_vec - apply(x)
+            residual_norm = _norm(residual, cupy=cupy, accum_dtype=acc_dtype)
+            relative_residual = residual_norm / b_norm if b_norm > 0.0 else residual_norm
+            true_history.append(float(relative_residual))
+            if restart_callback is not None:
+                restart_callback(float(relative_residual))
+        else:
+            residual_norm = float("nan")
+            relative_residual = float("nan")
         cycles += 1
-        if restart_callback is not None:
-            restart_callback(float(relative_residual))
 
-        if residual_norm <= target_abs:
+        if verify_true and residual_norm <= target_abs:
             info = 0
             converged_reason = "converged"
             del V, H_rot, Hbar, coupling, cs, sn, g, y
             break
 
-        if not cycle_breakdown and iterations < maxiter_total:
+        if verify_true and not cycle_breakdown and iterations < maxiter_total:
             candidate = _harmonic_recycle_pair(
                 arnoldi_rows=V[: k_used + 1, :],
                 hbar=Hbar[: k_used + 1, :k_used],
@@ -564,6 +575,10 @@ def gcro_cupy_native(
         if cycle_breakdown:
             info = iterations if iterations > 0 else maxiter_total
             converged_reason = cycle_breakdown_reason
+            break
+        if not verify_true and proxy_abs <= target_abs:
+            info = 0
+            converged_reason = "converged"
             break
         if iterations >= maxiter_total:
             info = iterations

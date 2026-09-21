@@ -27,7 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Fixed native restarted CuPy GMRES-family solvers so disabling the optional
   terminal residual diagnostic no longer skips the physical residual rebuild
-  required at restart boundaries.
+  required at restart boundaries; the flag now also avoids the terminal
+  operator application when no further restarted cycle can follow.
 - Dense T-matrix preparation now preserves supported input precision and shares
   immutable archetype blocks, reducing memory for repeated imports.
 - Breaking: `TMatrixData.as_particle(...)` now requires the intended wavelength
