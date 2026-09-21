@@ -1071,11 +1071,11 @@ def gmres_cupy(
     The Arnoldi basis, Hessenberg system, and Givens updates stay device-side.
     `callback` receives inner preconditioned residual updates. `callback_true`
     receives verified true residual updates only when the native solver
-    performs an explicit true-residual `A @ x` check. With the default
-    `compute_final_residual=True`, native CuPy restarted GMRES verifies true
-    residuals at restart boundaries for robust stopping decisions.
-    `compute_final_residual=False` disables those checks and leaves final
-    true-residual scalars as `NaN`.
+    performs an explicit true-residual `A @ x` check. Native CuPy restarted
+    GMRES always rebuilds the physical residual at restart boundaries, because
+    that vector is required to continue the next Arnoldi cycle correctly.
+    `compute_final_residual=False` suppresses only the optional terminal scalar
+    diagnostics and leaves those public scalars as `NaN`.
     """
     (
         cupy,
@@ -1568,10 +1568,11 @@ def fgmres_cupy(
     preconditioners (including callables that optionally consume iteration
     state dictionaries). Verified true-residual callbacks are emitted only
     when the native solver performs an explicit true-residual `A @ x` check.
-    With the default `compute_final_residual=True`, native CuPy restarted
-    FGMRES verifies true residuals at restart boundaries for robust stopping
-    decisions. `compute_final_residual=False` disables those checks and leaves
-    final true-residual scalars as `NaN`.
+    Native CuPy restarted FGMRES always rebuilds the physical residual at
+    restart boundaries, because that vector is required to continue the next
+    flexible Arnoldi cycle correctly. `compute_final_residual=False` suppresses
+    only the optional terminal scalar diagnostics and leaves those public
+    scalars as `NaN`.
     """
     (
         cupy,
@@ -1666,9 +1667,10 @@ def lgmres_cupy(
     projected/preconditioned recurrence, while verified true-residual callbacks
     are emitted when explicit true-residual checks are executed. With the
     default `compute_final_residual=True`, native CuPy restarted LGMRES
-    verifies true residuals at restart boundaries for robust stopping
-    decisions. `compute_final_residual=False` disables those checks and leaves
-    final true-residual scalars as `NaN`.
+    always rebuilds the physical residual at restart boundaries, because that
+    vector is required to continue the next cycle correctly.
+    `compute_final_residual=False` suppresses only the optional terminal scalar
+    diagnostics and leaves those public scalars as `NaN`.
     """
     (
         cupy,

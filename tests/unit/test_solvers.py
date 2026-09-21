@@ -566,6 +566,42 @@ def test_gmres_cupy_native_reports_inner_iteration_progress(monkeypatch):
 
 
 @pytest.mark.fake_gpu
+def test_gmres_cupy_final_flag_does_not_skip_restart_residuals(monkeypatch):
+    """The cheap-result flag must not corrupt the next restarted cycle."""
+    monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
+    matrix = np.asarray(
+        [[1.0 + 0.0j, 0.25 + 0.0j], [0.0 + 0.0j, 2.0 + 0.0j]],
+        dtype=np.complex128,
+    )
+    rhs = np.asarray([1.0 + 0.0j, 2.0 + 0.0j], dtype=np.complex128)
+    matvec_calls = 0
+
+    def _matvec(values: np.ndarray) -> np.ndarray:
+        nonlocal matvec_calls
+        matvec_calls += 1
+        return cast(np.ndarray, matrix @ np.asarray(values))
+
+    out = solvers.gmres_cupy(
+        _matvec,
+        rhs,
+        rtol=0.0,
+        atol=0.0,
+        restart=1,
+        maxiter=2,
+        show_progress=False,
+        compute_final_residual=False,
+    )
+
+    # Each restarted cycle needs one Arnoldi matvec and one physical residual
+    # matvec.  The public scalar is omitted, but the true history remains useful
+    # for diagnostics and proves that both restart checks took place.
+    assert matvec_calls == 4
+    assert out.true_residual_history is not None
+    assert len(np.asarray(out.true_residual_history)) == 3
+    assert np.isnan(float(out.relative_residual))
+
+
+@pytest.mark.fake_gpu
 def test_fgmres_cupy_variable_preconditioner_state(monkeypatch):
     monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
     b = np.array([1.0 + 0j, -2.0 + 0j, 0.5 + 0j], dtype=np.complex128)
@@ -675,7 +711,7 @@ def test_gcro_cupy_harmonic_recycling_solves_toy_system(
     )
     assert np.isnan(float(proxy_only.relative_residual))
     assert proxy_only.true_residual_history is not None
-    assert proxy_only.true_residual_history.size == 0
+    assert proxy_only.true_residual_history.size >= 2
 
     multi = solvers.solve_linear_system(
         lambda x: cupy.asarray(A, dtype=cupy.complex128) @ x,
@@ -1477,7 +1513,7 @@ def test_solve_linear_system_cupy_restart_solvers_verify_true_residual_each_rest
 
 
 @pytest.mark.fake_gpu
-def test_solve_linear_system_lgmres_cupy_skip_final_residual_avoids_extra_applies(monkeypatch):
+def test_solve_linear_system_lgmres_cupy_skip_final_residual_keeps_restart_apply(monkeypatch):
     monkeypatch.setattr(solvers, "import_cupy", lambda: (_fake_cupy_numpy_backend(), None))
     A = np.asarray([[2.0 + 0.0j, 0.25 + 0.0j], [0.0 + 0.0j, 3.0 + 0.0j]], dtype=np.complex128)
     b = np.asarray([1.0 + 0.0j, -1.5 + 0.0j], dtype=np.complex128)
@@ -1500,7 +1536,9 @@ def test_solve_linear_system_lgmres_cupy_skip_final_residual_avoids_extra_applie
         show_progress=False,
         compute_final_residual=False,
     )
-    assert calls == 1
+    # The terminal scalar is omitted, but the restart-boundary physical
+    # residual is still required to preserve the restarted Krylov method.
+    assert calls == 2
     assert int(out.iterations) == 1
     assert np.isnan(float(out.residual_norm))
     assert np.isnan(float(out.relative_residual))

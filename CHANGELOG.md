@@ -25,6 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   coupling, including single-level and multilevel sampled-far traversals.
 
 ### Changed
+- Fixed native restarted CuPy GMRES-family solvers so disabling the optional
+  terminal residual diagnostic no longer skips the physical residual rebuild
+  required at restart boundaries.
 - Dense T-matrix preparation now preserves supported input precision and shares
   immutable archetype blocks, reducing memory for repeated imports.
 - Breaking: `TMatrixData.as_particle(...)` now requires the intended wavelength

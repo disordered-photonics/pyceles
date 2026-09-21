@@ -315,9 +315,11 @@ def gcro_cupy_native(
     ``restart`` is the complete GCRO-DR augmented dimension.  The first cycle
     is ordinary GMRES; subsequent cycles retain at most ``recycle_dim``
     harmonic Ritz vectors and therefore generate at most ``restart-k`` new
-    Arnoldi directions.  By default a true physical residual is rebuilt at
-    every restart; ``compute_final_residual=False`` opts into the cheap
-    Arnoldi residual proxy and reports true-residual scalars as ``NaN``.
+    Arnoldi directions.  A true physical residual is rebuilt at every restart
+    because it is required to continue a restarted solve correctly.
+    ``compute_final_residual=False`` suppresses only the terminal scalar
+    diagnostics exposed by the public result; it does not replace the restart
+    state with the cheaper Arnoldi proxy.
     """
 
     b_dtype_obj = getattr(b, "dtype", None)
@@ -379,10 +381,9 @@ def gcro_cupy_native(
     residual = cupy.array(b_vec, dtype=op_dtype, copy=True) if x0_is_zero else b_vec - apply(x)
     residual_norm = _norm(residual, cupy=cupy, accum_dtype=acc_dtype)
     relative_residual = residual_norm / b_norm if b_norm > 0.0 else residual_norm
-    if compute_final_residual:
-        true_history.append(float(relative_residual))
-        if restart_callback is not None:
-            restart_callback(float(relative_residual))
+    true_history.append(float(relative_residual))
+    if restart_callback is not None:
+        restart_callback(float(relative_residual))
 
     recycle_space: CuPyRecycleSpace | None = None
     iterations = 0
@@ -402,16 +403,12 @@ def gcro_cupy_native(
             residual -= recycle_space.C @ gamma_op
             projected_norm = _norm(residual, cupy=cupy, accum_dtype=acc_dtype)
             if projected_norm <= target_abs:
-                if compute_final_residual:
-                    residual = b_vec - apply(x)
-                    residual_norm = _norm(residual, cupy=cupy, accum_dtype=acc_dtype)
-                    relative_residual = residual_norm / b_norm if b_norm > 0.0 else residual_norm
-                    true_history.append(float(relative_residual))
-                    if restart_callback is not None:
-                        restart_callback(float(relative_residual))
-                else:
-                    residual_norm = projected_norm
-                    relative_residual = residual_norm / b_norm if b_norm > 0.0 else residual_norm
+                residual = b_vec - apply(x)
+                residual_norm = _norm(residual, cupy=cupy, accum_dtype=acc_dtype)
+                relative_residual = residual_norm / b_norm if b_norm > 0.0 else residual_norm
+                true_history.append(float(relative_residual))
+                if restart_callback is not None:
+                    restart_callback(float(relative_residual))
                 if residual_norm <= target_abs:
                     info = 0
                     converged_reason = "converged"
@@ -535,20 +532,12 @@ def gcro_cupy_native(
             correction -= recycle_space.U @ cupy.asarray(coupling[:, :k_used] @ y, dtype=op_dtype)
         x += cupy.asarray(correction, dtype=op_dtype)
 
-        if compute_final_residual:
-            residual = b_vec - apply(x)
-            residual_norm = _norm(residual, cupy=cupy, accum_dtype=acc_dtype)
-            relative_residual = residual_norm / b_norm if b_norm > 0.0 else residual_norm
-            true_history.append(float(relative_residual))
-        else:
-            # The rotated least-squares residual is the component along the
-            # next Arnoldi vector.  Use it as the cheap continuation proxy;
-            # the public result still reports NaN true-residual scalars.
-            residual = cupy.asarray(g[k_used], dtype=op_dtype) * V[k_used, :]
-            residual_norm = _norm(residual, cupy=cupy, accum_dtype=acc_dtype)
-            relative_residual = residual_norm / b_norm if b_norm > 0.0 else residual_norm
+        residual = b_vec - apply(x)
+        residual_norm = _norm(residual, cupy=cupy, accum_dtype=acc_dtype)
+        relative_residual = residual_norm / b_norm if b_norm > 0.0 else residual_norm
+        true_history.append(float(relative_residual))
         cycles += 1
-        if compute_final_residual and restart_callback is not None:
+        if restart_callback is not None:
             restart_callback(float(relative_residual))
 
         if residual_norm <= target_abs:

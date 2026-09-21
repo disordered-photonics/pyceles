@@ -809,8 +809,12 @@ def gmres_cupy_native(
         raise ValueError("`cgs_refinement` must be 'never', 'ifneeded', or 'always'.")
     if float(happy_breakdown_tol) < 0.0:
         raise ValueError("`happy_breakdown_tol` must be >= 0.")
+    # ``compute_final_residual`` controls only the optional terminal diagnostic.
+    # In particular, it must not disable the true residual needed to rebuild
+    # the restart state.  ``true_residual_mode`` is the independent policy for
+    # those physical checks.
     tr_mode: Literal["none", "restart", "final"] = _normalize_true_residual_mode(
-        "none" if not bool(compute_final_residual) else str(true_residual_mode)
+        str(true_residual_mode)
     )
     op_dtype = _dtype_complex(
         operator_dtype if operator_dtype is not None else np.result_type(b_dtype, np.complex64),
@@ -1024,6 +1028,7 @@ def gmres_cupy_native(
         del V, H, cs, sn, g, y, z0
         should_verify_true = (tr_mode == "restart") or (
             tr_mode == "final"
+            and bool(compute_final_residual)
             and (cycle_presid <= ptol or iterations >= maxiter_total or cycle_breakdown)
         )
         if should_verify_true:
@@ -1137,7 +1142,7 @@ def fgmres_cupy_native(
     if float(happy_breakdown_tol) < 0.0:
         raise ValueError("`happy_breakdown_tol` must be >= 0.")
     tr_mode: Literal["none", "restart", "final"] = _normalize_true_residual_mode(
-        "none" if not bool(compute_final_residual) else str(true_residual_mode)
+        str(true_residual_mode)
     )
     op_dtype = _dtype_complex(
         operator_dtype if operator_dtype is not None else np.result_type(b_dtype, np.complex64),
@@ -1343,6 +1348,7 @@ def fgmres_cupy_native(
         del V, Z, H, cs, sn, g, y
         should_verify_true = (tr_mode == "restart") or (
             tr_mode == "final"
+            and bool(compute_final_residual)
             and (cycle_presid <= ptol or iterations >= maxiter_total or cycle_breakdown)
         )
         if should_verify_true:
@@ -1441,7 +1447,7 @@ def lgmres_cupy_native(
     if float(happy_breakdown_tol) < 0.0:
         raise ValueError("`happy_breakdown_tol` must be >= 0.")
     tr_mode: Literal["none", "restart", "final"] = _normalize_true_residual_mode(
-        "none" if not bool(compute_final_residual) else str(true_residual_mode)
+        str(true_residual_mode)
     )
     outer_keep = max(0, int(outer_k))
     op_dtype = _dtype_complex(
@@ -1663,6 +1669,7 @@ def lgmres_cupy_native(
         del V, Z, H, cs, sn, g, y, z0
         should_verify_true = (tr_mode == "restart") or (
             tr_mode == "final"
+            and bool(compute_final_residual)
             and (cycle_presid <= ptol or iterations >= maxiter_total or cycle_breakdown)
         )
         if should_verify_true:
