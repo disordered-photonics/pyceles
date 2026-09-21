@@ -6,7 +6,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from pyceles._cupy_memory import cupy_allocator_snapshot, guarded_device_limit_bytes
+from pyceles._cupy_memory import (
+    CuPyAllocatorSnapshot,
+    cupy_allocation_fits_guarded_device,
+    cupy_allocator_snapshot,
+    cupy_guarded_available_bytes,
+    guarded_device_limit_bytes,
+)
 
 _GIB = 1024**3
 _MIB = 1024**2
@@ -109,3 +115,37 @@ def test_cupy_allocator_trims_fragmented_cache_for_large_fresh_block() -> None:
     assert snapshot.pool_trimmed_for_fragmentation is True
     assert snapshot.pool_trimmed_to_limit is False
     assert snapshot.guaranteed_fresh_allocation_bytes >= 300 * _MIB
+
+
+def test_guarded_capacity_separates_total_live_bytes_from_largest_allocation() -> None:
+    snapshot = CuPyAllocatorSnapshot(
+        active_headroom_bytes=700 * _MIB,
+        raw_free_bytes=600 * _MIB,
+        pool_free_bytes=100 * _MIB,
+        guaranteed_fresh_allocation_bytes=500 * _MIB,
+        raw_total_bytes=8 * _GIB,
+        pool_used_bytes=0,
+        pool_total_bytes=0,
+        pool_limit_bytes=700 * _MIB,
+        effective_device_limit_bytes=700 * _MIB,
+        pool_limit_applied=False,
+        pool_trimmed_to_limit=False,
+        pool_trimmed_for_fragmentation=False,
+    )
+
+    assert cupy_guarded_available_bytes(snapshot) == 700 * _MIB
+    assert cupy_allocation_fits_guarded_device(
+        snapshot,
+        total_required_bytes=700 * _MIB,
+        largest_allocation_bytes=450 * _MIB,
+    )
+    assert not cupy_allocation_fits_guarded_device(
+        snapshot,
+        total_required_bytes=701 * _MIB,
+        largest_allocation_bytes=450 * _MIB,
+    )
+    assert not cupy_allocation_fits_guarded_device(
+        snapshot,
+        total_required_bytes=650 * _MIB,
+        largest_allocation_bytes=550 * _MIB,
+    )

@@ -8,6 +8,7 @@ from typing import Literal, cast
 import numpy as np
 import numpy.typing as npt
 
+from pyceles._cupy_memory import cupy_allocator_snapshot
 from pyceles._dtypes import resolve_compute_accum_dtypes
 from pyceles._optional import import_cupy
 from pyceles.core.geometry_bounds import conservative_set_diameter
@@ -343,7 +344,12 @@ def prepare_matvec(
                 leaf_map_backend="numpy",
             )
     elif backend_name == "cupy":
-        import_cupy()
+        cupy, _ = import_cupy()
+        # Establish one process-wide CuPy pool ceiling below physical VRAM
+        # before any backend-specific persistent state or Krylov workspace is
+        # allocated.  Method-specific planners may impose stricter budgets,
+        # but no CuPy simulation path should rely on WDDM/shared-memory spill.
+        cupy_allocator_snapshot(cupy, apply_pool_limit=True)
         if cache_translation_blocks and periodic_spec is None:
             raise NotImplementedError(
                 "`cache_translation_blocks=True` is not supported with finite `operator_backend='cupy'` "

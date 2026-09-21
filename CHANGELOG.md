@@ -25,6 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   coupling, including single-level and multilevel sampled-far traversals.
 
 ### Changed
+- CuPy simulations now establish one guarded device-memory ceiling before
+  backend-specific preparation. Hybrid-Rayleigh exact-near caches must remain
+  device-resident and fail fast when they do not fit instead of silently
+  switching every Krylov matvec to host-staged cache traffic.
 - Stabilized off-plane periodic Ewald reciprocal terms for tall cells by
   evaluating reflected Faddeeva products without lower-half-plane overflow.
 - Fixed native restarted CuPy GMRES-family solvers so disabling the optional

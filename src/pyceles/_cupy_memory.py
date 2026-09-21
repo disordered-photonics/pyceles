@@ -94,6 +94,37 @@ def guaranteed_fresh_allocation_bytes(
     )
 
 
+def cupy_guarded_available_bytes(snapshot: CuPyAllocatorSnapshot) -> int:
+    """Return reusable + fresh bytes inside the active guarded device limit."""
+    return max(
+        0,
+        min(
+            int(snapshot.active_headroom_bytes),
+            int(snapshot.raw_free_bytes) + int(snapshot.pool_free_bytes),
+        ),
+    )
+
+
+def cupy_allocation_fits_guarded_device(
+    snapshot: CuPyAllocatorSnapshot,
+    *,
+    total_required_bytes: int,
+    largest_allocation_bytes: int,
+) -> bool:
+    """Return whether a planned device workload fits the guarded allocator state.
+
+    ``total_required_bytes`` models aggregate live bytes that must coexist.
+    ``largest_allocation_bytes`` models the largest single fresh allocation;
+    keeping these separate avoids requiring transient reserves to be contiguous
+    with one persistent cache allocation.
+    """
+    total_required = max(0, int(total_required_bytes))
+    largest_allocation = max(0, int(largest_allocation_bytes))
+    return total_required <= cupy_guarded_available_bytes(snapshot) and largest_allocation <= int(
+        snapshot.guaranteed_fresh_allocation_bytes
+    )
+
+
 def cupy_allocator_snapshot(
     cupy: Any,
     *,
@@ -172,8 +203,10 @@ def cupy_allocator_snapshot(
 
 __all__ = [
     "CuPyAllocatorSnapshot",
+    "cupy_allocation_fits_guarded_device",
     "cupy_allocator_memory_info",
     "cupy_allocator_snapshot",
+    "cupy_guarded_available_bytes",
     "cupy_pool_limit_bytes",
     "guaranteed_fresh_allocation_bytes",
     "guarded_device_limit_bytes",

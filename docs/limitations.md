@@ -116,6 +116,10 @@ Dense/direct periodic validation can remain memory-sensitive on small GPUs. Even
 - The GPU backend is optional and depends on a working CuPy/CUDA environment.
 - Not every postprocessing stage has a CuPy implementation; unsupported stages may fall back to NumPy reference paths.
 - The direct CuPy backend is fast for moderate direct pairwise problems, but direct O(N^2) coupling is not the long-term large-N scaling path.
+- CuPy simulations enforce a guarded device-memory ceiling below physical VRAM;
+  hot repeated-apply state is not allowed to rely on Windows/WDDM shared-memory
+  spill. Rayleigh exact-near caches that do not fit this budget fail during
+  preparation rather than being staged from host memory on every Krylov action.
 - CuPy/driver/library combinations can affect runtime behavior, memory use, and diagnostic-tool noise.
 
 ## Public API stability

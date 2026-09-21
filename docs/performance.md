@@ -39,6 +39,16 @@ restart-boundary true-residual checks by default for robust stopping decisions.
 
 ## Practical CuPy notes
 
+- High-level CuPy simulations establish a guarded CuPy memory-pool ceiling
+  below physical VRAM before backend-specific preparation. This makes GPU
+  memory exhaustion explicit and consistent across pairwise, periodic, MLFMM,
+  and Krylov paths instead of relying on driver-managed host/shared-memory
+  oversubscription.
+- Persistent data consumed on every matvec are expected to remain on device.
+  Memory adaptation is reserved for bounded device-side chunking, recomputing
+  cheap intermediates, or explicitly selected lower-memory algorithms; pyceles
+  does not silently move a hot repeated-apply cache to host RAM.
+
 - CuPy GMRES in pyceles uses a native implementation by default.
 - CuPy GMRES multi-RHS runs use native block-GMRES and report per-RHS final true
   residuals.
@@ -352,12 +362,11 @@ periodic Ewald work on every Krylov matvec.
   already been requested through `populate_coupling()`.
 - Before allocating a CuPy exact-near cache, pyceles estimates its compact byte
   size together with the remaining Rayleigh tables and bounded apply workspace.
-  The automatic policy uses the same guarded CuPy pool ceiling as streamed
-  MLFMM, so Windows/WDDM shared-memory spill is not treated as available device
-  memory. Small caches stay resident on the GPU. Oversized caches remain in
-  ordinary host memory and are copied synchronously through one reusable bounded
-  device staging buffer during each matvec. This fallback trades PCIe traffic
-  for GPU residency; it does not remove the underlying `K` scaling.
+  The policy uses the same guarded CuPy pool ceiling as streamed MLFMM, so
+  Windows/WDDM shared-memory spill is not treated as available device memory.
+  The repeated-apply cache must remain device-resident; if it does not fit,
+  preparation fails before the Krylov solve instead of silently turning every
+  matvec into a host-to-device streaming workload.
 - CuPy contracts the compact exact-near cache in bounded pair batches. The
   batching budget includes the possible dense `(Nm, Nm)` block intermediate
   and its library workspace, rather than only the final `(Nm,)` contribution.

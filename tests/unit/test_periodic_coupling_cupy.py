@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import Any, cast
 
 import numpy as np
 import pytest
 
 import pyceles as pcl
+import pyceles.core.operators.coupling_periodic_cupy as periodic_cupy_module
+from pyceles._cupy_memory import CuPyAllocatorSnapshot
 from pyceles.core.indexing import n_modes
 from pyceles.core.lattice import RectangularLattice2D
 from pyceles.core.operators import (
@@ -174,6 +175,35 @@ def test_periodic_cupy_coupling_cache_apply_parity(cupy_runtime: tuple[Any, Any]
     np.testing.assert_allclose(cp.asnumpy(cached_gpu.apply(x_device)), want, rtol=1e-8, atol=1e-9)
 
 
+def test_periodic_cupy_dense_cache_rejects_device_oversubscription(
+    cupy_runtime: tuple[Any, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _cp, _ = cupy_runtime
+    _cpu, gpu = _small_periodic_case(cache_blocks=True, dtype=np.complex64, lmax=3)
+    snapshot = CuPyAllocatorSnapshot(
+        raw_free_bytes=1024,
+        raw_total_bytes=4096,
+        pool_used_bytes=0,
+        pool_total_bytes=0,
+        pool_free_bytes=0,
+        pool_limit_bytes=4096,
+        effective_device_limit_bytes=4096,
+        active_headroom_bytes=1024,
+        guaranteed_fresh_allocation_bytes=1024,
+        pool_limit_applied=False,
+        pool_trimmed_to_limit=False,
+        pool_trimmed_for_fragmentation=False,
+    )
+    monkeypatch.setattr(
+        periodic_cupy_module,
+        "cupy_allocator_snapshot",
+        lambda *_args, **_kwargs: snapshot,
+    )
+
+    with pytest.raises(MemoryError, match="dense W cache requires"):
+        gpu.populate(show_progress=False)
+
+
 @pytest.mark.parametrize("cache_blocks", [False, True])
 @pytest.mark.parametrize(
     ("dtype", "tolerance"),
@@ -253,7 +283,6 @@ def test_periodic_cupy_dense_assembly_from_cached_blocks_matches_matvec(
     assert prepared.coupling._dense_w_cache_gpu is None
 
 
-@pytest.mark.parametrize("cache_residency", ["device", "host"])
 @pytest.mark.parametrize(
     ("dtype", "accum_dtype", "rtol", "atol"),
     [
@@ -269,7 +298,6 @@ def test_periodic_cupy_rayleigh_hybrid_matches_numpy_scan_and_near_cache(
     accum_dtype: Any,
     rtol: float,
     atol: float,
-    cache_residency: str,
 ) -> None:
     cp, _ = cupy_runtime
     k = 2.0 * np.pi / 550.0
@@ -307,8 +335,6 @@ def test_periodic_cupy_rayleigh_hybrid_matches_numpy_scan_and_near_cache(
     cpu = PeriodicCouplingOperator(**cast(Any, kwargs), accum_dtype=np.dtype(accum_dtype))
     gpu = CuPyPeriodicCouplingOperator(**cast(Any, kwargs), accum_dtype=np.dtype(accum_dtype))
     monkeypatch.setattr(gpu, "_near_apply_batch_size", lambda **_kwargs: 1)
-    if cache_residency == "host":
-        gpu._near_cache_memory_plan = replace(gpu._near_cache_plan(), residency="host")
     rng = np.random.default_rng(20260725)
     x = rng.normal(size=(18, 2)) + 1j * rng.normal(size=(18, 2))
 
@@ -319,12 +345,7 @@ def test_periodic_cupy_rayleigh_hybrid_matches_numpy_scan_and_near_cache(
     np.testing.assert_allclose(cp.asnumpy(actual), expected, rtol=rtol, atol=atol)
     np.testing.assert_allclose(cp.asnumpy(repeated), expected, rtol=rtol, atol=atol)
     assert gpu._near_cache_memory_plan is not None
-    assert gpu._near_cache_memory_plan.residency == cache_residency
-    cache = (
-        gpu._near_structural_sums_gpu
-        if cache_residency == "device"
-        else gpu._near_structural_sums_host
-    )
+    cache = gpu._near_structural_sums_gpu
     assert cache is not None
     assert cache.shape[1] == 9
     assert cache.dtype == np.dtype(dtype)

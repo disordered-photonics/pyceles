@@ -846,22 +846,20 @@ def test_rayleigh_near_cache_estimate_honors_compute_dtype() -> None:
     assert estimate128.structural_bytes == 2 * estimate64.structural_bytes
 
 
-def test_rayleigh_near_cache_memory_plan_uses_host_before_guarded_spill() -> None:
+def test_rayleigh_near_cache_memory_plan_rejects_guarded_device_oversubscription() -> None:
     estimate = rayleigh_near_cache_estimate(pair_count=4_000_000, lmax=3, dtype=np.complex64)
     remaining = 512 * 1024**2
     available = 2 * 1024**3
 
-    plan = _resolve_rayleigh_near_cache_memory_plan(
-        estimate=estimate,
-        snapshot=_allocator_snapshot(
-            available=available,
-            guaranteed_fresh=available,
-        ),
-        remaining_rayleigh_device_bytes=remaining,
-    )
-
-    assert plan.residency == "host"
-    assert plan.required_device_bytes > plan.available_device_bytes
+    with pytest.raises(MemoryError, match="does not automatically spill"):
+        _resolve_rayleigh_near_cache_memory_plan(
+            estimate=estimate,
+            snapshot=_allocator_snapshot(
+                available=available,
+                guaranteed_fresh=available,
+            ),
+            remaining_rayleigh_device_bytes=remaining,
+        )
 
 
 @pytest.mark.fake_gpu
@@ -899,7 +897,7 @@ def test_cupy_rayleigh_release_drops_only_ewald_preparation_state(
     operator._contraction_tensor_gpu = cast(Any, object())
     operator._self_correction_gpu = cast(Any, object())
     operator._self_block_gpu = np.ones((1, 1), dtype=np.complex64)
-    operator._near_structural_sums_host = np.ones((1, 1), dtype=np.complex64)
+    operator._near_structural_sums_gpu = np.ones((1, 1), dtype=np.complex64)
 
     operator._release_rayleigh_preparation_state()
 
@@ -907,7 +905,7 @@ def test_cupy_rayleigh_release_drops_only_ewald_preparation_state(
     assert operator._contraction_tensor_gpu is None
     assert operator._self_correction_gpu is None
     assert operator._self_block_gpu is not None
-    assert operator._near_structural_sums_host is not None
+    assert operator._near_structural_sums_gpu is not None
 
 
 def test_rayleigh_near_cache_memory_plan_keeps_small_cache_on_device() -> None:
@@ -923,11 +921,11 @@ def test_rayleigh_near_cache_memory_plan_keeps_small_cache_on_device() -> None:
         remaining_rayleigh_device_bytes=128 * 1024**2,
     )
 
-    assert plan.residency == "device"
+    assert plan.required_device_bytes <= plan.available_device_bytes
 
 
 @pytest.mark.fake_gpu
-def test_cupy_near_apply_batch_accounts_only_for_structural_staging() -> None:
+def test_cupy_near_apply_batch_is_bounded_by_structural_row_size() -> None:
     positions = np.zeros((700, 3), dtype=float)
     operator = CuPyPeriodicCouplingOperator(
         lmax=3,
@@ -956,50 +954,6 @@ def test_cupy_near_apply_batch_accounts_only_for_structural_staging() -> None:
 
     assert batch == expected
     assert 1 <= batch < total
-
-
-@pytest.mark.fake_gpu
-def test_cupy_host_near_cache_staging_buffer_is_reused(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class FakeCuPy:
-        @staticmethod
-        def empty(shape: tuple[int, int], dtype: Any) -> np.ndarray:
-            return np.empty(shape, dtype=dtype)
-
-    operator = CuPyPeriodicCouplingOperator(
-        lmax=1,
-        k=2.0 * np.pi / 550.0,
-        positions=np.zeros((1, 3), dtype=float),
-        ab5=translation_ab5_table(1, dtype=np.complex64),
-        periodic=PeriodicSpec(
-            lattice=pcl.RectangularLattice2D(900.0, 850.0),
-            options=PeriodicOptions(
-                method="rayleigh",
-                eta=0.0015,
-                real_shells=1,
-                reciprocal_shells=1,
-                rayleigh_z_cut=550.0,
-                rayleigh_reciprocal_shells=1,
-            ),
-        ),
-        k_parallel=np.zeros(2),
-        dtype=np.dtype(np.complex64),
-        circumscribing_radii=np.asarray([40.0]),
-    )
-    monkeypatch.setattr(operator, "_cupy", lambda: FakeCuPy())
-
-    first = operator._near_host_staging_device(rows=8, width=9)
-    backing = operator._near_structural_staging_gpu
-    second = operator._near_host_staging_device(rows=4, width=9)
-
-    assert backing is not None
-    assert operator._near_structural_staging_gpu is backing
-    assert np.shares_memory(first, second)
-    assert second.shape == (4, 9)
-
-    operator._near_host_staging_device(rows=16, width=9)
-    assert operator._near_structural_staging_gpu is not backing
 
 
 @pytest.mark.reference
