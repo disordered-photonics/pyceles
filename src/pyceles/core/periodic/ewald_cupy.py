@@ -587,23 +587,22 @@ __device__ void _pyceles_shifted_delta_sequence(
         const complex<double> w_plus = _wtrap_wofz_one(
             complex<double>(0.0, a + c), quadrature, terms, h, H
         );
+        const complex<double> w_near = _wtrap_wofz_one(
+            complex<double>(0.0, fabs(a - c)), quadrature, terms, h, H
+        );
+        const complex<double> near_product = ev_exp * w_near;
+        const complex<double> plus_product = ev_exp * w_plus;
         complex<double> product_sum;
         complex<double> product_diff;
         if (c > a) {
-            const complex<double> w_lower_reflected = _wtrap_wofz_one(
-                complex<double>(0.0, c - a), quadrature, terms, h, H
-            );
             const double lower_term = 2.0 * exp(-scaled_abs);
             product_sum = complex<double>(lower_term, 0.0)
-                - ev_exp * w_lower_reflected + ev_exp * w_plus;
+                - near_product + plus_product;
             product_diff = complex<double>(lower_term, 0.0)
-                - ev_exp * w_lower_reflected - ev_exp * w_plus;
+                - near_product - plus_product;
         } else {
-            const complex<double> w_minus = _wtrap_wofz_one(
-                complex<double>(0.0, a - c), quadrature, terms, h, H
-            );
-            product_sum = ev_exp * (w_minus + w_plus);
-            product_diff = ev_exp * (w_minus - w_plus);
+            product_sum = near_product + plus_product;
+            product_diff = near_product - plus_product;
         }
         delta[0] = 0.5 * sqrt(PYCELES_PI) * product_sum;
         if (order >= 1) {

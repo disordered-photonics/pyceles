@@ -92,21 +92,60 @@ def test_shifted_delta_sequence_returns_finite_recurrence_values() -> None:
     assert np.all(np.isfinite(delta.imag))
 
 
-def test_shifted_delta_sequence_stays_finite_for_large_propagating_height() -> None:
-    # The lower-half-plane Faddeeva branch and its exponentially small
-    # prefactor otherwise form a 0*inf product for a perfectly valid tall-cell
-    # reciprocal offset.
+def test_shifted_delta_sequence_matches_tall_propagating_reference() -> None:
+    # High-precision reference for a tall-cell propagating reciprocal order.
+    # Directly forming the original lower-half-plane Faddeeva product in
+    # binary64 produces 0*inf even though these values are finite.
     k = 2.0 * math.pi / 550.0
     delta = shifted_delta_sequence(3, np.asarray([k + 0.0j]), 10550.4, 2.67125e-3)
+    expected = np.asarray(
+        [
+            0.7289288169279475 + 1.6156284948718302j,
+            -0.026809295123869023 + 0.012095644412897245j,
+            -0.00019702080574782977 - 0.0004465313518843544j,
+            7.463360361976309e-06 - 3.1461266502750974e-06j,
+        ],
+        dtype=np.complex128,
+    )
 
-    assert np.all(np.isfinite(delta.real))
-    assert np.all(np.isfinite(delta.imag))
+    np.testing.assert_allclose(delta[0], expected, rtol=2.0e-14, atol=2.0e-14)
     np.testing.assert_allclose(
         delta,
         shifted_delta_sequence(3, np.asarray([k + 0.0j]), -10550.4, 2.67125e-3),
         rtol=1.0e-13,
         atol=1.0e-13,
     )
+
+
+def test_shifted_delta_sequence_matches_evanescent_crossover_references() -> None:
+    # The auxiliary Faddeeva argument moves through zero as eta*|z| crosses
+    # |gamma|/(2*eta).  Both sides must be evaluated without ever visiting the
+    # exponentially growing lower-half-plane branch.
+    k = 2.0 * math.pi / 550.0
+    gamma = 0.5j * k
+    below = shifted_delta_sequence(3, np.asarray([gamma]), 275.0, 2.67125e-3)[0]
+    above = shifted_delta_sequence(3, np.asarray([gamma]), 10550.4, 2.67125e-3)[0]
+    expected_below = np.asarray(
+        [
+            0.16299582348779956,
+            0.09088696568255164,
+            0.05608578922986181,
+            0.03718231201638018,
+        ],
+        dtype=np.complex128,
+    )
+    expected_above = np.asarray(
+        [
+            1.192239514709785e-26,
+            3.9567389544870187e-28,
+            1.3349306678422327e-29,
+            4.578524664187957e-31,
+        ],
+        dtype=np.complex128,
+    )
+
+    np.testing.assert_allclose(below, expected_below, rtol=2.0e-14, atol=2.0e-14)
+    np.testing.assert_allclose(above, expected_above, rtol=2.0e-14, atol=1.0e-40)
 
 
 def test_shifted_delta_sequence_rejects_same_plane_limit() -> None:

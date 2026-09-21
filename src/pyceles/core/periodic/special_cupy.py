@@ -311,19 +311,23 @@ def _shifted_delta_sequence_cupy_raw(
             c = scaled_abs / (2.0 * a[None, :])
             ev_exp = cp.exp(-a[None, :] * a[None, :] - c * c)
             w_plus = wofz_cupy(1j * (a[None, :] + c), terms=int(terms), cupy=cp)
-            w_lower_reflected = wofz_cupy(1j * (c - a[None, :]), terms=int(terms), cupy=cp)
+            # Keep the auxiliary Faddeeva argument in the upper half-plane on
+            # both sides of c=a.  Besides avoiding a discarded overflowing
+            # branch, this needs one fewer Faddeeva evaluation.
+            w_near = wofz_cupy(1j * cp.abs(a[None, :] - c), terms=int(terms), cupy=cp)
             lower = c > a[None, :]
             lower_term = 2.0 * cp.exp(-scaled_abs)
-            w_minus_upper = wofz_cupy(1j * (a[None, :] - c), terms=int(terms), cupy=cp)
+            near_product = ev_exp * w_near
+            plus_product = ev_exp * w_plus
             product_sum = cp.where(
                 lower,
-                lower_term - ev_exp * w_lower_reflected + ev_exp * w_plus,
-                ev_exp * (w_minus_upper + w_plus),
+                lower_term - near_product + plus_product,
+                near_product + plus_product,
             )
             product_diff = cp.where(
                 lower,
-                lower_term - ev_exp * w_lower_reflected - ev_exp * w_plus,
-                ev_exp * (w_minus_upper - w_plus),
+                lower_term - near_product - plus_product,
+                near_product - plus_product,
             )
             out[:, ordinary_indices[ev_indices], 0] = 0.5 * math.sqrt(math.pi) * product_sum
             if n_max >= 1:

@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   coupling, including single-level and multilevel sampled-far traversals.
 
 ### Changed
+- Stabilized off-plane periodic Ewald reciprocal terms for tall cells by
+  evaluating reflected Faddeeva products without lower-half-plane overflow.
 - Fixed native restarted CuPy GMRES-family solvers so disabling the optional
   terminal residual diagnostic no longer skips the physical residual rebuild
   required at restart boundaries; the flag now also avoids the terminal

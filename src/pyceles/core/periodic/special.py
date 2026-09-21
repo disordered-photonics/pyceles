@@ -408,19 +408,25 @@ def _shifted_delta_sequence_batched_raw(
             c = scaled_abs / (2.0 * a[None, :])
             ev_exp = np.exp(-a[None, :] * a[None, :] - c * c)
             w_plus = special.wofz(1j * (a[None, :] + c))
-            w_lower_reflected = special.wofz(1j * (c - a[None, :]))
+            # Both sides of the crossover need the same upper-half-plane
+            # Faddeeva value.  Evaluating w(i*(a-c)) and w(i*(c-a))
+            # separately would eagerly visit a lower-half-plane argument on
+            # one side of every ``where`` and can overflow even when that
+            # branch is not selected.
+            w_near = special.wofz(1j * np.abs(a[None, :] - c))
             lower = c > a[None, :]
             lower_term = 2.0 * np.exp(-scaled_abs)
-            w_minus_upper = special.wofz(1j * (a[None, :] - c))
+            near_product = ev_exp * w_near
+            plus_product = ev_exp * w_plus
             product_sum = np.where(
                 lower,
-                lower_term - ev_exp * w_lower_reflected + ev_exp * w_plus,
-                ev_exp * (w_minus_upper + w_plus),
+                lower_term - near_product + plus_product,
+                near_product + plus_product,
             )
             product_diff = np.where(
                 lower,
-                lower_term - ev_exp * w_lower_reflected - ev_exp * w_plus,
-                ev_exp * (w_minus_upper - w_plus),
+                lower_term - near_product - plus_product,
+                near_product - plus_product,
             )
             out[:, ordinary_indices[ev_indices], 0] = 0.5 * math.sqrt(math.pi) * product_sum
             if n_max >= 1:
