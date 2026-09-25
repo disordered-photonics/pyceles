@@ -1,223 +1,291 @@
-# Performance notes
+# Performance and scaling
 
-pyceles keeps a NumPy/SciPy reference path and adds accelerated backends where
-they preserve the same operator structure. This page records the main
-performance assumptions, benchmark snapshots, and optimization decisions that
-are too detailed for the root README.
+pyceles keeps a NumPy/SciPy path as a reference implementation and adds
+accelerated backends where they preserve the same prepared operator
 
-## Solver and backend structure
+```text
+A = I - T W.
+```
 
-CELES is fast because it runs translation/matvec work on GPU, reuses cached
-translation tables and radial Hankel LUTs, and tunes solver/preconditioner
-choices around a matrix-free operator.
+Performance depends on particle count, `lmax`, geometry, solver, precision,
+and requested postprocessing. The phase profilers described below are the
+public way to measure and compare those costs across different systems.
+Their output is deliberately phase-resolved so that a regression in preparation,
+solve, or field evaluation is visible instead of being hidden in one wall-time
+number.
 
-pyceles currently ships:
+## Choosing a backend and solver
 
-- a NumPy/SciPy reference path,
-- a CuPy path using fused RawKernels for direct pairwise coupling,
-- a high-frequency MLFMM backend for larger dilute sphere clusters,
-- experimental periodic Ewald paths on NumPy and CuPy.
+- **NumPy/SciPy** is the portable reference path and is convenient only for
+  small systems, debugging, and independent checks.
+- **CuPy** keeps the hot operator and Krylov state on the GPU. It is the normal
+  choice for large direct, MLFMM, and periodic runs when a compatible CUDA
+  device is available.
+- **Pairwise coupling** is the direct `O(N^2)` finite-cluster reference and is
+  useful while the system is moderate enough to fit in memory.
+- **MLFMM** is the matrix-free high-frequency path for larger finite sphere
+  clusters. It keeps close interactions exact and accelerates well-separated
+  interactions through directional translations.
+- **Ewald** is the general periodic coupling method. The hybrid
+  `method="rayleigh"` path keeps exact self and near-vertical interactions and
+  uses reciprocal Rayleigh scans for vertically separated particles; it is
+  most useful for sufficiently extended cells.
 
-For moderate dense systems that fit in memory, both backends support direct
-dense solves with cached LU reuse for repeated RHS workflows. On the CuPy path
-this uses CuPy/cuSOLVER rather than a custom fused solve kernel.
+The high-level default solver is restarted GMRES. BiCGSTAB can be a good
+memory-light choice for finite systems, while periodic systems are generally
+best solved with GMRES. CuPy also provides FGMRES, LGMRES, GCRO-DR, and LSQR;
+NumPy uses the corresponding SciPy/reference implementations where available.
+Solver selection is explicit: pyceles does not automatically infer a method
+from system size. LSQR is single-RHS and requires an exact Hermitian adjoint
+of the prepared operator; imported dense T matrices are compatible with this
+algebraic path, but that does not create shape or material derivatives.
 
-For matrix-free iterative solves, CuPy GMRES supports true multi-RHS inputs:
-`solve_linear_system(..., backend="cupy", method="gmres", b.shape==(n, nrhs))`
-routes to a native block-GMRES path, and `Simulation.solve_sources(...)` uses
-that path automatically on labeled multi-channel runs.
+## Precision and memory
 
-For single-RHS iterative solves on the CuPy backend, pyceles also ships native
-`fgmres[cupy]`, `lgmres[cupy]`, `bicgstab[cupy]`, harmonic `gcro[cupy]`, and
-`lsqr[cupy]` and reference `lsqr` paths. The native path keeps the main Krylov
-state on device; the NumPy path delegates to SciPy. GCRO retains a bounded
-harmonic recycle space controlled by `solver_gcro_recycle_dim`; LSQR keeps only its
-bidiagonal recurrence but requires an exact Hermitian-adjoint action and
-currently supports one RHS. Multi-RHS workflows solve columns independently.
-Restarted GMRES-family methods use
-restart-boundary true-residual checks by default for robust stopping decisions.
+`compute_dtype` controls compact operator and contraction arithmetic, while
+`accum_dtype` controls wider reductions on paths that support it. A common GPU
+policy is `complex64` computation with `complex128` accumulation. Higher
+precision can be important for demanding residual tolerances, cancellation-
+sensitive lattice sums, and final validation.
 
-## Practical CuPy notes
+CuPy establishes a guarded device-memory ceiling below physical VRAM. Persistent
+data used by every matvec remain device-resident; pyceles does not silently
+stage a hot cache through host or shared memory. If an exact-near cache or
+other persistent repeated-apply state cannot fit, preparation fails explicitly
+instead of changing the runtime regime. Bounded chunking and recomputation of
+cheap intermediates remain available within an explicitly selected algorithm.
 
-- High-level CuPy simulations establish a guarded CuPy memory-pool ceiling
-  below physical VRAM before backend-specific preparation. This makes GPU
-  memory exhaustion explicit and consistent across pairwise, periodic, MLFMM,
-  and Krylov paths instead of relying on driver-managed host/shared-memory
-  oversubscription.
-- Persistent data consumed on every matvec are expected to remain on device.
-  Memory adaptation is reserved for bounded device-side chunking, recomputing
-  cheap intermediates, or explicitly selected lower-memory algorithms; pyceles
-  does not silently move a hot repeated-apply cache to host RAM.
+Direct dense solves assemble and factorize the full operator. They are useful
+for small reference cases and repeated right-hand sides, but the caller owns
+the memory budget; there is no hidden size-based fallback.
 
-- CuPy GMRES in pyceles uses a native implementation by default.
-- CuPy GMRES multi-RHS runs use native block-GMRES and report per-RHS final true
-  residuals.
-- Block-GMRES convergence requires every RHS column to satisfy the requested
-  tolerance.
-- Inner block iterations use a cheap aggregate residual proxy for monitoring,
-  followed by per-RHS true-residual checks when the proxy reaches target.
-- pyceles does not expose a public runtime toggle to swap back to built-in CuPy
-  GMRES in the simulation API.
-- `LinearSolveResult.block_metadata` reports block batches and residual
-  summaries; native block operators are required to accept `(n, nrhs)` inputs
-  directly.
-- Check your GPU's `singleToDoublePrecisionPerfRatio` before assuming
-  `complex128` is close to a `2x` cost over `complex64`. On many consumer or
-  laptop GPUs the ratio is high, and `complex128` slowdowns can be much larger
-  than `2x` for transcendental-heavy kernels.
-- Measure machine-local FP64/FP32 penalty before choosing production dtypes for
-  large CuPy runs.
-- Restarted GMRES can be restart-sensitive on dense/non-normal systems; small
-  restart values may stagnate.
+CuPy GMRES supports native block solves for compatible multi-RHS operators.
+Block convergence requires every right-hand-side column to satisfy the target;
+the inexpensive aggregate residual is only a monitor, followed by true
+per-column residual checks. Restarted Krylov methods perform true residual
+checks at restart boundaries by default. Disabling final checks is suitable
+only for low-level profiling and must not be interpreted as a converged solve.
 
-Internal solver sweeps on representative pairwise CuPy cases showed that
-restarted GMRES-family methods remained restart-sensitive at small restart
-budgets, while native `bicgstab[cupy]` was consistently a strong all-rounder
-with a smaller solver-state footprint. For memory-aware large-scale CuPy runs,
-`bicgstab` is a sensible first solver choice unless a specific geometry shows
-better behavior with a restarted method.
+## Finite-cluster MLFMM
 
-`SimulationConfig` defaults to restarted GMRES for a predictable, broadly
-applicable baseline. Users can select BiCGSTAB or another supported method
-explicitly when it better suits a particular workload; periodic systems in
-particular can be sensitive to solver choice.
+MLFMM is intended for high-frequency finite sphere clusters. Its exact-near
+partition handles close pairs, while the sampled far field uses directional
+translation operators. The current hierarchy is uniform-depth rather than
+adaptive. NumPy and CuPy share the validated hierarchy construction; repeated
+CuPy applies run on device.
 
-## MLFMM implementation notes
+The implementation keeps sampled-far interactions in the numerically safer
+precision used by the directional translations. CuPy exact-near evaluation is
+batched so that temporary dense mode blocks do not grow into an unbounded
+`O(N^2)` allocation. The finite MLFMM operator exposes an exact adjoint on both
+backends, including the reverse sampled-far traversal needed by LSQR.
 
-The MLFMM backend currently targets the high-frequency far-coupling regime.
-Close particle-pair interactions are handled exactly in the near field, so a
-separate low-frequency far-coupling branch has not yet been a practical
-performance bottleneck for the finite-size particle ensembles pyceles targets.
+## Public phase profilers
 
-Sampled-far MLFMM interactions remain `complex128` because high-order
-directional translations are more sensitive to phase/interpolation error than
-the exact-near path.
+`examples/profile_pyceles_phases.py` profiles one finite-cluster run and writes
+a `profile_summary.json` containing preparation, solver, far-field, and
+near-field phases. Its default reference case is the 500-sphere
+`examples/sphere_parameters.txt` geometry with `lmax=3`, wavelength 550, a
+Gaussian beam of width 2000, TE polarization, and `rtol=1e-4`.
 
-Current implementation details:
+The most relevant finite options are:
 
-- matrix-free MLFMM stages are available on both NumPy and CuPy operator
-  backends,
-- NumPy grouped dense leaf operators are the default repeated-apply shape,
-- compact on-the-fly leaf mode is kept as a lower-persistent-memory
-  reference/debug path,
-- prepared NumPy MLFMM operators expose plan, hierarchy, and memory diagnostics,
-- CuPy exact-near evaluation is memory-aware and avoids a pre-uploaded dense
-  near-block tensor,
-- CuPy grouped far-offset accumulation uses device kernels that multiply each
-  grouped interaction by its precomputed interpolation/translation weight during
-  accumulation. Doing this in one pass avoids materializing large intermediate
-  weighted tensors for every Krylov apply.
-- grouped far/transfer accumulation uses non-atomic kernels under a strict
-  grouped-batch uniqueness contract,
-- dense/direct solves use fast pairwise assembly when available and otherwise
-  fall back to generic dense assembly through repeated matrix-free applies,
-- the octree policy is uniform-depth rather than adaptive.
+- `--operator-backend {numpy,cupy}` and `--postprocessing-backend {inherit,numpy,cupy}`;
+- `--compute-dtype` and `--accum-dtype`;
+- `--solver`, `--solver-rtol`, `--solver-restart`, and `--solver-maxiter`;
+- `--cache-mode {off,on,both}`;
+- `--skip-farfield`, `--skip-nearfield`, and `--cuda-profiler-api`.
 
-A previous rotation-translation-rotation coupling idea was also explored as an
-alternative translation backend. After matching the formulas to the shipped
-CELES-compatible conventions, the experimental implementation reproduced
-translation blocks accurately but was much slower than the current reference
-block builder on the public 500-particle benchmark: about `26x` slower at
-`lmax=3` and `38x` slower at `lmax=4`. It is therefore not part of the active
-translation path.
-
-## Recent finite-cluster benchmark snapshot
-
-Measured on a laptop with:
-
-- CPU: `13th Gen Intel(R) Core(TM) i7-13850HX`,
-- GPU: `NVIDIA RTX 2000 Ada Generation Laptop GPU`,
-- Python: `3.12.10`,
-- NumPy/SciPy: `2.5.1 / 1.18.0`,
-- CuPy: `14.0.1`,
-- script: `examples/profile_pyceles_phases.py`.
-
-For a reproducible refresh of the supported finite and periodic cases, run the
-public suite orchestrator from a clean Python process:
+For a complete finite/periodic suite, use the public orchestrator:
 
 ```powershell
 python examples/profile_pyceles_benchmark_suite.py --suite all
 ```
 
-Each case gets its own output directory and subprocess, and the root
-`suite_manifest.json` records the exact commands. The finite suite runs all
-four backend/precision rows with one far-field and near-field postprocessing
-pass per row. If `--finite-cache-mode both` is selected, each finite profile
-also measures cache-on and cache-off solves while reusing the primary solved
-result for postprocessing. The pairwise periodic cache-on cases provide the
-documented NumPy and CuPy xy, interior-xy, and xz field maps; cache-off, direct,
-and Rayleigh cases remain solve-focused. Use `--suite finite` or
-`--suite periodic` for one family, `--skip-postprocessing` when only
-solve/preparation data is wanted, and `--skip-periodic-cache-off` when only
-cache-on periodic rows are needed. Use `--backends cupy` to restrict a refresh
-to CuPy rows when the NumPy reference rows are already available; the default
-remains both backends. Every CuPy case is run to convergence. The slow NumPy
-periodic cache-off and Rayleigh cases are one-iteration reference
-probes whose linear-solve time can be extrapolated
-from equivalent converged runs. `--reuse-existing` resumes a refresh and
-reruns a case if its existing summary is missing a required field phase.
+Use `--suite finite` or `--suite periodic` to select one family, `--backends
+cupy` to restrict a refresh, `--skip-postprocessing` for solve-only runs, and
+`--reuse-existing` to resume completed cases. The suite creates one output
+directory per case and a manifest containing the exact command line.
 
-Common benchmark parameters:
+### Finite reference phases
 
-- geometry: `N=500` spheres from `examples/sphere_parameters.txt`, `lmax=3`,
-- source: Gaussian beam, `wavelength=550`, `n_medium=1.0`,
-  `beam_width=2000`, TE, normal incidence,
-- angular grids: `n_beta=3601`, `n_alpha=180`,
-- near-field slice: plane `y=0`, `x=[-4000, 4000]`,
-  `z=[-3000, 5000]`, `dx=40`,
-- solver: `bicgstab`, `rtol=1e-4`.
+The following reference measurements use the default 500-sphere geometry and
+the standard finite profiler settings. They are a baseline for regression
+checks, not a promise of machine-independent runtime. The phase split is:
 
-Solve/preparation wall times from the default suite are:
+- **solver**: preparation plus the iterative/direct solve as reported by the
+  profile;
+- **far field**: conversion to scattered/initial/total plane-wave patterns;
+- **near field**: evaluation of the configured Cartesian slice and components.
 
-| backend and dtype | solver phase |
-| --- | ---: |
-| NumPy, `complex128/complex128` | `383.3 s` |
-| NumPy, `complex64/complex128` | `321.3 s` |
-| CuPy, `complex128/complex128` | `5.66 s` |
-| CuPy, `complex64/complex128` | `0.51 s` |
+The reference environment was a 13th-generation Intel Core i7-13850HX with an
+NVIDIA RTX 2000 Ada Laptop GPU, Python 3.12, NumPy/SciPy 2.5/1.18, and CuPy
+14.0.1.
 
-Postprocessing is measured once for every finite backend/precision row. These
-measurements use the same profile geometry and angular/field grids; cache-mode
-and solver comparisons do not repeat the field kernels because they do not
-depend on the solver iteration count.
+| backend and dtype | solver | far field | near field |
+| --- | ---: | ---: | ---: |
+| NumPy, `complex128/complex128` | 383.3 s | 20.57 s | 165.96 s |
+| NumPy, `complex64/complex128` | 321.3 s | 19.35 s | 132.67 s |
+| CuPy, `complex128/complex128` | 5.66 s | 1.87 s | 0.89 s |
+| CuPy, `complex64/complex128` | 0.51 s | 0.70 s | 0.65 s |
 
-| finite backend and dtype | far field | near field |
-| --- | ---: | ---: |
-| NumPy, `complex128/complex128` | `20.57 s` | `165.96 s` |
-| NumPy, `complex64/complex128` | `19.35 s` | `132.67 s` |
-| CuPy, `complex128/complex128` | `1.87 s` | `0.89 s` |
-| CuPy, `complex64/complex128` | `0.70 s` | `0.65 s` |
+The reference field slice uses `y=0`, `x=[-4000,4000]`, `z=[-3000,5000]`,
+and `dx=40`. The benchmark is most useful when refreshed with the same
+geometry, angular grids, precision, and solver; otherwise compare phase trends
+rather than absolute seconds.
 
-The low-level linear-solver `preconditioner=...` callable hook remains available
-for custom experiments; no built-in preconditioner is selected automatically.
+The finite scaling harness measures the separate pairwise and MLFMM solve
+path:
 
-## Pairwise optimization notes
+```bash
+python examples/run_pairwise_mlfmm_scaling_benchmark.py \
+  --couplings pairwise,mlfmm \
+  --powers-of-two-range 10,20
+```
 
-The current implementation emphasizes:
+Use a shorter range or `--n-values` for a smoke test. Its default MLFMM leaf
+size is 32 particles; lower-level hierarchy and accuracy controls remain
+available when the default is not appropriate. Pairwise coupling becomes
+memory-bound well before the largest MLFMM cases.
 
-- scalar-Legendre translation path in `translation_block`,
-- translation table/LUT reuse,
-- optional exact `W_ij` block cache,
-- end-to-end `compute_dtype`/`accum_dtype` precision policy,
-- rotated-frame tilted-beam initial near-field fast path,
-- CuPy scattered near-field contraction over mode index before Cartesian
-  assembly.
+### Periodic reference phases
 
-Benchmarked but intentionally not kept as defaults:
+`examples/profile_pyceles_periodic_phases.py` profiles periodic preparation,
+the complete solve, and optional exterior/interior `xy` and `xz` near-field
+maps. It uses the 500-sphere prototype geometry in a 3000-unit square cell,
+`lmax=3`, wavelength 550, normal-incidence TE illumination, GMRES with
+`rtol=1e-4`, and adaptive Ewald shells by default. The most relevant options
+are:
 
-- full `z*kz` phase precompute for near-field initial evaluation,
-- giant all-alpha batch strategies,
-- multiprocessing near-field initial evaluation,
-- hardware-aware scattered-field chunk heuristics,
-- shared `matmul` rewrite for CuPy scattered-field contractions,
-- the built-in regular-grid block preconditioner, which was useful as an
-  experiment but not compelling enough to keep as public API.
+- `--coupling-backend {pairwise,mlfmm}` and `--periodic-method {ewald,rayleigh}`;
+- `--operator-backend {numpy,cupy}`, precision, and `--cache-mode`;
+- `--solver`, `--solver-rtol`, `--solver-restart`, and `--solver-maxiter`;
+- `--field-bmax`, `--output-bmax`, `--rayleigh-z-cut`, and
+  `--rayleigh-reciprocal-shells`;
+- `--skip-nearfield` and `--cuda-profiler-api`.
 
-These gains preserve the matrix-free iterative workflow by default. Optional
-block caching is an explicit tradeoff for systems where RAM is plentiful.
+Preparation includes method-specific work such as Ewald W-cache or Rayleigh
+plan construction. The solve phase includes the complete Krylov run. Near-field
+maps are reported separately because their cost depends strongly on the number
+and placement of points.
 
-For long interactive sessions or large exploratory sweeps, process-global
-precompute caches can be cleared explicitly:
+The suite's standard periodic reference rows are:
+
+| backend and dtype | coupling | preparation | linear solve | complete solve | iterations |
+| --- | --- | ---: | ---: | ---: | ---: |
+| NumPy, `complex128/complex128` | pairwise, cache on | 147.18 s | 520.74 s | 671.34 s | 160 |
+| CuPy, `complex128/complex128` | pairwise, cache on | 7.41 s | 4.66 s | 12.25 s | 160 |
+| CuPy, `complex128/complex128` | pairwise, cache off | 0.06 s | 536.65 s | 540.19 s | 160 |
+| NumPy, `complex128/complex128` | Rayleigh, cache off | 58.72 s* | 1.44 s* | 61.08 s* | 1* |
+| CuPy, `complex128/complex128` | Rayleigh, cache off | 2.58 s | 11.38 s | 14.30 s | 160 |
+| NumPy, `complex64/complex128` | pairwise, cache on | 148.90 s | 537.60 s | 689.76 s | 160 |
+| CuPy, `complex64/complex128` | pairwise, cache on | 6.57 s | 3.60 s | 10.37 s | 160 |
+| CuPy, `complex64/complex128` | pairwise, cache off | 0.06 s | 530.97 s | 534.46 s | 160 |
+| NumPy, `complex64/complex128` | Rayleigh, cache off | 57.74 s* | 1.09 s* | 59.53 s* | 1* |
+
+The one-iteration NumPy rows are preparation/first-step probes, not converged
+solutions and must not be compared to complete solve times. The converged
+GMRES rows reached approximately `9.35e-5`; the two precision policies agreed
+at the displayed residual and power-balance precision. Ewald's scalar lattice
+sums remain `complex128` for cancellation safety, so changing compact compute
+precision does not accelerate every preparation phase.
+
+The same periodic profile can be refreshed directly:
+
+```powershell
+python examples/profile_pyceles_benchmark_suite.py --suite periodic
+```
+
+For a small smoke run, pass `--periodic-maxiter` explicitly and use
+`--skip-postprocessing`. Keep rows from one precision and geometry policy
+together when making a new comparison.
+
+## Finite implementation choices
+
+The finite path emphasizes scalar-Legendre translation evaluation, reusable
+translation tables and radial LUTs, optional exact W-block caching, explicit
+compute/accumulation precision, the rotated-frame tilted-beam initial-field
+fast path, and mode-index contraction for CuPy scattered fields.
+
+Several alternatives remain deliberately out of the default API because they
+do not improve the general workload enough to justify their memory or
+maintenance cost: full `z*kz` precomputation for near fields, giant all-alpha
+batches, multiprocessing inside near-field evaluation, hardware-specific
+chunk heuristics, and a regular-grid block preconditioner. A
+rotation-translation-rotation traversal was likewise tested and eventually
+not retained as a second translation backend.
+
+The low-level `solver_preconditioner` hook is still available for applications
+with a problem-specific approximate inverse. pyceles does not select one
+automatically.
+
+## Periodic scaling and Rayleigh safety
+
+The standalone periodic scaling harness performs a complete preflight before
+any solve and writes resumable JSON records:
+
+```bash
+python examples/run_ewald_rayleigh_scaling_benchmark.py
+```
+
+Rayleigh/Wood anomalies occur when a reciprocal order becomes grazing,
+
+```text
+|k_parallel + m b1 + n b2| = k_host.
+```
+
+They are singular channels of the artificial periodic lattice, not Ewald
+solver failures. Use `pyceles.core.periodic.rayleigh_report` or
+`suggest_safe_period_scales` before selecting a period. The geometry-only
+report identifies grazing orders but does not predict the minimum of a full
+coupling-norm scan. Production comparisons should vary shell and Rayleigh
+truncation controls and compare representative cases with a converged Ewald
+calculation.
+
+For `method="rayleigh"`, the exact-near cache scales with the number of directed
+non-self pairs inside the vertical band. A dense same-height layer can still be
+quadratic. Reciprocal work is chunked from a bounded temporary-memory budget;
+the persistent phase table and compact near cache remain part of the chosen
+algorithm. The default near-band and reciprocal truncation are conservative
+heuristics, not formal error bounds.
+
+Periodic output-order selection is separate from Ewald shell selection. Ewald
+`real_shells` and `reciprocal_shells` control lattice-sum convergence, whereas
+`output_bmax` and `field_bmax` select propagating or evanescent diffraction
+orders for output and near-field evaluation. For exterior near fields, choose
+`field_bmax` explicitly and check map stability as it is increased.
+
+## Periodic implementation notes
+
+- Periodic many-body solves remain particle-local and operator/Krylov oriented;
+  production workflows do not build a dense cluster T matrix.
+- Adaptive Ewald shell selection includes a propagating-order reciprocal guard.
+  `max_shells` is a safety cap, not an accuracy target.
+- The CuPy Ewald path batches structural sums and same-plane classification
+  under a temporary-memory budget; it does not retain a hidden quadratic index
+  cache in the matrix-free path.
+- Rayleigh preparation builds a reciprocal projection plan, one exact periodic
+  self block, and a sparse exact-near cache. Its repeated apply scales with
+  retained reciprocal orders and directed near pairs rather than all dense
+  pairwise blocks, but a dense same-height layer remains effectively
+  quadratic.
+- The compact repeated-apply cache must fit the guarded device-memory budget;
+  preparation fails instead of silently switching hot matvecs to host staging.
+- Near-field evaluation uses the same vertical split as the Rayleigh solve for
+  in-slab points. For repeated horizontal destination planes, CuPy reuses
+  source-side reciprocal work; pass the complete point cloud in one call when
+  practical.
+
+Periodic observable output uses an explicit diffraction-order basis. Ewald
+shell controls (`real_shells`, `reciprocal_shells`) are not output-order
+controls: `output_bmax` and `field_bmax` select propagating and evanescent
+orders. `output_bmax=None` is sufficient for `R/T/A`; exterior near fields
+usually require an explicit `field_bmax` and a stability check.
+
+## Cache management
+
+Process-global precomputation caches are useful when repeating compatible
+simulations. They can be cleared explicitly between independent workloads:
 
 ```python
 import pyceles as pcl
@@ -226,217 +294,5 @@ pcl.core.clear_caches()
 pcl.postprocessing.nearfield.clear_caches()
 ```
 
-pyceles does not call these automatically between runs because warm caches are
-often beneficial when repeating solves in the same process.
-
-## Periodic benchmark snapshot
-
-Use `examples/profile_pyceles_benchmark_suite.py --suite periodic` to refresh
-this complete supported snapshot.
-
-To refresh a different precision policy, pass
-`--periodic-compute-dtype` and `--periodic-accum-dtype`; keep the resulting rows
-together as one complete suite snapshot rather than mixing runs.
-
-```powershell
-python examples/profile_pyceles_benchmark_suite.py --suite periodic --periodic-maxiter 800
-```
-
-- 500 prototype spheres from `examples/sphere_parameters.txt` in a 3000 nm
-  square cell, `lmax=3`, wavelength 550 nm, homogeneous medium `n=1.0`;
-- normally incident TE plane wave with analytic source projection;
-- GMRES `rtol=1e-4`, `maxiter=800`, automatic eta and adaptive Ewald shells;
-- CuPy postprocessing at `dx=30 nm` for exterior-xy, slab-interior-xy, and
-  vertical xz maps.
-
-`prep` includes method-specific preparation (including W-cache or Rayleigh
-construction), and `solve` is the complete profiled solve phase. One-iteration
-rows are reference probes, not converged solves.
-
-| backend and dtype | coupling mode | prep | linear solve | solve | iterations |
-| --- | --- | ---: | ---: | ---: | ---: |
-| NumPy, `complex128/complex128` | Pairwise, W cache on | `147.18 s` | `520.74 s` | `671.34 s` | 160 |
-| CuPy, `complex128/complex128` | Pairwise, W cache on | `7.41 s` | `4.66 s` | `12.25 s` | 160 |
-| CuPy, `complex128/complex128` | Pairwise, W cache off | `0.06 s` | `536.65 s` | `540.19 s` | 160 |
-| NumPy, `complex128/complex128` | Pairwise, W cache off | `0.03 s` | `285.93 s` | `429.74 s` | 1* |
-| CuPy, `complex128/complex128` | Rayleigh, cache off | `2.58 s` | `11.38 s` | `14.30 s` | 160 |
-| NumPy, `complex128/complex128` | Rayleigh, cache off | `58.72 s` | `1.44 s` | `61.08 s` | 1* |
-| NumPy, `complex64/complex128` | Pairwise, W cache on | `148.90 s` | `537.60 s` | `689.76 s` | 160 |
-| CuPy, `complex64/complex128` | Pairwise, W cache on | `6.57 s` | `3.60 s` | `10.37 s` | 160 |
-| CuPy, `complex64/complex128` | Pairwise, W cache off | `0.06 s` | `530.97 s` | `534.46 s` | 160 |
-| NumPy, `complex64/complex128` | Pairwise, W cache off | `0.03 s` | `285.82 s` | `430.03 s` | 1* |
-| CuPy, `complex64/complex128` | Rayleigh, cache off | `2.53 s` | `4.59 s` | `7.38 s` | 160 |
-| NumPy, `complex64/complex128` | Rayleigh, cache off | `57.74 s` | `1.09 s` | `59.53 s` | 1* |
-
-All 160-step GMRES rows reached approximately `9.35e-5`; the two precision
-policies agree to the displayed residual and power-balance precision. Here
-`complex64/complex128` stores periodic translation data and performs its
-contractions in complex64, while the cancellation-sensitive scalar Ewald sum
-remains complex128. That scalar work dominates NumPy Ewald preparation and the
-cache-off pairwise probe, so those phases should not be expected to speed up
-and can be slightly slower than `complex128/complex128` because of ordinary
-host/runtime variability. Compute-dtype-sensitive phases can still benefit once
-that structural work is amortized: in this snapshot the complex64 direct
-assembly/factorization and Rayleigh repeated apply are faster. This differs from
-the finite pairwise case, where more of the hot path changes dtype; CuPy still
-benefits where c64 device kernels dominate. The rows are a paired snapshot, not
-a promise of ordering for short or host-bound phases.
-
-Direct dense validation (field work and final residual check skipped):
-
-| backend and dtype | W-block generation | assembly | factorization | solve phase |
-| --- | ---: | ---: | ---: | ---: |
-| NumPy, `complex128/complex128` | `147.23 s` | `3.51 s` | `20.07 s` | `318.34 s` |
-| CuPy, `complex128/complex128` | `5.45 s` | `2.14 s` | `43.68 s` | `55.13 s` |
-| NumPy, `complex64/complex128` | `147.22 s` | `2.09 s` | `10.59 s` | `305.05 s` |
-| CuPy, `complex64/complex128` | `4.57 s` | `0.26 s` | `1.49 s` | `10.38 s` |
-
-`*` One-iteration reference probe. Extrapolating its linear-solve time is
-useful for rough planning, but preparation and convergence behavior still need
-to be measured separately.
-
-The pairwise cache-on postprocessing phases use the primary solved result and
-are independent of Krylov convergence:
-
-| backend and dtype | exterior xy | interior xy | vertical xz |
-| --- | ---: | ---: | ---: |
-| NumPy, `complex128/complex128` | `1.40 s` | `1515.71 s` | `1624.09 s` |
-| CuPy, `complex128/complex128` | `1.47 s` | `7.57 s` | `9.86 s` |
-| NumPy, `complex64/complex128` | `1.38 s` | `1481.91 s` | `1600.28 s` |
-| CuPy, `complex64/complex128` | `1.46 s` | `7.57 s` | `9.86 s` |
-
-The interior plane is the occupied-slab midpoint (`z=1488.49 nm`; 872 of
-10,201 pixels are inside particles for this seed) and is saved as
-`nearfield_xy_interior_total.npz`. The direct rows are validation paths rather
-than a production scaling route; cache-off remains memory-light but recomputes
-periodic Ewald work on every Krylov matvec.
-
-## Periodic optimization notes
-
-- Periodic many-body solves remain particle-local and operator/Krylov oriented.
-  pyceles applies `A = I - T W` through the prepared operator and does not build
-  a dense cluster T-matrix as a production workflow.
-- Adaptive Ewald shell selection has a propagating-order reciprocal guard,
-  clear non-convergence errors, and reusable non-pair shell workspaces.
-  `real_shells=None` or `reciprocal_shells=None` means adaptive accumulation;
-  explicit integers force fixed shell counts, while `max_shells` is a safety cap
-  rather than an accuracy target.
-- The CuPy periodic Ewald path evaluates real-space and shifted reciprocal
-  structural sums with fused device kernels, classifies same-plane pairs
-  inside each device batch, and batches source particles by temporary-memory
-  budget. Same-plane pair indices are not retained across batches, so the
-  matrix-free path does not acquire a hidden quadratic index cache.
-- `PeriodicOptions(method="rayleigh")` is an opt-in hybrid alternative for
-  vertically extended cells. Exact Ewald work is restricted to the periodic
-  self block and non-self pairs satisfying `|delta_z| <= rayleigh_z_cut`; the
-  remaining reciprocal coupling is applied by two z-sorted semiseparable scans.
-  For `N` particles, `Q` retained reciprocal orders, and `K` directed non-self
-  near pairs, the repeated apply scales as `O(N * Q * Nm + K * Nm^2)` and the
-  exact-near cache as `O(K * (2*lmax+1)^2)`, instead of recomputing Ewald sums for all
-  `N^2` pairs or storing all dense W blocks.
-- The default Rayleigh half-band is one medium wavelength in `|delta_z|`,
-  enlarged to at least twice the largest particle circumscribing radius. This
-  is deliberately conservative: evanescent reciprocal orders have already
-  decayed substantially before a pair enters the scan. An explicit
-  `rayleigh_z_cut` may be used for convergence studies but cannot be smaller
-  than the particle-safe diameter bound.
-- `rayleigh_reciprocal_shells` fixes the square reciprocal half-width. With the
-  default `None`, pyceles selects a half-width from a conservative evanescent
-  envelope controlled by the same `shell_tolerance` and `max_shells` settings
-  used by Ewald accumulation. This is a truncation heuristic, not an error
-  proof; production studies should compare representative results against a
-  converged Ewald configuration and sweep the band/half-width.
-- Reciprocal work chunks are selected automatically from a fixed temporary-
-  memory budget. This avoids a small public chunk cap that would leave the GPU
-  under-occupied and add avoidable Python/einsum loop overhead on the CPU.
-- Preparation builds the reciprocal projection plan, the shared exact self
-  block, and the sparse exact-near cache. `cache_translation_blocks=False`
-  disables the dense periodic W cache, but the hybrid method still retains its
-  `O(N Q)` lateral phase table and `O(K (2*lmax+1)^2)` compact exact-near
-  structural cache. These are part of the Rayleigh repeated-apply design, not a
-  leaked dense W matrix. Structural sums are accumulated in complex128 and then
-  contracted and stored once in the selected compute dtype; a complex64 cache
-  therefore uses half the persistent bytes of a complex128 cache and performs
-  its repeated contractions in complex64. Time preparation separately from warmed
-  matvecs: the first direct `apply()` includes any preparation that has not
-  already been requested through `populate_coupling()`.
-- Before allocating a CuPy exact-near cache, pyceles estimates its compact byte
-  size together with the remaining Rayleigh tables and bounded apply workspace.
-  The policy uses the same guarded CuPy pool ceiling as streamed MLFMM, so
-  Windows/WDDM shared-memory spill is not treated as available device memory.
-  The repeated-apply cache must remain device-resident; if it does not fit,
-  preparation fails before the Krylov solve instead of silently turning every
-  matvec into a host-to-device streaming workload.
-- CuPy contracts the compact exact-near cache in bounded pair batches. The
-  batching budget includes the possible dense `(Nm, Nm)` block intermediate
-  and its library workspace, rather than only the final `(Nm,)` contribution.
-  This keeps dense bands from creating a hidden `O(K Nm^2)` temporary spanning
-  every near pair at once.
-- When measuring Rayleigh error against Ewald, pin a demonstrably converged
-  Ewald `eta` and shell configuration (or sweep them). A difference against an
-  automatically selected, insufficiently converged Ewald reference is not a
-  Rayleigh truncation estimate and can dominate the comparison in large cells.
-- The hybrid method is most useful when the vertical band is sparse. A dense
-  same-height layer still has `K = O(N^2)` and therefore receives little memory
-  or setup benefit. Exact grazing diffraction orders (Wood anomalies) are
-  rejected by the Rayleigh operator; use exact Ewald or move away from the
-  anomaly.
-- The periodic phase profiler accepts `--periodic-method rayleigh` together
-  with the `--rayleigh-*` convergence controls. Hybrid profiling requires
-  `--cache-mode off`, because its sparse near cache replaces dense W caching.
-- Explicit periodic W-block caching is an opt-in memory/runtime tradeoff.
-- Dense direct periodic solves are validation paths. For diagonal particle-local
-  `T` operators, dense `A` is assembled directly from cached periodic W blocks.
-- Periodic near-field evaluation uses Rayleigh orders above/below the particle
-  slab. For in-slab points, `method="rayleigh"` applies the same vertical split
-  as the coupling operator: reciprocal z scans accumulate vertically distant
-  particle sources, while source-point pairs inside `rayleigh_z_cut` retain the
-  exact Ewald local-SVWF projection. For `P` field points and `Kp` exact-near
-  source-point pairs, this changes the dominant shape from all `P*N` Ewald
-  evaluations to approximately `O((P + N) * Q * Nm + Kp * Nm)` plus structural
-  Ewald work for the near pairs. Dense same-height field maps can therefore
-  remain expensive even when the solve itself benefits strongly from Rayleigh.
-
-For repeated horizontal destination planes, the CuPy in-slab evaluator also
-recognizes shared z coordinates and reuses the source-side reciprocal
-calculation before applying the destination phases. This is an automatic,
-exact dispatch decision; there is no user-facing switch. Mixed-z arrays (for
-example, a vertical cross-section) are grouped internally when they contain
-enough points per plane, while small or irregular groups use the generic exact
-pair path. When several planes are needed, pass the complete point cloud to
-one `compute_periodic_near_field` call whenever practical. Calling the helper
-once per line or stripe repeats setup and transfer work and can be much slower,
-even when each individual stripe qualifies for the plane optimization. The
-optimization applies to in-slab periodic near fields; it does not change the
-periodic solver matvec or the exterior Rayleigh-order evaluator.
-
-### Periodic output basis
-
-Periodic observable output uses an explicit diffraction-order basis.
-Periodic output-order selection is not the same thing as Ewald shell selection.
-Ewald `real_shells` and `reciprocal_shells` control lattice-sum convergence in
-the operator. By contrast, `output_bmax` and `field_bmax` are reciprocal-space
-radii for diffraction/Rayleigh orders: all integer orders satisfying
-`|k_parallel + m*b1 + n*b2| <= bmax` are included.
-
-"Evanescent orders" refers to evanescent diffraction/Rayleigh orders in that
-output table.
-
-For `R/T/A`, `output_bmax=None` is enough because only propagating orders
-contribute to flux. Exterior periodic near-field maps often need evanescent
-orders, so the production near-field API requires an explicit `field_bmax` or a
-configured `PeriodicOptions.output_bmax`.
-
-The public periodic profile and MSTM-comparison scripts provide a convenience
-heuristic when their near-field `bmax` CLI option is omitted:
-
-```text
-bmax = sqrt(k^2 + (D / d)^2)
-```
-
-Here `d` is a characteristic exterior distance from the particle slab and `D` is
-a target evanescent decay, with the scripts currently defaulting to `D = 8`
-(`exp(-8)` amplitude decay over `d`). Increasing the value includes more
-evanescent orders and can be useful for stricter near-field map convergence
-checks. For production studies, prefer an explicit `field_bmax` sweep and inspect
-stability of the resulting field maps.
+The library does not clear them automatically because retaining warm tables is
+often the fastest choice in an interactive workflow.

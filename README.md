@@ -1,144 +1,98 @@
 # pyceles
 
-pyceles is a Python reimplementation of the MATLAB CELES package for
-electromagnetic simulation of large particle ensembles with the T-matrix method.
-It keeps a NumPy/SciPy reference implementation and adds optional CuPy
-acceleration for selected direct, MLFMM, postprocessing, and experimental
-periodic workflows.
+pyceles is a NumPy/SciPy-first implementation of CELES-style multiple
+scattering with the T-matrix method. It provides a correctness-oriented CPU
+path and optional CuPy acceleration for direct coupling, MLFMM, periodic
+operators, and selected postprocessing stages.
 
-The project focuses on:
+The central many-body system is written as
 
-- CELES-compatible conventions and reproducible numerical workflows,
-- a clean NumPy/SciPy reference implementation,
-- performance through vectorization, caching, and optional CuPy kernels,
-- the same `A = I - T W` operator structure across CPU and GPU backends,
-- explicit precision control through `compute_dtype` and `accum_dtype`.
+```text
+A = I - T W
+```
 
-## Acknowledgment
+where `T` contains particle-local scattering and `W` contains inter-particle
+coupling. The same prepared-operator interface is used by the reference and
+accelerated backends, with explicit control over solver method and numerical
+precision.
 
-This project would not be possible without the frameworks established by
+pyceles builds on the conventions and ideas established by
 [CELES](https://github.com/disordered-photonics/celes) and
-[SMUTHI](https://gitlab.com/AmosEgel/smuthi), and the work of their authors and
-contributors. Users of pyceles are referred to the publications listed in the
-CELES and SMUTHI repositories, and those papers can be cited when pyceles is
+[SMUTHI](https://gitlab.com/AmosEgel/smuthi). Their publications are listed in
+[`docs/references.md`](docs/references.md) and can be cited when pyceles is
 used in scientific work.
 
-## Documentation
+## Supported workflows
 
-The root README is now the main project overview. Longer-form Markdown notes are
-available under [`docs/`](docs/):
+- Homogeneous, layered, axisymmetric, and perfect-conductor particles.
+- Standard dense `.tmat.h5` particle blocks, selected at an exact wavelength
+  and converted to the CELES spherical-wave convention.
+- Plane waves, Gaussian and Laguerre-Gaussian beams, Bessel beams, focused
+  beams, angular-spectrum/SLM sources, local dipoles, and dipole collections.
+- Direct pairwise coupling and high-frequency MLFMM for finite clusters.
+- GMRES-family methods, BiCGSTAB, GCRO-DR, LSQR with exact adjoints, and
+  direct dense solves where the caller has sufficient memory.
+- Single- and multi-source workflows, including block solves for compatible
+  CuPy GMRES runs.
+- Component-resolved near fields, far-field plane-wave patterns, cross
+  sections, power balances, local absorption, and dipole LDOS diagnostics.
+- HDF5 persistence for particle-native geometry, solutions, fields, and typed
+  diagnostics.
+- Experimental rectangular 2D periodic workflows with Ewald coupling and the
+  opt-in hybrid exact-near/Rayleigh-far operator.
 
-- [capabilities](docs/capabilities.md): detailed feature inventory,
-- [quickstart](docs/quickstart.md): minimal end-to-end example,
-- [API map](docs/api.md): curated public entry points,
-- [workflows](docs/workflows.md): polarization, multi-source, dipole, HDF5, and solver notes,
-- [performance](docs/performance.md): benchmark snapshots and optimization notes,
-- [validation](docs/validation.md): tests and external-reference scripts,
-- [limitations](docs/limitations.md): current technical boundaries,
-- [references](docs/references.md): related literature.
+The detailed capability inventory is in
+[`docs/capabilities.md`](docs/capabilities.md). The curated public API map is
+in [`docs/api.md`](docs/api.md), and runnable usage starts with
+[`docs/quickstart.md`](docs/quickstart.md).
 
-The docs are plain Markdown for now. Sphinx/MyST can be added later if the
-project adopts generated API pages or hosted HTML documentation.
+## Scope and current boundaries
 
-## What works today
+pyceles is pre-1.0. Important boundaries are still present:
 
-Current tested capabilities include:
+- one simulation currently uses one common `lmax` for all particles;
+- the homogeneous host path currently requires a real positive refractive
+  index;
+- T-matrix superposition requires disjoint circumscribing spheres by default;
+- opaque imported T matrices support exact operator adjoints, but cannot
+  provide hidden internal fields or shape/material derivatives;
+- embedded dipoles inside particles are not yet supported by the main solver path;
+- periodic workflows are experimental and currently target homogeneous
+  rectangular 2D lattices with plane-wave excitation;
+- spheroid exterior fields require care inside a circumscribing sphere but
+  outside the physical spheroid.
 
-- CELES-compatible VSWF indexing, Wigner-3j tables, translation coefficients,
-  and plane-wave/Gaussian incident-field machinery,
-- explicit particle descriptors for homogeneous, layered, axisymmetric, and
-  perfect-conductor particles, plus uniform compact instance/archetype storage,
-- plane waves, structured beams, angular-spectrum SLM wrappers, local dipoles,
-  and dipole collections,
-- direct pairwise coupling on NumPy and CuPy,
-- high-frequency MLFMM coupling for large sphere clusters on NumPy and CuPy
-  repeated-apply paths,
-- native CuPy Krylov solvers, including GMRES-family methods, BiCGSTAB,
-  harmonic GCRO-DR, LSQR, and block-GMRES for multi-RHS runs, plus reference
-  SciPy LSQR on NumPy operators with exact adjoints,
-- near-field and far-field postprocessing, including component-resolved
-  `initial`, `scattered`, `internal`, and `total` near-field maps,
-- local absorption and dipole power/LDOS diagnostics,
-- HDF5 save/load workflows,
-- provider-neutral import of published spectral `.tmat.h5` dense T matrices,
-- experimental rectangular 2D periodic workflows with diffraction-order
-  payloads, `R/T/A`, periodic near-field slices, and an opt-in hybrid
-  exact-near/Rayleigh-far repeated-apply operator for vertically extended cells.
+See [`docs/limitations.md`](docs/limitations.md) for the full boundary list.
 
-See [docs/capabilities.md](docs/capabilities.md) for the full feature inventory.
+## Installation
 
-## Current limits
-
-pyceles is pre-1.0, and some boundaries are still intentional:
-
-- particles in one simulation currently share the same `lmax`,
-- imported dense T matrices currently use one selected wavelength and are
-  converted from the standard parity or helicity basis; their internal
-  geometry is not available to pyceles near-field postprocessing, although the
-  explicit block remains usable by exact adjoint operator paths,
-- homogeneous-medium workflows currently assume a real host refractive index,
-- T-matrix superposition requires disjoint particle circumscribing spheres by
-  default,
-- embedded dipoles inside particles are not supported in the main solver path,
-- periodic workflows are experimental and currently limited to homogeneous
-  rectangular 2D lattices with plane-wave excitation,
-- spheroid exterior near fields remain unreliable for points inside the
-  circumscribing sphere but outside the physical particle.
-
-See [docs/limitations.md](docs/limitations.md) for more detail.
-
-## Future nice-to-have features and workflows
-
-These are reminders for future development, not a release commitment:
-
-- optical force and torque postprocessing,
-- spectral-sweep workflows for dispersion studies and approximate time-domain
-  reconstruction,
-- nonlinear double-pass workflows, such as fundamental-field solves followed by
-  second-harmonic source construction,
-- basic layered-media support, starting from a single planar interface between
-  two homogeneous half-spaces,
-- a vendor-neutral accelerator backend, such as a PyOpenCL-style path, once the
-  useful CuPy kernel boundaries are clearer.
-
-## Install
-
-From the repository root:
+pyceles requires Python 3.12 or newer.
 
 ```bash
 python -m pip install -U pip
+python -m pip install pyceles
+```
+
+For a checkout in editable mode:
+
+```bash
 python -m pip install -e .
 ```
 
-For contributors:
+For GPU use, install the CuPy wheel matching the CUDA runtime before installing
+pyceles, or use the package extra:
 
 ```bash
-python -m pip install -e .[dev]
+python -m pip install cupy-cuda12x   # or cupy-cuda13x
+python -m pip install pyceles
 ```
-
-For GPU work, install a CuPy wheel matching your CUDA runtime when possible, then
-install pyceles:
 
 ```bash
-python -m pip install cupy-cuda12x
-python -m pip install -e .
+python -m pip install pyceles[cupy]
 ```
 
-or, on CUDA 13:
-
-```bash
-python -m pip install cupy-cuda13x
-python -m pip install -e .
-```
-
-The repository also exposes a `cupy` extra:
-
-```bash
-python -m pip install -e .[cupy]
-```
-
-See [docs/installation.md](docs/installation.md) for installation and local
-quality-check notes.
+The optional `dev` and `notebooks` extras are intended for contributors and
+interactive examples; see [`docs/installation.md`](docs/installation.md).
 
 ## Minimal example
 
@@ -154,15 +108,12 @@ source = pcl.PlaneWave(
     wavelength=550.0,
     medium_n=1.0 + 0j,
     polarization="TE",
-    polar_angle=0.0,
-    azimuthal_angle=0.0,
 )
-
 config = pcl.SimulationConfig(
     wavelength=550.0,
     n_medium=1.0 + 0j,
     lmax=3,
-    solver_method="bicgstab",
+    solver_method="gmres",
     solver_rtol=1e-6,
 )
 
@@ -171,27 +122,42 @@ print(result.n_particles)
 print(result.cross_sections)
 ```
 
-See [docs/quickstart.md](docs/quickstart.md) for near-field and HDF5 examples.
+For near-field slices, multi-source runs, imported T matrices, dipoles, and
+HDF5 output, see [`docs/quickstart.md`](docs/quickstart.md) and
+[`docs/workflows.md`](docs/workflows.md).
 
-## Examples and benchmarks
+## Examples and scaling harnesses
 
-Useful entry points:
+The repository includes small examples and general-purpose benchmark drivers:
 
-- `examples/minimal_pyceles_demo.py`: mixed particles, CuPy direct solve,
-  near/far field, HDF5 output, and dipole LDOS map,
-- `notebooks/01_celes_main_replication.ipynb`: replication of the original
-  `CELES_MAIN.m` workflow,
-- `examples/profile_pyceles_phases.py`: finite-cluster profiling,
-- `examples/profile_pyceles_periodic_phases.py`: rectangular periodic profiling,
-- `examples/run_mstm_pyceles_cluster_benchmark.py`: finite-cluster comparison
-  against MSTM,
-- `examples/run_mstm_pyceles_periodic_benchmark.py`: periodic comparison
-  against MSTM.
+- `examples/minimal_pyceles_demo.py` demonstrates mixed particles, CuPy,
+  near/far fields, HDF5 output, and dipole diagnostics.
+- `examples/source_showcase_demo.py` collects source families.
+- `notebooks/01_celes_main_replication.ipynb` reproduces the `CELES_main.m`-style
+  workflow.
+- `examples/run_pairwise_mlfmm_scaling_benchmark.py` measures finite-cluster
+  pairwise and MLFMM scaling. Its default ladder is `2**10` through `2**20`;
+  use `--powers-of-two-range` or `--n-values` for a smaller run. Pairwise
+  coupling becomes memory-bound well before the largest MLFMM cases; the full
+  ladder is intended for a GPU with at least 8GB of memory.
+- `examples/run_ewald_rayleigh_scaling_benchmark.py` measures the two periodic
+  growth families with a complete preflight and resumable JSON records.
 
-Benchmark details and representative timings are kept in
-[docs/performance.md](docs/performance.md) and
-[docs/validation.md](docs/validation.md).
+Validation strategy and external-reference entry points are described in
+[`docs/validation.md`](docs/validation.md). Performance guidance, memory
+policy, and scaling interpretation are in
+[`docs/performance.md`](docs/performance.md).
 
-## License
+## AI-assisted development
 
-MIT
+OpenAI GPT-5.6 Luna was used for assistance with code implementation, refactoring,
+debugging, testing, and documentation editing. The physical formulations, validation
+criteria and benchmarking protocols are defined by the authors, who reviewed all
+generated changes and remain responsible for the software, its numerical results,
+and scientific claims.
+
+## Acknowledgment and license
+
+This project would not be possible without the frameworks established by CELES
+and SMUTHI and the work of their authors and contributors. pyceles is released
+under the MIT license.

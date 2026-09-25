@@ -5,7 +5,7 @@ but too detailed for the root README.
 
 ## Source capability contract
 
-New source classes should satisfy the internal `Source` protocol in
+New source classes should satisfy the `Source` protocol in
 `pyceles.core.sources` and explicitly implement:
 
 - `incident_coeffs(...)`,
@@ -448,7 +448,10 @@ Notes:
 - Repeated direct solves on the same `Simulation` instance reuse both dense `A`
   and its LU factorization.
 - `SimulationConfig.solver_compute_final_residual` controls true-residual
-  verification/diagnostics policy.
+  verification. Keep it enabled for scientific solves; disabling it is a
+  profiling-only diagnostic mode and must not be used as evidence of physical
+  convergence because restarted Krylov methods need true residuals at cycle
+  boundaries.
 - `solver_method="gcro"` selects the native CuPy harmonic recycling solver for
   single-RHS runs; `SimulationConfig.solver_gcro_recycle_dim` controls its bounded
   recycle rank. The common `solver_restart` value is the total augmented
@@ -465,9 +468,10 @@ Notes:
   NumPy/reference backend; CuPy periodic workflows currently use Ewald or Rayleigh. LSQR does
   not restart; `solver_maxiter` is its iteration budget and `solver_restart` is
   ignored.
-- For native CuPy restarted GMRES/FGMRES/LGMRES, final-residual checks are
-  performed at restart boundaries by default; set the option to `False` only
-  for profiling-focused runs.
+- For native CuPy restarted GMRES/FGMRES/LGMRES, true-residual checks are
+  performed at restart boundaries by default. Setting the option to `False`
+  changes that stopping/progress policy and is reserved for low-level timing
+  experiments, not production convergence.
 - SciPy GMRES progress reports SciPy's cheap preconditioned residual
   (`pr_rel_res`). SciPy BiCGSTAB, LGMRES, and GCROTMK callbacks do not expose a
   cheap residual scalar, so pyceles reports iteration-only progress for those

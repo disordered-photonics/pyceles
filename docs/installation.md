@@ -81,7 +81,5 @@ GPU-specific tests require a working CUDA/CuPy installation:
 python -m pytest -q -m gpu
 ```
 
-Documentation tooling is intentionally not declared as an optional dependency
-yet. The current files under `docs/` are meant to be readable as Markdown; a
-dedicated `docs` extra can be added when the project adopts a documentation
-builder.
+Documentation is maintained as Markdown under `docs/` and does not require an
+additional documentation tool.

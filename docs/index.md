@@ -6,8 +6,7 @@ implementation while adding optional CuPy acceleration for selected solver and
 postprocessing paths.
 
 The documentation in this folder is deliberately small. It collects stable,
-user-facing material that would otherwise make the root README harder to scan,
-without committing the project to a full documentation site (yet).
+user-facing material that would otherwise make the root README harder to scan.
 
 For the current feature inventory, start with
 [capabilities.md](capabilities.md). For technical boundaries, see
@@ -26,5 +25,5 @@ For the current feature inventory, start with
 - [Current limitations](limitations.md)
 - [Related works](references.md)
 
-These pages are plain Markdown. They can be converted to a Sphinx/MyST site
-later without making Sphinx a runtime dependency of pyceles.
+These pages are plain Markdown and are intended to remain usable without a
+documentation build tool.

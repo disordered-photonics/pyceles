@@ -5,19 +5,25 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "pyceles"
 version = "0.5.0"
-description = "Reference implementation of CELES-style many-particle T-matrix scattering with NumPy and CuPy backends."
+description = "CELES-style many-particle T-matrix scattering with a NumPy/SciPy reference path and optional CuPy acceleration."
 readme = "README.md"
 requires-python = ">=3.12"
-license = { text = "MIT" }
-authors = [
-  { name = "Lorenzo Pattelli" },
+license = { file = "LICENSE" }
+authors = [{ name = "Lorenzo Pattelli" }]
+keywords = [
+  "computational-electromagnetics",
+  "multiple-scattering",
+  "t-matrix",
+  "spherical-waves",
+  "nanophotonics",
+  "cuda",
 ]
-keywords = ["electromagnetics", "multiple-scattering", "t-matrix", "spherical-waves"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Science/Research",
   "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
   "Programming Language :: Python :: 3.14",
@@ -32,6 +38,12 @@ dependencies = [
   "h5py~=3.16",
   "tqdm~=4.70",
 ]
+
+[project.urls]
+Homepage = "https://github.com/disordered-photonics/pyceles"
+Repository = "https://github.com/disordered-photonics/pyceles"
+Issues = "https://github.com/disordered-photonics/pyceles/issues"
+Documentation = "https://github.com/disordered-photonics/pyceles/tree/main/docs"
 
 [project.optional-dependencies]
 # Exact contributor-tool pins intentionally mirror the isolated pre-commit

@@ -42,7 +42,6 @@ This page records current limitations.
 - Homogeneous axisymmetric spheroids are supported with aligned/rotated spherical-basis T-matrix blocks.
 - Internal-field evaluation inside spheroids is covered.
 - Exterior near-field evaluation is still unreliable for points that lie inside a spheroid's circumscribing sphere but outside the physical spheroid, because the current default path uses the outgoing spherical SVWF expansion there.
-- Exploratory surface-integral, arbitrary-precision, and spheroidal-shell postprocessing variants have been investigated but are not yet ready to replace the default path.
 
 ## Dipoles
 
@@ -86,12 +85,11 @@ Other periodic limitations include:
 The hybrid Rayleigh method is not a general cure for dense planar cells. Its
 exact-near cache scales with the number of directed non-self pairs inside the
 vertical band, which remains quadratic when most particles share nearly the
-same height. CuPy can keep an oversized compact cache in host memory and stream
-it through a bounded device buffer, but this only moves the GPU-residency wall;
-it does not change the host-memory or per-matvec transfer scaling. Its automatic
-reciprocal truncation is conservative but heuristic; scientific runs should
-sweep `rayleigh_z_cut` or `rayleigh_reciprocal_shells` and compare
-representative cases with exact Ewald.
+same height. The cache must fit the guarded device-memory budget; preparation
+fails rather than silently streaming it through host memory on every Krylov
+action. Its automatic reciprocal truncation is conservative but heuristic;
+scientific runs should sweep `rayleigh_z_cut` or `rayleigh_reciprocal_shells`
+and compare representative cases with exact Ewald.
 
 Periodic in-slab near-field evaluation supports both `method="ewald"` and
 `method="rayleigh"`. The hybrid path retains exact Ewald local-SVWF evaluation

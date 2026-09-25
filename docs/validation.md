@@ -1,26 +1,23 @@
 # Validation and reproducibility
 
-pyceles is developed around reproducible numerical checks combining unit tests
-for individual numerical kernels, physics-oriented invariants, regression tests
-against independent references, and larger benchmark scripts.
+pyceles combines unit tests for numerical kernels, physics-oriented invariants,
+API-contract tests, and comparisons with independent scattering references.
+The CPU path is the correctness anchor; CuPy tests check backend agreement and
+GPU-specific execution where a CUDA device is available.
 
 ## Automated tests
 
-The test suite is organized by pytest markers:
+Tests use markers to make the required runtime explicit:
 
-- `unit`: isolated numerical and API checks,
-- `physics`: physically meaningful end-to-end or invariant checks,
-- `regression`: locked behavior and reference cases,
-- `io`: HDF5, plotting, and workflow-oriented tests,
-- `gpu`: tests requiring a real CuPy/CUDA runtime,
-- `fake_gpu`: deterministic CuPy-dispatch tests using controlled test doubles,
-- `slow`: longer-running tests kept out of fast local gates,
-- `filesystem` and `hdf5`: tests touching temporary files or HDF5 payloads,
-- `reference`: comparisons against independent formulas, fixed oracle data, or
-  external references,
-- `api_contract`: public-shape and protocol checks.
+- `unit`, `physics`, and `regression` cover numerical and physical behavior;
+- `api_contract` protects public shapes and protocols;
+- `io`, `filesystem`, and `hdf5` cover persistence and plotting-facing paths;
+- `reference` covers independent formulas or fixed oracle data;
+- `gpu` requires CuPy and a working CUDA device;
+- `fake_gpu` exercises CuPy dispatch without CUDA;
+- `slow` marks longer-running tests.
 
-Useful commands:
+Useful commands are:
 
 ```bash
 python -m pytest -q -m "not gpu and not slow"
@@ -29,60 +26,67 @@ python -m pytest -q -m fake_gpu
 python -m pytest -q -m gpu
 ```
 
-## Reference classes covered by tests
+The complete suite is the strongest check before a release:
 
-The current tests cover, among other areas:
+```bash
+python -m pytest -q
+```
 
-- CELES-compatible VSWF indexing and mode metadata,
-- Wigner-3j machinery,
-- spherical angular functions and recurrences,
-- Mie and layered-sphere T-matrix routines,
-- translation coefficients and coupling operators,
-- direct dense/pairwise matvec consistency,
-- NumPy and CuPy backend agreement for selected operators,
-- near-field and far-field helper contracts,
-- energy/power consistency checks,
-- translation, rotation, inversion-parity, particle-order, and Lorentz-
-  reciprocity invariants,
-- local absorption and dipole diagnostics,
-- HDF5 workflow persistence,
-- published spectral `.tmat.h5` mode conversion and opaque-particle near-field
-  behavior,
-- periodic Ewald helper routines and CuPy parity checks,
-- spheroid regression cases against external references.
+## Covered numerical contracts
 
-## Public benchmark scripts
+The test suite covers, among other areas:
 
-The repository includes benchmark scripts intended to produce human-inspectable
-validation artifacts.
+- CELES-compatible VSWF indexing, Wigner-3j tables, angular functions, and
+  translation coefficients;
+- Mie and layered-sphere particle operators;
+- direct pairwise and dense-operator consistency;
+- NumPy/CuPy agreement for selected operators and postprocessing;
+- translation, rotation, inversion-parity, particle-order, and reciprocity
+  invariants;
+- near-field, far-field, cross-section, power-balance, absorption, and dipole
+  diagnostics;
+- HDF5 persistence and standard spectral `.tmat.h5` basis conversion;
+- periodic Ewald helpers, Rayleigh diagnostics, and selected periodic backend
+  checks;
+- spheroid regression cases against independent particle calculations.
 
-Finite-cluster MSTM comparison:
+## Reproducible examples
+
+The repository includes scripts for controlled external comparisons:
 
 ```bash
 python examples/run_mstm_pyceles_cluster_benchmark.py \
   --mstm-exe <path-to-mstm-executable>
-```
 
-Periodic MSTM comparison:
-
-```bash
 python examples/run_mstm_pyceles_periodic_benchmark.py \
   --mstm-exe <path-to-mstm-executable>
 ```
 
-Profiling entry points:
+The finite and periodic scaling harnesses write self-contained JSON records and
+can resume an interrupted sweep:
 
-- `examples/profile_pyceles_phases.py`
-- `examples/profile_pyceles_periodic_phases.py`
+```bash
+python examples/run_pairwise_mlfmm_scaling_benchmark.py \
+  --couplings pairwise,mlfmm --powers-of-two-range 10,12
 
-For a loader-only check of a published dense T-matrix file that does not run a
-solver, use:
+python examples/run_ewald_rayleigh_scaling_benchmark.py \
+  --families lateral --n-values-lateral 114,228
+```
+
+These are measurements, not fixed performance guarantees. Record the backend,
+precision, solver, geometry, and postprocessing settings with any result that
+will be compared across machines.
+
+For a loader-only check of a standard dense T-matrix file:
 
 ```bash
 python examples/inspect_standard_tmatrix.py \
   --tmatrix <particle.tmat.h5> --wavelength 600
 ```
 
-Exact numerical comparisons against external T-matrix providers are maintained
-as private validation harnesses rather than public usage examples. Exact
-numbers depend strongly on CPU, GPU, CUDA, BLAS, and driver versions.
+External programs such as MSTM, SMUTHI, or TREAMS require their own local
+installations and conventions. When comparing fields, align wavelength units,
+host medium, basis/polarization convention, angular or spatial sampling, and
+solver residual before interpreting differences. The repository does not claim
+that a single external discretization is a universal reference for every
+postprocessing quantity.
