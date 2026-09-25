@@ -1,15 +1,23 @@
-"""Generate solve-time scaling data for pairwise and MLFMM coupling.
+"""Generate finite-coupling solve-time scaling data.
 
 The script generates a random sphere cloud for each requested particle count,
-runs the selected coupling backends on that same geometry, writes resumable
-JSON records, and can emit a quick log-log timing plot. Cold CuPy runs can
-include one-time kernel and library initialization overhead, so the per-phase
-timings in the JSON are the preferred source for later analysis.
+runs the selected coupling backends on the same deterministic geometry at each
+requested particle count, writes resumable JSON records, and can emit a quick
+log-log timing plot. The default particle ladder is a power-of-two sequence
+from 2**10 through 2**20; select a shorter range when running the dense
+pairwise reference. Per-phase timings in the JSON are the preferred source for
+later analysis.
+
+The standard benchmark defaults are CuPy, complex64 computation with
+complex128 accumulation, BiCGSTAB at relative tolerance 1e-4, and a calibrated
+MLFMM leaf size of 32. CPU, alternate solvers, and lower-level MLFMM controls
+remain available as explicit diagnostic overrides.
 """
 
 from __future__ import annotations
 
 import argparse
+import gc
 import hashlib
 import json
 import platform
@@ -91,13 +99,17 @@ def _n_values_from_args(args: argparse.Namespace) -> tuple[int, ...]:
     if args.n_values:
         try:
             values = tuple(
-                int(item.strip()) for item in str(args.n_values).split(",") if item.strip()
+                sorted(
+                    dict.fromkeys(
+                        int(item.strip()) for item in str(args.n_values).split(",") if item.strip()
+                    )
+                )
             )
         except ValueError as exc:
             raise ValueError("--n-values must be a comma-separated integer list.") from exc
-        if not values or any(v < 1 for v in values):
+        if not values or any(value < 1 for value in values):
             raise ValueError("--n-values must contain positive integers.")
-        return tuple(sorted(dict.fromkeys(values)))
+        return values
     start, stop = cast(tuple[int, int], args.powers_of_two_range)
     return tuple(2**p for p in range(start, stop + 1))
 
@@ -271,7 +283,7 @@ def _benchmark_config(args: argparse.Namespace) -> dict[str, Any]:
         "solver_rtol": float(args.solver_rtol),
         "solver_restart": int(args.solver_restart),
         "solver_maxiter": int(args.solver_maxiter),
-        "solver_compute_final_residual": not bool(args.skip_final_residual_check),
+        "solver_compute_final_residual": True,
         "compute_dtype": str(args.compute_dtype),
         "accum_dtype": str(args.accum_dtype),
         "radial_lut_dr": float(args.radial_lut_dr),
@@ -347,6 +359,31 @@ def _existing_payload(path: Path, expected_fingerprint: str) -> dict[str, Any] |
     return cast(dict[str, Any], payload)
 
 
+def _is_memory_exhaustion(exc: BaseException) -> bool:
+    """Recognize backend memory failures so later larger cases can be skipped."""
+
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if type(current).__name__ in {"MemoryError", "OutOfMemoryError"}:
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _free_backend_memory(backend: OperatorBackend) -> None:
+    """Release pooled CuPy blocks after an allocation failure."""
+
+    gc.collect()
+    if backend == "cupy":
+        import cupy as cp
+
+        cp.cuda.get_current_stream().synchronize()
+        cp.get_default_memory_pool().free_all_blocks()
+        cp.get_default_pinned_memory_pool().free_all_blocks()
+
+
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -390,7 +427,7 @@ def _run_one(
         solver_rtol=float(args.solver_rtol),
         solver_restart=int(args.solver_restart),
         solver_maxiter=int(args.solver_maxiter),
-        solver_compute_final_residual=not bool(args.skip_final_residual_check),
+        solver_compute_final_residual=True,
         operator_backend=cast(OperatorBackend, args.operator_backend),
         coupling_backend=coupling,
         mlfmm_options=_mlfmm_options(args) if coupling == "mlfmm" else None,
@@ -551,9 +588,24 @@ def main() -> None:
         description="Run solve-only pairwise-vs-MLFMM scaling sweeps for random sphere clouds."
     )
     parser.add_argument("--out-dir", type=Path, default=Path("outputs/pairwise_mlfmm_scaling"))
-    parser.add_argument("--powers-of-two-range", type=_parse_power_range, default=(10, 13))
-    parser.add_argument("--n-values", type=str, default="")
-    parser.add_argument("--couplings", type=_parse_coupling_list, default=("pairwise", "mlfmm"))
+    parser.add_argument(
+        "--powers-of-two-range",
+        type=_parse_power_range,
+        default=(10, 20),
+        help="Inclusive exponent range for the default 2**N particle ladder.",
+    )
+    parser.add_argument(
+        "--n-values",
+        type=str,
+        default="",
+        help="Comma-separated particle counts overriding the power-of-two range.",
+    )
+    parser.add_argument(
+        "--couplings",
+        type=_parse_coupling_list,
+        default=("pairwise", "mlfmm"),
+        help="Comma-separated coupling methods to run (default: pairwise,mlfmm).",
+    )
     parser.add_argument("--operator-backend", choices=("numpy", "cupy"), default="cupy")
     parser.add_argument("--lmax", type=int, default=3)
     parser.add_argument("--wavelength", type=float, default=550.0)
@@ -567,7 +619,6 @@ def main() -> None:
     parser.add_argument("--solver-rtol", type=float, default=1e-4)
     parser.add_argument("--solver-restart", type=int, default=50)
     parser.add_argument("--solver-maxiter", type=int, default=1000)
-    parser.add_argument("--skip-final-residual-check", action="store_true")
     parser.add_argument("--compute-dtype", choices=("complex64", "complex128"), default="complex64")
     parser.add_argument("--accum-dtype", choices=("complex64", "complex128"), default="complex128")
     parser.add_argument("--radial-lut-dr", type=float, default=1.0)
@@ -589,7 +640,12 @@ def main() -> None:
     )
     parser.add_argument("--seed", type=int, default=12345)
     parser.add_argument("--max-attempts-per-particle", type=int, default=2000)
-    parser.add_argument("--mlfmm-max-leaf-particles", type=int, default=256)
+    parser.add_argument(
+        "--mlfmm-max-leaf-particles",
+        type=int,
+        default=32,
+        help="Maximum particles per MLFMM leaf (default: 32).",
+    )
     parser.add_argument("--mlfmm-max-depth", type=int, default=12)
     parser.add_argument("--mlfmm-leaf-size-radius-factor", type=float, default=4.0)
     parser.add_argument("--mlfmm-accuracy-level", type=int, default=3)
@@ -599,7 +655,7 @@ def main() -> None:
     parser.add_argument(
         "--mlfmm-collect-stream-stats",
         action="store_true",
-        help="Collect per-apply CuPy MLFMM streaming diagnostics in the JSON output.",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument("--plot", action="store_true")
     parser.add_argument("--force", action="store_true")
@@ -613,11 +669,13 @@ def main() -> None:
     benchmark_config = _benchmark_config(args)
     rows: list[dict[str, Any]] = []
     status = "completed"
+    memory_exhausted: set[CouplingBackend] = set()
 
     try:
         for n_particles in _n_values_from_args(args):
+            active_couplings = cast(tuple[CouplingBackend, ...], args.couplings)
             pending: list[tuple[CouplingBackend, str, dict[str, Any], Path]] = []
-            for coupling in cast(tuple[CouplingBackend, ...], args.couplings):
+            for coupling in active_couplings:
                 run_config = {
                     **benchmark_config,
                     "n_particles": int(n_particles),
@@ -635,6 +693,24 @@ def main() -> None:
                     if not bool(args.quiet):
                         print(f"Skipping existing result: {path}")
                     rows.append(existing)
+                    continue
+                if coupling in memory_exhausted:
+                    payload = {
+                        "status": "skipped",
+                        "fingerprint": fingerprint,
+                        "config": run_config,
+                        "n_particles": int(n_particles),
+                        "operator_backend": str(args.operator_backend),
+                        "coupling_backend": coupling,
+                        "skip_reason": (
+                            "A previous larger case exhausted backend memory; "
+                            "later cases for this coupling were not attempted."
+                        ),
+                    }
+                    _atomic_write_json(path, payload)
+                    rows.append(payload)
+                    if not bool(args.quiet):
+                        print(f"Skipping {path} after previous memory exhaustion")
                     continue
                 pending.append((coupling, fingerprint, run_config, path))
             if not pending:
@@ -663,13 +739,42 @@ def main() -> None:
                         f"Running N={n_particles} coupling={coupling} "
                         f"backend={args.operator_backend}"
                     )
-                payload = _run_one(
-                    args=args,
-                    geometry=geometry,
-                    coupling=coupling,
-                    fingerprint=fingerprint,
-                    run_config=run_config,
-                )
+                try:
+                    payload = _run_one(
+                        args=args,
+                        geometry=geometry,
+                        coupling=coupling,
+                        fingerprint=fingerprint,
+                        run_config=run_config,
+                    )
+                except KeyboardInterrupt:
+                    raise
+                except Exception as exc:
+                    payload = {
+                        "status": "failed",
+                        "fingerprint": fingerprint,
+                        "config": run_config,
+                        "n_particles": int(n_particles),
+                        "operator_backend": str(args.operator_backend),
+                        "coupling_backend": coupling,
+                        "error_type": type(exc).__name__,
+                        "error": repr(exc),
+                    }
+                    _free_backend_memory(cast(OperatorBackend, args.operator_backend))
+                    if _is_memory_exhaustion(exc):
+                        memory_exhausted.add(coupling)
+                        payload["skip_reason"] = (
+                            "Later cases for this coupling were skipped after "
+                            "backend memory exhaustion."
+                        )
+                        print(
+                            f"MEMORY EXHAUSTED for {args.operator_backend}/{coupling}; "
+                            "later cases for this coupling will be skipped.",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                    else:
+                        print(f"FAILED {path.name}: {exc!r}", file=sys.stderr, flush=True)
                 _atomic_write_json(path, payload)
                 rows.append(payload)
                 _write_summary(
