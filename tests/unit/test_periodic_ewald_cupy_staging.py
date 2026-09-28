@@ -42,6 +42,43 @@ def test_real_term_staging_matches_host_bloch_phases() -> None:
     np.testing.assert_allclose(terms.phase_xy, expected, rtol=0.0, atol=0.0)
 
 
+def test_fixed_cupy_ewald_canonicalizes_pairs_at_evaluator_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = CupyEwaldShellWorkspace(
+        cupy=np,
+        lattice=RectangularLattice2D(3909.790257352941, 3909.790257352941),
+        k=2.0 * np.pi / (550.0 / 1.36),
+        k_parallel=np.asarray([4.0e-4, -2.0e-4], dtype=float),
+        eta=1.8133492941951595e-3,
+    )
+    raw = np.asarray([[-3600.0, -67.0, -168.0]], dtype=float)
+    periods = np.asarray([workspace.lattice.ax, workspace.lattice.ay], dtype=float)
+    shift = np.rint(raw[0, :2] / periods)
+    wrapped = raw.copy()
+    wrapped[0, :2] -= shift * periods
+    seen: list[np.ndarray] = []
+
+    def add_shifted(*, c: Any, sums: Any, **_: Any) -> None:
+        seen.append(np.asarray(c).copy())
+        sums[...] = 1.0 + 0.0j
+
+    monkeypatch.setattr(ewald_cupy, "_add_shifted_reciprocal_structural_sums_cupy", add_shifted)
+    monkeypatch.setattr(ewald_cupy, "_add_real_space_structural_sums_cupy", lambda **_: None)
+
+    got = ewald_cupy.ewald_structural_sums_2d_fixed_cupy(
+        relative_source_minus_destination=raw,
+        lmax_struct=1,
+        workspace=workspace,
+        real_shell_count=0,
+        reciprocal_shell_count=0,
+    )
+
+    np.testing.assert_allclose(seen[0], wrapped, rtol=0.0, atol=1.0e-12)
+    phase = np.exp(-1j * np.dot(shift * periods, workspace.k_parallel))
+    np.testing.assert_allclose(got, phase, rtol=0.0, atol=1.0e-14)
+
+
 def test_fixed_cupy_ewald_skips_shifted_preparation_for_same_plane_batches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

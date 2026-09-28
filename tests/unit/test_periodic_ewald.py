@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from typing import cast
 
 import numpy as np
 import pytest
@@ -48,6 +49,110 @@ from pyceles.core.translation import translation_ab5_table
 def _lattice() -> pcl.RectangularLattice2D:
     return pcl.RectangularLattice2D(ax=430.0, ay=470.0)
 
+
+def test_fixed_shell_ewald_is_quasiperiodic_across_lateral_seam() -> None:
+    """Fixed Ewald shells must be independent of the chosen cell representative."""
+    lattice = pcl.RectangularLattice2D(ax=3909.790257352941, ay=3909.790257352941)
+    k = 2.0 * np.pi / (550.0 / 1.36)
+    k_parallel = np.asarray([4.0e-4, -2.0e-4], dtype=float)
+    positions = np.asarray([[0.0, 0.0, 0.0], [-3600.0, -67.0, -168.0]], dtype=float)
+    periodic = pcl.PeriodicSpec(
+        lattice=lattice,
+        options=pcl.PeriodicOptions(
+            method="ewald",
+            shell_tolerance=1.0e-7,
+            max_shells=64,
+        ),
+    )
+    eta = resolve_ewald_eta(
+        periodic=periodic,
+        k=k,
+        k_parallel=k_parallel,
+        positions=positions,
+        lmax=1,
+    )
+    counts = ewald_module.resolve_ewald_shell_counts(
+        periodic=periodic,
+        k=k,
+        k_parallel=k_parallel,
+        positions=positions,
+        lmax=1,
+        eta=eta,
+    )
+    raw = positions[1] - positions[0]
+    periods = np.asarray([lattice.ax, lattice.ay], dtype=float)
+    shift = np.rint(raw[:2] / periods)
+    wrapped = raw.copy()
+    wrapped[:2] -= shift * periods
+    phase = np.exp(-1j * np.dot(shift * periods, k_parallel))
+    workspace = EwaldShellWorkspace(lattice, k, k_parallel, eta)
+
+    def evaluate(displacement: np.ndarray) -> np.ndarray:
+        values = ewald_structural_sums_2d_batch(
+            lmax_struct=1,
+            k=k,
+            destinations=(-displacement)[None, :],
+            source=np.zeros(3),
+            lattice=lattice,
+            k_parallel=k_parallel,
+            eta=eta,
+            real_shells=counts.real_shells,
+            reciprocal_shells=counts.reciprocal_shells,
+            shell_tolerance=1.0e-7,
+            max_shells=64,
+            workspace=workspace,
+        )
+        return cast(np.ndarray, values[0])
+
+    np.testing.assert_allclose(
+        evaluate(raw),
+        phase * evaluate(wrapped),
+        rtol=2.0e-11,
+        atol=2.0e-11,
+    )
+
+
+def test_scalar_ewald_is_quasiperiodic_across_lateral_seam() -> None:
+    lattice = pcl.RectangularLattice2D(ax=3909.790257352941, ay=3909.790257352941)
+    k = 2.0 * np.pi / (550.0 / 1.36)
+    k_parallel = np.asarray([4.0e-4, -2.0e-4], dtype=float)
+    eta = 1.8133492941951595e-3
+    source = np.zeros(3, dtype=float)
+    destination = np.asarray([3600.0, 67.0, 168.0], dtype=float)
+    periods = np.asarray([lattice.ax, lattice.ay], dtype=float)
+    shift = np.rint(destination[:2] / periods)
+    wrapped_destination = destination.copy()
+    wrapped_destination[:2] -= shift * periods
+    phase = np.exp(1j * np.dot(shift * periods, k_parallel))
+
+    raw = ewald_structural_constant_2d(
+        0,
+        0,
+        k=k,
+        destination=destination,
+        source=source,
+        lattice=lattice,
+        k_parallel=k_parallel,
+        eta=eta,
+        real_shells=0,
+        reciprocal_shells=12,
+        max_shells=64,
+    )
+    wrapped = ewald_structural_constant_2d(
+        0,
+        0,
+        k=k,
+        destination=wrapped_destination,
+        source=source,
+        lattice=lattice,
+        k_parallel=k_parallel,
+        eta=eta,
+        real_shells=0,
+        reciprocal_shells=12,
+        max_shells=64,
+    )
+
+    assert raw == pytest.approx(phase * wrapped, rel=2.0e-11, abs=2.0e-11)
 
 def test_self_correction_uses_half_integer_origin_term() -> None:
     """The 3D origin correction uses Gamma(-1/2, x), not plain Gamma(0, x)."""

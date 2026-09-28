@@ -184,6 +184,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   GMRES for periodic systems, reflecting their measured convergence behavior.
 
 ### Fixed
+- Fixed representation-dependent periodic Ewald sums for pairs crossing a
+  lateral cell seam. NumPy and CuPy Ewald evaluators now reduce every lateral
+  displacement to its nearest image and restore the exact Bloch phase, keeping
+  runtime evaluation consistent with the existing Ewald eta/shell preflight.
+  This prevents a fixed real-space truncation from omitting the physically
+  nearest image and leaving a large uncancelled Ewald contribution.
+
 - High-order periodic Ewald reciprocal structural sums now evaluate their
   factorial normalizations in log space, avoiding integer-to-float overflow
   in high-order structural evaluations.

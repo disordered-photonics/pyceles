@@ -1114,6 +1114,30 @@ def _add_shifted_reciprocal_structural_sums_cupy(
     )
 
 
+def _canonicalize_lateral_displacements_cupy(
+    relative_source_minus_destination: Any,
+    *,
+    workspace: CupyEwaldShellWorkspace,
+) -> tuple[Any, Any | None]:
+    """Return nearest-image pair offsets and the removed Bloch phase."""
+    cp = workspace.cupy
+    c = cp.asarray(relative_source_minus_destination, dtype=cp.float64).reshape(-1, 3).copy()
+    ax = float(workspace.lattice.ax)
+    ay = float(workspace.lattice.ay)
+    shift_x = cp.rint(c[:, 0] / ax)
+    shift_y = cp.rint(c[:, 1] / ay)
+    c[:, 0] -= shift_x * ax
+    c[:, 1] -= shift_y * ay
+
+    k_parallel = np.asarray(workspace.k_parallel, dtype=float).reshape(2)
+    if k_parallel[0] == 0.0 and k_parallel[1] == 0.0:
+        return c, None
+    phase = cp.exp(
+        -1j * (shift_x * (ax * float(k_parallel[0])) + shift_y * (ay * float(k_parallel[1])))
+    )
+    return c, phase
+
+
 def ewald_structural_sums_2d_fixed_cupy(
     *,
     relative_source_minus_destination: Any,
@@ -1154,7 +1178,10 @@ def ewald_structural_sums_2d_fixed_cupy(
     cp = workspace.cupy
     k = float(workspace.k)
     eta = float(workspace.eta)
-    c = cp.asarray(relative_source_minus_destination, dtype=cp.float64).reshape(-1, 3)
+    c, bloch_phase = _canonicalize_lateral_displacements_cupy(
+        relative_source_minus_destination,
+        workspace=workspace,
+    )
     n_pairs = int(c.shape[0])
     maximum_order = 2 * int(lmax_struct)
     if maximum_order < 0:
@@ -1178,7 +1205,6 @@ def ewald_structural_sums_2d_fixed_cupy(
     # mask is needed below regardless, and retaining caller-side pair-index
     # caches can otherwise turn matrix-free source batching into O(N^2) state.
     same_idx = cp.nonzero(same_plane)[0].astype(cp.int32, copy=False)
-    c = c.copy()
     c[:, 2] = cp.where(same_plane, 0.0, cz_raw)
 
     n_same = int(same_idx.size)
@@ -1256,6 +1282,8 @@ def ewald_structural_sums_2d_fixed_cupy(
         eta=float(eta),
         k=float(k),
     )
+    if bloch_phase is not None:
+        sums *= bloch_phase[:, None, None]
     return sums
 
 

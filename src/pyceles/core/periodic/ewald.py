@@ -257,15 +257,30 @@ def _candidate_ewald_etas(
     return tuple(candidates)
 
 
-def _nearest_periodic_delta_xy(delta_xy: Array, lattice: RectangularLattice2D) -> Array:
-    out = np.asarray(delta_xy, dtype=float).reshape(2).copy()
-    ax = float(np.linalg.norm(lattice.a1))
-    ay = float(np.linalg.norm(lattice.a2))
-    if ax > 0.0:
-        out[0] -= ax * np.round(out[0] / ax)
-    if ay > 0.0:
-        out[1] -= ay * np.round(out[1] / ay)
-    return out
+def _canonicalize_lateral_displacements(
+    displacements_xy: Array,
+    lattice: RectangularLattice2D,
+) -> tuple[Array, Array]:
+    """Return nearest-image lateral offsets and removed lattice shifts.
+
+    The second return value is the Cartesian lattice translation removed from
+    each input row, so ``raw = wrapped + lattice_shift``.  Periodic Ewald
+    truncation must act on ``wrapped``; callers restore the Bloch covariance
+    from ``lattice_shift`` after accumulation.
+    """
+    values = np.asarray(displacements_xy, dtype=float)
+    if values.shape[-1] != 2:
+        raise ValueError(
+            "Lateral periodic displacements must have a final dimension of length 2. "
+            f"Got shape {values.shape}."
+        )
+    periods = np.asarray([float(lattice.ax), float(lattice.ay)], dtype=float)
+    lattice_indices = np.rint(values / periods)
+    lattice_shift = lattice_indices * periods
+    return (
+        np.asarray(values - lattice_shift, dtype=float),
+        np.asarray(lattice_shift, dtype=float),
+    )
 
 
 def _append_eta_probe_offset(offsets: list[Array], offset: Array, *, atol: float = 1.0e-9) -> None:
@@ -306,7 +321,7 @@ def _representative_ewald_eta_offsets(
         bounded = np.asarray(raw, dtype=float).reshape(3).copy()
         if z_limit is not None:
             bounded[2] = float(np.clip(bounded[2], -z_limit, z_limit))
-        bounded[:2] = _nearest_periodic_delta_xy(bounded[:2], lattice)
+        bounded[:2], _ = _canonicalize_lateral_displacements(bounded[:2], lattice)
         return bounded
 
     offsets: list[Array] = []
@@ -1193,19 +1208,35 @@ def ewald_structural_constant_2d(
         lattice=lattice,
         eta=eta_f,
     )
-    rvec = np.asarray(destination, dtype=float).reshape(3) - np.asarray(
-        source, dtype=float
-    ).reshape(3)
-    coordinate_scale = float(
-        max(
-            np.max(np.abs(np.asarray(destination, dtype=float).reshape(3))),
-            np.max(np.abs(np.asarray(source, dtype=float).reshape(3))),
+    destination_arr = np.asarray(destination, dtype=float).reshape(3)
+    source_arr = np.asarray(source, dtype=float).reshape(3)
+    raw_rvec = destination_arr - source_arr
+    rvec = np.asarray(raw_rvec, dtype=float).copy()
+    rvec[:2], lattice_shift_xy = _canonicalize_lateral_displacements(rvec[:2], lattice)
+    bloch_phase = complex(
+        np.exp(
+            1j
+            * np.dot(
+                np.asarray(k_parallel, dtype=float).reshape(2),
+                np.asarray(lattice_shift_xy, dtype=float).reshape(2),
+            )
         )
     )
-    if abs(float(rvec[2])) <= same_plane_z_tolerance(float(k), coordinate_scale=coordinate_scale):
-        rvec = np.asarray(rvec, dtype=float).copy()
+    coordinate_scale = float(
+        max(
+            np.max(np.abs(destination_arr)),
+            np.max(np.abs(source_arr)),
+        )
+    )
+    same_plane_atol = same_plane_z_tolerance(float(k), coordinate_scale=coordinate_scale)
+    if abs(float(rvec[2])) <= same_plane_atol:
         rvec[2] = 0.0
-    is_self = bool(exclude_zero_shift) and float(np.linalg.norm(rvec)) == 0.0
+    is_self = (
+        bool(exclude_zero_shift)
+        and float(raw_rvec[0]) == 0.0
+        and float(raw_rvec[1]) == 0.0
+        and abs(float(raw_rvec[2])) <= same_plane_atol
+    )
     if is_self:
         value = _same_plane_reciprocal_sum(
             l,
@@ -1259,7 +1290,7 @@ def ewald_structural_constant_2d(
             max_shells=int(max_shells),
             workspace=ws,
         )
-    return complex(structural_sum_m_normalization(m) * value)
+    return complex(bloch_phase * structural_sum_m_normalization(m) * value)
 
 
 def ewald_structural_sums_2d(
@@ -1370,6 +1401,11 @@ def ewald_structural_sums_2d_batch(
         eta=float(eta),
     )
     c = source_arr[None, :] - dest
+    c[:, :2], lattice_shift_xy = _canonicalize_lateral_displacements(c[:, :2], lattice)
+    kp = np.asarray(k_parallel, dtype=float).reshape(2)
+    bloch_phase = None
+    if np.any(kp != 0.0):
+        bloch_phase = np.exp(-1j * (lattice_shift_xy @ kp))
     cxy = np.asarray(c[:, :2], dtype=float)
     cz = np.asarray(c[:, 2], dtype=float)
     coordinate_scale = float(max(np.max(np.abs(source_arr)), np.max(np.abs(dest))))
@@ -1594,6 +1630,8 @@ def ewald_structural_sums_2d_batch(
         )
 
     sums = reciprocal_sums + real_sums
+    if bloch_phase is not None:
+        sums *= bloch_phase[:, None, None]
     if not np.all(np.isfinite(sums)):
         raise FloatingPointError(
             f"Periodic Ewald structural sum produced non-finite coefficients at order={order}."
