@@ -6,6 +6,7 @@ from typing import cast
 import numpy as np
 from scipy.special import spherical_jn, spherical_yn
 
+from pyceles._arrays import expose_read_only_view
 from pyceles._optional import import_cupy, is_cupy_array
 from pyceles.core.indexing import index_vswf
 
@@ -22,7 +23,14 @@ def mode_indices_by_l(
         abs_m = np.abs(m_vals).astype(np.int32)
         n1_idx = np.array([index_vswf(l, int(m), 1, lmax) for m in m_vals], dtype=np.int32)
         n2_idx = np.array([index_vswf(l, int(m), 2, lmax) for m in m_vals], dtype=np.int32)
-        out.append((m_vals, abs_m, n1_idx, n2_idx))
+        out.append(
+            (
+                expose_read_only_view(m_vals),
+                expose_read_only_view(abs_m),
+                expose_read_only_view(n1_idx),
+                expose_read_only_view(n2_idx),
+            )
+        )
     return tuple(out)
 
 

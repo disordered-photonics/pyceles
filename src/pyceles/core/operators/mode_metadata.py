@@ -6,6 +6,8 @@ from functools import cache
 
 import numpy as np
 
+from pyceles._arrays import expose_read_only_view
+
 from pyceles.core.indexing import iter_modes, n_modes
 
 
@@ -20,10 +22,11 @@ def mode_metadata_tables(lmax: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]
         tau[idx] = tau_i
         ell[idx] = l_i
         m[idx] = m_i
-    tau.setflags(write=False)
-    ell.setflags(write=False)
-    m.setflags(write=False)
-    return tau, ell, m
+    return (
+        expose_read_only_view(tau),
+        expose_read_only_view(ell),
+        expose_read_only_view(m),
+    )
 
 
 def mode_m_table(lmax: int) -> np.ndarray:
@@ -65,10 +68,11 @@ def mode_pair_p_range_tables(lmax: int) -> tuple[np.ndarray, np.ndarray, np.ndar
             pair_pmin[n1, n2] = p_min
             pair_pcount[n1, n2] = p_count
             offset += p_count
-    pair_offset.setflags(write=False)
-    pair_pmin.setflags(write=False)
-    pair_pcount.setflags(write=False)
-    return pair_offset, pair_pmin, pair_pcount
+    return (
+        expose_read_only_view(pair_offset),
+        expose_read_only_view(pair_pmin),
+        expose_read_only_view(pair_pcount),
+    )
 
 
 __all__ = [

@@ -15,6 +15,8 @@ from typing import Literal, cast
 import numpy as np
 import numpy.typing as npt
 
+from pyceles._arrays import expose_read_only_view
+
 from pyceles.core.conversions import transformation_coefficients
 from pyceles.core.indexing import index_vswf, iter_modes, n_modes
 from pyceles.core.lattice import RectangularLattice2D
@@ -280,9 +282,7 @@ def valid_structural_indices(lmax: int) -> tuple[Array, Array]:
             orders.append(azimuthal_order + order)
     degree_array = np.asarray(degrees, dtype=np.int32)
     order_array = np.asarray(orders, dtype=np.int32)
-    degree_array.flags.writeable = False
-    order_array.flags.writeable = False
-    return degree_array, order_array
+    return expose_read_only_view(degree_array), expose_read_only_view(order_array)
 
 
 @dataclass(frozen=True)

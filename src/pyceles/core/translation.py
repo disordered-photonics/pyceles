@@ -8,6 +8,7 @@ import numpy as np
 import numpy.typing as npt
 from scipy.special import spherical_jn, spherical_yn
 
+from pyceles._arrays import expose_read_only_view
 from .indexing import index_vswf, iter_modes, n_modes
 from .spherical import _legendre_scalar_tables, legendre_normalized_trigon_scalar
 from .wigner import wigner_3j
@@ -230,8 +231,7 @@ def _translation_ab5_table_cached(lmax: int, dtype_str: str) -> np.ndarray:
                     factor = np.sqrt(inside)
                     w = wigner_3j(l1, l2, p, m1, -m2, -m1 + m2) * wigner_3j(l1, l2, p - 1, 0, 0, 0)
                     ab5[j2, j1, p] = i_phase * sign_dm * pref * factor * w
-    ab5.setflags(write=False)
-    return ab5
+    return expose_read_only_view(ab5)
 
 
 def translation_ab5_table(lmax: int, dtype=np.complex128) -> np.ndarray:

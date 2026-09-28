@@ -6,6 +6,8 @@ from functools import cache
 
 import numpy as np
 
+from pyceles._arrays import expose_read_only_view
+
 from pyceles.core.indexing import iter_modes, n_modes
 from pyceles.core.translation import translation_ab5_table
 
@@ -86,9 +88,12 @@ def l1_projection_data(lmax: int) -> tuple[int, int, np.ndarray, np.ndarray]:
         dm_idx = m_src - int(m_dst_arr[row]) + m_offset
         for col in range(nm):
             kernel[row, col, int(dm_idx[col]), :p_count] = ab5_l1[row, col, :p_count]
-    kernel.setflags(write=False)
-    row_idx_arr.setflags(write=False)
-    return lmax_struct, m_offset, kernel, row_idx_arr
+    return (
+        lmax_struct,
+        m_offset,
+        expose_read_only_view(kernel),
+        expose_read_only_view(row_idx_arr),
+    )
 
 
 @cache
@@ -121,14 +126,12 @@ def l1_compact_projection_data(
         dtype=np.complex128,
     )
     dense_order_columns = order_array + int(structural_order)
-    for value in (degree_array, dense_order_columns, compact_kernel):
-        value.setflags(write=False)
     return (
         int(lmax_struct),
         int(structural_order),
-        degree_array,
-        dense_order_columns,
-        compact_kernel,
+        expose_read_only_view(degree_array),
+        expose_read_only_view(dense_order_columns),
+        expose_read_only_view(compact_kernel),
     )
 
 
