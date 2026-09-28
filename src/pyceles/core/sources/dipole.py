@@ -12,8 +12,8 @@ from .common import (
     _as_complex_triplet,
     _as_float_triplet,
     _complex_triplet_tuple,
-    _float_triplet_tuple,
     _dipole_outgoing_coeff_vector,
+    _float_triplet_tuple,
     _incident_coeffs_from_outgoing_expansion,
     _normalize_dipole_collection_inputs,
 )

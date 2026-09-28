@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import cast
+
 import numpy as np
 import pytest
 
@@ -66,11 +68,15 @@ def test_frozen_descriptors_detach_mutable_constructor_inputs() -> None:
     polarization = np.asarray([1.0 + 0.0j, 0.0 + 1.0j])
     focal_point = np.asarray([4.0, 5.0, 6.0])
 
-    sphere = Sphere(position=position, radius=1.0, refractive_index=1.5)
+    sphere = Sphere(
+        position=cast(tuple[float, float, float], position),
+        radius=1.0,
+        refractive_index=1.5,
+    )
     source = PlaneWave(
         wavelength=1.0,
         polarization=polarization,
-        focal_point=focal_point,
+        focal_point=cast(tuple[float, float, float], focal_point),
     )
 
     position[:] = 0.0
@@ -94,6 +100,7 @@ def test_prepared_periodic_operator_owns_bloch_vector() -> None:
     )
 
     k_parallel[:] = 9.0
-    stored = prepared.coupling.k_parallel
+    stored = getattr(prepared.coupling, "k_parallel", None)
+    assert isinstance(stored, np.ndarray)
     np.testing.assert_allclose(stored, [0.1, 0.2])
     _assert_sealed(stored)

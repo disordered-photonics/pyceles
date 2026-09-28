@@ -7,7 +7,6 @@ from functools import cache
 import numpy as np
 
 from pyceles._arrays import expose_read_only_view
-
 from pyceles.core.indexing import iter_modes, n_modes
 
 

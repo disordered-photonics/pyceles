@@ -75,6 +75,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   been removed; explicit direct requests are allowed to reach the backend's
   normal allocation or factorization limits.
 
+### Fixed
+- Public immutable experiment descriptors, particle collections, and result
+  arrays now own their backing storage so callers cannot reopen read-only views
+  and invalidate prepared state. Process-global numerical tables are sealed by
+  the same ownership rule, preventing accidental cache corruption.
+
 ## [0.5.0] - 2026-09-05
 
 ### Added

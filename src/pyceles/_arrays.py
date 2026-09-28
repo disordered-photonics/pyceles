@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 import numpy as np
 import numpy.typing as npt
 
@@ -23,8 +25,8 @@ def owned_read_only_view(
     values: npt.ArrayLike,
     *,
     dtype: npt.DTypeLike | None = None,
-    order: str = "C",
+    order: Literal["C", "F", "A", "K"] = "C",
 ) -> np.ndarray:
     """Take one private copy and expose it as a non-owning read-only view."""
-    owner = np.array(values, dtype=dtype, copy=True, order=order)
+    owner = np.asarray(values, dtype=dtype, order=order).copy(order=order)
     return expose_read_only_view(owner)

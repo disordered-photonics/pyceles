@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal, Protocol, runtime_checkable
+from typing import Literal, Protocol, cast, runtime_checkable
 
 import numpy as np
 import numpy.typing as npt
@@ -45,9 +45,9 @@ def _canonicalize_polarization_input(
 ) -> Polarization | tuple[complex, complex]:
     """Validate polarization and retain an immutable canonical value."""
     if isinstance(polarization, str):
-        pol = polarization.strip().upper()
+        pol = cast(Polarization, polarization.strip().upper())
         polarization_to_jones(pol)
-        return "TE" if pol == "TE" else "TM"
+        return pol
     return polarization_to_jones(polarization)
 
 

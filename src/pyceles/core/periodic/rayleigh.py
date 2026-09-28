@@ -16,7 +16,6 @@ import numpy as np
 import numpy.typing as npt
 
 from pyceles._arrays import expose_read_only_view
-
 from pyceles.core.conversions import transformation_coefficients
 from pyceles.core.indexing import index_vswf, iter_modes, n_modes
 from pyceles.core.lattice import RectangularLattice2D

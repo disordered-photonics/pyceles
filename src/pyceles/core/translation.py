@@ -9,6 +9,7 @@ import numpy.typing as npt
 from scipy.special import spherical_jn, spherical_yn
 
 from pyceles._arrays import expose_read_only_view
+
 from .indexing import index_vswf, iter_modes, n_modes
 from .spherical import _legendre_scalar_tables, legendre_normalized_trigon_scalar
 from .wigner import wigner_3j
