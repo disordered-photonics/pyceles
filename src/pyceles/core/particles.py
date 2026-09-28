@@ -7,6 +7,8 @@ from typing import Literal, overload
 
 import numpy as np
 
+from pyceles._arrays import owned_read_only_view
+
 from .indexing import n_modes
 
 ParticleTRepresentation = Literal["diagonal", "axisymmetric", "dense"]
@@ -24,6 +26,16 @@ class Particle:
     """
 
     position: tuple[float, float, float]
+
+    def __post_init__(self) -> None:
+        values = np.asarray(self.position, dtype=float).reshape(-1)
+        if values.size != 3 or not np.all(np.isfinite(values)):
+            raise ValueError("position must contain exactly three finite coordinates.")
+        object.__setattr__(
+            self,
+            "position",
+            (float(values[0]), float(values[1]), float(values[2])),
+        )
 
     def pos_array(self, dtype=float) -> np.ndarray:
         """Return particle center as numeric array for kernel consumption."""
@@ -80,6 +92,7 @@ class PECSphere(Particle):
     radius: float
 
     def __post_init__(self) -> None:
+        Particle.__post_init__(self)
         if float(self.radius) <= 0.0:
             raise ValueError("radius must be positive.")
 
@@ -101,6 +114,11 @@ class LayeredSphere(Particle):
     layer_refractive_indices: tuple[complex, ...]
 
     def __post_init__(self) -> None:
+        Particle.__post_init__(self)
+        layer_radii = tuple(float(value) for value in self.layer_radii)
+        layer_indices = tuple(complex(value) for value in self.layer_refractive_indices)
+        object.__setattr__(self, "layer_radii", layer_radii)
+        object.__setattr__(self, "layer_refractive_indices", layer_indices)
         if len(self.layer_radii) == 0:
             raise ValueError("layer_radii must be non-empty.")
         if len(self.layer_radii) != len(self.layer_refractive_indices):
@@ -132,6 +150,11 @@ class Spheroid(Particle):
     euler_angles: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
     def __post_init__(self) -> None:
+        Particle.__post_init__(self)
+        euler = np.asarray(self.euler_angles, dtype=float).reshape(-1)
+        if euler.size != 3 or not np.all(np.isfinite(euler)):
+            raise ValueError("euler_angles must contain exactly three finite angles.")
+        object.__setattr__(self, "euler_angles", tuple(float(value) for value in euler))
         if float(self.equatorial_radius) <= 0.0:
             raise ValueError("equatorial_radius must be positive.")
         if float(self.polar_radius) <= 0.0:
@@ -167,6 +190,7 @@ class TMatrixParticle(Particle):
     t_matrix: np.ndarray
 
     def __post_init__(self) -> None:
+        Particle.__post_init__(self)
         radius = float(self.radius)
         if not np.isfinite(radius) or radius <= 0.0:
             raise ValueError("radius must be finite and strictly positive.")
@@ -186,8 +210,7 @@ class TMatrixParticle(Particle):
             matrix = np.asarray(matrix, dtype=np.complex128)
         if not np.all(np.isfinite(matrix.real)) or not np.all(np.isfinite(matrix.imag)):
             raise ValueError("t_matrix must contain only finite values.")
-        owned = np.array(matrix, dtype=matrix.dtype, copy=True, order="C")
-        owned.setflags(write=False)
+        owned = owned_read_only_view(matrix, dtype=matrix.dtype)
         object.__setattr__(self, "radius", radius)
         object.__setattr__(self, "lmax", lmax)
         object.__setattr__(self, "t_matrix", owned)
@@ -366,9 +389,7 @@ def particle_intrinsic_t_signature(particle: Particle) -> tuple[object, ...]:
 
 
 def _owned_read_only_array(values: np.ndarray, *, dtype: np.dtype) -> np.ndarray:
-    out = np.array(values, dtype=dtype, copy=True, order="C")
-    out.setflags(write=False)
-    return out
+    return owned_read_only_view(values, dtype=dtype)
 
 
 def _compact_index_dtype(n_values: int) -> np.dtype:
@@ -408,9 +429,7 @@ def _stable_unique_rows(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 def _owned_archetype_value(value: object) -> object:
     """Copy mutable metadata into an immutable collection-owned form."""
     if isinstance(value, np.ndarray):
-        array = np.array(value, copy=True, order="C")
-        array.setflags(write=False)
-        return array
+        return owned_read_only_view(value)
     if isinstance(value, Mapping):
         return MappingProxyType(
             {

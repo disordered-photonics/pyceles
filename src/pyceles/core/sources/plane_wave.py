@@ -6,7 +6,8 @@ import numpy as np
 import numpy.typing as npt
 
 from ..projection import incident_coeffs_planewave
-from .base import PolarizationInput, polarization_to_jones
+from .base import PolarizationInput, _canonicalize_polarization_input, polarization_to_jones
+from .common import _float_triplet_tuple
 
 
 @dataclass(frozen=True)
@@ -30,7 +31,12 @@ class PlaneWave:
             )
         if not (n.real > 0):
             raise ValueError(f"medium_n must be positive. Got {n!r}")
-        polarization_to_jones(self.polarization)
+        object.__setattr__(
+            self, "polarization", _canonicalize_polarization_input(self.polarization)
+        )
+        object.__setattr__(
+            self, "focal_point", _float_triplet_tuple("focal_point", self.focal_point)
+        )
 
     def jones_coefficients(self) -> tuple[complex, complex]:
         """Return normalized TE/TM Jones weights for this plane wave."""

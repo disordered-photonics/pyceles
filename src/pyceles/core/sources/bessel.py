@@ -8,9 +8,9 @@ import numpy.typing as npt
 from ..conversions import angular_spectrum_to_svwf_regular
 from ..plane_wave_spectrum import PlaneWaveSpectrum
 from ..polarization import normalize_global_polarization_vector
-from .base import PolarizationInput, polarization_to_jones
+from .base import PolarizationInput, _canonicalize_polarization_input, polarization_to_jones
 from .beam_kernels import _bessel_angular_spectrum_coeffs, _bessel_cartesian_angular_spectrum_coeffs
-from .common import _as_float_triplet
+from .common import _float_triplet_tuple
 
 
 @dataclass(frozen=True)
@@ -38,8 +38,10 @@ class BesselBeam:
             )
         if not (n.real > 0):
             raise ValueError(f"medium_n must be positive. Got {n!r}")
-        polarization_to_jones(self.polarization)
-        _as_float_triplet("center", self.center)
+        object.__setattr__(
+            self, "polarization", _canonicalize_polarization_input(self.polarization)
+        )
+        object.__setattr__(self, "center", _float_triplet_tuple("center", self.center))
         if not np.isfinite(float(self.amplitude)):
             raise ValueError(f"`amplitude` must be finite. Got {self.amplitude!r}.")
         if not np.isfinite(float(self.azimuthal_phase)):
@@ -139,8 +141,13 @@ class CartesianPolarizedBesselBeam:
             )
         if not (n.real > 0):
             raise ValueError(f"medium_n must be positive. Got {n!r}")
-        normalize_global_polarization_vector(self.global_polarization)
-        _as_float_triplet("center", self.center)
+        polarization = normalize_global_polarization_vector(self.global_polarization)
+        object.__setattr__(
+            self,
+            "global_polarization",
+            tuple(complex(value) for value in polarization),
+        )
+        object.__setattr__(self, "center", _float_triplet_tuple("center", self.center))
         if not np.isfinite(float(self.amplitude)):
             raise ValueError(f"`amplitude` must be finite. Got {self.amplitude!r}.")
         if not np.isfinite(float(self.azimuthal_phase)):

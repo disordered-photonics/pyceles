@@ -9,14 +9,19 @@ from ..conversions import angular_spectrum_to_svwf_regular
 from ..plane_wave_spectrum import PlaneWaveSpectrum
 from ..polarization import normalize_global_polarization_vector
 from ..projection import incident_coeffs_wavebundle_normal_incidence
-from .base import PolarizationInput, is_normal_incidence, polarization_to_jones
+from .base import (
+    PolarizationInput,
+    _canonicalize_polarization_input,
+    is_normal_incidence,
+    polarization_to_jones,
+)
 from .beam_kernels import (
     _focused_laguerre_cartesian_angular_spectrum_coeffs,
     _focused_laguerre_gaussian_angular_spectrum_coeffs,
     _gaussian_angular_spectrum_coeffs,
     _laguerre_gaussian_angular_spectrum_coeffs,
 )
-from .common import _as_float_triplet, _validated_int
+from .common import _float_triplet_tuple, _validated_int
 
 
 @dataclass(frozen=True)
@@ -41,7 +46,12 @@ class GaussianBeam:
             )
         if not (n.real > 0):
             raise ValueError(f"medium_n must be positive. Got {n!r}")
-        polarization_to_jones(self.polarization)
+        object.__setattr__(
+            self, "polarization", _canonicalize_polarization_input(self.polarization)
+        )
+        object.__setattr__(
+            self, "focal_point", _float_triplet_tuple("focal_point", self.focal_point)
+        )
 
     def jones_coefficients(self) -> tuple[complex, complex]:
         return polarization_to_jones(self.polarization)
@@ -128,7 +138,9 @@ class LaguerreGaussianBeam:
             )
         if not (n.real > 0):
             raise ValueError(f"medium_n must be positive. Got {n!r}")
-        polarization_to_jones(self.polarization)
+        object.__setattr__(
+            self, "polarization", _canonicalize_polarization_input(self.polarization)
+        )
         _validated_int("radial_order_p", self.radial_order_p, minimum=0)
         _validated_int("azimuthal_order_l", self.azimuthal_order_l)
         if not np.isfinite(float(self.polar_angle)):
@@ -141,7 +153,9 @@ class LaguerreGaussianBeam:
             raise ValueError(f"`amplitude` must be finite. Got {self.amplitude!r}.")
         if not np.isfinite(float(self.azimuthal_phase)):
             raise ValueError(f"`azimuthal_phase` must be finite. Got {self.azimuthal_phase!r}.")
-        _as_float_triplet("focal_point", self.focal_point)
+        object.__setattr__(
+            self, "focal_point", _float_triplet_tuple("focal_point", self.focal_point)
+        )
         w = float(self.beam_width)
         if (not np.isfinite(w)) or (w <= 0.0):
             raise ValueError(f"`beam_width` must be finite and > 0. Got {self.beam_width!r}.")
@@ -224,7 +238,9 @@ class FocusedLaguerreGaussianBeam:
             )
         if not (n.real > 0):
             raise ValueError(f"medium_n must be positive. Got {n!r}")
-        polarization_to_jones(self.polarization)
+        object.__setattr__(
+            self, "polarization", _canonicalize_polarization_input(self.polarization)
+        )
         _validated_int("radial_order_p", self.radial_order_p, minimum=0)
         _validated_int("azimuthal_order_l", self.azimuthal_order_l)
         if not np.isfinite(float(self.polar_angle)):
@@ -237,7 +253,9 @@ class FocusedLaguerreGaussianBeam:
             raise ValueError(f"`amplitude` must be finite. Got {self.amplitude!r}.")
         if not np.isfinite(float(self.azimuthal_phase)):
             raise ValueError(f"`azimuthal_phase` must be finite. Got {self.azimuthal_phase!r}.")
-        _as_float_triplet("focal_point", self.focal_point)
+        object.__setattr__(
+            self, "focal_point", _float_triplet_tuple("focal_point", self.focal_point)
+        )
         w = float(self.beam_width)
         if (not np.isfinite(w)) or (w <= 0.0):
             raise ValueError(f"`beam_width` must be finite and > 0. Got {self.beam_width!r}.")
@@ -345,12 +363,19 @@ class CartesianPolarizedFocusedLaguerreGaussianBeam:
             raise ValueError(f"`azimuthal_angle` must be finite. Got {self.azimuthal_angle!r}.")
         if float(self.polar_angle) < 0.0 or float(self.polar_angle) > np.pi:
             raise ValueError(f"`polar_angle` must lie in [0, pi]. Got {self.polar_angle!r}.")
-        normalize_global_polarization_vector(self.global_polarization)
+        polarization = normalize_global_polarization_vector(self.global_polarization)
+        object.__setattr__(
+            self,
+            "global_polarization",
+            tuple(complex(value) for value in polarization),
+        )
         if not np.isfinite(float(self.amplitude)):
             raise ValueError(f"`amplitude` must be finite. Got {self.amplitude!r}.")
         if not np.isfinite(float(self.azimuthal_phase)):
             raise ValueError(f"`azimuthal_phase` must be finite. Got {self.azimuthal_phase!r}.")
-        _as_float_triplet("focal_point", self.focal_point)
+        object.__setattr__(
+            self, "focal_point", _float_triplet_tuple("focal_point", self.focal_point)
+        )
         w = float(self.beam_width)
         if (not np.isfinite(w)) or (w <= 0.0):
             raise ValueError(f"`beam_width` must be finite and > 0. Got {self.beam_width!r}.")

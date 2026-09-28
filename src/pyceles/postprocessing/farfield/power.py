@@ -5,6 +5,8 @@ from typing import Literal
 
 import numpy as np
 
+from pyceles._arrays import owned_read_only_view
+
 from pyceles._optional import import_cupy, is_cupy_array
 from pyceles.core.plane_wave_spectrum import PlaneWaveSpectrum
 from pyceles.core.sources import Source, ensure_finite_power_diagnostics_supported
@@ -102,15 +104,16 @@ class PowerBalance:
                 raise ValueError(
                     "`local_absorbed_power` is required with a per-particle decomposition."
                 )
-            values = np.array(
-                self.local_absorbed_power_per_particle,
-                dtype=np.float64,
-                copy=True,
+            values = np.asarray(
+                self.local_absorbed_power_per_particle, dtype=np.float64
             ).reshape(-1)
             if not bool(np.all(np.isfinite(values))):
                 raise ValueError("Per-particle local absorbed powers must be finite.")
-            values.setflags(write=False)
-            object.__setattr__(self, "local_absorbed_power_per_particle", values)
+            object.__setattr__(
+                self,
+                "local_absorbed_power_per_particle",
+                owned_read_only_view(values, dtype=np.dtype(np.float64)),
+            )
 
     @property
     def has_flux_balance(self) -> bool:

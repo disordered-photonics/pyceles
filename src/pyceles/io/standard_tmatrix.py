@@ -19,6 +19,7 @@ from types import MappingProxyType
 import h5py
 import numpy as np
 
+from pyceles._arrays import owned_read_only_view
 from pyceles.core.indexing import n_modes
 from pyceles.core.particles import TMatrixParticle
 
@@ -70,9 +71,28 @@ def _metadata_value(value: object) -> object:
         return _text(item) if isinstance(item, (bytes, np.bytes_)) else item
     if array.dtype.kind in {"S", "O", "U"}:
         return tuple(_text(item) for item in array.reshape(-1).tolist())
-    owned = np.array(array, copy=True)
-    owned.setflags(write=False)
-    return owned
+    return owned_read_only_view(array)
+
+
+def _owned_metadata_value(value: object) -> object:
+    """Detach user-supplied metadata from mutable containers."""
+    if isinstance(value, np.ndarray):
+        return owned_read_only_view(value)
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {str(key): _owned_metadata_value(item) for key, item in value.items()}
+        )
+    if isinstance(value, (tuple, list)):
+        return tuple(_owned_metadata_value(item) for item in value)
+    if isinstance(value, (set, frozenset)):
+        return frozenset(_owned_metadata_value(item) for item in value)
+    return value
+
+
+def _owned_metadata_mapping(values: Mapping[str, object]) -> Mapping[str, object]:
+    return MappingProxyType(
+        {str(key): _owned_metadata_value(value) for key, value in values.items()}
+    )
 
 
 def _scalar_complex_metadata(value: object | None) -> complex | None:
@@ -140,16 +160,15 @@ class TMatrixData:
             matrix = np.asarray(matrix, dtype=np.complex128)
         if not np.all(np.isfinite(matrix.real)) or not np.all(np.isfinite(matrix.imag)):
             raise ValueError("t_matrix must contain only finite values.")
-        owned = np.array(matrix, copy=True, order="C")
-        owned.setflags(write=False)
+        owned = owned_read_only_view(matrix)
         object.__setattr__(self, "t_matrix", owned)
         object.__setattr__(self, "lmax", lmax)
         basis = str(self.source_basis).strip().lower()
         if basis not in {"parity", "helicity"}:
             raise ValueError(f"source_basis must be 'parity' or 'helicity'. Got {basis!r}.")
         object.__setattr__(self, "source_basis", basis)
-        object.__setattr__(self, "embedding", MappingProxyType(dict(self.embedding)))
-        object.__setattr__(self, "attributes", MappingProxyType(dict(self.attributes)))
+        object.__setattr__(self, "embedding", _owned_metadata_mapping(self.embedding))
+        object.__setattr__(self, "attributes", _owned_metadata_mapping(self.attributes))
 
     def as_particle(
         self,

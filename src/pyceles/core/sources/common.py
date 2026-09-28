@@ -34,6 +34,22 @@ def _as_float_triplet(name: str, values: tuple[float, float, float] | np.ndarray
     return arr
 
 
+def _complex_triplet_tuple(
+    name: str, values: tuple[complex, complex, complex] | np.ndarray
+) -> tuple[complex, complex, complex]:
+    """Return one validated complex triplet as immutable scalar values."""
+    arr = _as_complex_triplet(name, values)
+    return (complex(arr[0]), complex(arr[1]), complex(arr[2]))
+
+
+def _float_triplet_tuple(
+    name: str, values: tuple[float, float, float] | np.ndarray
+) -> tuple[float, float, float]:
+    """Return one validated float triplet as immutable scalar values."""
+    arr = _as_float_triplet(name, values)
+    return (float(arr[0]), float(arr[1]), float(arr[2]))
+
+
 def _normalize_dipole_collection_inputs(
     positions: np.ndarray,
     dipole_moments: np.ndarray,

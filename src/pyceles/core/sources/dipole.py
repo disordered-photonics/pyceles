@@ -5,10 +5,14 @@ from dataclasses import dataclass, field, replace
 import numpy as np
 import numpy.typing as npt
 
+from pyceles._arrays import owned_read_only_view
+
 from ..indexing import n_modes
 from .common import (
     _as_complex_triplet,
     _as_float_triplet,
+    _complex_triplet_tuple,
+    _float_triplet_tuple,
     _dipole_outgoing_coeff_vector,
     _incident_coeffs_from_outgoing_expansion,
     _normalize_dipole_collection_inputs,
@@ -35,8 +39,10 @@ class DipoleSource:
                 "DipoleSource currently requires real `medium_n` in this homogeneous solver path "
                 "(legacy policy from the original beam-only workflow, not a dipole-physics limit)."
             )
-        _as_complex_triplet("dipole_moment", self.dipole_moment)
-        _as_float_triplet("position", self.position)
+        object.__setattr__(
+            self, "dipole_moment", _complex_triplet_tuple("dipole_moment", self.dipole_moment)
+        )
+        object.__setattr__(self, "position", _float_triplet_tuple("position", self.position))
         if not np.isfinite(float(self.amplitude)):
             raise ValueError(f"`amplitude` must be finite. Got {self.amplitude!r}.")
         if float(self.radial_lut_dr) < 0.0:
@@ -152,10 +158,8 @@ class DipoleCollection:
         positions, moments = _normalize_dipole_collection_inputs(
             self.positions, self.dipole_moments
         )
-        positions = np.array(positions, dtype=float, copy=True, order="C")
-        moments = np.array(moments, dtype=np.complex128, copy=True, order="C")
-        positions.setflags(write=False)
-        moments.setflags(write=False)
+        positions = owned_read_only_view(positions, dtype=np.dtype(float))
+        moments = owned_read_only_view(moments, dtype=np.dtype(np.complex128))
         object.__setattr__(self, "positions", positions)
         object.__setattr__(self, "dipole_moments", moments)
         if not np.isfinite(float(self.amplitude)):

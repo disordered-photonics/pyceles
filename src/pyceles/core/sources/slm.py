@@ -6,6 +6,8 @@ from dataclasses import dataclass, replace
 import numpy as np
 import numpy.typing as npt
 
+from pyceles._arrays import owned_read_only_view
+
 from ..conversions import angular_spectrum_to_svwf_regular
 from ..plane_wave_spectrum import PlaneWaveSpectrum
 from .base import AngularSpectrumSource, JonesPolarizedSource, PolarizationInput, Source
@@ -36,8 +38,7 @@ class AngularSpectrumSLMSource:
             if not np.all(np.isfinite(weights.real)) or not np.all(np.isfinite(weights.imag)):
                 raise ValueError("`modulation` array/scalar must be finite.")
             if weights.ndim > 0:
-                weights = np.array(weights, dtype=np.complex128, copy=True, order="C")
-                weights.setflags(write=False)
+                weights = owned_read_only_view(weights, dtype=np.dtype(np.complex128))
                 object.__setattr__(self, "modulation", weights)
 
     @property

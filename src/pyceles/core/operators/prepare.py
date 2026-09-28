@@ -8,6 +8,7 @@ from typing import Literal, cast
 import numpy as np
 import numpy.typing as npt
 
+from pyceles._arrays import owned_read_only_view
 from pyceles._cupy_memory import cupy_allocator_snapshot
 from pyceles._dtypes import resolve_compute_accum_dtypes
 from pyceles._optional import import_cupy
@@ -266,7 +267,10 @@ def prepare_matvec(
             )
         if k_parallel is None:
             raise ValueError("`k_parallel` is required when preparing a periodic operator.")
-        k_parallel_arr = np.asarray(k_parallel, dtype=float).reshape(2)
+        k_parallel_values = np.asarray(k_parallel, dtype=float).reshape(2)
+        if not np.all(np.isfinite(k_parallel_values)):
+            raise ValueError("`k_parallel` must contain exactly two finite values.")
+        k_parallel_arr = owned_read_only_view(k_parallel_values, dtype=np.dtype(float))
         if backend_name == "cupy" and periodic_spec.options.method not in {"ewald", "rayleigh"}:
             raise NotImplementedError(
                 "CuPy periodic workflows currently support Ewald or Rayleigh coupling."

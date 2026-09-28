@@ -9,6 +9,7 @@ from typing import Literal
 
 import numpy as np
 
+from pyceles._arrays import owned_read_only_view
 from pyceles._dtypes import resolve_compute_accum_dtypes
 from pyceles.core.angular import uniform_periodic_azimuth_grid, uniform_polar_grid
 from pyceles.core.operators.mlfmm import MLFMMOptions
@@ -36,14 +37,10 @@ def _as_1d_float_array(name: str, values: np.ndarray) -> np.ndarray:
 
 
 def _owned_read_only_array(values: np.ndarray, *, dtype: np.dtype | None = None) -> np.ndarray:
-    out = np.array(
+    return owned_read_only_view(
         values,
         dtype=np.asarray(values).dtype if dtype is None else dtype,
-        copy=True,
-        order="C",
     )
-    out.setflags(write=False)
-    return out
 
 
 def validate_angular_grid_pair(

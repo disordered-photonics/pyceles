@@ -40,6 +40,17 @@ def polarization_to_jones(polarization: PolarizationInput) -> tuple[complex, com
     return a_te, a_tm
 
 
+def _canonicalize_polarization_input(
+    polarization: PolarizationInput,
+) -> Polarization | tuple[complex, complex]:
+    """Validate polarization and retain an immutable canonical value."""
+    if isinstance(polarization, str):
+        pol = polarization.strip().upper()
+        polarization_to_jones(pol)
+        return "TE" if pol == "TE" else "TM"
+    return polarization_to_jones(polarization)
+
+
 def is_normal_incidence(polar_angle: float, *, atol: float = 1e-12) -> bool:
     """Return True when `polar_angle` corresponds to +/- z propagation."""
     return bool(np.isclose(np.sin(float(polar_angle)), 0.0, atol=float(atol)))
