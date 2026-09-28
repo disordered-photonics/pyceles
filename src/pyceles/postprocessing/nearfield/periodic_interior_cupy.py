@@ -367,7 +367,12 @@ def periodic_local_regular_l1_coeffs_cupy(
     )
     real_count = int(shell_counts.real_shells)
     recip_count = int(shell_counts.reciprocal_shells)
-    coordinate_scale = float(max(np.max(np.abs(pos)), np.max(np.abs(pts))))
+    coordinate_scale = float(
+        max(
+            np.max(np.abs(pos[:, 2]), initial=0.0),
+            np.max(np.abs(pts[:, 2]), initial=0.0),
+        )
+    )
     workspace = CupyEwaldShellWorkspace(
         cupy=cp,
         lattice=periodic.lattice,

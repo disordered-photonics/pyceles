@@ -140,7 +140,7 @@ class CuPyPeriodicCouplingOperator:
     _workspace: CupyEwaldShellWorkspace | None = field(default=None, init=False, repr=False)
     _resolved_ewald_eta: float | None = field(default=None, init=False, repr=False)
     _resolved_shell_counts: tuple[int, int] | None = field(default=None, init=False, repr=False)
-    _coordinate_scale: float | None = field(default=None, init=False, repr=False)
+    _z_coordinate_scale: float | None = field(default=None, init=False, repr=False)
     _contraction_tensor_gpu: Any | None = field(default=None, init=False, repr=False)
     _self_correction_gpu: Any | None = field(default=None, init=False, repr=False)
     _dense_w_cache_gpu: Any | None = field(default=None, init=False, repr=False)
@@ -270,10 +270,11 @@ class CuPyPeriodicCouplingOperator:
             self._contraction_tensor_gpu = cp.asarray(tensor_np, dtype=self.dtype)
         return self._contraction_tensor_gpu
 
-    def _coordinate_scale_value(self) -> float:
-        if self._coordinate_scale is None:
-            self._coordinate_scale = float(np.max(np.abs(np.asarray(self.positions, dtype=float))))
-        return float(self._coordinate_scale)
+    def _z_coordinate_scale_value(self) -> float:
+        if self._z_coordinate_scale is None:
+            positions = np.asarray(self.positions, dtype=float).reshape(-1, 3)
+            self._z_coordinate_scale = float(np.max(np.abs(positions[:, 2]), initial=0.0))
+        return float(self._z_coordinate_scale)
 
     def _self_correction_device(self) -> Any:
         cp = self._cupy()
@@ -343,7 +344,7 @@ class CuPyPeriodicCouplingOperator:
             workspace=self._workspace_device(),
             real_shell_count=int(real_count),
             reciprocal_shell_count=int(reciprocal_count),
-            coordinate_scale=self._coordinate_scale_value(),
+            coordinate_scale=self._z_coordinate_scale_value(),
         )
         sums = cp.asarray(sums, dtype=cp.complex128).reshape(
             len(key),
@@ -554,7 +555,7 @@ class CuPyPeriodicCouplingOperator:
             workspace=self._workspace_device(),
             real_shell_count=int(real_count),
             reciprocal_shell_count=int(reciprocal_count),
-            coordinate_scale=self._coordinate_scale_value(),
+            coordinate_scale=self._z_coordinate_scale_value(),
         )
         structural = cp.asarray(structural, dtype=cp.complex128).reshape(
             1, order + 1, 2 * order + 1
@@ -696,7 +697,7 @@ class CuPyPeriodicCouplingOperator:
                 workspace=self._workspace_device(),
                 real_shell_count=int(real_count),
                 reciprocal_shell_count=int(reciprocal_count),
-                coordinate_scale=self._coordinate_scale_value(),
+                coordinate_scale=self._z_coordinate_scale_value(),
             )
             local = cp.asarray(local, dtype=cp.complex128).reshape(
                 stop - start, order + 1, 2 * order + 1

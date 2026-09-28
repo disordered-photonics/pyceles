@@ -190,6 +190,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runtime evaluation consistent with the existing Ewald eta/shell preflight.
   This prevents a fixed real-space truncation from omitting the physically
   nearest image and leaving a large uncancelled Ewald contribution.
+- Same-plane Ewald routing now scales its roundoff tolerance only from axial
+  coordinates, so translating a configuration laterally cannot change whether
+  a tiny nonzero height separation uses the shifted or same-plane formula.
 
 - High-order periodic Ewald reciprocal structural sums now evaluate their
   factorial normalizations in log space, avoiding integer-to-float overflow

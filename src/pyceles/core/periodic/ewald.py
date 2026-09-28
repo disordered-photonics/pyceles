@@ -1222,12 +1222,7 @@ def ewald_structural_constant_2d(
             )
         )
     )
-    coordinate_scale = float(
-        max(
-            np.max(np.abs(destination_arr)),
-            np.max(np.abs(source_arr)),
-        )
-    )
+    coordinate_scale = float(max(abs(float(destination_arr[2])), abs(float(source_arr[2]))))
     same_plane_atol = same_plane_z_tolerance(float(k), coordinate_scale=coordinate_scale)
     if abs(float(rvec[2])) <= same_plane_atol:
         rvec[2] = 0.0
@@ -1408,7 +1403,9 @@ def ewald_structural_sums_2d_batch(
         bloch_phase = np.exp(-1j * (lattice_shift_xy @ kp))
     cxy = np.asarray(c[:, :2], dtype=float)
     cz = np.asarray(c[:, 2], dtype=float)
-    coordinate_scale = float(max(np.max(np.abs(source_arr)), np.max(np.abs(dest))))
+    coordinate_scale = float(
+        max(abs(float(source_arr[2])), np.max(np.abs(dest[:, 2]), initial=0.0))
+    )
     same_plane_atol = same_plane_z_tolerance(float(k), coordinate_scale=coordinate_scale)
     same_plane_points = np.abs(cz) <= same_plane_atol
     if np.any(same_plane_points):

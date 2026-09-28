@@ -154,6 +154,46 @@ def test_scalar_ewald_is_quasiperiodic_across_lateral_seam() -> None:
 
     assert raw == pytest.approx(phase * wrapped, rel=2.0e-11, abs=2.0e-11)
 
+
+def test_scalar_same_plane_routing_ignores_lateral_coordinate_origin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Large lateral coordinates must not alter a z-only routing decision."""
+    routes: list[str] = []
+
+    def shifted_reciprocal(*args: object, **kwargs: object) -> complex:
+        del args, kwargs
+        routes.append("shifted")
+        return 0.0 + 0.0j
+
+    def same_plane_reciprocal(*args: object, **kwargs: object) -> complex:
+        del args, kwargs
+        routes.append("same")
+        return 0.0 + 0.0j
+
+    monkeypatch.setattr(ewald_module, "_shifted_reciprocal_sum", shifted_reciprocal)
+    monkeypatch.setattr(ewald_module, "_same_plane_reciprocal_sum", same_plane_reciprocal)
+    monkeypatch.setattr(ewald_module, "_shifted_real_sum", lambda *args, **kwargs: 0.0 + 0.0j)
+    monkeypatch.setattr(ewald_module, "_same_plane_real_sum", lambda *args, **kwargs: 0.0 + 0.0j)
+
+    lattice = pcl.RectangularLattice2D(ax=430.0, ay=470.0)
+    for lateral_origin in (0.0, 1.0e10):
+        ewald_structural_constant_2d(
+            0,
+            0,
+            k=1.0,
+            destination=np.asarray([lateral_origin, 0.0, 1.0e-8]),
+            source=np.asarray([lateral_origin, 0.0, 0.0]),
+            lattice=lattice,
+            k_parallel=np.zeros(2),
+            eta=0.1,
+            real_shells=0,
+            reciprocal_shells=0,
+        )
+
+    assert routes == ["shifted", "shifted"]
+
+
 def test_self_correction_uses_half_integer_origin_term() -> None:
     """The 3D origin correction uses Gamma(-1/2, x), not plain Gamma(0, x)."""
     k = 2.0 * np.pi / 550.0
