@@ -1,9 +1,9 @@
 # pyceles documentation
 
 pyceles is a Python implementation of CELES-style many-particle electromagnetic
-scattering with the T-matrix method. The project keeps a NumPy/SciPy reference
-implementation while adding optional CuPy acceleration for selected solver and
-postprocessing paths.
+scattering with the T-matrix method. The project is GPU-oriented: it keeps a
+NumPy/SciPy reference implementation for portability and validation, while the
+main scalable finite and periodic solver paths use CuPy acceleration.
 
 The documentation in this folder is deliberately small. It collects stable,
 user-facing material that would otherwise make the root README harder to scan.

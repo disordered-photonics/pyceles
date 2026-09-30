@@ -37,23 +37,38 @@ notebooks/01_celes_main_replication.ipynb
 The notebook reproduces the original CELES main workflow using the bundled CELES
 sphere-parameter example.
 
-## Optional CuPy backend
+## CuPy GPU backend
 
-CuPy is optional and is not included in pyceles's runtime dependencies. The
-correct CuPy package depends on the CUDA runtime available on the machine, so
-install the matching pre-built wheel explicitly.
+The NumPy/SciPy reference path is available without CUDA. The performance path
+used for large finite, MLFMM, and periodic workloads is CuPy-based, so install
+the matching pre-built wheel explicitly. Choose the wheel for the CUDA major
+version available on the machine:
 
-Typical examples are:
+For CUDA 13.x:
+
+```bash
+python -m pip install pyceles cupy-cuda13x
+```
+
+For CUDA 12.x systems:
 
 ```bash
 python -m pip install pyceles cupy-cuda12x
 ```
 
-or, on a CUDA 13 environment:
+If the machine has an NVIDIA driver but no system-wide CUDA Toolkit, install
+CuPy together with its matching CUDA component wheels through the `ctk` extra:
 
 ```bash
-python -m pip install pyceles cupy-cuda13x
+python -m pip install pyceles "cupy-cuda13x[ctk]"
+# or: python -m pip install pyceles "cupy-cuda12x[ctk]"
 ```
+
+This is a convenient fresh-environment setup; it does not remove the
+requirement for a compatible NVIDIA driver. When a system CUDA Toolkit is
+already installed, prefer the regular `cupy-cuda13x` or `cupy-cuda12x` wheel.
+For the CUDA component compatibility matrix and optional libraries, see the
+[CuPy installation guide](https://docs.cupy.dev/en/stable/install.html).
 
 For an editable checkout, install pyceles separately after installing the
 matching CuPy wheel:
@@ -64,6 +79,8 @@ python -m pip install -e .
 
 Do not install the generic source-build `cupy` package alongside one of these
 CUDA-specific distributions; use exactly one CuPy distribution per environment.
+The CuPy dependency is intentionally not bundled into pyceles because the
+appropriate wheel is CUDA-generation-specific.
 
 ## Recommended local checks
 

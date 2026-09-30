@@ -111,7 +111,9 @@ Dense/direct periodic validation can remain memory-sensitive on small GPUs. Even
 
 ## GPU backend
 
-- The GPU backend is optional and depends on a working CuPy/CUDA environment.
+- CuPy is a separately installed dependency and requires a working
+  CuPy/CUDA environment. The NumPy/SciPy reference path remains available
+  without it, but the main large finite and periodic workflows target CuPy.
 - Not every postprocessing stage has a CuPy implementation; unsupported stages may fall back to NumPy reference paths.
 - The direct CuPy backend is fast for moderate direct pairwise problems, but direct O(N^2) coupling is not the long-term large-N scaling path.
 - CuPy simulations enforce a guarded device-memory ceiling below physical VRAM;

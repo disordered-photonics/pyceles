@@ -5,10 +5,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "pyceles"
 dynamic = ["version"]
-description = "CELES-style many-particle T-matrix scattering with a NumPy/SciPy reference path and optional CuPy acceleration."
+description = "GPU-oriented electromagnetic T-matrix multiple scattering with finite, MLFMM, and periodic solvers."
 readme = "README.md"
 requires-python = ">=3.12"
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "Lorenzo Pattelli" }]
 keywords = [
   "computational-electromagnetics",
@@ -21,7 +22,6 @@ keywords = [
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Science/Research",
-  "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",
   "Programming Language :: Python :: 3.12",

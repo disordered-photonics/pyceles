@@ -1,9 +1,9 @@
 # pyceles
 
-pyceles is a NumPy/SciPy-first implementation of CELES-style multiple
-scattering with the T-matrix method. It provides a correctness-oriented CPU
-path and optional CuPy acceleration for direct coupling, MLFMM, periodic
-operators, and selected postprocessing stages.
+pyceles is a GPU-oriented implementation of CELES-style multiple scattering
+with the T-matrix method. It keeps a NumPy/SciPy reference path for portability,
+validation, and small CPU workflows, while the main scalable finite and
+periodic operators use CuPy acceleration.
 
 The central many-body system is written as
 
@@ -79,16 +79,31 @@ For a checkout in editable mode:
 python -m pip install -e .
 ```
 
-For GPU use, install the CuPy wheel matching the CUDA runtime together with
-pyceles:
+For the GPU-first performance path, install one CuPy wheel matching the CUDA
+major version available on the machine together with pyceles. If the matching
+CUDA Toolkit is already installed, use the regular wheel:
 
 ```bash
-python -m pip install pyceles cupy-cuda12x   # CUDA 12
-# or: python -m pip install pyceles cupy-cuda13x   # CUDA 13
+python -m pip install pyceles cupy-cuda13x   # CUDA 13.x
+# or: python -m pip install pyceles cupy-cuda12x   # CUDA 12.x
 ```
 
-The generic `cupy` package is a source-build distribution and is not a
-pyceles dependency. Install only one CuPy distribution in an environment.
+For a fresh environment where only the NVIDIA driver is available, CuPy can
+also install its matching CUDA component wheels from PyPI through the `ctk`
+extra:
+
+```bash
+python -m pip install pyceles "cupy-cuda13x[ctk]"   # CUDA 13.x
+# or: python -m pip install pyceles "cupy-cuda12x[ctk]"   # CUDA 12.x
+```
+
+The `ctk` form avoids requiring a system-wide CUDA Toolkit, but a compatible
+NVIDIA driver is still required. For an editable checkout, install the CuPy
+wheel first and then run `python -m pip install -e .`.
+
+pyceles deliberately does not select a generic source-build `cupy` dependency:
+choose one CUDA-specific wheel for the installed CUDA generation. The
+NumPy/SciPy reference path remains available without CuPy.
 
 The optional `dev` and `notebooks` extras are intended for contributors and
 interactive examples; see [`docs/installation.md`](docs/installation.md).
