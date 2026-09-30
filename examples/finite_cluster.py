@@ -23,9 +23,8 @@ N_PARTICLES = 500
 def _backend() -> Backend:
     """Use CuPy when a CUDA device is available, otherwise use NumPy."""
     try:
-        from pyceles._optional import import_cupy
+        import cupy
 
-        cupy, _ = import_cupy()
         if int(cupy.cuda.runtime.getDeviceCount()) > 0:
             return "cupy"
     except Exception:  # pragma: no cover - depends on the local installation
