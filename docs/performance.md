@@ -82,10 +82,10 @@ backends, including the reverse sampled-far traversal needed by LSQR.
 
 ## Public phase profilers
 
-`examples/profile_pyceles_phases.py` profiles one finite-cluster run and writes
+`benchmarks/profiling/finite_phases.py` profiles one finite-cluster run and writes
 a `profile_summary.json` containing preparation, solver, far-field, and
 near-field phases. Its default reference case is the 500-sphere
-`examples/sphere_parameters.txt` geometry with `lmax=3`, wavelength 550, a
+the `examples/sphere_parameters.txt` geometry with `lmax=3`, wavelength 550, a
 Gaussian beam of width 2000, TE polarization, and `rtol=1e-4`.
 
 The most relevant finite options are:
@@ -99,7 +99,7 @@ The most relevant finite options are:
 For a complete finite/periodic suite, use the public orchestrator:
 
 ```powershell
-python examples/profile_pyceles_benchmark_suite.py --suite all
+python benchmarks/profiling/benchmark_suite.py --suite all
 ```
 
 Use `--suite finite` or `--suite periodic` to select one family, `--backends
@@ -138,7 +138,7 @@ The finite scaling harness measures the separate pairwise and MLFMM solve
 path:
 
 ```bash
-python examples/run_pairwise_mlfmm_scaling_benchmark.py \
+python benchmarks/scaling/finite_pairwise_mlfmm.py \
   --couplings pairwise,mlfmm \
   --powers-of-two-range 10,20
 ```
@@ -150,7 +150,7 @@ memory-bound well before the largest MLFMM cases.
 
 ### Periodic reference phases
 
-`examples/profile_pyceles_periodic_phases.py` profiles periodic preparation,
+`benchmarks/profiling/periodic_phases.py` profiles periodic preparation,
 the complete solve, and optional exterior/interior `xy` and `xz` near-field
 maps. It uses the 500-sphere prototype geometry in a 3000-unit square cell,
 `lmax=3`, wavelength 550, normal-incidence TE illumination, GMRES with
@@ -193,7 +193,7 @@ precision does not accelerate every preparation phase.
 The same periodic profile can be refreshed directly:
 
 ```powershell
-python examples/profile_pyceles_benchmark_suite.py --suite periodic
+python benchmarks/profiling/benchmark_suite.py --suite periodic
 ```
 
 For a small smoke run, pass `--periodic-maxiter` explicitly and use
@@ -225,7 +225,7 @@ The standalone periodic scaling harness performs a complete preflight before
 any solve and writes resumable JSON records:
 
 ```bash
-python examples/run_ewald_rayleigh_scaling_benchmark.py
+python benchmarks/scaling/periodic_ewald_rayleigh.py
 ```
 
 Rayleigh/Wood anomalies occur when a reciprocal order becomes grazing,

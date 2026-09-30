@@ -126,22 +126,32 @@ For near-field slices, multi-source runs, imported T matrices, dipoles, and
 HDF5 output, see [`docs/quickstart.md`](docs/quickstart.md) and
 [`docs/workflows.md`](docs/workflows.md).
 
-## Examples and scaling harnesses
+## Examples and benchmarks
 
-The repository includes small examples and general-purpose benchmark drivers:
+The `examples/` directory is curated around direct public-API workflows:
 
-- `examples/minimal_pyceles_demo.py` demonstrates mixed particles, CuPy,
-  near/far fields, HDF5 output, and dipole diagnostics.
-- `examples/source_showcase_demo.py` collects source families.
-- `notebooks/01_celes_main_replication.ipynb` reproduces the `CELES_main.m`-style
-  workflow.
-- `examples/run_pairwise_mlfmm_scaling_benchmark.py` measures finite-cluster
+- `examples/minimal_pyceles_demo.py` is a complete mixed-particle walkthrough
+  covering a solve, field output, persistence, and dipole observables.
+- `examples/inspect_standard_tmatrix.py` inspects an imported standard-format
+  T-matrix file.
+- `examples/sources_demo.py` renders the supported incident-source families.
+- `examples/particles_demo.py` compares near- and far-field responses for the
+  same 500-particle geometry represented by layered spheres, rotated spheroids,
+  and PEC spheres.
+- `notebooks/01_celes_main_replication.ipynb` reproduces the `CELES_main.m`-
+  style workflow interactively.
+
+Reproducibility and performance programs are collected under `benchmarks/`:
+
+- `benchmarks/scaling/finite_pairwise_mlfmm.py` measures finite-cluster
   pairwise and MLFMM scaling. Its default ladder is `2**10` through `2**20`;
   use `--powers-of-two-range` or `--n-values` for a smaller run. Pairwise
   coupling becomes memory-bound well before the largest MLFMM cases; the full
   ladder is intended for a GPU with at least 8GB of memory.
-- `examples/run_ewald_rayleigh_scaling_benchmark.py` measures the two periodic
-  growth families with a complete preflight and resumable JSON records.
+- `benchmarks/scaling/periodic_ewald_rayleigh.py` measures the two periodic
+  scaling ladders with complete preflight and resumable JSON records.
+- `benchmarks/validation/` contains independent MSTM comparison scripts.
+- `benchmarks/profiling/` contains the phase profilers and their suite runner.
 
 Validation strategy and external-reference entry points are described in
 [`docs/validation.md`](docs/validation.md). Performance guidance, memory

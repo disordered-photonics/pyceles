@@ -1,13 +1,24 @@
+"""Render the curated incident-source family demonstration.
+
+The fixed setup generates near-field panels for the Gaussian,
+Laguerre--Gaussian, focused, Bessel, and Cartesian-polarized source models.
+Outputs are written to ``outputs/sources_demo`` so the example remains a small,
+reproducible illustration of the source API rather than a configurable
+benchmark driver.
+"""
+
 from __future__ import annotations
 
-import argparse
 from pathlib import Path
-from typing import Literal, cast
+from typing import Literal
 
 import matplotlib.pyplot as plt
 import numpy as np
 
 import pyceles as pcl
+
+ROOT = Path(__file__).resolve().parents[1]
+OUTPUT_DIR = ROOT / "outputs" / "sources_demo"
 
 SourceName = Literal[
     "plane_wave",
@@ -252,7 +263,7 @@ def _render_source_showcase(
         ),
         fontsize=12,
     )
-    out_path = out_dir / f"source_showcase_{label}.png"
+    out_path = out_dir / f"sources_demo_{label}.png"
     fig.savefig(out_path, dpi=int(dpi))
     plt.close(fig)
     return out_path
@@ -330,186 +341,35 @@ def _propagation_and_polarization_note(source: pcl.core.Source) -> str:
     return f"{prop} | {pol_txt}"
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Generate no-particle initial-field source showcases (3x5 panels) for "
-            "normal-incidence z-axis-aligned sources."
-        )
-    )
-    parser.add_argument(
-        "--sources",
-        nargs="+",
-        choices=[
-            "plane_wave",
-            "gaussian",
-            "laguerre_gaussian",
-            "focused_laguerre_gaussian",
-            "focused_laguerre_gaussian_cartesian",
-            "bessel",
-            "bessel_cartesian",
-        ],
-        default=[
-            "plane_wave",
-            "gaussian",
-            "laguerre_gaussian",
-            "focused_laguerre_gaussian",
-            "focused_laguerre_gaussian_cartesian",
-            "bessel",
-            "bessel_cartesian",
-        ],
-        help="Sources to render.",
-    )
-    parser.add_argument("--output-dir", type=Path, default=Path("outputs/source_showcase"))
-    parser.add_argument("--wavelength", type=float, default=550.0, help="Wavelength in nm.")
-    parser.add_argument("--n-medium", type=float, default=1.0, help="Background refractive index.")
-    parser.add_argument("--lmax", type=int, default=3)
-    parser.add_argument("--n-polar", type=int, default=361, help="Source polar grid samples.")
-    parser.add_argument("--n-azimuth", type=int, default=181, help="Source azimuth grid samples.")
-    parser.add_argument(
-        "--half-span",
-        type=float,
-        default=5000.0,
-        help="Half-window size (nm) for all showcase slices.",
-    )
-    parser.add_argument(
-        "--dx",
-        type=float,
-        default=50.0,
-        help="Slice sampling step in nm (coarser step to cover wider windows).",
-    )
-    parser.add_argument(
-        "--gaussian-beam-width",
-        type=float,
-        default=1000.0,
-        help="Gaussian beam width parameter in nm.",
-    )
-    parser.add_argument(
-        "--bessel-cone-angle",
-        type=float,
-        default=np.nan,
-        help=(
-            "Bessel cone angle in radians. Default derives from Gaussian beam width "
-            "to keep comparable convergence behavior."
-        ),
-    )
-    parser.add_argument(
-        "--laguerre-p",
-        type=int,
-        default=0,
-        help="Laguerre-Gaussian radial index p for both collimated/focused LG sources.",
-    )
-    parser.add_argument(
-        "--laguerre-l",
-        type=int,
-        default=1,
-        help="Laguerre-Gaussian azimuthal index l for both collimated/focused LG sources.",
-    )
-    parser.add_argument(
-        "--focused-focal-length",
-        type=float,
-        default=1000.0,
-        help="Focused LG focal length in nm.",
-    )
-    parser.add_argument(
-        "--focused-na",
-        type=float,
-        default=np.nan,
-        help=(
-            "Focused LG numerical aperture (must be < n_medium). "
-            "Default derives from the Gaussian beam width to match divergence."
-        ),
-    )
-    parser.add_argument(
-        "--real-limit",
-        type=float,
-        default=np.nan,
-        help="Optional fixed |Re(E*)| color limit. Default uses row-wise robust auto-scaling.",
-    )
-    parser.add_argument(
-        "--abs-limit",
-        type=float,
-        default=np.nan,
-        help="Optional fixed |E| color limit. Default uses row-wise robust auto-scaling.",
-    )
-    parser.add_argument("--phase-cmap", type=str, default="twilight_shifted")
-    parser.add_argument("--dpi", type=int, default=220)
-    parser.add_argument("--quiet", action="store_true")
-    return parser.parse_args()
-
-
 def main() -> None:
-    args = parse_args()
-    if float(args.dx) <= 0.0:
-        raise ValueError("`dx` must be > 0.")
-    if float(args.half_span) <= 0.0:
-        raise ValueError("`half_span` must be > 0.")
-
-    out_dir = Path(args.output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    wavelength = float(args.wavelength)
-    n_medium = complex(float(args.n_medium), 0.0)
-    beam_width = float(args.gaussian_beam_width)
-    cone_angle = (
-        _derived_bessel_cone_angle(wavelength=wavelength, gaussian_beam_width=beam_width)
-        if not np.isfinite(float(args.bessel_cone_angle))
-        else float(args.bessel_cone_angle)
+    wavelength = 550.0
+    n_medium = 1.0 + 0.0j
+    lmax = 3
+    n_polar, n_azimuth = 361, 181
+    half_span, dx = 5000.0, 50.0
+    beam_width = 1000.0
+    laguerre_p, laguerre_l = 0, 1
+    focused_focal_length = 1000.0
+    cone_angle = _derived_bessel_cone_angle(wavelength=wavelength, gaussian_beam_width=beam_width)
+    focused_na = _derived_focused_na(
+        wavelength=wavelength,
+        gaussian_beam_width=beam_width,
+        n_medium=n_medium,
     )
-    real_limit = float(args.real_limit) if np.isfinite(float(args.real_limit)) else None
-    abs_limit = float(args.abs_limit) if np.isfinite(float(args.abs_limit)) else None
-
-    focused_na = (
-        _derived_focused_na(
-            wavelength=wavelength,
-            gaussian_beam_width=beam_width,
-            n_medium=n_medium,
-        )
-        if not np.isfinite(float(args.focused_na))
-        else float(args.focused_na)
+    source_names: tuple[SourceName, ...] = (
+        "plane_wave",
+        "gaussian",
+        "laguerre_gaussian",
+        "focused_laguerre_gaussian",
+        "focused_laguerre_gaussian_cartesian",
+        "bessel",
+        "bessel_cartesian",
     )
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    print(f"Output directory: {OUTPUT_DIR}")
+    print(f"Wavelength: {wavelength:.1f} nm | medium_n: {n_medium.real:.3f}")
 
-    if focused_na >= float(np.real(n_medium)):
-        raise ValueError(
-            "`focused-na` must be smaller than n_medium. "
-            f"Got focused_na={focused_na!r}, n_medium={float(np.real(n_medium))!r}."
-        )
-
-    if not args.quiet:
-        print(f"Output directory: {out_dir}")
-        print(f"Wavelength: {wavelength:.1f} nm | medium_n: {n_medium.real:.3f}")
-        print(f"Shared showcase window: [-{args.half_span:.1f}, {args.half_span:.1f}] nm")
-        print(f"Shared showcase dx: {args.dx:.1f} nm")
-        print(f"Gaussian beam width: {beam_width:.1f} nm")
-        print(f"Laguerre mode indices: p={int(args.laguerre_p)}, l={int(args.laguerre_l)}")
-        print(
-            "Focused LG: "
-            f"focal_length={float(args.focused_focal_length):.1f} nm, "
-            f"NA={focused_na:.3f}"
-        )
-        print(f"Bessel cone angle: {cone_angle:.4f} rad")
-        if real_limit is None:
-            print("Re(E*) scaling: row-wise robust auto")
-        else:
-            print(f"Re(E*) scaling: fixed +/-{real_limit:.3g}")
-        if abs_limit is None:
-            print("|E| scaling: row-wise robust auto")
-        else:
-            print(f"|E| scaling: fixed [0, {abs_limit:.3g}]")
-
-    for src_name_raw in args.sources:
-        if src_name_raw not in {
-            "plane_wave",
-            "gaussian",
-            "laguerre_gaussian",
-            "focused_laguerre_gaussian",
-            "focused_laguerre_gaussian_cartesian",
-            "bessel",
-            "bessel_cartesian",
-        }:
-            raise ValueError(f"Unsupported source {src_name_raw!r}.")
-        src_name = cast(SourceName, src_name_raw)
-
+    for src_name in source_names:
         bessel_orders = (0, 1) if src_name in {"bessel", "bessel_cartesian"} else (0,)
         for bessel_order in bessel_orders:
             label, source = _build_source(
@@ -517,22 +377,21 @@ def main() -> None:
                 wavelength=wavelength,
                 n_medium=n_medium,
                 gaussian_beam_width=beam_width,
-                laguerre_radial_order=int(args.laguerre_p),
-                laguerre_azimuthal_order=int(args.laguerre_l),
-                focused_focal_length=float(args.focused_focal_length),
+                laguerre_radial_order=laguerre_p,
+                laguerre_azimuthal_order=laguerre_l,
+                focused_focal_length=focused_focal_length,
                 focused_numerical_aperture=focused_na,
                 bessel_cone_angle=cone_angle,
                 bessel_order=int(bessel_order),
             )
-            if not args.quiet:
-                print(f"Running showcase for {label}...")
+            print(f"Running showcase for {label}...")
             sim = _make_no_particle_simulation(
                 wavelength=wavelength,
                 n_medium=n_medium,
-                lmax=int(args.lmax),
-                n_polar=int(args.n_polar),
-                n_azimuth=int(args.n_azimuth),
-                verbose=(not args.quiet),
+                lmax=lmax,
+                n_polar=n_polar,
+                n_azimuth=n_azimuth,
+                verbose=True,
             )
             run = sim.run(source, include_farfield=False)
             source_note = f"{_source_note(source)} | {_propagation_and_polarization_note(source)}"
@@ -541,17 +400,16 @@ def main() -> None:
                 label=label,
                 wavelength=wavelength,
                 source_note=source_note,
-                out_dir=out_dir,
-                half_span=float(args.half_span),
-                dx=float(args.dx),
-                real_limit=real_limit,
-                abs_limit=abs_limit,
-                phase_cmap=str(args.phase_cmap),
-                dpi=int(args.dpi),
-                show_progress=(not args.quiet),
+                out_dir=OUTPUT_DIR,
+                half_span=half_span,
+                dx=dx,
+                real_limit=None,
+                abs_limit=None,
+                phase_cmap="twilight_shifted",
+                dpi=220,
+                show_progress=True,
             )
-            if not args.quiet:
-                print(f"Saved: {out_path}")
+            print(f"Saved: {out_path}")
 
 
 if __name__ == "__main__":

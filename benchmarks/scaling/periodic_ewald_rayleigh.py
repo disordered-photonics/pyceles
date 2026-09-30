@@ -774,7 +774,7 @@ def main() -> None:
         default=(128, 256, 512, 1024, 2048, 4096, 8192, 16384),
     )
 
-    # Match run_pairwise_mlfmm_scaling_benchmark.py unless stated otherwise.
+    # Match finite_pairwise_mlfmm.py unless stated otherwise.
     parser.add_argument("--lmax", type=int, default=3)
     parser.add_argument("--wavelength", type=float, default=550.0)
     parser.add_argument("--n-medium", type=float, default=1.0)

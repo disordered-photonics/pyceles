@@ -25,6 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   coupling, including single-level and multilevel sampled-far traversals.
 
 ### Changed
+- Reorganized the public reproducibility surface: scaling, profiling, and
+  independent MSTM validation drivers now live under `benchmarks/` rather
+  than alongside the introductory files in `examples/`.
 - CuPy simulations now establish one guarded device-memory ceiling before
   backend-specific preparation. Hybrid-Rayleigh exact-near caches must remain
   device-resident and fail fast when they do not fit instead of silently

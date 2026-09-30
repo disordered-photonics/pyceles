@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Profile periodic pyceles solve and near-field phases for a 500-sphere cell.
 
-This script is the periodic counterpart of ``profile_pyceles_phases.py``.  It
-uses the 500 sphere radii and refractive indices from ``examples/sphere_parameters.txt``
+This script is the periodic counterpart of ``finite_phases.py``.  It
+uses the 500 sphere radii and refractive indices from
+``examples/sphere_parameters.txt``
 exactly once, places them into a random non-overlapping periodic cube, and
 profiles the periodic solve plus optional near-field exterior-xy, interior-xy,
 and xz maps.

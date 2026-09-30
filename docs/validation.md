@@ -50,15 +50,15 @@ The test suite covers, among other areas:
   checks;
 - spheroid regression cases against independent particle calculations.
 
-## Reproducible examples
+## Reproducible benchmark drivers
 
 The repository includes scripts for controlled external comparisons:
 
 ```bash
-python examples/run_mstm_pyceles_cluster_benchmark.py \
+python benchmarks/validation/mstm_finite.py \
   --mstm-exe <path-to-mstm-executable>
 
-python examples/run_mstm_pyceles_periodic_benchmark.py \
+python benchmarks/validation/mstm_periodic.py \
   --mstm-exe <path-to-mstm-executable>
 ```
 
@@ -66,10 +66,10 @@ The finite and periodic scaling harnesses write self-contained JSON records and
 can resume an interrupted sweep:
 
 ```bash
-python examples/run_pairwise_mlfmm_scaling_benchmark.py \
+python benchmarks/scaling/finite_pairwise_mlfmm.py \
   --couplings pairwise,mlfmm --powers-of-two-range 10,12
 
-python examples/run_ewald_rayleigh_scaling_benchmark.py \
+python benchmarks/scaling/periodic_ewald_rayleigh.py \
   --families lateral --n-values-lateral 114,228
 ```
 

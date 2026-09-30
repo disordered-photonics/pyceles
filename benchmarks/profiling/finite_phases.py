@@ -26,10 +26,22 @@ from pyceles.postprocessing.farfield import compute_far_field_patterns
 
 def _find_repo_root() -> Path:
     here = Path.cwd().resolve()
-    if (here / "examples" / "sphere_parameters.txt").exists():
-        return here
-    if (here.parent / "examples" / "sphere_parameters.txt").exists():
-        return here.parent
+    candidates = (
+        here,
+        Path(__file__).resolve().parent,
+        *here.parents,
+        *Path(__file__).resolve().parents,
+    )
+    seen: set[Path] = set()
+    for candidate in candidates:
+        candidate = candidate.resolve()
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if (candidate / "pyproject.toml").is_file() and (
+            candidate / "examples" / "sphere_parameters.txt"
+        ).exists():
+            return candidate
     raise FileNotFoundError("Could not find examples/sphere_parameters.txt")
 
 

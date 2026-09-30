@@ -123,6 +123,10 @@ loaded = pcl.load_simulation_h5(out_dir / "quickstart.h5")
 More complete examples can be found in:
 
 - `examples/minimal_pyceles_demo.py`: mixed particle families, CuPy direct solve, near field, far field, HDF5 output, and dipole LDOS map.
+- `examples/particles_demo.py`: the same 500-particle geometry represented by
+  layered spheres, randomly oriented spheroids, and PEC spheres, with near-
+  and far-field canvases for each representation.
+- `examples/sources_demo.py`: a fixed source-family visualization workflow.
 - `notebooks/01_celes_main_replication.ipynb`: CELES main example replication.
 
 Treat these examples as a source of end-to-end usage patterns while the public API is still evolving.

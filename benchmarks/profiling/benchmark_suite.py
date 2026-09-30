@@ -24,14 +24,18 @@ from typing import Any
 
 
 def _repo_root() -> Path:
-    return Path(__file__).resolve().parents[1]
+    here = Path(__file__).resolve()
+    for parent in (here.parent, *here.parents):
+        if (parent / "pyproject.toml").is_file() and (parent / "src" / "pyceles").is_dir():
+            return parent
+    raise FileNotFoundError("Could not locate the pyceles repository root.")
 
 
 def _case_has_summary(case: dict[str, Any]) -> bool:
     output_dir = Path(case["output_dir"])
     summary_name = (
         "profile_periodic_summary.json"
-        if case["script"] == "profile_pyceles_periodic_phases.py"
+        if Path(case["script"]).name == "periodic_phases.py"
         else "profile_summary.json"
     )
     summary_path = output_dir / summary_name
@@ -167,7 +171,7 @@ def _build_cases(args: argparse.Namespace, output_root: Path) -> list[dict[str, 
                 cases.append(
                     _case(
                         name=name,
-                        script="profile_pyceles_phases.py",
+                        script="benchmarks/profiling/finite_phases.py",
                         arguments=command,
                         output_dir=case_dir,
                         required_phases=_finite_required_phases(
@@ -186,7 +190,7 @@ def _build_cases(args: argparse.Namespace, output_root: Path) -> list[dict[str, 
             cases.append(
                 _case(
                     name=name,
-                    script="profile_pyceles_periodic_phases.py",
+                    script="benchmarks/profiling/periodic_phases.py",
                     arguments=[
                         "--coupling-backend",
                         "pairwise",
@@ -226,7 +230,7 @@ def _build_cases(args: argparse.Namespace, output_root: Path) -> list[dict[str, 
                     cases.append(
                         _case(
                             name=cache_off_name,
-                            script="profile_pyceles_periodic_phases.py",
+                            script="benchmarks/profiling/periodic_phases.py",
                             arguments=[
                                 "--coupling-backend",
                                 "pairwise",
@@ -257,7 +261,7 @@ def _build_cases(args: argparse.Namespace, output_root: Path) -> list[dict[str, 
                     cases.append(
                         _case(
                             name=cache_off_name,
-                            script="profile_pyceles_periodic_phases.py",
+                            script="benchmarks/profiling/periodic_phases.py",
                             arguments=[
                                 "--coupling-backend",
                                 "pairwise",
@@ -290,7 +294,7 @@ def _build_cases(args: argparse.Namespace, output_root: Path) -> list[dict[str, 
                 cases.append(
                     _case(
                         name=name,
-                        script="profile_pyceles_periodic_phases.py",
+                        script="benchmarks/profiling/periodic_phases.py",
                         arguments=[
                             "--coupling-backend",
                             "pairwise",
@@ -321,7 +325,7 @@ def _build_cases(args: argparse.Namespace, output_root: Path) -> list[dict[str, 
             cases.append(
                 _case(
                     name=name,
-                    script="profile_pyceles_periodic_phases.py",
+                    script="benchmarks/profiling/periodic_phases.py",
                     arguments=[
                         "--coupling-backend",
                         coupling,
@@ -353,7 +357,7 @@ def _build_cases(args: argparse.Namespace, output_root: Path) -> list[dict[str, 
                 cases.append(
                     _case(
                         name=name,
-                        script="profile_pyceles_periodic_phases.py",
+                        script="benchmarks/profiling/periodic_phases.py",
                         arguments=[
                             "--coupling-backend",
                             coupling,
@@ -477,7 +481,7 @@ def main() -> None:
             record["status"] = "reused"
             manifest["cases"].append(record)
             continue
-        command = [sys.executable, str(root / "examples" / case["script"]), *case["arguments"]]
+        command = [sys.executable, str(root / Path(case["script"])), *case["arguments"]]
         record["command"] = command
         print(f"\n=== {case['name']} ===")
         print(subprocess.list2cmdline(command))
