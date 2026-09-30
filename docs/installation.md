@@ -39,32 +39,31 @@ sphere-parameter example.
 
 ## Optional CuPy backend
 
-pyceles exposes a `cupy` optional dependency, but practical GPU installations
-often work best when CuPy is installed through the wheel matching the local CUDA
-runtime.
+CuPy is optional and is not included in pyceles's runtime dependencies. The
+correct CuPy package depends on the CUDA runtime available on the machine, so
+install the matching pre-built wheel explicitly.
 
 Typical examples are:
 
 ```bash
-python -m pip install cupy-cuda12x
-python -m pip install -e .
+python -m pip install pyceles cupy-cuda12x
 ```
 
 or, on a CUDA 13 environment:
 
 ```bash
-python -m pip install cupy-cuda13x
+python -m pip install pyceles cupy-cuda13x
+```
+
+For an editable checkout, install pyceles separately after installing the
+matching CuPy wheel:
+
+```bash
 python -m pip install -e .
 ```
 
-The repository metadata also contains:
-
-```bash
-python -m pip install -e .[cupy]
-```
-
-Use whichever route matches the CUDA runtime and CuPy packaging available on the
-machine.
+Do not install the generic source-build `cupy` package alongside one of these
+CUDA-specific distributions; use exactly one CuPy distribution per environment.
 
 ## Recommended local checks
 

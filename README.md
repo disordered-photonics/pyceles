@@ -79,17 +79,16 @@ For a checkout in editable mode:
 python -m pip install -e .
 ```
 
-For GPU use, install the CuPy wheel matching the CUDA runtime before installing
-pyceles, or use the package extra:
+For GPU use, install the CuPy wheel matching the CUDA runtime together with
+pyceles:
 
 ```bash
-python -m pip install cupy-cuda12x   # or cupy-cuda13x
-python -m pip install pyceles
+python -m pip install pyceles cupy-cuda12x   # CUDA 12
+# or: python -m pip install pyceles cupy-cuda13x   # CUDA 13
 ```
 
-```bash
-python -m pip install pyceles[cupy]
-```
+The generic `cupy` package is a source-build distribution and is not a
+pyceles dependency. Install only one CuPy distribution in an environment.
 
 The optional `dev` and `notebooks` extras are intended for contributors and
 interactive examples; see [`docs/installation.md`](docs/installation.md).
