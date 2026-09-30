@@ -122,7 +122,10 @@ loaded = pcl.load_simulation_h5(out_dir / "quickstart.h5")
 
 More complete examples can be found in:
 
-- `examples/minimal_pyceles_demo.py`: mixed particle families, CuPy direct solve, near field, far field, HDF5 output, and dipole LDOS map.
+- `examples/finite_cluster.py`: a compact 500-particle finite-cluster solve
+  using MLFMM.
+- `examples/periodic_cell.py`: a compact 500-particle periodic solve using
+  Rayleigh coupling and diffraction-order power diagnostics.
 - `examples/particles_demo.py`: the same 500-particle geometry represented by
   layered spheres, randomly oriented spheroids, and PEC spheres, with near-
   and far-field canvases for each representation.

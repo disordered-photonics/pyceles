@@ -345,7 +345,9 @@ def main() -> None:
     wavelength = 550.0
     n_medium = 1.0 + 0.0j
     lmax = 3
-    n_polar, n_azimuth = 361, 181
+    # The polar grid includes both endpoints, whereas the azimuthal grid is
+    # periodic and excludes 2*pi.
+    n_polar, n_azimuth = 181, 180
     half_span, dx = 5000.0, 50.0
     beam_width = 1000.0
     laguerre_p, laguerre_l = 0, 1

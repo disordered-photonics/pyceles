@@ -130,8 +130,10 @@ HDF5 output, see [`docs/quickstart.md`](docs/quickstart.md) and
 
 The `examples/` directory is curated around direct public-API workflows:
 
-- `examples/minimal_pyceles_demo.py` is a complete mixed-particle walkthrough
-  covering a solve, field output, persistence, and dipole observables.
+- `examples/finite_cluster.py` solves the canonical 500-particle cluster with
+  the finite MLFMM backend.
+- `examples/periodic_cell.py` solves the same-sized cell with periodic Rayleigh
+  coupling and reports diffraction-order power diagnostics.
 - `examples/inspect_standard_tmatrix.py` inspects an imported standard-format
   T-matrix file.
 - `examples/sources_demo.py` renders the supported incident-source families.
