@@ -25,6 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   coupling, including single-level and multilevel sampled-far traversals.
 
 ### Changed
+- CuPy GMRES, FGMRES, LGMRES, and GCRO now fuse each ordered Givens update
+  in one device kernel, retaining the existing accumulation and stopping
+  semantics while removing the scalar-array dispatch loop.
+- CuPy scattered-field evaluation no longer allocates full host placeholders
+  for unmasked or all-active grids; scatter destinations are allocated only
+  when a partial mask requires them.
 - Simulation cache replacement now releases obsolete operator and dense/LU
   assets before preparing the new system.
 - Reduced overlapping Krylov allocations at restart and bounded the widened
@@ -97,6 +103,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   normal allocation or factorization limits.
 
 ### Fixed
+- Pure Jones source channels now retain their supplied complex amplitude and
+  phase, Cartesian polarization normalization is safe across finite input
+  scales, and Bessel orders use the shared exact integer validator.
 - CuPy MLFMM actions now return independently owned results, preserving live
   complex128 vectors across subsequent forward/adjoint actions and LSQR steps.
 - Public immutable experiment descriptors, particle collections, and result
