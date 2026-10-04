@@ -66,6 +66,11 @@ def wigner_3j(l1: int, l2: int, l3: int, m1: int, m2: int, m3: int) -> float:
         return 0.0
     if not _triangle(l1, l2, l3):
         return 0.0
+    # Exact selection rule, not a tolerance-based truncation. Besides avoiding
+    # a cancelling Racah sum, this keeps dense reference translation tables
+    # consistent with the parity-packed GPU tables.
+    if m1 == m2 == m3 == 0 and (l1 + l2 + l3) % 2:
+        return 0.0
 
     # phase (-1)^(l1-l2-m3)
     phase = -1.0 if ((l1 - l2 - m3) % 2) else 1.0

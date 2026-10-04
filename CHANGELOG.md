@@ -25,6 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   coupling, including single-level and multilevel sampled-far traversals.
 
 ### Changed
+- CuPy pairwise and MLFMM translation kernels now omit exactly forbidden
+  parity orders, reducing coefficient storage and contraction work without
+  restricting particle T-matrices.
 - Reorganized the public reproducibility surface: scaling, profiling, and
   independent MSTM validation drivers now live under `benchmarks/` rather
   than alongside the introductory files in `examples/`.

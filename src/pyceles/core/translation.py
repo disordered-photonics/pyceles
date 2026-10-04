@@ -10,7 +10,7 @@ from scipy.special import spherical_jn, spherical_yn
 
 from pyceles._arrays import expose_read_only_view
 
-from .indexing import index_vswf, iter_modes, n_modes
+from .indexing import _translation_orders, index_vswf, iter_modes, n_modes
 from .spherical import _legendre_scalar_tables, legendre_normalized_trigon_scalar
 from .wigner import wigner_3j
 
@@ -305,7 +305,7 @@ def _poly_linear_combo(
 def _translation_ab5_compact_tables_cached(
     lmax: int, dtype_str: str
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Return CELES-style flattened real/imag `ab5` tables for direct GPU kernels."""
+    """Return real/imag `ab5` tables packed over parity-admissible orders."""
     lmax = int(lmax)
     ab5 = np.asarray(_translation_ab5_table_cached(lmax, dtype_str))
     real_dtype = np.float32 if np.dtype(dtype_str) == np.dtype(np.complex64) else np.float64
@@ -313,8 +313,7 @@ def _translation_ab5_compact_tables_cached(
     im_entries: list[float] = []
     for tau1, l1, m1, n1 in iter_modes(lmax):
         for tau2, l2, m2, n2 in iter_modes(lmax):
-            p_min = max(abs(m1 - m2), abs(l1 - l2) + abs(tau1 - tau2))
-            for p in range(p_min, l1 + l2 + 1):
+            for p in _translation_orders(tau1, l1, m1, tau2, l2, m2):
                 entry = ab5[n1, n2, p]
                 re_entries.append(float(np.real(entry)))
                 im_entries.append(float(np.imag(entry)))
@@ -325,7 +324,7 @@ def _translation_ab5_compact_tables_cached(
 
 
 def _translation_ab5_compact_tables(lmax: int, dtype=np.complex64) -> tuple[np.ndarray, np.ndarray]:
-    """Return CELES-style flattened real/imag `ab5` tables for direct GPU kernels."""
+    """Return real/imag `ab5` tables packed over parity-admissible orders."""
     return _translation_ab5_compact_tables_cached(int(lmax), np.dtype(dtype).str)
 
 

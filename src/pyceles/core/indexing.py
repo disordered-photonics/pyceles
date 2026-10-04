@@ -82,6 +82,19 @@ def unindex_vswf(idx: int, lmax: int) -> tuple[int, int, int]:
     return l, m, tau
 
 
+def _translation_orders(tau1: int, l1: int, m1: int, tau2: int, l2: int, m2: int) -> range:
+    """Admissible translation orders for two valid SVWF modes, in steps of two.
+
+    The zero-m Wigner factor requires l1+l2+p to be even for equal
+    polarizations and odd for opposite polarizations. An empty range is
+    possible, e.g. opposite polarizations with abs(m1-m2) == l1+l2.
+    """
+    cross = int(tau1 != tau2)
+    p_min = max(abs(m1 - m2), abs(l1 - l2) + cross)
+    p_min += (l1 + l2 + cross + p_min) & 1
+    return range(p_min, l1 + l2 + 1, 2)
+
+
 def iter_modes(lmax: int) -> Iterator[tuple[int, int, int, int]]:
     """Yield (tau, l, m, idx) in CELES order."""
     lmax = int(lmax)

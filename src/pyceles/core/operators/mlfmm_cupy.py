@@ -23,7 +23,7 @@ from pyceles._cupy_memory import (
     cupy_allocator_snapshot,
 )
 from pyceles._optional import coerce_array, import_cupy
-from pyceles.core.indexing import index_vswf, iter_modes, n_modes
+from pyceles.core.indexing import _translation_orders, index_vswf, iter_modes, n_modes
 from pyceles.core.translation import (
     RadialLUT,
     _translation_ab5_compact_tables,
@@ -646,7 +646,8 @@ def _leaf_rect_pair_tables_and_ab(
 
     Unlike the full square CELES tables, this helper builds only the mode-pair
     subset needed by leaf on-the-fly aggregation/disaggregation:
-    `n_modes(box_order) x n_modes(particle_lmax)`.
+    `n_modes(box_order) x n_modes(particle_lmax)`. Entries within a pair
+    correspond to `p = pair_pmin + 2 * ip`, including zero-length ranges.
     """
 
     full = int(full_order)
@@ -678,19 +679,17 @@ def _leaf_rect_pair_tables_and_ab(
             l1 = int(mode_l_full[n_in_mode])
             m1 = int(mode_m_full[n_in_mode])
 
-            p_min = max(abs(m1 - m2), abs(l1 - l2) + abs(tau1 - tau2))
-            p_max = l1 + l2
-            p_count = p_max - p_min + 1
+            orders = _translation_orders(tau1, l1, m1, tau2, l2, m2)
             pair_meta_idx = out_local * n_in + in_local
             pair_offset[pair_meta_idx] = offset
-            pair_pmin[pair_meta_idx] = p_min
-            pair_pcount[pair_meta_idx] = p_count
+            pair_pmin[pair_meta_idx] = orders.start
+            pair_pcount[pair_meta_idx] = len(orders)
 
             phase_exp_base = abs(m1 - m2) - abs(m1) - abs(m2) + l2 - l1
             sign_dm = -1.0 if ((m1 - m2) % 2) else 1.0
             pref = np.sqrt((2 * l1 + 1) * (2 * l2 + 1) / (2 * l1 * (l1 + 1) * l2 * (l2 + 1)))
 
-            for p in range(p_min, p_max + 1):
+            for p in orders:
                 if tau1 == tau2:
                     i_phase = (1j) ** (phase_exp_base + p)
                     factor = (l1 * (l1 + 1) + l2 * (l2 + 1) - p * (p + 1)) * np.sqrt(2 * p + 1)
@@ -928,7 +927,7 @@ def _leaf_translation_blocks_rect_raw_kernel(full_order: int, dtype_name: str) -
             {real_t} re_acc = ({real_t})0.0;
             {real_t} im_acc = ({real_t})0.0;
             for (int ip = 0; ip < p_count; ++ip) {{
-                const int p = p_min + ip;
+                const int p = p_min + 2 * ip;
                 const int ab_idx = base + ip;
                 const {real_t} plm = p_pdm_shared[p * (p + 1) / 2 + abs(delta_m)];
                 const {real_t} re_abp = re_ab[ab_idx] * plm;
@@ -2962,7 +2961,7 @@ def _exact_leaf_pairs_raw_kernel(lmax: int, near_dtype_name: str, adjoint: bool 
                                 const int p_min = pair_pmin[pair_table_idx];
                                 const int p_count = pair_pcount[pair_table_idx];
                                 for (int ip = 0; ip < p_count; ++ip) {{
-                                    const int p = p_min + ip;
+                                    const int p = p_min + 2 * ip;
                                     const int ab_idx = base + ip;
                                     const {real_t} plm =
                                         p_pdm_shared[p * (p + 1) / 2 + abs(delta_m)];
@@ -4424,7 +4423,7 @@ def _leaf_otf_aggregate_fused_raw_kernel(full_order: int, coeff_dtype_name: str)
                         double re_acc = 0.0;
                         double im_acc = 0.0;
                         for (int ip = 0; ip < p_count; ++ip) {{
-                            const int p = p_min + ip;
+                            const int p = p_min + 2 * ip;
                             const int ab_idx = base + ip;
                             const double plm =
                                 p_pdm_shared[p * (p + 1) / 2 + abs(delta_m)];
@@ -4842,7 +4841,7 @@ def _leaf_otf_receive_fused_raw_kernel(full_order: int, threads: int) -> Any:
                         double re_sum = 0.0;
                         double im_sum = 0.0;
                         for (int ip = 0; ip < p_count; ++ip) {{
-                            const int p = p_min + ip;
+                            const int p = p_min + 2 * ip;
                             const int ab_idx = base + ip;
                             const double plm = p_pdm_shared[p * (p + 1) / 2 + abs(delta_m)];
                             const double re_abp = re_ab[ab_idx] * plm;

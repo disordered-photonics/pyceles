@@ -237,11 +237,11 @@ def _translation_matvec_raw_kernel(lmax: int, dtype_str: str):
                         const int base = pair_offset[pair_idx];
                         const int p_min = pair_pmin[pair_idx];
                         const int p_count = pair_pcount[pair_idx];
-                        // `pair_*` turns the CELES/SMUTHI triangular p-range for each
-                        // (n1, n2) pair into a simple flat interval in the compact ab5
-                        // arrays. That keeps the kernel inner loop branch-light.
+                        // The compact ab5 interval stores only parity-admissible
+                        // orders. Stride p by two without a per-term branch or an
+                        // additional order-index table.
                         for (int ip = 0; ip < p_count; ++ip) {{
-                            const int p = p_min + ip;
+                            const int p = p_min + 2 * ip;
                             const int ab_idx = base + ip;
                             const {real_type} plm = p_pdm_shared[p * (p + 1) / 2 + abs(delta_m)];
                             const {real_type} re_abp = re_ab[ab_idx] * plm;
@@ -412,7 +412,7 @@ def _translation_matvec_adjoint_raw_kernel(lmax: int, dtype_str: str):
                             const int p_min = pair_pmin[pair_idx];
                             const int p_count = pair_pcount[pair_idx];
                             for (int ip = 0; ip < p_count; ++ip) {{
-                                const int p = p_min + ip;
+                                const int p = p_min + 2 * ip;
                                 const int ab_idx = base + ip;
                                 const int absdm = delta_m < 0 ? -delta_m : delta_m;
                                 const {real_type} plm = p_pdm_shared[p * (p + 1) / 2 + absdm];

@@ -7,7 +7,7 @@ from functools import cache
 import numpy as np
 
 from pyceles._arrays import expose_read_only_view
-from pyceles.core.indexing import iter_modes, n_modes
+from pyceles.core.indexing import _translation_orders, iter_modes, n_modes
 
 
 @cache
@@ -43,11 +43,11 @@ def mode_tau_l_tables(lmax: int) -> tuple[np.ndarray, np.ndarray]:
 def mode_pair_p_range_tables(lmax: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Return compact translation-order ranges for every `(out_mode, in_mode)` pair.
 
-    The arrays encode the CELES/SMUTHI admissible `p` interval used by compact
-    translation kernels:
+    The arrays encode parity-admissible orders used by compact translation
+    kernels. Every consumer must visit `p = pair_pmin + 2 * ip`:
     - `pair_offset[n1, n2]`: starting offset into flattened compact tables,
     - `pair_pmin[n1, n2]`: first admissible translation order,
-    - `pair_pcount[n1, n2]`: number of consecutive orders to visit.
+    - `pair_pcount[n1, n2]`: number of stride-two orders (possibly zero).
     """
     order = int(lmax)
     nmodes_total = n_modes(order)
@@ -58,15 +58,18 @@ def mode_pair_p_range_tables(lmax: int) -> tuple[np.ndarray, np.ndarray, np.ndar
     offset = 0
     for n1 in range(nmodes_total):
         for n2 in range(nmodes_total):
-            p_min = max(
-                abs(int(mode_m[n1]) - int(mode_m[n2])),
-                abs(int(mode_l[n1]) - int(mode_l[n2])) + abs(int(mode_tau[n1]) - int(mode_tau[n2])),
+            orders = _translation_orders(
+                int(mode_tau[n1]),
+                int(mode_l[n1]),
+                int(mode_m[n1]),
+                int(mode_tau[n2]),
+                int(mode_l[n2]),
+                int(mode_m[n2]),
             )
-            p_count = int(mode_l[n1]) + int(mode_l[n2]) - p_min + 1
             pair_offset[n1, n2] = offset
-            pair_pmin[n1, n2] = p_min
-            pair_pcount[n1, n2] = p_count
-            offset += p_count
+            pair_pmin[n1, n2] = orders.start
+            pair_pcount[n1, n2] = len(orders)
+            offset += len(orders)
     return (
         expose_read_only_view(pair_offset),
         expose_read_only_view(pair_pmin),

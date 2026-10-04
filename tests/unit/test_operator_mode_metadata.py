@@ -60,11 +60,16 @@ def test_mode_pair_p_range_tables_match_translation_formula() -> None:
                 abs(int(mode_m[n1]) - int(mode_m[n2])),
                 abs(int(mode_l[n1]) - int(mode_l[n2])) + abs(int(mode_tau[n1]) - int(mode_tau[n2])),
             )
-            expected_pcount = int(mode_l[n1]) + int(mode_l[n2]) - expected_pmin + 1
+            p_max = int(mode_l[n1]) + int(mode_l[n2])
+            cross = int(mode_tau[n1] != mode_tau[n2])
+            expected = [p for p in range(expected_pmin, p_max + 1) if (p_max + p + cross) % 2 == 0]
+            start = int(pair_pmin[n1, n2])
+            count = int(pair_pcount[n1, n2])
             assert pair_offset[n1, n2] == offset
-            assert pair_pmin[n1, n2] == expected_pmin
-            assert pair_pcount[n1, n2] == expected_pcount
-            offset += expected_pcount
+            assert list(range(start, start + 2 * count, 2)) == expected
+            assert (p_max + start + cross) % 2 == 0
+            assert start in (expected_pmin, expected_pmin + 1)
+            offset += len(expected)
 
 
 def test_mode_pair_p_range_tables_are_read_only_and_cached() -> None:

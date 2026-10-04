@@ -134,12 +134,17 @@ def test_cupy_pairwise_partial_mode_tiles_match_numpy(
     ("compute_dtype", "tolerance"),
     ((np.complex64, 5.0e-6), (np.complex128, 1.0e-12)),
 )
+@pytest.mark.parametrize("lmax", (1, 5))
+@pytest.mark.parametrize("nrhs", (1, 3))
 def test_cupy_pairwise_adjoint_matches_inner_product(
-    compute_dtype: type[np.complexfloating[Any, Any]], tolerance: float
+    compute_dtype: type[np.complexfloating[Any, Any]],
+    tolerance: float,
+    lmax: int,
+    nrhs: int,
 ) -> None:
     particles = _small_cluster_particles()
     kwargs: dict[str, Any] = dict(
-        lmax=1,
+        lmax=lmax,
         k=2.0 * np.pi / 550.0,
         particles=particles,
         n_medium=1.0 + 0j,
@@ -150,13 +155,60 @@ def test_cupy_pairwise_adjoint_matches_inner_product(
     )
     prepared = prepare_matvec(**kwargs, backend="cupy")
     rng = np.random.default_rng(20260912)
-    n = len(particles) * n_modes(1)
-    x = np.asarray(rng.standard_normal(n) + 1j * rng.standard_normal(n), dtype=compute_dtype)
-    y = np.asarray(rng.standard_normal(n) + 1j * rng.standard_normal(n), dtype=compute_dtype)
+    n = len(particles) * n_modes(lmax)
+    shape = (n,) if nrhs == 1 else (n, nrhs)
+    x = np.asarray(
+        rng.standard_normal(shape) + 1j * rng.standard_normal(shape), dtype=compute_dtype
+    )
+    y = np.asarray(
+        rng.standard_normal(shape) + 1j * rng.standard_normal(shape), dtype=compute_dtype
+    )
     coupling = cast(AdjointCouplingOperator, prepared.coupling)
     lhs = np.vdot(asnumpy(coupling.apply(x)), y)
     rhs = np.vdot(x, asnumpy(coupling.apply_adjoint(y)))
     assert abs(lhs - rhs) / max(abs(lhs), abs(rhs), 1.0) < tolerance
+
+
+@pytest.mark.parametrize("compute_dtype", (np.complex64, np.complex128))
+def test_cupy_parity_translation_preserves_general_dense_t_blocks(compute_dtype) -> None:
+    """Translation parity must not impose particle-T polarization or m symmetry."""
+    lmax = 3
+    nm = n_modes(lmax)
+    rng = np.random.default_rng(20261003)
+    particles = tuple(
+        pcl.TMatrixParticle(
+            position=position,
+            radius=30.0,
+            lmax=lmax,
+            t_matrix=(
+                0.01 * (rng.standard_normal((nm, nm)) + 1j * rng.standard_normal((nm, nm)))
+            ).astype(compute_dtype),
+        )
+        for position in ((0.0, 0.0, 0.0), (220.0, 25.0, -60.0), (-180.0, 90.0, 70.0))
+    )
+    kwargs = dict(
+        lmax=lmax,
+        k=2.0 * np.pi / 550.0,
+        particles=particles,
+        n_medium=1.0 + 0j,
+        radial_lut_dr=0.5,
+        cache_translation_blocks=False,
+        operator_dtype=compute_dtype,
+    )
+    reference = prepare_matvec(**kwargs, backend="numpy")
+    device = prepare_matvec(**kwargs, backend="cupy")
+    x = (rng.standard_normal((3 * nm, 3)) + 1j * rng.standard_normal((3 * nm, 3))).astype(
+        compute_dtype
+    )
+    tolerance = 2e-5 if compute_dtype == np.complex64 else 2e-12
+    for actual, expected in (
+        (device.apply_A(x), np.column_stack([reference.apply_A(column) for column in x.T])),
+        (
+            device.apply_adjoint(x),
+            np.column_stack([reference.apply_adjoint(column) for column in x.T]),
+        ),
+    ):
+        np.testing.assert_allclose(asnumpy(actual), expected, rtol=tolerance, atol=tolerance)
 
 
 def _plane_wave_source(wavelength: float, n_medium: complex) -> pcl.PlaneWave:
