@@ -20,7 +20,12 @@ COMPLEX128_DTYPE = np.dtype(np.complex128)
 
 @runtime_checkable
 class CouplingOperator(Protocol):
-    """Prepared many-body coupling operator `W`."""
+    """Prepared many-body coupling operator `W`.
+
+    Full-vector actions return writable results independent of the input and
+    of reusable operator workspace. A result must remain valid after later
+    forward or adjoint calls. Views of a fresh result allocation are fine.
+    """
 
     def apply(self, x: Array) -> Array: ...
 

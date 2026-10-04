@@ -89,6 +89,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   normal allocation or factorization limits.
 
 ### Fixed
+- CuPy MLFMM actions now return independently owned results, preserving live
+  complex128 vectors across subsequent forward/adjoint actions and LSQR steps.
 - Public immutable experiment descriptors, particle collections, and result
   arrays now own their backing storage so callers cannot reopen read-only views
   and invalidate prepared state. Process-global numerical tables are sealed by

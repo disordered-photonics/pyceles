@@ -2741,6 +2741,30 @@ def _restore_unknown_shape(y: Any, *, squeezed: bool) -> Any:
     return y.reshape(n_particles * nm, nrhs)
 
 
+def _combine_near_far_outputs(
+    y_near: Any,
+    y_far: Any,
+    *,
+    out_dtype: np.dtype,
+    far_is_workspace: bool,
+    cupy: Any,
+) -> Any:
+    """Combine in far precision, transferring only exclusively owned storage.
+
+    Cached ``y_states`` must not escape as a live Krylov vector: the next
+    action clears that buffer. Fresh far results can instead become the output
+    directly when their dtype already matches. The ufunc widens near values
+    and narrows the sum per element, without a full promoted near temporary.
+    """
+
+    if not far_is_workspace and np.dtype(y_far.dtype) == np.dtype(out_dtype):
+        result = y_far
+    else:
+        result = cupy.empty(y_far.shape, dtype=_cupy_complex_dtype(out_dtype, cupy=cupy))
+    cupy.add(y_far, y_near, out=result, dtype=cupy.complex128)
+    return result
+
+
 @cache
 def _exact_leaf_pairs_raw_kernel(lmax: int, near_dtype_name: str, adjoint: bool = False) -> Any:
     cupy, _ = import_cupy()
@@ -9273,8 +9297,10 @@ class CuPyMLFMMCouplingOperator:
         if stream_stats is not None:
             stream_stats.pop("_internal_same_level_source_union_history", None)
         self._last_stream_stats = None if stream_stats is None else dict(stream_stats)
-        y_total = cupy.asarray(y_far, dtype=cupy.complex128)
-        y_total += cupy.asarray(y_near, dtype=cupy.complex128)
+        # Both forward traversals return cached y_states, not transferable storage.
+        y_total = _combine_near_far_outputs(
+            y_near, y_far, out_dtype=out_dtype, far_is_workspace=True, cupy=cupy
+        )
         combine_elapsed = elapsed_after_device_work(combine_started)
         self._update_device_pool_peak(cupy=cupy)
         if collect_apply_timing:
@@ -9288,10 +9314,7 @@ class CuPyMLFMMCouplingOperator:
             }
         else:
             self._last_apply_timing_seconds = None
-        return _restore_unknown_shape(
-            y_total.astype(_cupy_complex_dtype(out_dtype, cupy=cupy), copy=False),
-            squeezed=squeezed,
-        )
+        return _restore_unknown_shape(y_total, squeezed=squeezed)
 
     def apply_adjoint(self, x: Any) -> Any:
         """Apply the Hermitian adjoint of the finite MLFMM coupling on device.
@@ -9353,6 +9376,9 @@ class CuPyMLFMMCouplingOperator:
         )
         near_elapsed = elapsed_after_device_work(near_started)
         stage = str(self.prepared_data.stage)
+        # Resident adjoint paths allocate their far output; only the streamed
+        # multilevel path below borrows reusable y_states.
+        far_is_workspace = False
         resolved_leaf_otf_bytes_budget: int | None = None
         resolved_streamed_far_chunk_box_cap: int | None = None
         resolved_streamed_far_frontier_box_cap: int | None = None
@@ -9421,6 +9447,7 @@ class CuPyMLFMMCouplingOperator:
                     stream_stats = {"action": "adjoint"}
                 far_setup_elapsed += elapsed_after_device_work(far_setup_started)
                 far_started = start_timer()
+                far_is_workspace = True
                 y_far = _apply_multilevel_far_adjoint_streamed(
                     self.prepared_data,
                     x_states,
@@ -9463,8 +9490,9 @@ class CuPyMLFMMCouplingOperator:
         )
         self._last_stream_stats = None if stream_stats is None else dict(stream_stats)
         combine_started = start_timer()
-        y_total = cupy.asarray(y_far, dtype=cupy.complex128)
-        y_total += cupy.asarray(y_near, dtype=cupy.complex128)
+        y_total = _combine_near_far_outputs(
+            y_near, y_far, out_dtype=out_dtype, far_is_workspace=far_is_workspace, cupy=cupy
+        )
         combine_elapsed = elapsed_after_device_work(combine_started)
         self._update_device_pool_peak(cupy=cupy)
         if collect_apply_timing:
@@ -9477,10 +9505,7 @@ class CuPyMLFMMCouplingOperator:
             }
         else:
             self._last_apply_timing_seconds = None
-        return _restore_unknown_shape(
-            y_total.astype(_cupy_complex_dtype(out_dtype, cupy=cupy), copy=False),
-            squeezed=squeezed,
-        )
+        return _restore_unknown_shape(y_total, squeezed=squeezed)
 
     def __getstate__(self) -> dict[str, Any]:
         raise TypeError(

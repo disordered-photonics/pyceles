@@ -23,6 +23,7 @@ from pyceles.core.operators import (
 )
 from pyceles.core.operators.mlfmm_cupy import (
     _box_outgoing_to_directional_cupy,
+    _combine_near_far_outputs,
     _directional_to_box_regular_cupy,
     _upload_directional_transforms,
     _upload_offset_batches,
@@ -1042,6 +1043,16 @@ def test_cupy_mlfmm_dense_receive_cache_uses_stable_group_identity() -> None:
     assert (
         second_workspace["leaf_receive_cache_bytes"] == first_workspace["leaf_receive_cache_bytes"]
     )
+    # Resident reverse outputs are fresh allocations; forwarding their values
+    # must preserve them just as it preserves streamed action results.
+    retained_reverse = runtime.apply_adjoint(x)
+    saved_reverse = asnumpy(retained_reverse)
+    retained_forward = runtime.apply(retained_reverse)
+    saved_forward = asnumpy(retained_forward)
+    runtime.apply_adjoint(-x)
+    runtime.apply(x)
+    np.testing.assert_array_equal(asnumpy(retained_reverse), saved_reverse)
+    np.testing.assert_array_equal(asnumpy(retained_forward), saved_forward)
 
 
 @pytest.mark.parametrize(
@@ -1240,6 +1251,7 @@ def test_cupy_mlfmm_prepared_operator_matches_numpy_reference(
     adjoint_numpy = np.asarray(prepared_numpy.coupling.apply_adjoint(x), dtype=np.complex128)
     adjoint_cupy = np.asarray(asnumpy(prepared_cupy.coupling.apply_adjoint(x)), dtype=np.complex128)
     np.testing.assert_allclose(adjoint_cupy, adjoint_numpy, rtol=1e-10, atol=1e-10)
+    _assert_mlfmm_live_results_survive_composition(prepared_cupy, x)
 
 
 @pytest.mark.parametrize("expected_stage", ("single_level", "multilevel"))
@@ -1414,6 +1426,7 @@ def test_cupy_mlfmm_prepared_operator_block_rhs_matches_columnwise() -> None:
         ]
     )
     np.testing.assert_allclose(y_block, y_cols, rtol=1e-10, atol=1e-10)
+    _assert_mlfmm_live_results_survive_composition(prepared_cupy, x_block)
 
 
 def test_cupy_mlfmm_complex64_request_matches_numpy_with_far_complex128() -> None:
@@ -1467,6 +1480,7 @@ def test_cupy_mlfmm_complex64_request_matches_numpy_with_far_complex128() -> Non
     y_cupy = np.asarray(asnumpy(prepared_cupy.apply_W(x)), dtype=np.complex64)
     assert y_cupy.dtype == np.dtype(np.complex64)
     np.testing.assert_allclose(y_cupy, y_numpy, rtol=1e-4, atol=1e-5)
+    _assert_mlfmm_live_results_survive_composition(prepared_cupy, x)
 
 
 @pytest.mark.parametrize(
@@ -1698,3 +1712,56 @@ def test_cupy_mixed_particle_groups_match_numpy_for_solve_and_backscatter() -> N
         rtol=5e-8,
         atol=5e-10,
     )
+
+
+def _assert_mlfmm_live_results_survive_composition(prepared: Any, x: Any) -> None:
+    """Reuse prepared fixtures to check the live vectors needed by LSQR."""
+    cupy, _ = import_cupy()
+    x = cupy.asarray(x)
+    before = x.copy()
+    forward = prepared.apply_W(x)
+    forward_before = forward.copy()
+    adjoint = prepared.apply_adjoint(x)
+    adjoint_before = adjoint.copy()
+    # A(v) must not clear the workspace backing its live A^H(u) input.
+    prepared.apply_A(adjoint)
+    np.testing.assert_array_equal(asnumpy(adjoint), asnumpy(adjoint_before))
+    np.testing.assert_array_equal(asnumpy(forward), asnumpy(forward_before))
+    np.testing.assert_array_equal(asnumpy(x), asnumpy(before))
+
+
+@pytest.mark.parametrize("out_dtype", (np.complex64, np.complex128))
+@pytest.mark.parametrize("near_dtype", (np.complex64, np.complex128))
+def test_mlfmm_near_far_combination_owns_output_and_keeps_wide_sum(out_dtype, near_dtype) -> None:
+    cupy, _ = import_cupy()
+    # Narrowing far before addition would erase the small residual entirely.
+    far_host = np.asarray([2.0**25 + 0.5, -(2.0**25) + 0.25j], dtype=np.complex128)
+    near_host = np.asarray([-(2.0**25), 2.0**25], dtype=near_dtype)
+    far = cupy.asarray(far_host).reshape(1, 2, 1)
+    near = cupy.asarray(near_host).reshape(1, 2, 1)
+    result = _combine_near_far_outputs(
+        near, far, out_dtype=np.dtype(out_dtype), far_is_workspace=True, cupy=cupy
+    )
+    expected = (far_host + near_host.astype(np.complex128)).astype(out_dtype)
+    assert result.dtype == np.dtype(out_dtype)
+    np.testing.assert_array_equal(asnumpy(result).reshape(-1), expected)
+    np.testing.assert_array_equal(asnumpy(far).reshape(-1), far_host)
+    np.testing.assert_array_equal(asnumpy(near).reshape(-1), near_host)
+    assert not cupy.shares_memory(result, far)
+    assert not cupy.shares_memory(result, near)
+    far.fill(0)
+    near.fill(0)
+    np.testing.assert_array_equal(asnumpy(result).reshape(-1), expected)
+
+
+@pytest.mark.parametrize("near_dtype", (np.complex64, np.complex128))
+def test_mlfmm_near_far_combination_transfers_fresh_far_storage(near_dtype) -> None:
+    cupy, _ = import_cupy()
+    far = cupy.asarray([2.0**25 + 0.5], dtype=cupy.complex128)
+    near = cupy.asarray([-(2.0**25)], dtype=near_dtype)
+    result = _combine_near_far_outputs(
+        near, far, out_dtype=np.dtype(np.complex128), far_is_workspace=False, cupy=cupy
+    )
+    assert result is far
+    np.testing.assert_array_equal(asnumpy(result), np.asarray([0.5]))
+    np.testing.assert_array_equal(asnumpy(near), np.asarray([-(2.0**25)], dtype=near_dtype))
