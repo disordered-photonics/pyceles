@@ -81,6 +81,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Exact adjoint paths reuse forward dense T/coupling storage and bound
   Rayleigh reverse-scan metadata, reducing persistent memory for dense and
   periodic adjoint workloads.
+- CuPy particle-local `T` dispatch now prepares immutable group and index
+  metadata once, reusing the device layout across repeated forward and
+  adjoint applications.
+- CuPy BiCGSTAB reuses its owned residual workspace through each iteration,
+  avoiding a full-vector copy on the ordinary recurrence path.
+- Finite CuPy geometry retains float64 coordinates until fused displacement
+  subtraction, while coordinate-coincidence checks use bounded absolute
+  infinity-norm queries instead of relative all-pairs comparisons.
 - Reference LSQR continuation now uses the same physical stopping semantics as
   native LSQR and reports forward/adjoint action counts consistently.
 - Breaking: solver selection is now explicit. `auto` is no longer accepted,
@@ -95,6 +103,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   arrays now own their backing storage so callers cannot reopen read-only views
   and invalidate prepared state. Process-global numerical tables are sealed by
   the same ownership rule, preventing accidental cache corruption.
+- Integer-valued source orders now reject nonintegral inputs without
+  tolerance-based rounding.
 
 ## [0.5.0] - 2026-09-05
 
