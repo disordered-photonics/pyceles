@@ -126,7 +126,7 @@ def _translation_matvec_raw_kernel(lmax: int, dtype_str: str):
         const int ns,
         const int nmodes,
         const int nrhs,
-        const {real_type}* positions,
+        const double* positions,
         const {real_type}* re_h,
         const {real_type}* im_h,
         const {real_type} inv_dr,
@@ -337,7 +337,7 @@ def _translation_matvec_adjoint_raw_kernel(lmax: int, dtype_str: str):
     }}
     extern "C" __global__ void {kernel_name}(
         const int ns, const int nmodes, const int nrhs,
-        const {real_type}* positions, const {real_type}* re_h,
+        const double* positions, const {real_type}* re_h,
         const {real_type}* im_h, const {real_type} inv_dr,
         const int last_index, const {real_type}* plm_coeffs,
         const {real_type}* re_ab, const {real_type}* im_ab,
@@ -491,7 +491,12 @@ class CuPyPairwiseCouplingOperator:
         cupy, _ = import_cupy()
         real_dtype = self.real_dtype
         if self._positions_gpu is None:
-            self._positions_gpu = cupy.asarray(self.positions, dtype=real_dtype).reshape(-1)
+            # Subtract absolute coordinates in float64 inside the kernel,
+            # then narrow the displacement to the compute precision. Casting
+            # positions first can merge distinct particles far from the origin.
+            self._positions_gpu = cupy.asarray(
+                np.ascontiguousarray(self.positions, dtype=np.float64).reshape(-1)
+            )
         if self._compact_re_ab_gpu is None or self._compact_im_ab_gpu is None:
             re_ab, im_ab = _translation_ab5_compact_tables(self.lmax, dtype=self.dtype)
             self._compact_re_ab_gpu = cupy.asarray(re_ab, dtype=real_dtype)

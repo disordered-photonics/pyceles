@@ -264,8 +264,8 @@ def _scattered_field_raw_kernel(
         const int n_r,
         const ACC_REAL medium_re,
         const ACC_REAL medium_im,
-        const REAL* points,
-        const REAL* positions,
+        const double* points,
+        const double* positions,
         const COMPUTE_COMPLEX* coeffs,
         const REAL* h_re,
         const REAL* h_im,
@@ -284,9 +284,9 @@ def _scattered_field_raw_kernel(
         ACC_COMPLEX ez((ACC_REAL)0, (ACC_REAL)0);
         {magnetic_locals}
 
-        const REAL px = points[3 * point + 0];
-        const REAL py = points[3 * point + 1];
-        const REAL pz = points[3 * point + 2];
+        const double px = points[3 * point + 0];
+        const double py = points[3 * point + 1];
+        const double pz = points[3 * point + 2];
 
         for (int source_idx = tid; source_idx < n_sources; source_idx += {_BLOCK_SIZE}) {{
             const REAL dx = px - positions[source_idx];
@@ -385,16 +385,18 @@ def compute_scattered_field_cupy_fused(
     real_dtype = np.dtype(np.float32 if compute_dtype == np.dtype(np.complex64) else np.float64)
     accum_real_dtype = np.dtype(np.float32 if accum_dtype == np.dtype(np.complex64) else np.float64)
 
-    pts = np.asarray(field_points, dtype=real_dtype).reshape(-1, 3)
-    pos = np.asarray(positions, dtype=real_dtype).reshape(-1, 3)
+    # Geometry is independent of field compute precision: retain coordinates
+    # through subtraction, then evaluate radial/angular functions in REAL.
+    pts = np.asarray(field_points, dtype=np.float64).reshape(-1, 3)
+    pos = np.asarray(positions, dtype=np.float64).reshape(-1, 3)
     coeff_arr = np.asarray(coeffs, dtype=compute_dtype).reshape(pos.shape[0], n_modes(int(lmax)))
     if pts.shape[0] == 0 or pos.shape[0] == 0:
         empty = np.zeros((pts.shape[0], 3), dtype=accum_dtype)
         return empty, empty.copy() if compute_magnetic else None
 
     h_re, h_im, d_re, d_im = _packed_lut_arrays(lut, real_dtype=real_dtype)
-    pts_cp = cupy.asarray(pts.reshape(-1), dtype=real_dtype)
-    pos_cp = cupy.asarray(np.ascontiguousarray(pos.T).reshape(-1), dtype=real_dtype)
+    pts_cp = cupy.asarray(np.ascontiguousarray(pts).reshape(-1), dtype=cupy.float64)
+    pos_cp = cupy.asarray(np.ascontiguousarray(pos.T).reshape(-1), dtype=cupy.float64)
     coeff_cp = cupy.asarray(np.ascontiguousarray(coeff_arr.T).reshape(-1), dtype=compute_dtype)
     h_re_cp = cupy.asarray(h_re, dtype=real_dtype)
     h_im_cp = cupy.asarray(h_im, dtype=real_dtype)

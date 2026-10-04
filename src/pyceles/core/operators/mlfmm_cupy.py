@@ -1998,8 +1998,10 @@ def _build_mlfmm_cupy_host_cache(
         n_particles=int(np.asarray(coupling.positions).shape[0]),
         leaf_particle_offsets=np.ascontiguousarray(leaf_offsets, dtype=np.int32),
         leaf_particle_indices=np.ascontiguousarray(leaf_indices, dtype=np.int32),
+        # Preserve absolute geometry until the exact-near kernel forms each
+        # displacement. Only that difference may be narrowed to near_dtype.
         near_positions_flat=np.ascontiguousarray(
-            np.asarray(coupling.positions, dtype=real_dtype).reshape(-1)
+            np.asarray(coupling.positions, dtype=np.float64).reshape(-1)
         ),
         near_dst_leaf_indices=np.ascontiguousarray(dst_leaf_indices, dtype=np.int32),
         near_src_leaf_indices=np.ascontiguousarray(src_leaf_indices, dtype=np.int32),
@@ -2629,7 +2631,7 @@ def _upload_exact_near_pair_data_from_host_cache(
         near_dtype=near_dtype,
         positions=cupy.asarray(
             np.ascontiguousarray(np.asarray(cache.near_positions_flat).reshape(-1)),
-            dtype=cupy_real_dtype,
+            dtype=cupy.float64,
             blocking=True,
         ),
         leaf_particle_offsets=cupy.asarray(
@@ -2856,7 +2858,7 @@ def _exact_leaf_pairs_raw_kernel(lmax: int, near_dtype_name: str, adjoint: bool 
         const int n_leaf_pairs,
         const int nmodes,
         const int nrhs,
-        const {real_t}* positions,
+        const double* positions,
         const int skip_identity,
         const int* dst_leaf_indices,
         const int* src_leaf_indices,
@@ -9575,8 +9577,9 @@ def prepare_mlfmm_cupy_data(
     -------
     CuPyMLFMMPreparedData
         Device-resident representation of all repeated-apply data needed by
-        the CuPy MLFMM apply path. Exact-near payload dtype follows
-        `coupling.near_dtype`; sampled-far payloads stay on complex128.
+        the CuPy MLFMM apply path. Exact-near field payload dtype follows
+        `coupling.near_dtype`; absolute coordinates retain float64 until
+        subtraction. Sampled-far payloads stay on complex128.
     """
 
     cupy, _ = import_cupy()
