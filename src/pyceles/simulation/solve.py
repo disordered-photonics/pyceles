@@ -374,9 +374,12 @@ def _prepare_linear_system(
     n_particles = sim.positions.shape[0]
     modes_per_particle = n_modes(cfg.lmax)
     unknowns = n_particles * modes_per_particle
-    rhs_flat = {label: np.zeros((unknowns,), dtype=accum_dtype) for label in labels}
     if unknowns == 0:
+        rhs_flat = {label: np.zeros((0,), dtype=accum_dtype) for label in labels}
         return _PreparedLinearSystem(None, rhs_flat, None, None, None)
+    # Each transformed source owns its output; do not allocate placeholders
+    # that would all be overwritten after the operator has been prepared.
+    rhs_flat = {}
 
     periodic_key = (
         None
@@ -394,6 +397,10 @@ def _prepare_linear_system(
     if operator_is_current:
         prepared = sim._prepared_operator_cache
     else:
+        # The old operator and its derived dense/LU caches cannot serve this
+        # system. Drop our references before allocating their replacements.
+        # If preparation fails, leave the cache empty rather than stale.
+        sim.clear_caches()
         prepare_t0 = time.perf_counter()
         prepared = prepare_matvec(
             lmax=cfg.lmax,
@@ -416,10 +423,6 @@ def _prepare_linear_system(
         sim._prepared_operator_dtype = compute_dtype
         sim._prepared_operator_accum_dtype = accum_dtype
         sim._prepared_operator_periodic_key = periodic_key
-        sim._dense_operator_cache = None
-        sim._dense_operator_dtype = None
-        sim._dense_lu_cache = None
-        sim._dense_lu_dtype = None
 
     if prepared is None:
         raise RuntimeError("Internal error: prepared operator cache not initialized.")

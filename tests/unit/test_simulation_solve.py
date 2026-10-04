@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import weakref
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -557,3 +558,111 @@ def test_multi_source_projection_progress_counts_channels(monkeypatch):
     assert progress_calls == [
         (("left", "right"), "Source projection", "channel"),
     ]
+
+
+@pytest.mark.parametrize("preparation_fails", [False, True])
+def test_operator_cache_miss_releases_old_payloads_before_preparing(monkeypatch, preparation_fails):
+    sim = _single_sphere_sim()
+    dtype = np.dtype(np.complex128)
+
+    class _Prepared:
+        def apply_A(self, x):
+            return np.asarray(x)
+
+        def rhs_Tb(self, b):
+            return np.asarray(b).copy()
+
+    old = _Prepared()
+    dense = np.eye(6, dtype=dtype)
+    lu = _Prepared()  # Weak-referenceable stand-in for a factorization owner.
+    refs = (weakref.ref(old), weakref.ref(dense), weakref.ref(lu))
+    sim._prepared_operator_cache = cast(Any, old)
+    sim._prepared_operator_dtype = dtype
+    sim._prepared_operator_accum_dtype = dtype
+    sim._prepared_operator_periodic_key = (0.0, 0.0)
+    sim._dense_operator_cache = dense
+    sim._dense_operator_dtype = dtype
+    sim._dense_lu_cache = cast(Any, lu)
+    sim._dense_lu_dtype = dtype
+    del old, dense, lu
+
+    def _prepare(**kwargs):
+        assert all(ref() is None for ref in refs)
+        assert sim._prepared_operator_cache is None
+        assert sim._prepared_operator_dtype is None
+        assert sim._prepared_operator_accum_dtype is None
+        assert sim._prepared_operator_periodic_key is None
+        assert sim._dense_operator_cache is None
+        assert sim._dense_operator_dtype is None
+        assert sim._dense_lu_cache is None
+        assert sim._dense_lu_dtype is None
+        if preparation_fails:
+            raise RuntimeError("deliberate preparation failure")
+        return _Prepared()
+
+    monkeypatch.setattr(sim_solve, "prepare_matvec", _prepare)
+    kwargs: dict[str, Any] = dict(
+        labels=("src",),
+        initial_coeffs={"src": np.ones((1, 6), dtype=dtype)},
+        k=2 * np.pi / 550.0,
+        k_parallel=np.array([0.1, 0.2]),
+        compute_dtype=dtype,
+        accum_dtype=dtype,
+        will_use_direct=False,
+        phase_timings={},
+    )
+    if preparation_fails:
+        with pytest.raises(RuntimeError, match="deliberate preparation failure"):
+            sim_solve._prepare_linear_system(sim, **kwargs)
+        assert sim._prepared_operator_cache is None
+        assert sim._prepared_operator_periodic_key is None
+        assert sim._dense_lu_cache is None
+    else:
+        result = sim_solve._prepare_linear_system(sim, **kwargs)
+        assert sim._prepared_operator_cache is result.prepared_operator
+        assert sim._prepared_operator_periodic_key == (0.1, 0.2)
+        np.testing.assert_array_equal(result.rhs_flat["src"], np.ones(6))
+
+
+def test_operator_cache_hit_preserves_operator_and_derived_payloads(monkeypatch):
+    sim = _single_sphere_sim()
+    dtype = np.dtype(np.complex128)
+
+    class _Prepared:
+        def apply_A(self, x):
+            return np.asarray(x)
+
+        def rhs_Tb(self, b):
+            return np.asarray(b).copy()
+
+    prepared = _Prepared()
+    dense = np.eye(6, dtype=dtype)
+    lu = _Prepared()
+    sim._prepared_operator_cache = cast(Any, prepared)
+    sim._prepared_operator_dtype = dtype
+    sim._prepared_operator_accum_dtype = dtype
+    sim._prepared_operator_periodic_key = None
+    sim._dense_operator_cache = dense
+    sim._dense_operator_dtype = dtype
+    sim._dense_lu_cache = cast(Any, lu)
+    sim._dense_lu_dtype = dtype
+
+    def _unexpected_prepare(**kwargs):
+        raise AssertionError("a cache hit must not prepare an operator")
+
+    monkeypatch.setattr(sim_solve, "prepare_matvec", _unexpected_prepare)
+    result = sim_solve._prepare_linear_system(
+        sim,
+        labels=("src",),
+        initial_coeffs={"src": np.ones((1, 6), dtype=dtype)},
+        k=2 * np.pi / 550.0,
+        k_parallel=None,
+        compute_dtype=dtype,
+        accum_dtype=dtype,
+        will_use_direct=False,
+        phase_timings={},
+    )
+    assert result.prepared_operator is cast(Any, prepared)
+    assert sim._prepared_operator_cache is prepared
+    assert sim._dense_operator_cache is dense
+    assert sim._dense_lu_cache is lu

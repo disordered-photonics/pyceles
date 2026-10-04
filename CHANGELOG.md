@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   coupling, including single-level and multilevel sampled-far traversals.
 
 ### Changed
+- Simulation cache replacement now releases obsolete operator and dense/LU
+  assets before preparing the new system.
 - Reduced overlapping Krylov allocations at restart and bounded the widened
   basis workspace in mixed-precision CuPy classical Gram-Schmidt reconstruction.
 - CuPy pairwise and MLFMM translation kernels now omit exactly forbidden
