@@ -22,6 +22,42 @@ from pyceles.linear.solvers import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _numpy_givens_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the NumPy test double out of the production CUDA implementation."""
+    from scipy.linalg.lapack import get_lapack_funcs
+
+    from pyceles.linear import _gcro_cupy
+
+    device_update = krylov_cupy._apply_givens_rotation
+
+    def update(h_rows, cs, sn, g, col, *, residual):
+        if not isinstance(h_rows, np.ndarray):
+            return device_update(h_rows, cs, sn, g, col, residual=residual)
+        h = h_rows[col]
+        for row in range(col):
+            a, b = h[row], h[row + 1]
+            c, s = cs[row].real, sn[row]
+            h[row] = c * a + s * b
+            h[row + 1] = -s.conjugate() * a + c * b
+        a, b = h[col], h[col + 1]
+        if b == 0:
+            c, s, r = 1.0, 0.0j, a
+        elif a == 0:
+            c, s, r = 0.0, 1.0 + 0.0j, b
+        else:
+            c, s, r = get_lapack_funcs("lartg", (h_rows,))(a, b)
+        cs[col], sn[col] = c, s
+        h[col], h[col + 1] = r, 0.0j
+        rhs = g[col]
+        g[col], g[col + 1] = c * rhs, -s.conjugate() * rhs
+        residual[...] = abs(g[col + 1])
+        return float(residual)
+
+    monkeypatch.setattr(krylov_cupy, "_apply_givens_rotation", update)
+    monkeypatch.setattr(_gcro_cupy, "_apply_givens_rotation", update)
+
+
 def _fake_cupy_numpy_backend():
     class _FakeCuPy:
         @staticmethod

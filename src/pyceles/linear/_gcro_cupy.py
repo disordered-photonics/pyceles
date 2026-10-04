@@ -21,11 +21,11 @@ import numpy as np
 import numpy.typing as npt
 
 from .krylov_cupy import (
+    _apply_givens_rotation,
     _as_device_matrix,
     _as_device_vector,
     _dot,
     _dtype_complex,
-    _givens_complex,
     _norm,
     _resolve_accum_dtype,
     _solve_rotated_upper,
@@ -375,6 +375,9 @@ def gcro_cupy_native(
     target_abs = max(float(atol), float(rtol) * b_norm)
     eps = float(np.finfo(op_dtype).eps)
     breakdown = max(float(breakdown_tol), np.finfo(float).tiny)
+    givens_residual = cupy.empty(
+        (), dtype=np.float64 if acc_dtype == np.dtype(np.complex128) else np.float32
+    )
     proxy_history: list[float] = []
     true_history: list[float] = []
 
@@ -479,32 +482,10 @@ def gcro_cupy_native(
                 cycle_breakdown = True
                 cycle_breakdown_reason = "happy_breakdown"
 
-            for row in range(col):
-                c_old = cs[row].copy()
-                s_old = sn[row].copy()
-                h0 = H_rot[col, row].copy()
-                h1 = H_rot[col, row + 1].copy()
-                H_rot[col, row] = c_old * h0 + s_old * h1
-                H_rot[col, row + 1] = -cupy.conj(s_old) * h0 + c_old * h1
-            c_new, s_new = _givens_complex(
-                H_rot[col, col],
-                H_rot[col, col + 1],
-                cupy=cupy,
-                accum_dtype=acc_dtype,
-            )
-            cs[col] = c_new
-            sn[col] = s_new
-            h0 = H_rot[col, col].copy()
-            h1 = H_rot[col, col + 1].copy()
-            H_rot[col, col] = c_new * h0 + s_new * h1
-            H_rot[col, col + 1] = cupy.asarray(0.0, dtype=acc_dtype)
-            g0 = g[col].copy()
-            g[col] = c_new * g0
-            g[col + 1] = -cupy.conj(s_new) * g0
+            proxy_abs = _apply_givens_rotation(H_rot, cs, sn, g, col, residual=givens_residual)
 
             k_used = col + 1
             iterations += 1
-            proxy_abs = float(cupy.abs(g[col + 1]))
             proxy_relative = proxy_abs / b_norm if b_norm > 0.0 else proxy_abs
             if record_proxy_history:
                 proxy_history.append(float(proxy_relative))

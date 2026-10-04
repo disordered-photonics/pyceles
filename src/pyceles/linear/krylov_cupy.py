@@ -438,32 +438,113 @@ def _apply_block_preconditioner(
     return y
 
 
-def _givens_complex(a: Any, b: Any, *, cupy: Any, accum_dtype: np.dtype) -> tuple[Any, Any]:
-    """Return complex Givens factors `(c, s)` such that:
+@cache
+def _givens_update_kernel(accum_dtype_name: str) -> Any:
+    """One ordered QR update of a contiguous Hessenberg row and its RHS.
 
-      [conj(c)  conj(s)] [a] = [r]
-      [  -s        c   ] [b]   [0]
-
-    with unitary rotation and `r` real/positive when possible.
+    Consecutive rotations share an entry, so the short recurrence is serial.
+    One CUDA thread replaces O(column) launches, not the parallel Arnoldi work.
     """
-    abs_a = cupy.abs(a)
-    abs_b = cupy.abs(b)
-    if float(abs_b) == 0.0:
-        return (
-            cupy.asarray(1.0 + 0.0j, dtype=accum_dtype),
-            cupy.asarray(0.0 + 0.0j, dtype=accum_dtype),
-        )
-    if float(abs_a) == 0.0:
-        return (
-            cupy.asarray(0.0 + 0.0j, dtype=accum_dtype),
-            cupy.asarray(1.0 + 0.0j, dtype=accum_dtype),
-        )
-    scale = abs_a + abs_b
-    norm = scale * cupy.sqrt((abs_a / scale) ** 2 + (abs_b / scale) ** 2)
-    alpha = a / abs_a
-    c = abs_a / norm
-    s = alpha * cupy.conj(b) / norm
-    return cupy.asarray(c, dtype=accum_dtype), cupy.asarray(s, dtype=accum_dtype)
+    from pyceles._optional import import_cupy
+
+    cupy, _ = import_cupy()
+    dtype = np.dtype(accum_dtype_name)
+    if dtype not in (np.dtype(np.complex64), np.dtype(np.complex128)):
+        raise TypeError(f"Unsupported Givens accumulation dtype {dtype}.")
+    real = "float" if dtype == np.dtype(np.complex64) else "double"
+    source = r"""
+#include <cupy/complex.cuh>
+using Real = REAL_TYPE;
+using Complex = complex<Real>;
+
+extern "C" __global__
+void pyceles_givens_update(
+    Complex* h, Complex* cs, Complex* sn, Complex* g,
+    const int col, Real* residual)
+{
+    // The launcher uses exactly one thread. No atomics, shared memory, or
+    // full-space vectors are involved; each step consumes its predecessor.
+    for (int k = 0; k < col; ++k) {
+        const Real c = cs[k].real();
+        const Complex s = sn[k];
+        const Complex a = h[k];
+        const Complex b = h[k + 1];
+        h[k] = c * a + s * b;
+        h[k + 1] = -conj(s) * a + c * b;
+    }
+
+    const Complex a = h[col];
+    const Complex b = h[col + 1];
+    Real c;
+    Complex s, r;
+    if (!isfinite(a.real()) || !isfinite(a.imag()) ||
+        !isfinite(b.real()) || !isfinite(b.imag())) {
+        const Real nan_value = (Real)nan("");
+        c = nan_value;
+        s = r = Complex(nan_value, nan_value);
+    } else {
+        const Real a_scale = FMAX(FABS(a.real()), FABS(a.imag()));
+        const Real b_scale = FMAX(FABS(b.real()), FABS(b.imag()));
+        if (b_scale == (Real)0) {
+            c = (Real)1;
+            s = Complex((Real)0, (Real)0);
+            r = a;
+        } else if (a_scale == (Real)0) {
+            // Preserve pyceles' a=0 convention, including complex b: r=b.
+            c = (Real)0;
+            s = Complex((Real)1, (Real)0);
+            r = b;
+        } else {
+            // Normalize a separately to preserve its phase even when a/b
+            // underflows. Component scaling also avoids overflowing |a|+|b|.
+            const Complex a_unit(a.real() / a_scale, a.imag() / a_scale);
+            const Complex phase = a_unit / HYPOT(a_unit.real(), a_unit.imag());
+            const Real scale = FMAX(a_scale, b_scale);
+            const Complex a_scaled(a.real() / scale, a.imag() / scale);
+            const Complex b_scaled(b.real() / scale, b.imag() / scale);
+            const Real aa = HYPOT(a_scaled.real(), a_scaled.imag());
+            const Real bb = HYPOT(b_scaled.real(), b_scaled.imag());
+            const Real norm = HYPOT(aa, bb);
+            c = aa / norm;
+            s = phase * (conj(b_scaled) / norm);
+            // Rescale components, not a possibly unrepresentable real norm.
+            r = (c * a_scaled + s * b_scaled) * scale;
+        }
+    }
+    // [c s; -conj(s) c] [a b]^T = [r 0]^T, c real.
+    cs[col] = Complex(c, (Real)0);
+    sn[col] = s;
+    h[col] = r;
+    h[col + 1] = Complex((Real)0, (Real)0);
+    const Complex rhs = g[col];
+    g[col] = c * rhs;
+    const Complex next_rhs = -conj(s) * rhs;
+    g[col + 1] = next_rhs;
+    residual[0] = HYPOT(next_rhs.real(), next_rhs.imag());
+}
+"""
+    source = (
+        source.replace("REAL_TYPE", real)
+        .replace("FMAX", "fmax")
+        .replace("FABS", "fabs")
+        .replace("HYPOT", "hypot")
+    )
+    return cupy.RawKernel(source, "pyceles_givens_update")
+
+
+def _apply_givens_rotation(
+    h_rows: Any, cs: Any, sn: Any, g: Any, col: int, *, residual: Any
+) -> float:
+    """Rotate one owned row in place and read only the convergence scalar.
+
+    All complex arrays use accumulation precision. Rows are C-contiguous and
+    ``residual`` is a reusable scalar of the corresponding real dtype. Only
+    the initialized prefixes of cs/sn/g and h_rows[col] are read. This is a
+    private solver contract, not a general strided-array kernel interface.
+    """
+    kernel = _givens_update_kernel(np.dtype(h_rows.dtype).name)
+    kernel((1,), (1,), (h_rows[col], cs, sn, g, np.int32(col), residual))
+    return float(residual)
 
 
 def _solve_rotated_upper(
@@ -918,6 +999,9 @@ def gmres_cupy_native(
     residual_norm: float
     relative_residual: float
     need_pr_rel = bool(callback is not None or record_preconditioned_history)
+    givens_residual = cupy.empty(
+        (), dtype=np.float64 if acc_dtype == np.dtype(np.complex128) else np.float32
+    )
 
     def _record_true_residual(rel_norm: float) -> None:
         true_hist.append(float(rel_norm))
@@ -1011,31 +1095,10 @@ def gmres_cupy_native(
                 cycle_breakdown = True
                 cycle_breakdown_reason = "happy_breakdown"
 
-            for k in range(col):
-                c = cs[k].copy()
-                s = sn[k].copy()
-                n0 = H[col, k].copy()
-                n1 = H[col, k + 1].copy()
-                H[col, k] = c * n0 + s * n1
-                H[col, k + 1] = -cupy.conj(s) * n0 + c * n1
-
-            c_new, s_new = _givens_complex(
-                H[col, col], H[col, col + 1], cupy=cupy, accum_dtype=acc_dtype
-            )
-            cs[col] = c_new
-            sn[col] = s_new
-            h_col_col = H[col, col].copy()
-            h_col_colp1 = H[col, col + 1].copy()
-            H[col, col] = c_new * h_col_col + s_new * h_col_colp1
-            H[col, col + 1] = cupy.asarray(0.0 + 0.0j, dtype=acc_dtype)
-
-            g_col = g[col].copy()
-            g[col] = c_new * g_col
-            g[col + 1] = -cupy.conj(s_new) * g_col
+            pr_abs = _apply_givens_rotation(H, cs, sn, g, col, residual=givens_residual)
 
             k_used = col + 1
             iterations += 1
-            pr_abs = float(cupy.abs(g[col + 1]))
             pr_rel = (pr_abs / b_norm if b_norm > 0 else pr_abs) if need_pr_rel else float("nan")
             cycle_presid = pr_abs
             if record_preconditioned_history:
@@ -1236,6 +1299,9 @@ def fgmres_cupy_native(
     residual_norm: float
     relative_residual: float
     need_pr_rel = bool(callback is not None or record_preconditioned_history)
+    givens_residual = cupy.empty(
+        (), dtype=np.float64 if acc_dtype == np.dtype(np.complex128) else np.float32
+    )
 
     def _record_true_residual(rel_norm: float) -> None:
         true_hist.append(float(rel_norm))
@@ -1332,31 +1398,10 @@ def fgmres_cupy_native(
                 cycle_breakdown = True
                 cycle_breakdown_reason = "happy_breakdown"
 
-            for k in range(col):
-                c = cs[k].copy()
-                s = sn[k].copy()
-                n0 = H[col, k].copy()
-                n1 = H[col, k + 1].copy()
-                H[col, k] = c * n0 + s * n1
-                H[col, k + 1] = -cupy.conj(s) * n0 + c * n1
-
-            c_new, s_new = _givens_complex(
-                H[col, col], H[col, col + 1], cupy=cupy, accum_dtype=acc_dtype
-            )
-            cs[col] = c_new
-            sn[col] = s_new
-            h_col_col = H[col, col].copy()
-            h_col_colp1 = H[col, col + 1].copy()
-            H[col, col] = c_new * h_col_col + s_new * h_col_colp1
-            H[col, col + 1] = cupy.asarray(0.0 + 0.0j, dtype=acc_dtype)
-
-            g_col = g[col].copy()
-            g[col] = c_new * g_col
-            g[col + 1] = -cupy.conj(s_new) * g_col
+            pr_abs = _apply_givens_rotation(H, cs, sn, g, col, residual=givens_residual)
 
             k_used = col + 1
             iterations += 1
-            pr_abs = float(cupy.abs(g[col + 1]))
             pr_rel = (pr_abs / b_norm if b_norm > 0 else pr_abs) if need_pr_rel else float("nan")
             cycle_presid = pr_abs
             if record_preconditioned_history:
@@ -1534,6 +1579,9 @@ def lgmres_cupy_native(
     residual_norm: float
     relative_residual: float
     need_pr_rel = bool(callback is not None or record_preconditioned_history)
+    givens_residual = cupy.empty(
+        (), dtype=np.float64 if acc_dtype == np.dtype(np.complex128) else np.float32
+    )
     outer_v: list[tuple[Any, Any | None]] = []
 
     def _record_true_residual(rel_norm: float) -> None:
@@ -1638,31 +1686,10 @@ def lgmres_cupy_native(
                 cycle_breakdown = True
                 cycle_breakdown_reason = "happy_breakdown"
 
-            for k in range(col):
-                c = cs[k].copy()
-                s = sn[k].copy()
-                n0 = H[col, k].copy()
-                n1 = H[col, k + 1].copy()
-                H[col, k] = c * n0 + s * n1
-                H[col, k + 1] = -cupy.conj(s) * n0 + c * n1
-
-            c_new, s_new = _givens_complex(
-                H[col, col], H[col, col + 1], cupy=cupy, accum_dtype=acc_dtype
-            )
-            cs[col] = c_new
-            sn[col] = s_new
-            h_col_col = H[col, col].copy()
-            h_col_colp1 = H[col, col + 1].copy()
-            H[col, col] = c_new * h_col_col + s_new * h_col_colp1
-            H[col, col + 1] = cupy.asarray(0.0 + 0.0j, dtype=acc_dtype)
-
-            g_col = g[col].copy()
-            g[col] = c_new * g_col
-            g[col + 1] = -cupy.conj(s_new) * g_col
+            pr_abs = _apply_givens_rotation(H, cs, sn, g, col, residual=givens_residual)
 
             k_used = col + 1
             iterations += 1
-            pr_abs = float(cupy.abs(g[col + 1]))
             pr_rel = (pr_abs / b_norm if b_norm > 0 else pr_abs) if need_pr_rel else float("nan")
             cycle_presid = pr_abs
             if record_preconditioned_history:
