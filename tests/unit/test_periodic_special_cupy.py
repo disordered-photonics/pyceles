@@ -156,7 +156,7 @@ def test_fixed_cupy_ewald_near_coplanar_matches_numpy(
             workspace=workspace,
             real_shell_count=12,
             reciprocal_shell_count=12,
-            coordinate_scale=float(np.max(np.abs(np.stack([source, destination])))),
+            coordinate_scale=max(abs(float(source[2])), abs(float(destination[2]))),
         )
     )
     want = ewald_structural_sums_2d_batch(
