@@ -126,8 +126,8 @@ NVIDIA RTX 2000 Ada Laptop GPU, Python 3.12, NumPy/SciPy 2.5/1.18, and CuPy
 | --- | ---: | ---: | ---: |
 | NumPy, `complex128/complex128` | 383.3 s | 20.57 s | 165.96 s |
 | NumPy, `complex64/complex128` | 321.3 s | 19.35 s | 132.67 s |
-| CuPy, `complex128/complex128` | 5.66 s | 1.87 s | 0.89 s |
-| CuPy, `complex64/complex128` | 0.51 s | 0.70 s | 0.65 s |
+| CuPy, `complex128/complex128` | 4.31 s | 1.78 s | 0.86 s |
+| CuPy, `complex64/complex128` | 0.38 s | 0.71 s | 0.62 s |
 
 The reference field slice uses `y=0`, `x=[-4000,4000]`, `z=[-3000,5000]`,
 and `dx=40`. The benchmark is most useful when refreshed with the same
@@ -174,20 +174,21 @@ The suite's standard periodic reference rows are:
 | backend and dtype | coupling | preparation | linear solve | complete solve | iterations |
 | --- | --- | ---: | ---: | ---: | ---: |
 | NumPy, `complex128/complex128` | pairwise, cache on | 147.18 s | 520.74 s | 671.34 s | 160 |
-| CuPy, `complex128/complex128` | pairwise, cache on | 7.41 s | 4.66 s | 12.25 s | 160 |
-| CuPy, `complex128/complex128` | pairwise, cache off | 0.06 s | 536.65 s | 540.19 s | 160 |
-| NumPy, `complex128/complex128` | Rayleigh, cache off | 58.72 s* | 1.44 s* | 61.08 s* | 1* |
-| CuPy, `complex128/complex128` | Rayleigh, cache off | 2.58 s | 11.38 s | 14.30 s | 160 |
+| CuPy, `complex128/complex128` | pairwise, cache on | 7.28 s | 3.62 s | 11.10 s | 160 |
+| CuPy, `complex128/complex128` | pairwise, cache off | 0.06 s | 514.21 s | 517.55 s | 160 |
+| NumPy, `complex128/complex128` | Rayleigh, cache off* | 58.72 s* | 1.44 s* | 61.08 s* | 1* |
+| CuPy, `complex128/complex128` | Rayleigh, cache off | 2.58 s | 9.46 s | 12.26 s | 160 |
 | NumPy, `complex64/complex128` | pairwise, cache on | 148.90 s | 537.60 s | 689.76 s | 160 |
-| CuPy, `complex64/complex128` | pairwise, cache on | 6.57 s | 3.60 s | 10.37 s | 160 |
-| CuPy, `complex64/complex128` | pairwise, cache off | 0.06 s | 530.97 s | 534.46 s | 160 |
-| NumPy, `complex64/complex128` | Rayleigh, cache off | 57.74 s* | 1.09 s* | 59.53 s* | 1* |
+| CuPy, `complex64/complex128` | pairwise, cache on | 6.60 s | 2.60 s | 9.39 s | 160 |
+| CuPy, `complex64/complex128` | pairwise, cache off | 0.06 s | 509.37 s | 512.68 s | 160 |
+| NumPy, `complex64/complex128` | Rayleigh, cache off* | 57.74 s* | 1.09 s* | 59.53 s* | 1* |
+| CuPy, `complex64/complex128` | Rayleigh, cache off | 2.52 s | 3.18 s | 5.89 s | 160 |
 
-The one-iteration NumPy rows are preparation/first-step probes, not converged
-solutions and must not be compared to complete solve times. The converged
-GMRES rows reached approximately `9.35e-5`; the two precision policies agreed
-at the displayed residual and power-balance precision. Ewald's scalar lattice
-sums remain `complex128` for cancellation safety, so changing compact compute
+The asterisked NumPy rows are preparation/first-step probes, not converged
+solutions and must not be compared to complete solve times. The estimated time
+to convergence in those cases is of the order of the number of iterations (160)
+times the measured time for a single iteration. Ewald's scalar lattice sums
+remain `complex128` for cancellation safety, so changing compact compute
 precision does not accelerate every preparation phase.
 
 The same periodic profile can be refreshed directly:
