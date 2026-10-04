@@ -75,7 +75,7 @@ def interpolate_center_pixels(
     """Patch singular center pixels by local interpolation on exact center hits."""
     p = np.asarray(run.positions, dtype=float)
     normal_idx, axis_0_idx, axis_1_idx, _, _ = slice_plane_metadata(plane)
-    on_plane = np.isclose(p[:, normal_idx], plane_value, atol=1e-12)
+    on_plane = np.isclose(p[:, normal_idx], plane_value, rtol=0.0, atol=1e-12)
     u = p[on_plane, axis_0_idx]
     v = p[on_plane, axis_1_idx]
 
@@ -88,8 +88,8 @@ def interpolate_center_pixels(
         i0 = int(np.argmin(np.abs(axis_0_values - uu)))
         i1 = int(np.argmin(np.abs(axis_1_values - vv)))
         if not (
-            np.isclose(axis_0_values[i0], uu, atol=1e-12)
-            and np.isclose(axis_1_values[i1], vv, atol=1e-12)
+            np.isclose(axis_0_values[i0], uu, rtol=0.0, atol=1e-12)
+            and np.isclose(axis_1_values[i1], vv, rtol=0.0, atol=1e-12)
         ):
             continue
         for key in field_maps:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 from scipy.special import eval_genlaguerre
 
-from ..geometry_bounds import conservative_cross_set_max_distance
+from ..geometry_bounds import coincident_point_mask, conservative_cross_set_max_distance
 from ..indexing import index_vswf, n_modes
 from ..translation import RadialLUT, translation_ab5_table, translation_block
 
@@ -124,7 +124,7 @@ def _incident_coeffs_from_outgoing_expansion(
     if ns == 0 or pos_src.shape[0] == 0:
         return out
 
-    if np.any(np.all(np.isclose(pos_rcv[:, None, :], pos_src[None, :, :], atol=1e-12), axis=2)):
+    if np.any(coincident_point_mask(pos_rcv, pos_src)):
         raise ValueError(
             "Outgoing source center and receiver center coincide for at least one pair. "
             "Outgoing-to-regular translation is singular at zero separation."

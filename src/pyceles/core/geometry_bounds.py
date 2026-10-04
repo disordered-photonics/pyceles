@@ -1,8 +1,9 @@
-"""Cheap conservative geometric bounds used for LUT sizing."""
+"""Coordinate coincidence checks and conservative bounds for LUT sizing."""
 
 from __future__ import annotations
 
 import numpy as np
+from scipy.spatial import cKDTree
 
 
 def conservative_set_diameter(points: np.ndarray) -> float:
@@ -33,3 +34,27 @@ def conservative_cross_set_max_distance(a: np.ndarray, b: np.ndarray) -> float:
     bmax = np.max(bb, axis=0)
     d_axis = np.maximum(np.abs(bmax - amin), np.abs(amax - bmin))
     return float(np.linalg.norm(d_axis))
+
+
+def coincident_point_mask(
+    points: np.ndarray, centers: np.ndarray, *, atol: float = 1e-12
+) -> np.ndarray:
+    """Find points within an absolute per-coordinate tolerance of any center.
+
+    The infinity-norm nearest neighbor preserves the componentwise coincidence
+    convention without a relative tolerance or a points-by-centers temporary.
+    Inputs must be finite, with shapes (N, 3) and (M, 3), respectively.
+    """
+    pts = np.asarray(points, dtype=float)
+    ctr = np.asarray(centers, dtype=float)
+    if pts.ndim != 2 or pts.shape[1] != 3:
+        raise ValueError(f"`points` must have shape (N, 3). Got {pts.shape}.")
+    if ctr.ndim != 2 or ctr.shape[1] != 3:
+        raise ValueError(f"`centers` must have shape (M, 3). Got {ctr.shape}.")
+    tolerance = float(atol)
+    if not np.isfinite(tolerance) or tolerance < 0:
+        raise ValueError(f"`atol` must be finite and non-negative. Got {atol!r}.")
+    if pts.shape[0] == 0 or ctr.shape[0] == 0:
+        return np.zeros(pts.shape[0], dtype=bool)
+    distances, _ = cKDTree(ctr).query(pts, k=1, p=np.inf)
+    return np.asarray(distances, dtype=float) <= tolerance

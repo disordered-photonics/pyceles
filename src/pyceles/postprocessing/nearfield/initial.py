@@ -16,6 +16,7 @@ from pyceles.core.angular import (
     periodic_azimuthal_weights,
     trapezoidal_weights,
 )
+from pyceles.core.geometry_bounds import coincident_point_mask
 from pyceles.core.sources import (
     GaussianBeam,
     LocalExpansionSource,
@@ -421,6 +422,8 @@ def _compute_initial_field_general(
     if isinstance(beam, LocalExpansionSource):
         src_pos = np.asarray(beam.source_positions(), dtype=float).reshape(-1, 3)
         src_coeffs = np.asarray(beam.outgoing_coeffs(1, dtype=compute_dtype), dtype=compute_dtype)
+        hit = coincident_point_mask(pts, src_pos)
+        has_hits = bool(np.any(hit))
         e, h = compute_scattered_field(
             pts,
             src_pos,
@@ -435,16 +438,11 @@ def _compute_initial_field_general(
             compute_dtype=compute_dtype,
             accum_dtype=accum_dtype,
         )
-        if src_pos.shape[0] > 0 and pts.shape[0] > 0:
-            hit = np.any(
-                np.all(np.isclose(pts[:, None, :], src_pos[None, :, :], atol=1e-12), axis=2),
-                axis=1,
-            )
-            if np.any(hit):
-                e = np.asarray(e, dtype=accum_dtype).copy()
-                h = np.asarray(h, dtype=accum_dtype).copy()
-                e[hit] = np.nan + 0j
-                h[hit] = np.nan + 0j
+        if has_hits:
+            # The evaluator returns owned arrays; mark singular points
+            # directly instead of copying both complete field arrays.
+            e[hit] = np.nan + 0j
+            h[hit] = np.nan + 0j
         return np.asarray(e, dtype=accum_dtype), np.asarray(h, dtype=accum_dtype)
 
     if isinstance(beam, PlaneWave):

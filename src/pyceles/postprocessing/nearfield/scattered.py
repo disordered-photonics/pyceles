@@ -154,6 +154,7 @@ def compute_scattered_field(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Evaluate the exterior scattered field from outgoing SVWF coefficients.
 
+    Both returned field arrays are owned by the caller, not borrowed scratch.
     CuPy work uses the fused point-owned RawKernel; the CPU path remains the
     reference implementation. Direct CuPy calls do not fabricate progress
     subdivisions for that single fused launch; the high-level finite near-field
