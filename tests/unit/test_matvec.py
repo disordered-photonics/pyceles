@@ -1210,6 +1210,15 @@ def test_cupy_group_wrappers_preserve_shared_operator_maps(monkeypatch):
         lambda value, *, dtype, prefer_cupy: np.asarray(value, dtype=dtype),
     )
 
+    def mapped_diagonal(diag, ids, values, nmodes, nrhs):
+        del nmodes, nrhs
+        selected = diag[ids]
+        return selected * values if values.ndim == 2 else selected[:, :, None] * values
+
+    monkeypatch.setattr(
+        single_body_cupy, "_shared_diagonal_apply_kernel", lambda cupy: mapped_diagonal
+    )
+
     particle_indices = np.arange(3, dtype=np.int64)
     operator_indices = np.array([0, 1, 0], dtype=np.int64)
     diagonal = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.complex128)

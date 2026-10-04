@@ -93,6 +93,8 @@ class CompositeParticleTOperator:
                 raise ValueError("Particle-T operator groups must be non-empty.")
             if np.any(ids < 0) or np.any(ids >= ns):
                 raise ValueError("Particle-T operator group indices out of bounds.")
+            if np.unique(ids).size != ids.size:
+                raise ValueError("Particle-T operator group indices must be unique.")
             if np.any(group_of[ids] != -1):
                 raise ValueError("Particle-T operator groups must not overlap.")
             group_of[ids] = gidx

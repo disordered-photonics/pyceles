@@ -18,7 +18,13 @@ import numpy as np
 from pyceles._optional import asnumpy, coerce_array, import_cupy, is_cupy_array
 from pyceles.core.indexing import n_modes
 
-from .groups import AxisymmetricTGroup, DenseTGroup, DiagonalTGroup, _operator_local_indices
+from .groups import (
+    AxisymmetricTGroup,
+    DenseTGroup,
+    DiagonalTGroup,
+    _normalized_operator_indices,
+    _operator_local_indices,
+)
 
 Array = np.ndarray
 DEFAULT_COMPLEX_DTYPE = np.dtype(np.complex128)
@@ -28,9 +34,9 @@ _SHARED_DIAGONAL_APPLY_KERNEL: object | None = None
 
 
 def _shared_diagonal_apply_kernel(cupy):
-    """Return a fused gather/multiply kernel when real CuPy is available."""
+    """Return the fused gather/multiply kernel for shared diagonal rows."""
     global _SHARED_DIAGONAL_APPLY_KERNEL
-    if _SHARED_DIAGONAL_APPLY_KERNEL is None and hasattr(cupy, "ElementwiseKernel"):
+    if _SHARED_DIAGONAL_APPLY_KERNEL is None:
         _SHARED_DIAGONAL_APPLY_KERNEL = cupy.ElementwiseKernel(
             "raw T diag, raw int64 operator_indices, T x, int64 nmodes, int64 nrhs",
             "T y",
@@ -55,21 +61,25 @@ class CuPyDiagonalTGroup:
     _T_diag_gpu: object | None = field(default=None, init=False, repr=False)
     _T_diag_adjoint_gpu: object | None = field(default=None, init=False, repr=False)
     _operator_indices_gpu: object | None = field(default=None, init=False, repr=False)
+    _identity_operator_map: bool = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.particle_indices = np.asarray(self.particle_indices, dtype=np.int64).reshape(-1)
         self.T_M = np.asarray(self.T_M, dtype=self.dtype)
         self.T_N = np.asarray(self.T_N, dtype=self.dtype)
         self.T_diag = np.asarray(self.T_diag, dtype=self.dtype)
-        if self.operator_indices.size == 0:
-            if self.T_diag.shape[0] == 1:
-                self.operator_indices = np.zeros(self.particle_indices.size, dtype=np.int64)
-            else:
-                self.operator_indices = np.arange(self.particle_indices.size, dtype=np.int64)
-        else:
-            self.operator_indices = np.asarray(self.operator_indices, dtype=np.int64).reshape(-1)
-        if self.operator_indices.size != self.particle_indices.size:
-            raise ValueError("`operator_indices` must align with `particle_indices`.")
+        if self.T_M.shape[0] != self.T_N.shape[0] or self.T_M.shape[0] != self.T_diag.shape[0]:
+            raise ValueError("Diagonal T data must have one row per prepared archetype.")
+        self.particle_indices, self.operator_indices = _normalized_operator_indices(
+            self.particle_indices,
+            None if self.operator_indices.size == 0 else self.operator_indices,
+            n_operators=self.T_diag.shape[0],
+        )
+        self._identity_operator_map = self.T_diag.shape[
+            0
+        ] == self.particle_indices.size and np.array_equal(
+            self.operator_indices, np.arange(self.particle_indices.size)
+        )
 
     @property
     def supports_adjoint(self) -> bool:
@@ -87,62 +97,33 @@ class CuPyDiagonalTGroup:
             self._operator_indices_gpu = cupy.asarray(self.operator_indices, dtype=np.int64)
         return self._operator_indices_gpu
 
-    def apply_subset(self, x_subset: Array | object) -> object:
+    def _apply_diagonal(self, x_subset: Array | object, diag: Any) -> object:
         cupy, _ = import_cupy()
         arr = coerce_array(x_subset, dtype=self.dtype, prefer_cupy=True)
         if int(arr.ndim) not in {2, 3}:
             raise ValueError(f"Diagonal T-group subset must be 2D or 3D. Got ndim={int(arr.ndim)}.")
-        if self.T_diag.shape[0] == 1:
-            diag = self._diag_gpu()[0]
-            return diag * arr if int(arr.ndim) == 2 else diag[:, None] * arr
-        identity = self.T_diag.shape[0] == self.particle_indices.size and np.array_equal(
-            self.operator_indices, np.arange(self.particle_indices.size)
-        )
-        if identity:
-            diag = self._diag_gpu()
-            return diag * arr if int(arr.ndim) == 2 else diag[:, :, None] * arr
-
-        kernel = _shared_diagonal_apply_kernel(cupy)
-        if kernel is not None:
-            nrhs = 1 if int(arr.ndim) == 2 else int(arr.shape[2])
-            return kernel(
-                self._diag_gpu(),
-                self._operators_gpu(),
-                arr,
-                np.int64(arr.shape[1]),
-                np.int64(nrhs),
-            )
-        gathered = self._diag_gpu()[self._operators_gpu()]
-        return gathered * arr if int(arr.ndim) == 2 else gathered[:, :, None] * arr
-
-    def apply_adjoint_subset(self, x_subset: Array | object) -> object:
-        cupy, _ = import_cupy()
-        arr = coerce_array(x_subset, dtype=self.dtype, prefer_cupy=True)
-        if int(arr.ndim) not in {2, 3}:
-            raise ValueError(f"Diagonal T-group subset must be 2D or 3D. Got ndim={int(arr.ndim)}.")
-        if self._T_diag_adjoint_gpu is None:
-            self._T_diag_adjoint_gpu = cupy.conjugate(self._diag_gpu())
-        diag = cast(Any, self._T_diag_adjoint_gpu)
         if self.T_diag.shape[0] == 1:
             local = diag[0]
             return local * arr if int(arr.ndim) == 2 else local[:, None] * arr
-        identity = self.T_diag.shape[0] == self.particle_indices.size and np.array_equal(
-            self.operator_indices, np.arange(self.particle_indices.size)
-        )
-        if identity:
+        if self._identity_operator_map:
             return diag * arr if int(arr.ndim) == 2 else diag[:, :, None] * arr
-        kernel = _shared_diagonal_apply_kernel(cupy)
-        if kernel is not None:
-            nrhs = 1 if int(arr.ndim) == 2 else int(arr.shape[2])
-            return kernel(
-                diag,
-                self._operators_gpu(),
-                arr,
-                np.int64(arr.shape[1]),
-                np.int64(nrhs),
-            )
-        gathered = diag[self._operators_gpu()]
-        return gathered * arr if int(arr.ndim) == 2 else gathered[:, :, None] * arr
+        nrhs = 1 if int(arr.ndim) == 2 else int(arr.shape[2])
+        return _shared_diagonal_apply_kernel(cupy)(
+            diag,
+            self._operators_gpu(),
+            arr,
+            np.int64(arr.shape[1]),
+            np.int64(nrhs),
+        )
+
+    def apply_subset(self, x_subset: Array | object) -> object:
+        return self._apply_diagonal(x_subset, self._diag_gpu())
+
+    def apply_adjoint_subset(self, x_subset: Array | object) -> object:
+        cupy, _ = import_cupy()
+        if self._T_diag_adjoint_gpu is None:
+            self._T_diag_adjoint_gpu = cupy.conjugate(self._diag_gpu())
+        return self._apply_diagonal(x_subset, self._T_diag_adjoint_gpu)
 
     def rhs_subset(self, b_subset: Array | object) -> object:
         return self.apply_subset(b_subset)
@@ -174,19 +155,23 @@ class CuPyDenseTGroup:
     _T_blocks_gpu: object | None = field(default=None, init=False, repr=False)
     _local_indices_host: tuple[Array, ...] = field(default=(), init=False, repr=False)
     _local_indices_gpu: dict[int, object] = field(default_factory=dict, init=False, repr=False)
+    _identity_operator_map: bool = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.particle_indices = np.asarray(self.particle_indices, dtype=np.int64).reshape(-1)
         self.T_blocks = np.asarray(self.T_blocks, dtype=self.dtype)
-        if self.operator_indices.size == 0:
-            if self.T_blocks.shape[0] == 1:
-                self.operator_indices = np.zeros(self.particle_indices.size, dtype=np.int64)
-            else:
-                self.operator_indices = np.arange(self.particle_indices.size, dtype=np.int64)
-        else:
-            self.operator_indices = np.asarray(self.operator_indices, dtype=np.int64).reshape(-1)
-        if self.operator_indices.size != self.particle_indices.size:
-            raise ValueError("`operator_indices` must align with `particle_indices`.")
+        if self.T_blocks.ndim != 3 or self.T_blocks.shape[1] != self.T_blocks.shape[2]:
+            raise ValueError(f"`T_blocks` must have shape (Nu, Nm, Nm). Got {self.T_blocks.shape}.")
+        self.particle_indices, self.operator_indices = _normalized_operator_indices(
+            self.particle_indices,
+            None if self.operator_indices.size == 0 else self.operator_indices,
+            n_operators=self.T_blocks.shape[0],
+        )
+        self._identity_operator_map = self.T_blocks.shape[
+            0
+        ] == self.particle_indices.size and np.array_equal(
+            self.operator_indices, np.arange(self.particle_indices.size)
+        )
         self._local_indices_host = _operator_local_indices(
             self.operator_indices, self.T_blocks.shape[0]
         )
@@ -225,10 +210,7 @@ class CuPyDenseTGroup:
         )
         if self.T_blocks.shape[0] == 1:
             return cupy.einsum(shared, cast(Any, blocks)[0], arr, optimize=True)
-        identity = self.T_blocks.shape[0] == self.particle_indices.size and np.array_equal(
-            self.operator_indices, np.arange(self.particle_indices.size)
-        )
-        if identity:
+        if self._identity_operator_map:
             return cupy.einsum(mapped, blocks, arr, optimize=True)
 
         out = cupy.empty_like(arr)
@@ -290,22 +272,32 @@ class CuPyCompositeParticleTOperator:
     _particle_to_group: np.ndarray = field(init=False, repr=False)
     _particle_to_local: np.ndarray = field(init=False, repr=False)
     _group_indices_gpu: dict[int, Any] = field(default_factory=dict, init=False, repr=False)
-    _full_group: object | None = field(default=None, init=False, repr=False)
+    _full_group: CuPyDiagonalTGroup | CuPyDenseTGroup | None = field(
+        default=None, init=False, repr=False
+    )
+    _group_slices: tuple[slice | None, ...] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         ns = int(self.n_particles)
         group_of = np.full(ns, -1, dtype=np.int64)
         local_of = np.full(ns, -1, dtype=np.int64)
+        group_slices: list[slice | None] = []
         for gidx, group in enumerate(self.groups):
             ids = np.asarray(group.particle_indices, dtype=np.int64).reshape(-1)
             if ids.size == 0:
                 raise ValueError("Particle-T operator groups must be non-empty.")
             if np.any(ids < 0) or np.any(ids >= ns):
                 raise ValueError("Particle-T operator group indices out of bounds.")
+            if np.unique(ids).size != ids.size:
+                raise ValueError("Particle-T operator group indices must be unique.")
             if np.any(group_of[ids] != -1):
                 raise ValueError("Particle-T operator groups must not overlap.")
             group_of[ids] = gidx
             local_of[ids] = np.arange(ids.size, dtype=np.int64)
+            group_slices.append(
+                slice(int(ids[0]), int(ids[-1]) + 1) if np.all(ids[1:] == ids[:-1] + 1) else None
+            )
+        self._group_slices = tuple(group_slices)
         if np.any(group_of < 0):
             raise ValueError("Particle-T operator groups must cover all particles.")
         self._particle_to_group = group_of
@@ -335,104 +327,43 @@ class CuPyCompositeParticleTOperator:
     def _apply_impl(self, x: Array | object, *, group_method: str = "apply_subset") -> object:
         cupy, _ = import_cupy()
         arr_raw = coerce_array(x, dtype=self.dtype, prefer_cupy=True)
-        if self._full_group is not None:
-            expected = self.n_particles * self.n_modes
-            if int(arr_raw.ndim) == 1:
-                if int(arr_raw.size) != expected:
-                    raise ValueError(
-                        "Input length must match n_particles * n_modes. "
-                        f"Got {int(arr_raw.size)} for {expected}."
-                    )
-                subset = arr_raw.reshape(self.n_particles, self.n_modes)
-            elif int(arr_raw.ndim) == 2:
-                if int(arr_raw.shape[0]) != expected:
-                    raise ValueError(
-                        "Input first dimension must match n_particles * n_modes. "
-                        f"Got {int(arr_raw.shape[0])} for {expected}."
-                    )
-                subset = arr_raw.reshape(self.n_particles, self.n_modes, int(arr_raw.shape[1]))
-            else:
-                raise ValueError(f"Input must be 1D or 2D. Got shape {tuple(arr_raw.shape)}.")
-            result = cupy.asarray(getattr(self._full_group, group_method)(subset), dtype=self.dtype)
-            return result.reshape(arr_raw.shape)
+        expected = self.n_particles * self.n_modes
         if int(arr_raw.ndim) == 1:
-            if int(arr_raw.size) != self.n_particles * self.n_modes:
+            if int(arr_raw.size) != expected:
                 raise ValueError(
-                    "Input length must match n_particles * n_modes. "
-                    f"Got {int(arr_raw.size)} for {self.n_particles * self.n_modes}."
+                    f"Input length must match n_particles * n_modes. Got {int(arr_raw.size)} for {expected}."
                 )
             arr = arr_raw.reshape(self.n_particles, self.n_modes)
-            # Groups are validated to be disjoint and exhaustive in
-            # ``__post_init__``; every output row is assigned exactly once.
-            out = cupy.empty((self.n_particles, self.n_modes), dtype=self.dtype)
-            for group_index, group in enumerate(self.groups):
-                ids = np.asarray(group.particle_indices, dtype=np.int64)
-                if ids.size == 0:
-                    continue
-                if np.all(np.diff(ids) == 1):
-                    start = int(ids[0])
-                    stop = int(ids[-1]) + 1
-                    subset = arr[start:stop]
-                    subset_out = cupy.asarray(
-                        getattr(group, group_method)(subset), dtype=self.dtype
-                    )
-                    out[start:stop] = subset_out
-                    continue
-                ids_gpu = self._indices_gpu(group_index, ids, cupy=cupy)
-                subset = arr[ids_gpu]
-                subset_out = cupy.asarray(getattr(group, group_method)(subset), dtype=self.dtype)
-                out[ids_gpu] = subset_out
-            return out.reshape(self.n_particles * self.n_modes)
         elif int(arr_raw.ndim) == 2:
-            if int(arr_raw.shape[0]) != self.n_particles * self.n_modes:
+            if int(arr_raw.shape[0]) != expected:
                 raise ValueError(
                     "Input first dimension must match n_particles * n_modes. "
-                    f"Got {int(arr_raw.shape[0])} for {self.n_particles * self.n_modes}."
+                    f"Got {int(arr_raw.shape[0])} for {expected}."
                 )
             arr = arr_raw.reshape(self.n_particles, self.n_modes, int(arr_raw.shape[1]))
         else:
             raise ValueError(f"Input must be 1D or 2D. Got shape {tuple(arr_raw.shape)}.")
 
-        out = cupy.empty((self.n_particles, self.n_modes, int(arr.shape[2])), dtype=self.dtype)
-        for group_index, group in enumerate(self.groups):
-            ids = np.asarray(group.particle_indices, dtype=np.int64)
-            # Large sphere-only CuPy runs usually prepare one diagonal group
-            # covering a contiguous particle range. Keep that case slice-based.
-            #
-            # Why this matters:
-            # - the older implementation gathered one particle at a time with
-            #   `stack([arr[i] for i in ids])`,
-            # - then scattered results back one particle at a time,
-            # - Nsight Systems profiling showed that pattern generated a storm
-            #   of tiny device-to-device copies, one `nmodes`-sized block per
-            #   particle per matvec.
-            #
-            # For `lmax=3` and `complex64`, that meant ~240-byte D2D copies.
-            # The profiler count matched `n_particles * n_matvecs` almost
-            # exactly, which made the origin of the issue unambiguous.
-            #
-            # A contiguous group lets us express the same logic as one slice
-            # read and one slice write. That preserves the group abstraction
-            # while removing the per-particle gather/scatter churn from the
-            # hot iterative path.
-            #
-            # Non-contiguous groups use one vectorized device gather and
-            # scatter below. That keeps mixed/interleaved clusters free of the
-            # former Python-level per-particle copy storm.
-            contiguous = ids.size > 0 and np.all(ids[1:] == ids[:-1] + 1)
-            if contiguous:
-                start = int(ids[0])
-                stop = int(ids[-1]) + 1
-                subset = arr[start:stop]
-                subset_out = cupy.asarray(getattr(group, group_method)(subset), dtype=self.dtype)
-                out[start:stop] = subset_out
-                continue
-            ids_gpu = self._indices_gpu(group_index, ids, cupy=cupy)
-            subset = arr[ids_gpu]
+        if self._full_group is not None:
+            result = cupy.asarray(getattr(self._full_group, group_method)(arr), dtype=self.dtype)
+            return result.reshape(arr_raw.shape)
+
+        # The immutable prepared layout was classified once in __post_init__.
+        # Contiguous groups use views; interleaved groups retain the cached
+        # device gather/scatter indices. Every output row is assigned once.
+        out = cupy.empty_like(arr)
+        for group_index, (group, selection) in enumerate(
+            zip(self.groups, self._group_slices, strict=True)
+        ):
+            if selection is None:
+                selection = self._indices_gpu(group_index, group.particle_indices, cupy=cupy)
+            subset = arr[selection]
             subset_out = cupy.asarray(getattr(group, group_method)(subset), dtype=self.dtype)
-            out[ids_gpu] = subset_out
-        out2 = out.reshape(self.n_particles * self.n_modes, int(arr.shape[2]))
-        return out2
+            out[selection] = subset_out
+            # Do not carry a previous group's gather/output into the next
+            # group's allocation or dense contraction.
+            del subset, subset_out
+        return out.reshape(arr_raw.shape)
 
     def apply(self, x: Array | object) -> Array | object:
         out = self._apply_impl(x)
