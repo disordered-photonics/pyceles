@@ -10,7 +10,7 @@ from ..plane_wave_spectrum import PlaneWaveSpectrum
 from ..polarization import normalize_global_polarization_vector
 from .base import PolarizationInput, _canonicalize_polarization_input, polarization_to_jones
 from .beam_kernels import _bessel_angular_spectrum_coeffs, _bessel_cartesian_angular_spectrum_coeffs
-from .common import _float_triplet_tuple
+from .common import _float_triplet_tuple, _validated_int
 
 
 @dataclass(frozen=True)
@@ -52,12 +52,7 @@ class BesselBeam:
             raise ValueError(f"`azimuthal_angle` must be finite. Got {self.azimuthal_angle!r}.")
         if float(self.polar_angle) < 0.0 or float(self.polar_angle) > np.pi:
             raise ValueError(f"`polar_angle` must lie in [0, pi]. Got {self.polar_angle!r}.")
-        try:
-            m_float = float(self.order_m)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"`order_m` must be an integer. Got {self.order_m!r}.") from exc
-        if not np.isfinite(m_float) or (not np.isclose(m_float, round(m_float), atol=0.0)):
-            raise ValueError(f"`order_m` must be an integer. Got {self.order_m!r}.")
+        object.__setattr__(self, "order_m", _validated_int("order_m", self.order_m))
         cone = float(self.cone_angle)
         if not (cone > 0.0 and cone < np.pi):
             raise ValueError(f"`cone_angle` must lie in (0, pi). Got {self.cone_angle!r}.")
@@ -158,12 +153,7 @@ class CartesianPolarizedBesselBeam:
             raise ValueError(f"`azimuthal_angle` must be finite. Got {self.azimuthal_angle!r}.")
         if float(self.polar_angle) < 0.0 or float(self.polar_angle) > np.pi:
             raise ValueError(f"`polar_angle` must lie in [0, pi]. Got {self.polar_angle!r}.")
-        try:
-            m_float = float(self.order_m)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"`order_m` must be an integer. Got {self.order_m!r}.") from exc
-        if not np.isfinite(m_float) or (not np.isclose(m_float, round(m_float), atol=0.0)):
-            raise ValueError(f"`order_m` must be an integer. Got {self.order_m!r}.")
+        object.__setattr__(self, "order_m", _validated_int("order_m", self.order_m))
         cone = float(self.cone_angle)
         if not (cone > 0.0 and cone < np.pi):
             raise ValueError(f"`cone_angle` must lie in (0, pi). Got {self.cone_angle!r}.")
