@@ -278,6 +278,47 @@ def _solve_block_least_squares(
     return cupy.linalg.lstsq(h_acc, g_acc, rcond=None)[0]
 
 
+def _row_basis_combination(
+    coefficients: Any,
+    v_rows: Any,
+    *,
+    cupy: Any,
+    accum_dtype: np.dtype,
+    workspace_bytes: int = 64 * 1024**2,
+) -> Any:
+    """Return ``coefficients @ V`` without promoting the entire row basis.
+
+    CGS coefficients and this contraction retain accumulation precision; only
+    the final vector is narrowed to the stored basis dtype. Chunking output
+    columns bounds the widened basis plus product to ``workspace_bytes``
+    (apart from the minimum one-column case and library workspace), without
+    splitting any dot product across chunks. The result allocation is separate.
+    """
+
+    basis = cupy.asarray(v_rows)
+    weights = cupy.asarray(coefficients, dtype=accum_dtype)
+    if np.dtype(basis.dtype) == np.dtype(accum_dtype):
+        return weights @ basis
+
+    n_rows, n = (int(value) for value in basis.shape)
+    result = cupy.empty((n,), dtype=basis.dtype)
+    if n == 0:
+        return result
+    if n_rows == 0:
+        result.fill(0)
+        return result
+    bytes_per_column = (n_rows + 1) * int(np.dtype(accum_dtype).itemsize)
+    chunk = max(1, min(n, int(workspace_bytes) // bytes_per_column))
+    for start in range(0, n, chunk):
+        stop = min(n, start + chunk)
+        # Copy/cast a possibly strided slice directly into one packed buffer.
+        widened = cupy.empty((n_rows, stop - start), dtype=accum_dtype)
+        widened[...] = basis[:, start:stop]
+        result[start:stop] = weights @ widened
+        del widened
+    return result
+
+
 def _block_basis_projection(
     v_blocks: Any,
     w: Any,
@@ -938,7 +979,9 @@ def gmres_cupy_native(
                 for k in range(col + 1):
                     h_row[k] = _dot(V[k, :], w, cupy=cupy, accum_dtype=acc_dtype)
                 H[col, : col + 1] = h_row
-                w = w - cupy.asarray(h_row @ V[: col + 1, :], dtype=op_dtype)
+                w = w - _row_basis_combination(
+                    h_row, V[: col + 1, :], cupy=cupy, accum_dtype=acc_dtype
+                )
                 run_cgs_refine = False
                 if cgs_refine_mode == "always":
                     run_cgs_refine = True
@@ -950,7 +993,9 @@ def gmres_cupy_native(
                     for k in range(col + 1):
                         h_row2[k] = _dot(V[k, :], w, cupy=cupy, accum_dtype=acc_dtype)
                     H[col, : col + 1] = H[col, : col + 1] + h_row2
-                    w = w - cupy.asarray(h_row2 @ V[: col + 1, :], dtype=op_dtype)
+                    w = w - _row_basis_combination(
+                        h_row2, V[: col + 1, :], cupy=cupy, accum_dtype=acc_dtype
+                    )
 
             h_next = _norm(w, cupy=cupy, accum_dtype=acc_dtype)
             H[col, col + 1] = h_next
@@ -1234,6 +1279,10 @@ def fgmres_cupy_native(
             z = _apply_flexible_minv(V[col, :], iteration=iterations, cycle_iteration=col)
             Z[col, :] = z
             w = _apply(A_mv, z)
+            # An absent/identity preconditioner returns a view of V[col].
+            # Keeping z until the next iteration would pin the completed V
+            # across restart cleanup and the next basis allocation.
+            del z
             h0 = _norm(w, cupy=cupy, accum_dtype=acc_dtype)
 
             if orth_mode == "mgs":
@@ -1251,7 +1300,9 @@ def fgmres_cupy_native(
                 for k in range(col + 1):
                     h_row[k] = _dot(V[k, :], w, cupy=cupy, accum_dtype=acc_dtype)
                 H[col, : col + 1] = h_row
-                w = w - cupy.asarray(h_row @ V[: col + 1, :], dtype=op_dtype)
+                w = w - _row_basis_combination(
+                    h_row, V[: col + 1, :], cupy=cupy, accum_dtype=acc_dtype
+                )
                 run_cgs_refine = False
                 if cgs_refine_mode == "always":
                     run_cgs_refine = True
@@ -1263,7 +1314,9 @@ def fgmres_cupy_native(
                     for k in range(col + 1):
                         h_row2[k] = _dot(V[k, :], w, cupy=cupy, accum_dtype=acc_dtype)
                     H[col, : col + 1] = H[col, : col + 1] + h_row2
-                    w = w - cupy.asarray(h_row2 @ V[: col + 1, :], dtype=op_dtype)
+                    w = w - _row_basis_combination(
+                        h_row2, V[: col + 1, :], cupy=cupy, accum_dtype=acc_dtype
+                    )
 
             h_next = _norm(w, cupy=cupy, accum_dtype=acc_dtype)
             H[col, col + 1] = h_next
@@ -1534,6 +1587,8 @@ def lgmres_cupy_native(
                 z = cupy.asarray(z, dtype=op_dtype)
                 w = _apply(A_mv, z) if w_cached is None else cupy.asarray(w_cached, dtype=op_dtype)
             Z[col, :] = z
+            # z may be a view of the Arnoldi basis, not an owned vector.
+            del z
             h0 = _norm(w, cupy=cupy, accum_dtype=acc_dtype)
 
             if orth_mode == "mgs":
@@ -1551,7 +1606,9 @@ def lgmres_cupy_native(
                 for k in range(col + 1):
                     h_row[k] = _dot(V[k, :], w, cupy=cupy, accum_dtype=acc_dtype)
                 H[col, : col + 1] = h_row
-                w = w - cupy.asarray(h_row @ V[: col + 1, :], dtype=op_dtype)
+                w = w - _row_basis_combination(
+                    h_row, V[: col + 1, :], cupy=cupy, accum_dtype=acc_dtype
+                )
                 run_cgs_refine = False
                 if cgs_refine_mode == "always":
                     run_cgs_refine = True
@@ -1563,7 +1620,9 @@ def lgmres_cupy_native(
                     for k in range(col + 1):
                         h_row2[k] = _dot(V[k, :], w, cupy=cupy, accum_dtype=acc_dtype)
                     H[col, : col + 1] = H[col, : col + 1] + h_row2
-                    w = w - cupy.asarray(h_row2 @ V[: col + 1, :], dtype=op_dtype)
+                    w = w - _row_basis_combination(
+                        h_row2, V[: col + 1, :], cupy=cupy, accum_dtype=acc_dtype
+                    )
 
             h_next = _norm(w, cupy=cupy, accum_dtype=acc_dtype)
             H[col, col + 1] = h_next
@@ -2153,6 +2212,8 @@ def block_gmres_cupy_native(
                 h_block2 = _block_basis_projection(v_prev, w, cupy=cupy, accum_dtype=acc_dtype)
                 H[: (col + 1) * p, cs] = H[: (col + 1) * p, cs] + h_block2
                 _subtract_block_basis_projection(w, v_prev, h_block2, cupy=cupy)
+            # Deleting V at restart is insufficient while this view is live.
+            del v_prev
 
             q_next, r_next = cupy.linalg.qr(cupy.asarray(w, dtype=acc_dtype), mode="reduced")
             if float(cupy.linalg.norm(r_next)) <= max(breakdown_tol_f, eps):
@@ -2213,6 +2274,9 @@ def block_gmres_cupy_native(
                     v_trial = _pack_block_basis(V[:k_used], cupy=cupy, dtype=op_dtype)
                     y_trial = cupy.asarray(y_last[: k_used * p, :], dtype=op_dtype)
                     x_trial = x_mat + v_trial @ y_trial
+                    # The packed basis can be as large as V. It is no longer
+                    # needed when the physical-residual operator starts.
+                    del v_trial, y_trial
                     (
                         block_trial_abs,
                         block_trial_rel,
@@ -2244,6 +2308,9 @@ def block_gmres_cupy_native(
                         converged_reason = "converged"
                         cycle_converged = True
                         break
+                    # Failed gates must not retain full trial/residual blocks
+                    # throughout the remaining Arnoldi steps or next restart.
+                    del x_trial, r_true_trial
             if iterations >= maxiter_total:
                 break
 
@@ -2268,7 +2335,7 @@ def block_gmres_cupy_native(
         x_mat = x_mat + dx
         # Release cycle-local Krylov storage before the residual matvec and
         # before a subsequent cycle allocates another block basis.
-        del V, H, G, v_used, y_used, y_last, q0, r0
+        del V, H, G, v_used, y_used, y_last, q0, r0, z0, dx
 
         (
             block_residual_norm,

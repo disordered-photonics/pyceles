@@ -9,7 +9,7 @@ from scipy.sparse.linalg import LinearOperator
 from scipy.sparse.linalg import gmres as scipy_gmres
 
 from pyceles.io.hdf5 import load_solution_h5, save_solution_h5
-from pyceles.linear import solvers
+from pyceles.linear import krylov_cupy, solvers
 from pyceles.linear.solvers import (
     direct_dense_scipy,
     estimate_dense_matrix_bytes,
@@ -1979,3 +1979,53 @@ def test_direct_dense_scipy_validates_public_input_shapes(kwargs, match):
     b = kwargs.pop("b")
     with pytest.raises(ValueError, match=match):
         direct_dense_scipy(lambda x: np.asarray(x), b, show_progress=False, **kwargs)
+
+
+@pytest.mark.fake_gpu
+@pytest.mark.parametrize("method", ("fgmres", "lgmres", "block_gmres"))
+@pytest.mark.parametrize("identity_preconditioner", (False, True))
+def test_native_cupy_restarts_release_all_basis_views(method, identity_preconditioner):
+    """A slice must not outlive the explicit end-of-cycle basis deletion."""
+    cupy = _fake_cupy_numpy_backend()
+    original_empty = cupy.empty
+    n = 8
+    block = method == "block_gmres"
+    basis_shape = (2, n, 2) if block else (2, n)
+    basis_refs: list[weakref.ReferenceType[np.ndarray]] = []
+    live_before_allocation: list[int] = []
+
+    def tracked_empty(shape, dtype=None):
+        if tuple(shape) == basis_shape:
+            live_before_allocation.append(sum(ref() is not None for ref in basis_refs))
+            array = original_empty(shape, dtype=dtype)
+            basis_refs.append(weakref.ref(array))
+            return array
+        return original_empty(shape, dtype=dtype)
+
+    cupy.empty = tracked_empty
+    rng = np.random.default_rng(20261004)
+    shape = (n, 2) if block else (n,)
+    b = np.asarray(
+        rng.standard_normal(shape) + 1j * rng.standard_normal(shape), dtype=np.complex128
+    )
+    before = b.copy()
+    diagonal = np.arange(2, n + 2, dtype=np.complex128)
+    if block:
+        diagonal = diagonal[:, None]
+    kwargs = {"outer_k": 0} if method == "lgmres" else {}
+    preconditioner = (lambda x: x) if identity_preconditioner else None
+    result = getattr(krylov_cupy, f"{method}_cupy_native")(
+        lambda x: diagonal * x,
+        b,
+        cupy=cupy,
+        preconditioner=preconditioner,
+        restart=1,
+        maxiter=2,
+        rtol=0.0,
+        atol=0.0,
+        **kwargs,
+    )
+    assert result.iterations == 2
+    assert live_before_allocation == [0, 0]
+    assert all(ref() is None for ref in basis_refs)
+    np.testing.assert_array_equal(b, before)
