@@ -39,7 +39,7 @@ class PlaneWave:
         )
 
     def jones_coefficients(self) -> tuple[complex, complex]:
-        """Return normalized TE/TM Jones weights for this plane wave."""
+        """Return the TE/TM Jones weights, including amplitude and phase."""
         return polarization_to_jones(self.polarization)
 
     def with_polarization(self, polarization: PolarizationInput) -> PlaneWave:

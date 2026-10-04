@@ -12,7 +12,7 @@ PolarizationInput = Polarization | tuple[complex, complex] | list[complex] | np.
 
 
 def polarization_to_jones(polarization: PolarizationInput) -> tuple[complex, complex]:
-    """Normalize user polarization input to Jones-like TE/TM weights."""
+    """Validate TE/TM Jones weights without changing their amplitude or phase."""
     if isinstance(polarization, str):
         pol = polarization.strip().upper()
         if pol == "TE":
@@ -35,7 +35,7 @@ def polarization_to_jones(polarization: PolarizationInput) -> tuple[complex, com
         and np.isfinite(a_tm.imag)
     ):
         raise ValueError("Jones polarization entries must be finite complex numbers.")
-    if np.isclose(abs(a_te), 0.0) and np.isclose(abs(a_tm), 0.0):
+    if a_te == 0.0 and a_tm == 0.0:
         raise ValueError("At least one Jones polarization entry must be non-zero.")
     return a_te, a_tm
 

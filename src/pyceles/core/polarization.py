@@ -11,13 +11,15 @@ Polarization = Literal["TE", "TM"]
 def pure_polarization_label(
     a_te: complex,
     a_tm: complex,
-    *,
-    atol: float = 1e-15,
 ) -> Polarization | None:
-    """Return pure-channel label when Jones weights represent TE-only or TM-only."""
-    if abs(a_tm) <= atol and abs(a_te) > atol:
+    """Classify exact single-channel support, without discarding a small component.
+
+    The label does not imply unit amplitude: callers must retain the nonzero
+    Jones coefficient, including its complex phase.
+    """
+    if a_tm == 0.0 and a_te != 0.0:
         return "TE"
-    if abs(a_te) <= atol and abs(a_tm) > atol:
+    if a_te == 0.0 and a_tm != 0.0:
         return "TM"
     return None
 
@@ -39,10 +41,17 @@ def normalize_global_polarization_vector(
         )
     if not np.all(np.isfinite(arr.real)) or not np.all(np.isfinite(arr.imag)):
         raise ValueError("`global_polarization` must contain only finite values.")
-    norm = float(np.linalg.norm(arr))
-    if np.isclose(norm, 0.0):
+    # Scale real components before the norm: a finite direction may have an
+    # unrepresentable norm, or a norm whose square underflows. Avoid complex
+    # magnitude/division here too, including for subnormal input components.
+    scale = float(max(np.max(np.abs(arr.real)), np.max(np.abs(arr.imag))))
+    if scale == 0.0:
         raise ValueError("`global_polarization` must not be the zero vector.")
-    return np.asarray(arr / norm, dtype=np.complex128)
+    scaled = np.empty(3, dtype=np.complex128)
+    np.divide(arr.real, scale, out=scaled.real)
+    np.divide(arr.imag, scale, out=scaled.imag)
+    scaled /= np.linalg.norm(scaled)
+    return scaled
 
 
 def project_global_cartesian_to_te_tm(

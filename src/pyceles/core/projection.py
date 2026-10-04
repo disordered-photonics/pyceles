@@ -137,6 +137,7 @@ def incident_coeffs_planewave(
     cb = np.cos(beta)
     sb = np.sin(beta)
 
+    jones_weight = 1.0 + 0.0j
     if polarization_override is None:
         a_te, a_tm = source.jones_coefficients()
         pure = pure_polarization_label(a_te, a_tm)
@@ -157,6 +158,7 @@ def incident_coeffs_planewave(
             )
             return np.asarray(a_te * a_te_field + a_tm * a_tm_field, dtype=ctype)
         polarization_override = pure
+        jones_weight = a_te if pure == "TE" else a_tm
 
     PI, TAU = spherical_functions_trigon(np.asarray(cb), np.asarray(sb), lmax, xp=np)
     pol = 1 if str(polarization_override).upper() == "TE" else 2
@@ -175,6 +177,8 @@ def incident_coeffs_planewave(
                 idx = (tau - 1) * Nscl + sidx
                 Bdag = transformation_coefficients(PI, TAU, tau, l, m, pol, dagger=True)
                 aI[:, idx] = 4.0 * E0 * phase_m * eikr * Bdag
+    if jones_weight != 1.0:
+        aI *= jones_weight
     return np.asarray(aI, dtype=ctype)
 
 
@@ -216,6 +220,7 @@ def incident_coeffs_wavebundle_normal_incidence(
             "incident_coeffs_wavebundle_normal_incidence requires polar_angle = 0 or pi."
         )
 
+    jones_weight = 1.0 + 0.0j
     if polarization_override is None:
         a_te, a_tm = beam.jones_coefficients()
         pure = pure_polarization_label(a_te, a_tm)
@@ -238,6 +243,7 @@ def incident_coeffs_wavebundle_normal_incidence(
             )
             return np.asarray(a_te * a_te_field + a_tm * a_tm_field, dtype=ctype)
         polarization_override = pure
+        jones_weight = a_te if pure == "TE" else a_tm
 
     prefac = E0 * (k**2) * (w**2) / np.pi
 
@@ -325,4 +331,6 @@ def incident_coeffs_wavebundle_normal_incidence(
         )
         aI[:, idx_m] = prefac * contrib * (d_beta / 2.0)
 
+    if jones_weight != 1.0:
+        aI *= jones_weight
     return np.asarray(aI, dtype=ctype)

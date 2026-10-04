@@ -46,6 +46,7 @@ def _gaussian_angular_spectrum_coeffs(
     polarization_override: Polarization | None = None,
 ) -> PlaneWaveSpectrum:
     """Evaluate Gaussian-beam TE/TM angular-spectrum coefficients on a grid."""
+    jones_weight = 1.0 + 0.0j
     if polarization_override is None:
         a_te, a_tm = beam.jones_coefficients()
         pure = pure_polarization_label(a_te, a_tm)
@@ -71,6 +72,7 @@ def _gaussian_angular_spectrum_coeffs(
                 a_tm=a_tm,
             )
         polarization_override = pure
+        jones_weight = a_te if pure == "TE" else a_tm
 
     beta = np.asarray(polar_angles, float)
     alpha = np.asarray(azimuthal_angles, float)
@@ -125,6 +127,9 @@ def _gaussian_angular_spectrum_coeffs(
     m22 = np.einsum("abi,abi->ab", etheta_g, etheta_l)
     coeff_te = (m11 * g_te_l + m12 * g_tm_l) * phase
     coeff_tm = (m21 * g_te_l + m22 * g_tm_l) * phase
+    if jones_weight != 1.0:
+        coeff_te *= jones_weight
+        coeff_tm *= jones_weight
     return PlaneWaveSpectrum(alpha, beta, kx, ky, kz, coeff_te, coeff_tm)
 
 
@@ -137,6 +142,7 @@ def _laguerre_gaussian_angular_spectrum_coeffs(
     polarization_override: Polarization | None = None,
 ) -> PlaneWaveSpectrum:
     """Evaluate Maxwell-consistent collimated LG TE/TM angular-spectrum coefficients."""
+    jones_weight = 1.0 + 0.0j
     if polarization_override is None:
         a_te, a_tm = beam.jones_coefficients()
         pure = pure_polarization_label(a_te, a_tm)
@@ -162,6 +168,7 @@ def _laguerre_gaussian_angular_spectrum_coeffs(
                 a_tm=a_tm,
             )
         polarization_override = pure
+        jones_weight = a_te if pure == "TE" else a_tm
 
     beta = np.asarray(polar_angles, float).reshape(-1)
     alpha = np.asarray(azimuthal_angles, float).reshape(-1)
@@ -226,6 +233,9 @@ def _laguerre_gaussian_angular_spectrum_coeffs(
     m22 = np.einsum("abi,abi->ab", etheta_g, etheta_l)
     coeff_te = (m11 * g_te_l + m12 * g_tm_l) * phase
     coeff_tm = (m21 * g_te_l + m22 * g_tm_l) * phase
+    if jones_weight != 1.0:
+        coeff_te *= jones_weight
+        coeff_tm *= jones_weight
     return PlaneWaveSpectrum(alpha, beta, kx, ky, kz, coeff_te, coeff_tm)
 
 
@@ -313,6 +323,7 @@ def _focused_laguerre_gaussian_angular_spectrum_coeffs(
     polarization_override: Polarization | None = None,
 ) -> PlaneWaveSpectrum:
     """Evaluate Debye/aplanatic-focused LG TE/TM angular-spectrum coefficients."""
+    jones_weight = 1.0 + 0.0j
     if polarization_override is None:
         a_te, a_tm = beam.jones_coefficients()
         pure = pure_polarization_label(a_te, a_tm)
@@ -338,6 +349,7 @@ def _focused_laguerre_gaussian_angular_spectrum_coeffs(
                 a_tm=a_tm,
             )
         polarization_override = pure
+        jones_weight = a_te if pure == "TE" else a_tm
 
     geom = _focused_laguerre_geometry(
         beam=beam,
@@ -382,6 +394,9 @@ def _focused_laguerre_gaussian_angular_spectrum_coeffs(
     m22 = np.einsum("abi,abi->ab", etheta_g, etheta_l)
     coeff_te = (m11 * g_te_l + m12 * g_tm_l) * phase
     coeff_tm = (m21 * g_te_l + m22 * g_tm_l) * phase
+    if jones_weight != 1.0:
+        coeff_te *= jones_weight
+        coeff_tm *= jones_weight
     return PlaneWaveSpectrum(alpha, beta, kx, ky, kz, coeff_te, coeff_tm)
 
 
@@ -676,6 +691,7 @@ def _bessel_angular_spectrum_coeffs(
     polarization_override: Polarization | None = None,
 ) -> PlaneWaveSpectrum:
     """Evaluate exact non-paraxial Bessel-beam ring spectrum on one alpha-beta grid."""
+    jones_weight = 1.0 + 0.0j
     if polarization_override is None:
         a_te, a_tm = beam.jones_coefficients()
         pure = pure_polarization_label(a_te, a_tm)
@@ -701,6 +717,7 @@ def _bessel_angular_spectrum_coeffs(
                 a_tm=a_tm,
             )
         polarization_override = pure
+        jones_weight = a_te if pure == "TE" else a_tm
     geom = _bessel_ring_geometry(
         beam=beam,
         k=float(k),
@@ -744,6 +761,9 @@ def _bessel_angular_spectrum_coeffs(
     m22 = np.einsum("abi,abi->ab", etheta_g, etheta_l)
     coeff_te = m11 * g_te_l + m12 * g_tm_l
     coeff_tm = m21 * g_te_l + m22 * g_tm_l
+    if jones_weight != 1.0:
+        coeff_te *= jones_weight
+        coeff_tm *= jones_weight
     return PlaneWaveSpectrum(alpha, beta, kx, ky, kz, coeff_te, coeff_tm)
 
 

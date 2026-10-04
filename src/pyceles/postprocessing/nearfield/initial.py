@@ -91,7 +91,7 @@ def _compute_initial_field_gaussian_normal_incidence_analytic(
     beta_weighted: real_array = envelope * sb * beta_w
 
     a_te, a_tm = polarization_to_jones(polarization)
-    if not (np.isclose(abs(a_te), 0.0) or np.isclose(abs(a_tm), 0.0)):
+    if a_te != 0.0 and a_tm != 0.0:
         out_te = _compute_initial_field_gaussian_normal_incidence_analytic(
             field_points_local,
             k=k,
@@ -133,7 +133,8 @@ def _compute_initial_field_gaussian_normal_incidence_analytic(
             np.asarray(a_te * h_te + a_tm * h_tm, dtype=accum_dtype),
         )
 
-    pol = "te" if abs(a_te) > 0 else "tm"
+    pol = "te" if a_te != 0.0 else "tm"
+    jones_weight = a_te if pol == "te" else a_tm
     alpha_g = float(azimuthal_angle) if pol == "te" else float(azimuthal_angle) - np.pi / 2.0
     c = float(np.cos(alpha_g))
     s = float(np.sin(alpha_g))
@@ -251,6 +252,9 @@ def _compute_initial_field_gaussian_normal_incidence_analytic(
 
         if beta_pbar is not None:
             beta_pbar.close()
+        if jones_weight != 1.0:
+            e_gpu *= jones_weight
+            h_gpu *= jones_weight
         return asnumpy(e_gpu).astype(accum_dtype, copy=False), asnumpy(h_gpu).astype(
             accum_dtype, copy=False
         )
@@ -298,6 +302,9 @@ def _compute_initial_field_gaussian_normal_incidence_analytic(
         h[:, 1] += n_medium_c * (wgt * hy).astype(accum_dtype, copy=False)
         h[:, 2] += n_medium_c * (wgt * hz).astype(accum_dtype, copy=False)
 
+    if jones_weight != 1.0:
+        e *= jones_weight
+        h *= jones_weight
     return e, h
 
 
