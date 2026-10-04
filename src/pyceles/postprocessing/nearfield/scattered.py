@@ -327,21 +327,24 @@ def _compute_scattered_field_cupy(
     pos = np.asarray(positions, np.float64)
     compute_dtype_np = np.dtype(compute_dtype)
     accum_dtype_np = np.dtype(accum_dtype)
-    empty = np.zeros((pts.shape[0], 3), dtype=accum_dtype_np)
-    if pos.shape[0] == 0:
+    if pts.shape[0] == 0 or pos.shape[0] == 0:
+        empty = np.zeros((pts.shape[0], 3), dtype=accum_dtype_np)
         return empty, empty.copy() if compute_magnetic else None
 
     idx_eval: np.ndarray | None = None
-    if active_mask is None:
-        pts_eval = pts
-    else:
+    pts_eval = pts
+    if active_mask is not None:
         mask = np.asarray(active_mask, dtype=bool).reshape(-1)
         if mask.shape[0] != pts.shape[0]:
             raise ValueError(f"`active_mask` must have length {pts.shape[0]}. Got {mask.shape[0]}.")
-        idx_eval = np.flatnonzero(mask)
-        if idx_eval.size == 0:
-            return empty, empty.copy() if compute_magnetic else None
-        pts_eval = pts[idx_eval]
+        # An all-active mask is the ordinary full-grid case, not a request
+        # for a copied point set and a second pair of full-sized field arrays.
+        if not np.all(mask):
+            idx_eval = np.flatnonzero(mask)
+            if idx_eval.size == 0:
+                empty = np.zeros((pts.shape[0], 3), dtype=accum_dtype_np)
+                return empty, empty.copy() if compute_magnetic else None
+            pts_eval = pts[idx_eval]
 
     dr = float(particle_distance_resolution)
     if dr < 0.0:
@@ -382,7 +385,9 @@ def _compute_scattered_field_cupy(
     )
     if idx_eval is None:
         return e_eval, h_eval
-    e = empty
+    # Allocate scatter destinations only after evaluation. The unmasked
+    # path above returns the evaluator's owned arrays without a placeholder.
+    e = np.zeros((pts.shape[0], 3), dtype=accum_dtype_np)
     e[idx_eval] = e_eval
     if not compute_magnetic:
         return e, None
