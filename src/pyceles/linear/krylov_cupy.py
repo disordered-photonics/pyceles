@@ -1940,11 +1940,18 @@ def bicgstab_cupy_native(
 
         alpha = rho / d1
         alpha_op = cupy.asarray(alpha, dtype=op_dtype)
-        s_vec = cupy.asarray(r_vec, dtype=op_dtype).copy()
+        # r is owned: initialization copies b, and reliable restarts take
+        # ownership of b - A(x). Its old value is dead once p and alpha are
+        # formed; r_hat and the fresh p were copied separately. Reuse r for s
+        # rather than copying a full vector every iteration.
+        s_vec = r_vec
         s_vec -= alpha_op * v_vec
         s_norm = _norm(s_vec, cupy=cupy, accum_dtype=acc_dtype)
         if s_norm <= target_abs:
             x_vec += alpha_op * phat
+            # The true-residual gate can need substantial operator workspace.
+            # phat is dead after this update (and can alias p without M).
+            phat = None
             iterations = k + 1
             _record_recursive(s_norm)
             if not compute_final_residual:
@@ -1961,6 +1968,8 @@ def bicgstab_cupy_native(
             # Reliable restart after a false recursive convergence gate.
             r_vec = cupy.asarray(r_true, dtype=op_dtype)
             r_hat = cupy.asarray(r_true, dtype=op_dtype).copy()
+            del r_true
+            s_vec = None
             p_vec = None
             v_vec = None
             rho_old = cupy.asarray(1.0 + 0.0j, dtype=acc_dtype)
@@ -1985,6 +1994,7 @@ def bicgstab_cupy_native(
         # Reuse s as the next residual instead of allocating s - omega*t.
         s_vec -= omega_op * t_vec
         r_vec = s_vec
+        s_vec = None
         residual_norm = _norm(r_vec, cupy=cupy, accum_dtype=acc_dtype)
         relative_residual = _record_recursive(residual_norm)
         iterations = k + 1
@@ -2006,6 +2016,8 @@ def bicgstab_cupy_native(
                 break
             r_vec = cupy.asarray(r_true, dtype=op_dtype)
             r_hat = cupy.asarray(r_true, dtype=op_dtype).copy()
+            del r_true
+            s_vec = None
             p_vec = None
             v_vec = None
             rho_old = cupy.asarray(1.0 + 0.0j, dtype=acc_dtype)
