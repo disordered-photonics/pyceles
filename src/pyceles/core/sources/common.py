@@ -156,13 +156,13 @@ def _incident_coeffs_from_outgoing_expansion(
     return out
 
 
-def _validated_int(name: str, value: int, *, minimum: int | None = None) -> int:
-    """Validate one finite integer parameter (optionally with lower bound)."""
+def _validated_int(name: str, value: int | float, *, minimum: int | None = None) -> int:
+    """Validate one finite integer-valued numeric parameter (optionally bounded)."""
     try:
         value_f = float(value)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"`{name}` must be an integer. Got {value!r}.") from exc
-    if not np.isfinite(value_f) or (not np.isclose(value_f, round(value_f), atol=0.0)):
+    if not np.isfinite(value_f) or not value_f.is_integer():
         raise ValueError(f"`{name}` must be an integer. Got {value!r}.")
     value_i = round(value_f)
     if minimum is not None and value_i < int(minimum):
