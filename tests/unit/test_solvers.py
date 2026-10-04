@@ -74,8 +74,8 @@ def _fake_cupy_numpy_backend():
             return np.sqrt(x)
 
         @staticmethod
-        def conj(x):
-            return np.conj(x)
+        def conj(x, out=None):
+            return np.conj(x, out=out)
 
         @staticmethod
         def vdot(x, y):

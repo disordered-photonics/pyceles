@@ -153,7 +153,10 @@ def _dot_reduction_kernel(input_dtype_name: str, accum_dtype_name: str) -> Any:
     return cupy.ReductionKernel(
         f"{input_dtype.name} x, {input_dtype.name} y",
         f"{accum_dtype.name} z",
-        "conj(x) * y",
+        # Widen before multiplication, not just when reducing the product.
+        # A complex64 product can lose bits or overflow before a complex128
+        # accumulator sees it; casts here require no widened device vectors.
+        f"conj(({reduce_type})x) * ({reduce_type})y",
         "a + b",
         "z = a",
         "0",
@@ -215,7 +218,15 @@ def _norm(v: Any, *, cupy: Any, accum_dtype: np.dtype) -> float:
 
 
 def _norms_block(v: Any, *, cupy: Any, accum_dtype: np.dtype) -> Any:
-    return cupy.linalg.norm(cupy.asarray(v, dtype=accum_dtype), axis=0)
+    """Column norms using the scalar norm's fused map/reduce precision policy."""
+    values = cupy.asarray(v)
+    dtype = np.dtype(values.dtype)
+    if dtype in {np.dtype(np.complex64), np.dtype(np.complex128)} and hasattr(
+        cupy, "ReductionKernel"
+    ):
+        kernel = _norm_reduction_kernel(dtype.name, np.dtype(accum_dtype).name)
+        return kernel(values, axis=0)
+    return cupy.linalg.norm(cupy.asarray(values, dtype=accum_dtype), axis=0)
 
 
 def _solve_upper_triangular(r_upper: Any, rhs: Any, *, cupy: Any) -> Any:
@@ -299,10 +310,16 @@ def _block_basis_projection(
     chunk = max(1, min(n, int(workspace_bytes) // (live_columns * itemsize)))
     for start in range(0, n, chunk):
         stop = min(n, start + chunk)
-        basis_chunk = basis[:, start:stop, :].transpose(1, 0, 2).reshape(stop - start, n_blocks * p)
-        left = cupy.asarray(basis_chunk, dtype=accum_dtype)
+        # Conjugate, pack and widen in one ufunc write into owned workspace.
+        # Reshaping the transposed basis first can copy it; then astype and
+        # conj would each allocate another full chunk. Never conjugate a view
+        # returned by asarray in place: it may still alias the Krylov basis.
+        left = cupy.empty((stop - start, n_blocks, p), dtype=accum_dtype)
+        cupy.conj(basis[:, start:stop, :].transpose(1, 0, 2), out=left)
         right = cupy.asarray(values[start:stop, :], dtype=accum_dtype)
-        coefficients += left.conj().T @ right
+        coefficients += left.reshape(stop - start, n_blocks * p).T @ right
+        # Do not retain the previous chunk while allocating the next one.
+        del left, right
     return coefficients
 
 
@@ -2037,13 +2054,13 @@ def block_gmres_cupy_native(
             out=np.asarray(rhs_norms_np, dtype=float).copy(),
             where=b_norms_np > 0,
         )
-        block_abs = float(cupy.linalg.norm(cupy.asarray(r_true, dtype=acc_dtype)))
+        block_abs = _norm(r_true, cupy=cupy, accum_dtype=acc_dtype)
         block_rel = block_abs / b_norm_frob if b_norm_frob > 0 else block_abs
         return block_abs, block_rel, rhs_norms_np, rhs_rel, r_true
 
     b_norms = _norms_block(b_mat, cupy=cupy, accum_dtype=acc_dtype)
     b_norms_np = np.asarray(cupy.asnumpy(b_norms), dtype=float)
-    b_norm_frob = float(cupy.linalg.norm(cupy.asarray(b_mat, dtype=acc_dtype)))
+    b_norm_frob = _norm(b_mat, cupy=cupy, accum_dtype=acc_dtype)
     rhs_target_abs = np.maximum(float(atol), float(rtol) * b_norms_np)
     target_abs_block = max(float(atol), float(rtol) * b_norm_frob)
     breakdown_tol_f = float(breakdown_tol)

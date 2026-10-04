@@ -28,6 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CuPy pairwise and MLFMM translation kernels now omit exactly forbidden
   parity orders, reducing coefficient storage and contraction work without
   restricting particle T-matrices.
+- Reduced temporary device memory in CuPy block-GMRES basis projections and
+  residual norms. Fused mixed-precision dot products now multiply in the
+  requested accumulation precision, avoiding premature rounding and overflow.
 - Reorganized the public reproducibility surface: scaling, profiling, and
   independent MSTM validation drivers now live under `benchmarks/` rather
   than alongside the introductory files in `examples/`.
