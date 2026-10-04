@@ -511,7 +511,7 @@ class PeriodicCouplingOperator:
         )
 
     def iter_source_block_batches(
-        self, *, show_progress: bool = False
+        self, *, show_progress: bool = False, for_dense_assembly: bool = False
     ) -> Iterable[SourceBlockBatch]:
         """Yield exact Ewald source-major blocks for dense assembly."""
         pos = np.asarray(self.positions, dtype=float).reshape(-1, 3)

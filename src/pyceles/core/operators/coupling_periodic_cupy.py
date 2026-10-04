@@ -284,9 +284,9 @@ class CuPyPeriodicCouplingOperator:
             self._self_correction_gpu = cp.asarray(value, dtype=cp.complex128)
         return self._self_correction_gpu
 
-    def _source_batch_size(self) -> int:
+    def _source_batch_size(self, *, for_dense_assembly: bool = False) -> int:
         """Return an internal source chunk size bounded by temporary device memory."""
-        if self.cache_blocks:
+        if self.cache_blocks or for_dense_assembly:
             bytes_per_source = self.n_particles * self.n_modes * self.n_modes * self.dtype.itemsize
             target_bytes = 256 * 1024**2
             max_sources = 16
@@ -302,8 +302,8 @@ class CuPyPeriodicCouplingOperator:
             max_sources = self.n_particles
         return max(1, min(self.n_particles, max_sources, target_bytes // max(bytes_per_source, 1)))
 
-    def _source_batches(self) -> Iterable[tuple[int, ...]]:
-        batch_size = int(self._source_batch_size())
+    def _source_batches(self, *, for_dense_assembly: bool = False) -> Iterable[tuple[int, ...]]:
+        batch_size = int(self._source_batch_size(for_dense_assembly=for_dense_assembly))
         for start in range(0, self.n_particles, batch_size):
             stop = min(self.n_particles, start + batch_size)
             yield tuple(range(start, stop))
@@ -1067,15 +1067,17 @@ class CuPyPeriodicCouplingOperator:
         self._dense_w_cache_gpu = matrix
 
     def iter_source_block_batches(
-        self, *, show_progress: bool = False
+        self, *, show_progress: bool = False, for_dense_assembly: bool = False
     ) -> Iterable[SourceBlockBatch]:
         """Yield cached or ephemeral source-major blocks for dense assembly."""
-        batches: Iterable[tuple[int, ...]] = self._source_batches()
+        batches: Iterable[tuple[int, ...]] = self._source_batches(
+            for_dense_assembly=for_dense_assembly
+        )
         if show_progress:
+            batch_size = self._source_batch_size(for_dense_assembly=for_dense_assembly)
             batches = tqdm(
                 batches,
-                total=(self.n_particles + self._source_batch_size() - 1)
-                // self._source_batch_size(),
+                total=(self.n_particles + batch_size - 1) // batch_size,
                 desc="Build periodic source blocks (CuPy)",
             )
         for source_indices in batches:

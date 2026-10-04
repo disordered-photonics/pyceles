@@ -8,7 +8,12 @@ import pytest
 
 import pyceles as pcl
 from pyceles.core.indexing import n_modes
-from pyceles.core.operators import PeriodicCouplingOperator, apply_W_numpy, prepare_matvec
+from pyceles.core.operators import (
+    CuPyPeriodicCouplingOperator,
+    PeriodicCouplingOperator,
+    apply_W_numpy,
+    prepare_matvec,
+)
 from pyceles.core.periodic.ewald import periodic_ewald_block
 from pyceles.core.translation import translation_ab5_table
 from pyceles.io import load_periodic_h5, save_periodic_h5
@@ -697,6 +702,32 @@ def test_periodic_ewald_solve_runs_through_dense_fallback() -> None:
     solved = sim.solve_sources({"pw": source})
 
     assert np.all(np.isfinite(solved.coeffs["pw"]))
+
+
+def test_cupy_periodic_dense_batches_do_not_use_cache_off_matvec_budget() -> None:
+    """Dense assembly must bound its transient blocks independently of matvec batches."""
+
+    lmax = 3
+    positions = np.zeros((500, 3), dtype=float)
+    coupling = CuPyPeriodicCouplingOperator(
+        lmax=lmax,
+        k=2.0 * np.pi / 550.0,
+        positions=positions,
+        ab5=translation_ab5_table(lmax, dtype=np.complex128),
+        periodic=pcl.PeriodicSpec(
+            lattice=pcl.RectangularLattice2D(3000.0, 3000.0),
+            options=pcl.PeriodicOptions(method="ewald"),
+        ),
+        k_parallel=np.zeros(2, dtype=float),
+        dtype=np.dtype(np.complex128),
+        cache_blocks=False,
+    )
+
+    matvec_batch_size = coupling._source_batch_size()
+    dense_batch_size = coupling._source_batch_size(for_dense_assembly=True)
+
+    assert matvec_batch_size > dense_batch_size
+    assert dense_batch_size <= 16
 
 
 def test_periodic_postprocess_populates_periodic_result_payload() -> None:

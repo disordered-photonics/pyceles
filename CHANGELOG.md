@@ -54,6 +54,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   terminal residual diagnostic no longer skips the physical residual rebuild
   required at restart boundaries; the flag now also avoids the terminal
   operator application when no further restarted cycle can follow.
+- Fixed periodic CuPy direct assembly to use dense-solve block bounds instead
+  of the larger cache-off iterative batch policy, avoiding unnecessary
+  out-of-memory failures during dense matrix construction.
 - Dense T-matrix preparation now preserves supported input precision and shares
   immutable archetype blocks, reducing memory for repeated imports.
 - Breaking: `TMatrixData.as_particle(...)` now requires the intended wavelength

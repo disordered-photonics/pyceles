@@ -65,7 +65,7 @@ class SourceBlockCouplingOperator(Protocol):
     def supports_source_block_dense_assembly(self) -> bool: ...
 
     def iter_source_block_batches(
-        self, *, show_progress: bool = False
+        self, *, show_progress: bool = False, for_dense_assembly: bool = False
     ) -> Iterable[SourceBlockBatch]: ...
 
 
@@ -181,7 +181,9 @@ class PreparedOperator:
         ns = int(np.asarray(self.positions).reshape(-1, 3).shape[0])
         nm = int(n_modes(self.lmax))
         n = ns * nm
-        batches = iter(coupling.iter_source_block_batches(show_progress=show_progress))
+        batches = iter(
+            coupling.iter_source_block_batches(show_progress=show_progress, for_dense_assembly=True)
+        )
         generation_seconds = 0.0
         assembly_seconds = 0.0
         matrix: Any | None = None
