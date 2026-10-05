@@ -514,6 +514,7 @@ def test_periodic_dense_assembly_streams_without_populating_cache() -> None:
         A_mv=prepared.apply_A,
         n=2 * n_modes(1),
         dtype=np.dtype(np.complex128),
+        backend="numpy",
         show_progress=False,
     )
     eye = np.eye(2 * n_modes(1), dtype=np.complex128)
@@ -565,6 +566,7 @@ def test_periodic_dense_assembly_applies_nondiagonal_particle_t_blocks() -> None
         A_mv=prepared.apply_A,
         n=nm,
         dtype=np.dtype(np.complex128),
+        backend="numpy",
         show_progress=False,
     )
     eye = np.eye(nm, dtype=np.complex128)

@@ -5,12 +5,13 @@ from __future__ import annotations
 import time
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 from tqdm.auto import tqdm
 
 from pyceles._dtypes import resolve_compute_accum_dtypes
+from pyceles._optional import import_cupy
 from pyceles.core.indexing import n_modes
 from pyceles.core.operators import (
     PairwiseCouplingOperator,
@@ -52,28 +53,43 @@ def _assemble_dense_operator_via_matvec(
     *,
     n: int,
     dtype: np.dtype,
+    backend: Literal["numpy", "cupy"],
     show_progress: bool,
     timings: dict[str, float] | None = None,
 ) -> np.ndarray:
-    """Assemble a dense operator by applying the prepared matvec to basis vectors.
+    """Assemble columns using one backend-native basis vector and a host sink.
 
-    This is the generic dense fallback used when a backend-specific blockwise
-    assembler is not available yet. It keeps the direct-solve/LU-cache workflow
-    usable on the CuPy backend without forcing a separate dense-assembly kernel.
+    Finite CuPy and periodic Rayleigh operators do not expose source blocks.
+    Keep their W/T action chain on device, but retain host matrix staging so
+    the full dense matrix does not compete with transient matvec workspace in
+    VRAM. Fortran host storage permits direct downloads into column views.
+    Coupling source-batch policy and the single-RHS width remain unchanged.
     """
-    A = np.empty((n, n), dtype=dtype)
+    xp: Any = np
+    if backend == "cupy":
+        xp, _ = import_cupy()
+    A = np.empty((n, n), dtype=dtype, order="F" if backend == "cupy" else "C")
     # A full identity matrix is needlessly O(n^2) storage when only one basis
     # vector is consumed per call.  Reuse one sparse basis vector instead;
     # this is especially important for large direct-assembly probes.
-    basis = np.zeros((n,), dtype=dtype)
+    basis = xp.zeros((n,), dtype=dtype)
     col_iter: Iterable[int] = range(n)
     if show_progress:
         col_iter = tqdm(col_iter, desc="Assemble A (dense via matvec)")
+    if backend == "cupy":
+        xp.cuda.get_current_stream().synchronize()
     t0 = time.perf_counter()
     for j in col_iter:
         basis[j] = 1
-        A[:, j] = np.asarray(A_mv(basis), dtype=dtype)
+        column = xp.asarray(A_mv(basis), dtype=dtype)
+        if backend == "cupy":
+            xp.asnumpy(column, out=A[:, j])
+        else:
+            A[:, j] = column
+        del column
         basis[j] = 0
+    if backend == "cupy":
+        xp.cuda.get_current_stream().synchronize()
     _record_elapsed(timings, "dense_operator_assembly_s", t0)
     return A
 
@@ -84,16 +100,12 @@ def _assemble_dense_operator_for_prepared(
     A_mv,
     n: int,
     dtype: np.dtype,
+    backend: Literal["numpy", "cupy"],
     show_progress: bool,
     timings: dict[str, float] | None = None,
 ) -> Any:
     """Assemble dense `A`, preferring operator-owned source-block streaming."""
-    source_block_assembler = getattr(prepared, "assemble_dense_from_source_blocks", None)
-    source_blocks = (
-        None
-        if source_block_assembler is None
-        else source_block_assembler(show_progress=show_progress)
-    )
+    source_blocks = prepared.assemble_dense_from_source_blocks(show_progress=show_progress)
     if source_blocks is not None:
         if timings is not None:
             timings["periodic_w_block_generation_s"] = (
@@ -108,6 +120,7 @@ def _assemble_dense_operator_for_prepared(
         A_mv,
         n=n,
         dtype=dtype,
+        backend=backend,
         show_progress=show_progress,
         timings=timings,
     )
@@ -328,14 +341,22 @@ def _prepare_direct_factorization(
             A_mv=apply_operator,
             n=unknowns,
             dtype=compute_dtype,
+            backend=operator_backend,
             show_progress=bool(cfg.verbose),
             timings=phase_timings,
         )
 
     if dense_operator is None:
         raise RuntimeError("Internal error: direct solve requires a dense operator.")
-    sim._dense_operator_cache = dense_operator
-    sim._dense_operator_dtype = compute_dtype
+    if operator_backend == "cupy":
+        # Transfer ownership BEFORE destructive LU. If factorization raises
+        # after overwriting any entries, a retry must assemble a fresh A, not
+        # read partially factorized storage from the unfactorized-matrix cache.
+        sim._dense_operator_cache = None
+        sim._dense_operator_dtype = None
+    else:
+        sim._dense_operator_cache = dense_operator
+        sim._dense_operator_dtype = compute_dtype
 
     factor_t0 = time.perf_counter()
     factorization = factorize_dense_matrix(
@@ -349,10 +370,7 @@ def _prepare_direct_factorization(
     sim._dense_lu_dtype = compute_dtype
 
     if operator_backend == "cupy":
-        # The in-place LU payload owns the device matrix. Retaining or passing
-        # the unfactorized matrix would consume VRAM and trigger an avoidable copy.
-        sim._dense_operator_cache = None
-        sim._dense_operator_dtype = None
+        # The LU payload now owns the device matrix; it is no longer A.
         dense_operator = None
     return dense_operator, factorization
 

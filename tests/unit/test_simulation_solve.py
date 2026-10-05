@@ -106,7 +106,14 @@ def test_assemble_dense_operator_via_matvec_builds_dense_columns():
         return np.array([2.0 * arr[0] + arr[1], arr[0] - 3.0 * arr[1]], dtype=np.complex128)
 
     timings: dict[str, float] = {}
-    A = fn(_op, n=2, dtype=np.dtype(np.complex128), show_progress=False, timings=timings)
+    A = fn(
+        _op,
+        n=2,
+        dtype=np.dtype(np.complex128),
+        backend="numpy",
+        show_progress=False,
+        timings=timings,
+    )
     np.testing.assert_allclose(A, np.array([[2.0, 1.0], [1.0, -3.0]], dtype=np.complex128))
     assert timings["dense_operator_assembly_s"] >= 0.0
 
@@ -126,6 +133,10 @@ def test_solve_sources_core_reuses_prepared_cache_and_broadcasts_warm_start(
     class _Prepared:
         def __init__(self) -> None:
             self.coupling = object()
+
+        def assemble_dense_from_source_blocks(self, *, show_progress: bool = False):
+            del show_progress
+            return None
 
         def apply_A(self, x: np.ndarray) -> np.ndarray:
             return np.asarray(x)
@@ -247,6 +258,10 @@ def test_solve_sources_core_validates_warm_start_shapes(monkeypatch, warm_start,
         def __init__(self) -> None:
             self.coupling = object()
 
+        def assemble_dense_from_source_blocks(self, *, show_progress: bool = False):
+            del show_progress
+            return None
+
         def apply_A(self, x: np.ndarray) -> np.ndarray:
             return np.asarray(x)
 
@@ -311,8 +326,23 @@ def test_solve_sources_core_zero_particle_case_skips_operator_and_solver(monkeyp
     assert out.rhs["src"].shape == (0, 6)
 
 
+@pytest.fixture
+def host_dense_assembly_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep legacy fake-GPU doubles on the host-only assembly path."""
+
+    native = sim_solve._assemble_dense_operator_via_matvec
+
+    def assemble(A_mv, *, backend, **kwargs):
+        assert backend == "cupy"
+        return native(A_mv, backend="numpy", **kwargs)
+
+    monkeypatch.setattr(sim_solve, "_assemble_dense_operator_via_matvec", assemble)
+
+
 @pytest.mark.fake_gpu
-def test_solve_sources_core_direct_cupy_dense_fallback_releases_dense_cache(monkeypatch):
+def test_solve_sources_core_direct_cupy_dense_fallback_releases_dense_cache(
+    monkeypatch, host_dense_assembly_adapter
+):
     sim = _single_sphere_sim(operator_backend="cupy", solver_method="direct")
     recorded: dict[str, object] = {}
     lu_payload = ("lu", "piv")
@@ -320,6 +350,10 @@ def test_solve_sources_core_direct_cupy_dense_fallback_releases_dense_cache(monk
     class _Prepared:
         def __init__(self) -> None:
             self.coupling = object()
+
+        def assemble_dense_from_source_blocks(self, *, show_progress: bool = False):
+            del show_progress
+            return None
 
         def apply_A(self, x: np.ndarray) -> np.ndarray:
             arr = np.asarray(x, dtype=np.complex128)
@@ -369,7 +403,9 @@ def test_solve_sources_core_direct_cupy_dense_fallback_releases_dense_cache(monk
 
 
 @pytest.mark.fake_gpu
-def test_solve_sources_core_direct_cupy_reuses_lu_without_reassembling_dense_A(monkeypatch):
+def test_solve_sources_core_direct_cupy_reuses_lu_without_reassembling_dense_A(
+    monkeypatch, host_dense_assembly_adapter
+):
     sim = _single_sphere_sim(operator_backend="cupy", solver_method="direct")
     apply_calls = 0
     factorize_calls = 0
@@ -379,6 +415,10 @@ def test_solve_sources_core_direct_cupy_reuses_lu_without_reassembling_dense_A(m
     class _Prepared:
         def __init__(self) -> None:
             self.coupling = object()
+
+        def assemble_dense_from_source_blocks(self, *, show_progress: bool = False):
+            del show_progress
+            return None
 
         def apply_A(self, x: np.ndarray) -> np.ndarray:
             nonlocal apply_calls
@@ -666,3 +706,167 @@ def test_operator_cache_hit_preserves_operator_and_derived_payloads(monkeypatch)
     assert sim._prepared_operator_cache is prepared
     assert sim._dense_operator_cache is dense
     assert sim._dense_lu_cache is lu
+
+
+@pytest.mark.fake_gpu
+@pytest.mark.parametrize("backend", ("numpy", "cupy"))
+@pytest.mark.parametrize("already_cached", (False, True))
+def test_direct_lu_failure_does_not_reuse_partially_overwritten_matrix(
+    monkeypatch, backend, already_cached
+) -> None:
+    """A failed destructive CuPy LU must not poison the dense-A cache."""
+
+    from types import SimpleNamespace
+
+    sim = _single_sphere_sim(operator_backend=backend, solver_method="direct")
+    dtype = np.dtype(np.complex128)
+    original = np.eye(6, dtype=dtype) * 2
+    if already_cached:
+        sim._dense_operator_cache = original.copy()
+        sim._dense_operator_dtype = dtype
+
+    assemblies = 0
+    factorizations = 0
+
+    def assemble(**kwargs):
+        nonlocal assemblies
+        del kwargs
+        assemblies += 1
+        return original.copy()
+
+    def factorize(matrix, *, dtype, backend, overwrite_input):
+        nonlocal factorizations
+        del dtype
+        factorizations += 1
+        np.testing.assert_array_equal(matrix, original)
+        assert overwrite_input == (backend == "cupy")
+        if overwrite_input:
+            assert sim._dense_operator_cache is None
+            matrix[...] = 123.0
+        else:
+            assert sim._dense_operator_cache is matrix
+        if factorizations == 1:
+            raise RuntimeError("deliberate LU failure")
+        return matrix, np.arange(6)
+
+    def action(vector):
+        return original @ vector
+
+    monkeypatch.setattr(sim_solve, "_assemble_dense_operator_for_prepared", assemble)
+    monkeypatch.setattr(sim_solve, "factorize_dense_matrix", factorize)
+    prepared = cast(Any, SimpleNamespace(coupling=object()))
+    kwargs = dict(
+        prepared=prepared,
+        apply_operator=action,
+        unknowns=6,
+        compute_dtype=dtype,
+        phase_timings={},
+    )
+
+    with pytest.raises(RuntimeError, match="deliberate LU failure"):
+        sim_solve._prepare_direct_factorization(sim, **kwargs)
+
+    assert sim._dense_lu_cache is None
+    if backend == "cupy":
+        assert sim._dense_operator_cache is None
+        assert sim._dense_operator_dtype is None
+    else:
+        np.testing.assert_array_equal(sim._dense_operator_cache, original)
+
+    matrix, factorization = sim_solve._prepare_direct_factorization(sim, **kwargs)
+    assert factorizations == 2
+    assert assemblies == int(not already_cached) + int(backend == "cupy")
+    assert sim._dense_lu_cache is factorization
+    if backend == "cupy":
+        assert matrix is None
+        assert sim._dense_operator_cache is None
+    else:
+        np.testing.assert_array_equal(matrix, original)
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("dtype", (np.complex64, np.complex128))
+def test_dense_matvec_assembly_uses_native_rhs_and_host_sink(
+    cupy_runtime, monkeypatch, dtype
+) -> None:
+    cp, _ = cupy_runtime
+    rng = np.random.default_rng(57)
+    expected = (rng.standard_normal((7, 7)) + 1j * rng.standard_normal((7, 7))).astype(dtype)
+    basis_pointers: list[int] = []
+    calls = 0
+    with cp.cuda.Stream(non_blocking=True):
+        matrix = cp.asarray(expected)
+
+        def action(vector):
+            nonlocal calls
+            assert isinstance(vector, cp.ndarray)
+            assert vector.shape == (7,)
+            basis_pointers.append(int(vector.data.ptr))
+            reference = np.zeros(7, dtype=dtype)
+            reference[calls] = 1
+            np.testing.assert_array_equal(cp.asnumpy(vector), reference)
+            calls += 1
+            return matrix @ vector
+
+        original_empty = cp.empty
+
+        def no_device_dense_matrix(shape, *args, **kwargs):
+            assert shape != (7, 7), (
+                "host-staged assembly must not allocate the dense matrix on device"
+            )
+            return original_empty(shape, *args, **kwargs)
+
+        monkeypatch.setattr(cp, "empty", no_device_dense_matrix)
+        timings: dict[str, float] = {}
+        result = sim_solve._assemble_dense_operator_via_matvec(
+            action,
+            n=7,
+            dtype=np.dtype(dtype),
+            backend="cupy",
+            show_progress=False,
+            timings=timings,
+        )
+        assert isinstance(result, np.ndarray)
+        assert result.flags.f_contiguous
+        assert calls == 7 and len(set(basis_pointers)) == 1
+        assert timings["dense_operator_assembly_s"] >= 0
+        np.testing.assert_allclose(result, expected, rtol=2e-6, atol=2e-6)
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("dtype", (np.complex64, np.complex128))
+def test_finite_cupy_dense_fallback_matches_prepared_action(cupy_runtime, dtype) -> None:
+    from pyceles.core.operators import prepare_matvec
+
+    cp, _ = cupy_runtime
+    prepared = prepare_matvec(
+        lmax=1,
+        k=2 * np.pi / 550.0,
+        particles=[
+            Sphere(position=(0.0, 0.0, 0.0), radius=40.0, refractive_index=1.5 + 0j),
+            Sphere(position=(170.0, 20.0, 0.0), radius=30.0, refractive_index=1.4 + 0j),
+        ],
+        backend="cupy",
+        operator_dtype=np.dtype(dtype),
+        radial_lut_dr=1.0,
+        show_progress=False,
+    )
+    assert prepared.assemble_dense_from_source_blocks() is None
+    result = sim_solve._assemble_dense_operator_for_prepared(
+        prepared=prepared,
+        A_mv=prepared.apply_A,
+        n=12,
+        dtype=np.dtype(dtype),
+        backend="cupy",
+        show_progress=False,
+    )
+    assert isinstance(result, np.ndarray)
+    assert result.flags.f_contiguous
+    vector = cp.asarray(np.arange(12) + 0.5j, dtype=dtype)
+    tolerance = 5e-6 if dtype == np.complex64 else 3e-13
+    np.testing.assert_allclose(
+        result @ cp.asnumpy(vector),
+        cp.asnumpy(prepared.apply_A(vector)),
+        rtol=tolerance,
+        atol=tolerance,
+    )

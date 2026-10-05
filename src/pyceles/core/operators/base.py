@@ -82,7 +82,7 @@ def _synchronize_if_cupy(value: Any) -> None:
     if not is_cupy_array(value):
         return
     cupy, _ = import_cupy()
-    cupy.cuda.Stream.null.synchronize()
+    cupy.cuda.get_current_stream().synchronize()
 
 
 @dataclass
@@ -200,71 +200,85 @@ class PreparedOperator:
             generation_seconds += time.perf_counter() - generation_t0
 
             blocks = batch.blocks
-            if matrix is None:
-                if is_cupy_array(blocks):
-                    cupy, _ = import_cupy()
-                    matrix = cupy.empty((n, n), dtype=self.dtype, order="F")
-                    diag_backend = (
-                        None
-                        if diagonal is None
-                        else cupy.asarray(diagonal, dtype=self.dtype).reshape(ns, nm)
-                    )
-                else:
-                    matrix = np.empty((n, n), dtype=self.dtype)
-                    diag_backend = (
-                        None
-                        if diagonal is None
-                        else np.asarray(diagonal, dtype=self.dtype).reshape(ns, nm)
-                    )
-
-            assembly_t0 = time.perf_counter()
             source_indices = tuple(int(i) for i in batch.source_indices)
-            if len(source_indices) == 0:
+            if tuple(blocks.shape) != (len(source_indices), ns, nm, nm):
+                raise ValueError(
+                    "Source-block batch shape must match its source indices and modes."
+                )
+            if not source_indices:
+                del blocks, batch
                 continue
             if min(source_indices) < 0 or max(source_indices) >= ns:
                 raise IndexError("Source-block batch contains an out-of-range particle index.")
             source_array = np.asarray(source_indices, dtype=np.int64)
-            if np.any(assembled_sources[source_array]):
+            if np.unique(source_array).size != len(source_indices) or np.any(
+                assembled_sources[source_array]
+            ):
                 raise ValueError("Source-block batches must not repeat source indices.")
-            assembled_sources[source_array] = True
-            if diag_backend is not None:
-                weighted = -(blocks.astype(self.dtype, copy=False) * diag_backend[None, :, :, None])
-            else:
-                weighted = blocks.copy()
-                for local_source in range(len(source_indices)):
-                    for destination in range(ns):
-                        weighted[local_source, destination] = -self.apply_particle_block(
-                            destination, blocks[local_source, destination]
-                        )
 
-            columns = weighted.transpose(1, 2, 0, 3).reshape(n, len(source_indices) * nm)
-            start = source_indices[0]
-            stop = source_indices[-1] + 1
-            if stop - start == len(source_indices):
-                matrix[:, start * nm : stop * nm] = columns
+            if matrix is None:
+                xp: Any = np
+                if is_cupy_array(blocks):
+                    xp, _ = import_cupy()
+                matrix = xp.empty(
+                    (n, n), dtype=self.dtype, order="F" if is_cupy_array(blocks) else "C"
+                )
+                diag_backend = (
+                    None
+                    if diagonal is None
+                    else xp.asarray(diagonal, dtype=self.dtype).reshape(ns, nm)
+                )
+                # Split each matrix axis, then permute the axes of the VIEW.
+                # No axes are joined across the permutation: unlike reshaping
+                # transposed source blocks, this never packs a batch-sized copy.
+                matrix_blocks = matrix.reshape(ns, nm, ns, nm).transpose(2, 0, 1, 3)
+
+            assembly_t0 = time.perf_counter()
+            if diag_backend is not None:
+                start = source_indices[0]
+                if source_indices == tuple(range(start, start + len(source_indices))):
+                    target = matrix_blocks[start : start + len(source_indices)]
+                    xp.multiply(
+                        blocks, diag_backend[None, :, :, None], out=target, dtype=self.dtype
+                    )
+                    xp.negative(target, out=target)
+                else:
+                    for local_source, source_index in enumerate(source_indices):
+                        target = matrix_blocks[source_index]
+                        xp.multiply(
+                            blocks[local_source],
+                            diag_backend[:, :, None],
+                            out=target,
+                            dtype=self.dtype,
+                        )
+                        xp.negative(target, out=target)
             else:
                 for local_source, source_index in enumerate(source_indices):
-                    column_slice = slice(source_index * nm, (source_index + 1) * nm)
-                    local_slice = slice(local_source * nm, (local_source + 1) * nm)
-                    matrix[:, column_slice] = columns[:, local_slice]
+                    for destination in range(ns):
+                        transformed = self.apply_particle_block(
+                            destination, blocks[local_source, destination]
+                        )
+                        xp.negative(transformed, out=matrix_blocks[source_index, destination])
+                        del transformed
+            assembled_sources[source_array] = True
             _synchronize_if_cupy(matrix)
             assembly_seconds += time.perf_counter() - assembly_t0
+            # Release the consumer's references before next(batches) starts
+            # producing the next block. Producers must also drop their local
+            # reference after resuming from yield, unless the block is cached.
+            del blocks, batch
 
+        if not bool(np.all(assembled_sources)):
+            missing = np.flatnonzero(~assembled_sources)
+            raise ValueError(
+                "Source-block batches did not cover every source particle; "
+                f"missing {missing[:8].tolist()}."
+            )
         if matrix is None:
-            matrix = np.eye(n, dtype=self.dtype)
+            matrix = np.empty((0, 0), dtype=self.dtype)
         else:
-            if not bool(np.all(assembled_sources)):
-                missing = np.flatnonzero(~assembled_sources)
-                raise ValueError(
-                    "Source-block batches did not cover every source particle; "
-                    f"missing {missing[:8].tolist()}."
-                )
             identity_t0 = time.perf_counter()
-            if is_cupy_array(matrix):
-                cupy, _ = import_cupy()
-                diagonal_indices = cupy.arange(n)
-            else:
-                diagonal_indices = np.arange(n)
+            diagonal_indices = xp.arange(n)
             matrix[diagonal_indices, diagonal_indices] += 1
             _synchronize_if_cupy(matrix)
             assembly_seconds += time.perf_counter() - identity_t0

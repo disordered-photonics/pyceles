@@ -1051,14 +1051,15 @@ class CuPyPeriodicCouplingOperator:
             if show_progress
             else None
         )
+        matrix_blocks = matrix.reshape(self.n_particles, nm, self.n_particles, nm).transpose(
+            2, 0, 1, 3
+        )
         try:
             for source_indices in self._source_batches():
                 key = tuple(int(i) for i in source_indices)
                 blocks = self._compute_blocks_for_sources(key)
-                columns = blocks.transpose(1, 2, 0, 3).reshape(n, len(key) * nm)
-                start = key[0] * nm
-                stop = (key[-1] + 1) * nm
-                matrix[:, start:stop] = columns
+                matrix_blocks[key[0] : key[-1] + 1] = blocks
+                del blocks
                 if progress is not None:
                     progress.update(len(key))
         finally:
@@ -1088,6 +1089,9 @@ class CuPyPeriodicCouplingOperator:
                 else self._compute_blocks_for_sources(key)
             )
             yield SourceBlockBatch(source_indices=key, blocks=blocks)
+            # Do not retain the previous ephemeral batch while computing its
+            # replacement. Dense-cache views remain owned by the cache itself.
+            del blocks
 
     def supports_source_block_dense_assembly(self) -> bool:
         """Return whether exact Ewald source blocks match the configured apply."""

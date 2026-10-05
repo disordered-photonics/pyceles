@@ -570,6 +570,7 @@ class PeriodicCouplingOperator:
                 source_indices=(source,),
                 blocks=np.asarray(blocks, dtype=self.dtype)[None, ...],
             )
+            del blocks
 
     def supports_source_block_dense_assembly(self) -> bool:
         """Return whether exact Ewald source blocks match the configured apply."""

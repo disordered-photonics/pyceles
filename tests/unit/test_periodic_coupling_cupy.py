@@ -273,6 +273,7 @@ def test_periodic_cupy_dense_assembly_from_cached_blocks_matches_matvec(
         A_mv=prepared.apply_A,
         n=n,
         dtype=np.dtype(np.complex128),
+        backend="cupy",
         show_progress=False,
     )
     eye = cp.eye(n, dtype=cp.complex128)
