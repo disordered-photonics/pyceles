@@ -25,6 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   coupling, including single-level and multilevel sampled-far traversals.
 
 ### Changed
+- Dense source-block assembly now writes into destination-matrix views instead
+  of allocating full weighted and packed batches. The finite CuPy fallback
+  keeps intermediate operator actions on device while retaining host matrix
+  staging to limit device residency during assembly.
 - CuPy GMRES, FGMRES, LGMRES, and GCRO now fuse each ordered Givens update
   in one device kernel, retaining the existing accumulation and stopping
   semantics while removing the scalar-array dispatch loop.
@@ -106,6 +110,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   normal allocation or factorization limits.
 
 ### Fixed
+- CuPy direct factorization retires the unfactorized-matrix cache before
+  destructive LU, preventing a failed factorization from leaving corrupted
+  matrix data available to a retry.
+- SciPy LSQR no longer reports least-squares stationarity as a solved scattering
+  system when terminal residual diagnostics are disabled. Native LSQR validates
+  warm-start dimensions before supplied-residual early exits.
+- Iterative solver dispatch and simulation configuration reject invalid solver
+  tolerances. Native CuPy and reference LSQR setup reject non-finite RHS norms
+  or overflowing stopping thresholds without changing the norm reductions.
 - Pure Jones source channels now retain their supplied complex amplitude and
   phase, Cartesian polarization normalization is safe across finite input
   scales, and Bessel orders use the shared exact integer validator.

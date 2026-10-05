@@ -445,13 +445,18 @@ Notes:
   operator without a pyceles size heuristic; the caller is responsible for
   memory availability. An oversized request therefore fails at the backend's
   normal allocation or factorization boundary.
-- Repeated direct solves on the same `Simulation` instance reuse both dense `A`
-  and its LU factorization.
-- `SimulationConfig.solver_compute_final_residual` controls true-residual
-  verification. Keep it enabled for scientific solves; disabling it is a
-  profiling-only diagnostic mode and must not be used as evidence of physical
-  convergence because restarted Krylov methods need true residuals at cycle
-  boundaries.
+- Repeated direct solves on the same `Simulation` instance reuse its LU
+  factorization. NumPy also retains the original dense `A`; CuPy retires that
+  cache before destructive factorization and retains only the LU payload.
+  Failed CuPy factorization therefore cannot leave partially overwritten `A`
+  in the unfactorized-matrix cache.
+- `SimulationConfig.solver_compute_final_residual` controls optional terminal
+  true-residual diagnostics. Keep it enabled for scientific solves. Native
+  CuPy restarted GMRES-family solvers always rebuild the physical residual
+  before continuing into another cycle, even with this option disabled.
+  Disabling it may permit terminal acceptance from a recurrence estimate and
+  reports final true-residual scalars as `NaN`; this is not an independently
+  verified physical-convergence measurement.
 - `solver_method="gcro"` selects the native CuPy harmonic recycling solver for
   single-RHS runs; `SimulationConfig.solver_gcro_recycle_dim` controls its bounded
   recycle rank. The common `solver_restart` value is the total augmented
@@ -468,10 +473,16 @@ Notes:
   NumPy/reference backend; CuPy periodic workflows currently use Ewald or Rayleigh. LSQR does
   not restart; `solver_maxiter` is its iteration budget and `solver_restart` is
   ignored.
-- For native CuPy restarted GMRES/FGMRES/LGMRES, true-residual checks are
-  performed at restart boundaries by default. Setting the option to `False`
-  changes that stopping/progress policy and is reserved for low-level timing
-  experiments, not production convergence.
+- LSQR's least-squares stopping codes do not by themselves establish that
+  `A x = b` meets the requested tolerance. The NumPy wrapper checks SciPy's
+  returned residual estimate even with terminal diagnostics disabled; when
+  enabled, the independently evaluated physical residual is authoritative.
+- Native CuPy setup rejects non-finite RHS norms and unrepresentable absolute
+  stopping thresholds instead of silently accepting them as convergence. This
+  uses already available host scalars and does not rescale vectors or replace
+  the hot norm reductions. It does not diagnose every later arithmetic failure
+  or recover norm underflow; investigate source scaling and precision if the
+  setup check fails.
 - SciPy GMRES progress reports SciPy's cheap preconditioned residual
   (`pr_rel_res`). SciPy BiCGSTAB, LGMRES, and GCROTMK callbacks do not expose a
   cheap residual scalar, so pyceles reports iteration-only progress for those

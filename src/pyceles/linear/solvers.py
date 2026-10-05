@@ -31,7 +31,9 @@ from pyceles._optional import asnumpy, import_cupy
 
 from ._gcro_cupy import gcro_cupy_native
 from .krylov_cupy import (
+    _absolute_residual_target,
     _resolve_accum_dtype,
+    _validated_tolerances,
     bicgstab_cupy_native,
     block_gmres_cupy_native,
     fgmres_cupy_native,
@@ -1418,7 +1420,7 @@ def lsqr_scipy(
         original_rhs_norm = float(rhs_norm)
         if not np.isfinite(original_rhs_norm) or original_rhs_norm < 0.0:
             raise ValueError("`rhs_norm` must be finite and non-negative when provided.")
-    target_abs = max(float(atol), float(rtol) * original_rhs_norm)
+    target_abs = _absolute_residual_target(original_rhs_norm, rtol=rtol, atol=atol)
     correction_rhs_norm = float(np.linalg.norm(np.asarray(rhs, dtype=np.complex128)))
     if correction and correction_rhs_norm <= target_abs:
         # A supplied continuation residual is authoritative.  In particular,
@@ -1433,8 +1435,8 @@ def lsqr_scipy(
         return LinearSolveResult(
             x=solution,
             info=0,
-            residual_norm=correction_rhs_norm,
-            relative_residual=float(relative),
+            residual_norm=correction_rhs_norm if compute_final_residual else float("nan"),
+            relative_residual=float(relative) if compute_final_residual else float("nan"),
             iterations=0,
             method="lsqr",
             residual_history=None,
@@ -1475,9 +1477,17 @@ def lsqr_scipy(
         x = np.asarray(base + x, dtype=op_dtype)
     iterations = int(result[2])
     istop = int(result[1])
-    # SciPy uses istop=0 for an exact zero-RHS/zero-initial-residual solve.
-    info = 0 if istop in {0, 1, 2} else 1
-    converged_reason = "converged" if info == 0 else f"scipy_istop_{istop}"
+    # A least-squares stationary point need not solve the scattering system.
+    # SciPy's r1norm is already available, even when a terminal physical
+    # residual evaluation is disabled. Do not equate istop=0/2 with Ax=b.
+    estimated_residual = float(result[3])
+    meets_target = bool(np.isfinite(estimated_residual) and estimated_residual <= target_abs)
+    info = 0 if meets_target else max(1, iterations)
+    converged_reason = (
+        "converged"
+        if meets_target
+        else ("tolerance_not_met" if istop in {0, 1, 2} else f"scipy_istop_{istop}")
+    )
     finalized = _finalize_result(
         A_mv,
         b_arr,
@@ -2355,10 +2365,14 @@ def solve_linear_system(
         of correction directions retained across restart cycles; enabling
         ``lgmres_store_outer_av`` caches ``A @ v`` for those recycled vectors.
     compute_final_residual:
-        If `True`, compute/store true-residual diagnostics. For native CuPy
-        restarted GMRES/FGMRES/LGMRES this enables true-residual checks at
-        restart boundaries (robust default); if `False`, those checks are
-        disabled and final true-residual scalars are reported as `NaN`.
+        If `True`, compute/store terminal true-residual diagnostics. Native
+        CuPy restarted GMRES-family solvers rebuild the physical residual
+        whenever another cycle is needed, regardless of this flag. If `False`,
+        they may stop on a recurrence estimate without a terminal operator
+        application, and final true-residual scalars are reported as `NaN`.
+        LSQR likewise uses its available residual estimate when the optional
+        terminal check is disabled; least-squares stationarity alone is not
+        treated as convergence of the scattering system.
 
     Multi-RHS policy:
     - `backend='cupy', method='gmres', b.ndim==2` uses the native block-GMRES path.
@@ -2425,6 +2439,8 @@ def solve_linear_system(
         if squeezed:
             return out
         return out
+
+    rtol, atol = _validated_tolerances(rtol=rtol, atol=atol)
 
     if nrhs > 1 and m == "gmres" and backend_name == "cupy":
         return gmres_cupy_block(

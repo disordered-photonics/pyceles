@@ -222,8 +222,8 @@ class SimulationConfig:
             raise ValueError("`check_circumscribing_sphere_overlap` must be a boolean.")
         if not isinstance(self.force_general_initial_field, (bool, np.bool_)):
             raise ValueError("`force_general_initial_field` must be a boolean.")
-        if float(self.solver_rtol) <= 0.0:
-            raise ValueError(f"`solver_rtol` must be > 0. Got {self.solver_rtol!r}.")
+        if not np.isfinite(float(self.solver_rtol)) or float(self.solver_rtol) <= 0.0:
+            raise ValueError(f"`solver_rtol` must be finite and > 0. Got {self.solver_rtol!r}.")
         if not isinstance(self.solver_compute_final_residual, (bool, np.bool_)):
             raise ValueError("`solver_compute_final_residual` must be a boolean.")
         if int(self.solver_restart) < 1:

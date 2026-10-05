@@ -21,6 +21,7 @@ import numpy as np
 import numpy.typing as npt
 
 from .krylov_cupy import (
+    _absolute_residual_target,
     _apply_givens_rotation,
     _as_device_matrix,
     _as_device_vector,
@@ -372,7 +373,7 @@ def gcro_cupy_native(
         return out
 
     b_norm = _norm(b_vec, cupy=cupy, accum_dtype=acc_dtype)
-    target_abs = max(float(atol), float(rtol) * b_norm)
+    target_abs = _absolute_residual_target(b_norm, rtol=rtol, atol=atol)
     eps = float(np.finfo(op_dtype).eps)
     breakdown = max(float(breakdown_tol), np.finfo(float).tiny)
     givens_residual = cupy.empty(

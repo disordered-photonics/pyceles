@@ -114,6 +114,38 @@ def _resolve_accum_dtype(operator_dtype: np.dtype, accum_dtype: npt.DTypeLike | 
     return out
 
 
+def _validated_tolerances(*, rtol: float, atol: float) -> tuple[float, float]:
+    """Validate scalar stopping controls without inspecting solver vectors."""
+    relative, absolute = float(rtol), float(atol)
+    if not np.isfinite(relative) or relative < 0.0:
+        raise ValueError("`rtol` must be finite and non-negative.")
+    if not np.isfinite(absolute) or absolute < 0.0:
+        raise ValueError("`atol` must be finite and non-negative.")
+    return relative, absolute
+
+
+def _absolute_residual_target(rhs_norm: float, *, rtol: float, atol: float) -> float:
+    """Build a finite stopping threshold from an already computed host norm.
+
+    This is a setup check, not an overflow-safe reduction: leave the hot norm
+    kernels unchanged and reject unusable scaling instead of accepting inf <=
+    inf as convergence. No vector scan, device readback, or retry is added.
+    """
+    relative, absolute = _validated_tolerances(rtol=rtol, atol=atol)
+    norm = float(rhs_norm)
+    if not np.isfinite(norm) or norm < 0.0:
+        raise FloatingPointError(
+            "The RHS norm is not finite and non-negative. "
+            "Check source scaling and solver precision before solving."
+        )
+    target = max(absolute, relative * norm)
+    if not np.isfinite(target):
+        raise FloatingPointError(
+            "The absolute residual target overflowed. Check `rtol` and RHS scaling."
+        )
+    return target
+
+
 def _as_device_vector(x: Any, *, cupy: Any, dtype: np.dtype, name: str) -> Any:
     out = cupy.asarray(x, dtype=dtype)
     if int(out.ndim) != 1:
@@ -625,6 +657,10 @@ def lsqr_cupy_native(
     if maxiter_total < 1:
         raise ValueError("`maxiter` must be >= 1 when provided.")
     x0_vec = None if x0 is None else _as_device_vector(x0, cupy=cupy, dtype=op_dtype, name="x0")
+    # This wrapper solves square scattering systems. Check before the supplied-
+    # residual early exit, which deliberately does not probe the adjoint.
+    if x0_vec is not None and int(x0_vec.size) != n:
+        raise ValueError(f"`x0` size {int(x0_vec.size)} does not match `b` size {n}.")
 
     def _apply(action: Callable[[Any], Any], values: Any, name: str) -> Any:
         return _as_device_vector(
@@ -643,7 +679,7 @@ def lsqr_cupy_native(
         b_norm = float(rhs_norm)
         if not np.isfinite(b_norm) or b_norm < 0.0:
             raise ValueError("`rhs_norm` must be finite and non-negative when provided.")
-    target_abs = max(float(atol), float(rtol) * b_norm)
+    target_abs = _absolute_residual_target(b_norm, rtol=rtol, atol=atol)
     operator_applications = 0
     adjoint_applications = 0
     true_history: list[float] = []
@@ -986,7 +1022,7 @@ def gmres_cupy_native(
         return abs_norm, rel_norm, r_true
 
     b_norm = _norm(b_vec, cupy=cupy, accum_dtype=acc_dtype)
-    target_abs = max(float(atol), float(rtol) * b_norm)
+    target_abs = _absolute_residual_target(b_norm, rtol=rtol, atol=atol)
     eps = float(np.finfo(op_dtype.char).eps)
     breakdown_tol_f = float(breakdown_tol)
     Mb_norm = _norm(_apply_minv(b_vec), cupy=cupy, accum_dtype=acc_dtype)
@@ -1287,7 +1323,7 @@ def fgmres_cupy_native(
         return abs_norm, rel_norm, r_true
 
     b_norm = _norm(b_vec, cupy=cupy, accum_dtype=acc_dtype)
-    target_abs = max(float(atol), float(rtol) * b_norm)
+    target_abs = _absolute_residual_target(b_norm, rtol=rtol, atol=atol)
     eps = float(np.finfo(op_dtype.char).eps)
     breakdown_tol_f = float(breakdown_tol)
     ptol = target_abs
@@ -1567,7 +1603,7 @@ def lgmres_cupy_native(
         return abs_norm, rel_norm, r_true
 
     b_norm = _norm(b_vec, cupy=cupy, accum_dtype=acc_dtype)
-    target_abs = max(float(atol), float(rtol) * b_norm)
+    target_abs = _absolute_residual_target(b_norm, rtol=rtol, atol=atol)
     eps = float(np.finfo(op_dtype.char).eps)
     breakdown_tol_f = float(breakdown_tol)
     ptol = target_abs
@@ -1875,7 +1911,7 @@ def bicgstab_cupy_native(
         return abs_norm, rel_norm, r_true
 
     b_norm = _norm(b_vec, cupy=cupy, accum_dtype=acc_dtype)
-    target_abs = max(float(atol), float(rtol) * b_norm)
+    target_abs = _absolute_residual_target(b_norm, rtol=rtol, atol=atol)
     breakdown_tol_f = float(max(0.0, breakdown_tol))
     residual_hist: list[float] = []
     true_hist: list[float] = []
@@ -2159,8 +2195,10 @@ def block_gmres_cupy_native(
     b_norms = _norms_block(b_mat, cupy=cupy, accum_dtype=acc_dtype)
     b_norms_np = np.asarray(cupy.asnumpy(b_norms), dtype=float)
     b_norm_frob = _norm(b_mat, cupy=cupy, accum_dtype=acc_dtype)
+    target_abs_block = _absolute_residual_target(b_norm_frob, rtol=rtol, atol=atol)
+    if not np.all(np.isfinite(b_norms_np)):
+        raise FloatingPointError("The RHS column norms must be finite before solving.")
     rhs_target_abs = np.maximum(float(atol), float(rtol) * b_norms_np)
-    target_abs_block = max(float(atol), float(rtol) * b_norm_frob)
     breakdown_tol_f = float(breakdown_tol)
     eps = float(np.finfo(op_dtype.char).eps)
     ptol_max_factor = 1.0
