@@ -58,6 +58,58 @@ def _numpy_givens_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(_gcro_cupy, "_apply_givens_rotation", update)
 
 
+@pytest.fixture(autouse=True)
+def _numpy_mgs_kernel_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the NumPy test double out of the production CUDA implementation."""
+    device_factory = krylov_cupy._mgs_update_kernel
+
+    def factory(dtype_name: str):
+        def update(values, direction, alpha, output):
+            if not isinstance(values, np.ndarray):
+                return device_factory(dtype_name)(values, direction, alpha, output)
+            alpha_op = np.asarray(alpha, dtype=values.dtype)
+            np.subtract(values, alpha_op * direction, out=output)
+            return output
+
+        return update
+
+    monkeypatch.setattr(krylov_cupy, "_mgs_update_kernel", factory)
+
+
+@pytest.fixture(autouse=True)
+def _numpy_krylov_reduction_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the incomplete CuPy test double out of production reductions."""
+    from pyceles.linear import _gcro_cupy
+
+    device_dot = krylov_cupy._dot
+    device_norm = krylov_cupy._norm
+    device_norms_block = krylov_cupy._norms_block
+
+    def dot(u, v, *, cupy, accum_dtype):
+        if hasattr(cupy, "ReductionKernel"):
+            return device_dot(u, v, cupy=cupy, accum_dtype=accum_dtype)
+        return np.vdot(
+            np.asarray(cupy.asarray(u), dtype=accum_dtype),
+            np.asarray(cupy.asarray(v), dtype=accum_dtype),
+        )
+
+    def norm(v, *, cupy, accum_dtype):
+        if hasattr(cupy, "ReductionKernel"):
+            return device_norm(v, cupy=cupy, accum_dtype=accum_dtype)
+        return float(np.linalg.norm(np.asarray(cupy.asarray(v), dtype=accum_dtype)))
+
+    def norms_block(v, *, cupy, accum_dtype):
+        if hasattr(cupy, "ReductionKernel"):
+            return device_norms_block(v, cupy=cupy, accum_dtype=accum_dtype)
+        return np.linalg.norm(np.asarray(cupy.asarray(v), dtype=accum_dtype), axis=0)
+
+    monkeypatch.setattr(krylov_cupy, "_dot", dot)
+    monkeypatch.setattr(krylov_cupy, "_norm", norm)
+    monkeypatch.setattr(krylov_cupy, "_norms_block", norms_block)
+    monkeypatch.setattr(_gcro_cupy, "_dot", dot)
+    monkeypatch.setattr(_gcro_cupy, "_norm", norm)
+
+
 def _fake_cupy_numpy_backend():
     class _FakeCuPy:
         @staticmethod

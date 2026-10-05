@@ -20,7 +20,21 @@ from pyceles.core.operators.base import PreparedOperator
 from pyceles.core.particles import Sphere, Spheroid
 from pyceles.core.periodic import PeriodicOptions, PeriodicSpec
 from pyceles.core.translation import RadialLUT, translation_ab5_table
+from pyceles.linear import krylov_cupy
 from pyceles.linear.krylov_cupy import lsqr_cupy_native
+
+
+@pytest.fixture(autouse=True)
+def _numpy_krylov_reduction_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep this file's minimal CuPy test double out of native reductions."""
+    device_norm = krylov_cupy._norm
+
+    def norm(values, *, cupy, accum_dtype):
+        if hasattr(cupy, "ReductionKernel"):
+            return device_norm(values, cupy=cupy, accum_dtype=accum_dtype)
+        return float(np.linalg.norm(np.asarray(cupy.asarray(values), dtype=accum_dtype)))
+
+    monkeypatch.setattr(krylov_cupy, "_norm", norm)
 
 
 class _SyntheticParticleT:

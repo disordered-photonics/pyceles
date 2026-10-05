@@ -32,6 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CuPy GMRES, FGMRES, LGMRES, and GCRO now fuse each ordered Givens update
   in one device kernel, retaining the existing accumulation and stopping
   semantics while removing the scalar-array dispatch loop.
+- Native CuPy GMRES, FGMRES, LGMRES, and GCRO now fuse scalar MGS basis
+  updates while preserving the first-write ownership boundary for aliased
+  operator results.
 - CuPy scattered-field evaluation no longer allocates full host placeholders
   for unmasked or all-active grids; scatter destinations are allocated only
   when a partial mask requires them.

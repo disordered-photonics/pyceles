@@ -27,6 +27,7 @@ from .krylov_cupy import (
     _as_device_vector,
     _dot,
     _dtype_complex,
+    _mgs_subtract_scaled,
     _norm,
     _resolve_accum_dtype,
     _solve_rotated_upper,
@@ -446,22 +447,30 @@ def gcro_cupy_native(
         for col in range(cycle_steps):
             w = apply(V[col, :])
             initial_w_norm = _norm(w, cupy=cupy, accum_dtype=acc_dtype)
+            w_owned = False
             if recycle_space is not None and coupling is not None:
                 b_col = _recycle_projection(recycle_space.C, w, cupy=cupy, accum_dtype=acc_dtype)
                 coupling[:, col] = b_col
+                # ``apply`` may return an alias of ``V[col, :]``.  The
+                # recycle correction is the first mutating operation, so make
+                # ownership explicit before applying it in place.
+                w = cupy.array(w, dtype=op_dtype, copy=True)
+                w_owned = True
                 w -= recycle_space.C @ cupy.asarray(b_col, dtype=op_dtype)
 
             for row in range(col + 1):
                 value = _dot(V[row, :], w, cupy=cupy, accum_dtype=acc_dtype)
                 H_rot[col, row] = value
                 Hbar[row, col] = value
-                w -= cupy.asarray(value, dtype=op_dtype) * V[row, :]
+                w, w_owned = _mgs_subtract_scaled(w, V[row, :], value, cupy=cupy, owns_w=w_owned)
             if reorthogonalize:
                 for row in range(col + 1):
                     value = _dot(V[row, :], w, cupy=cupy, accum_dtype=acc_dtype)
                     H_rot[col, row] += value
                     Hbar[row, col] += value
-                    w -= cupy.asarray(value, dtype=op_dtype) * V[row, :]
+                    w, w_owned = _mgs_subtract_scaled(
+                        w, V[row, :], value, cupy=cupy, owns_w=w_owned
+                    )
 
             h_next = _norm(w, cupy=cupy, accum_dtype=acc_dtype)
             H_rot[col, col + 1] = h_next

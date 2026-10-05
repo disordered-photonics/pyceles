@@ -11,12 +11,41 @@ from scipy.linalg.lapack import get_lapack_funcs
 from pyceles.linear._gcro_cupy import gcro_cupy_native
 from pyceles.linear.krylov_cupy import (
     _apply_givens_rotation,
+    _mgs_subtract_scaled,
     fgmres_cupy_native,
     gmres_cupy_native,
     lgmres_cupy_native,
 )
 
 pytestmark = pytest.mark.gpu
+
+
+@pytest.mark.parametrize("dtype", (np.complex64, np.complex128))
+def test_fused_mgs_update_establishes_ownership_before_in_place_reuse(
+    cupy_runtime: tuple[Any, Any], dtype
+) -> None:
+    cupy, _ = cupy_runtime
+    rng = np.random.default_rng(5102026)
+    n = 257
+    source = np.asarray(rng.normal(size=2 * n) + 1j * rng.normal(size=2 * n), dtype=dtype)
+    w = cupy.asarray(source[::2])
+    basis = cupy.asarray(np.asarray(rng.normal(size=n) + 1j * rng.normal(size=n), dtype=dtype))
+    coefficient = np.asarray(0.37 - 0.19j, dtype=dtype)
+    w_before = w.copy()
+    expected = cupy.asnumpy(w) - coefficient * cupy.asnumpy(basis)
+
+    updated, owns_w = _mgs_subtract_scaled(w, basis, coefficient, cupy=cupy, owns_w=False)
+    assert owns_w
+    np.testing.assert_array_equal(cupy.asnumpy(w), cupy.asnumpy(w_before))
+    np.testing.assert_allclose(cupy.asnumpy(updated), expected, rtol=2e-6, atol=2e-6)
+
+    second_coefficient = np.asarray(-0.11 + 0.07j, dtype=dtype)
+    expected_second = expected - second_coefficient * cupy.asnumpy(basis)
+    updated_again, owns_w_again = _mgs_subtract_scaled(
+        updated, basis, second_coefficient, cupy=cupy, owns_w=owns_w
+    )
+    assert owns_w_again
+    np.testing.assert_allclose(cupy.asnumpy(updated_again), expected_second, rtol=2e-6, atol=2e-6)
 
 
 def _reference_step(h, cs, sn, g, col: int) -> float:

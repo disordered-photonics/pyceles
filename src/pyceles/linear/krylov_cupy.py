@@ -226,11 +226,10 @@ def _dot(u: Any, v: Any, *, cupy: Any, accum_dtype: np.dtype) -> Any:
             f"Dot-product operands must have matching shapes. Got {left.shape} and {right.shape}."
         )
     dtype = np.dtype(left.dtype)
-    if (
-        dtype == np.dtype(right.dtype)
-        and dtype in {np.dtype(np.complex64), np.dtype(np.complex128)}
-        and hasattr(cupy, "ReductionKernel")
-    ):
+    if dtype == np.dtype(right.dtype) and dtype in {
+        np.dtype(np.complex64),
+        np.dtype(np.complex128),
+    }:
         kernel = _dot_reduction_kernel(dtype.name, np.dtype(accum_dtype).name)
         return kernel(left, right)
     return cupy.vdot(cupy.asarray(left, dtype=accum_dtype), cupy.asarray(right, dtype=accum_dtype))
@@ -241,21 +240,70 @@ def _norm(v: Any, *, cupy: Any, accum_dtype: np.dtype) -> float:
     if int(values.size) == 0:
         return 0.0
     dtype = np.dtype(values.dtype)
-    if dtype in {np.dtype(np.complex64), np.dtype(np.complex128)} and hasattr(
-        cupy, "ReductionKernel"
-    ):
+    if dtype in {np.dtype(np.complex64), np.dtype(np.complex128)}:
         kernel = _norm_reduction_kernel(dtype.name, np.dtype(accum_dtype).name)
         return float(kernel(values))
     return float(cupy.linalg.norm(cupy.asarray(values, dtype=accum_dtype)))
+
+
+@cache
+def _mgs_update_kernel(operator_dtype_name: str) -> Any:
+    """Return the elementwise kernel for one scalar MGS projection update."""
+    from pyceles._optional import import_cupy
+
+    cupy, _ = import_cupy()
+    operator_dtype = np.dtype(operator_dtype_name)
+    if operator_dtype not in {np.dtype(np.complex64), np.dtype(np.complex128)}:
+        raise TypeError(
+            "Native CuPy MGS updates support complex64 and complex128 vectors. "
+            f"Got {operator_dtype.name}."
+        )
+    return cupy.ElementwiseKernel(
+        f"{operator_dtype.name} x, {operator_dtype.name} basis, {operator_dtype.name} alpha",
+        f"{operator_dtype.name} y",
+        "y = x - alpha * basis",
+        f"pyceles_mgs_subtract_scaled_{operator_dtype.name}",
+    )
+
+
+def _mgs_subtract_scaled(
+    w: Any,
+    basis: Any,
+    coefficient: Any,
+    *,
+    cupy: Any,
+    owns_w: bool,
+) -> tuple[Any, bool]:
+    """Subtract one scaled MGS basis vector while preserving alias safety.
+
+    The first update cannot assume that ``w`` is privately owned: an operator
+    or preconditioner is allowed to return a view of its input.  That update
+    therefore writes to a separate vector.  Subsequent updates reuse that
+    owned vector in place, avoiding the product temporary and the second full
+    vector write performed by ``w - alpha * basis``.
+    """
+    values = cupy.asarray(w)
+    direction = cupy.asarray(basis, dtype=values.dtype)
+    if int(values.ndim) != 1 or int(direction.ndim) != 1:
+        raise ValueError("MGS update operands must be one-dimensional.")
+    if tuple(values.shape) != tuple(direction.shape):
+        raise ValueError(
+            f"MGS update operands must have matching shapes. Got {values.shape} and "
+            f"{direction.shape}."
+        )
+    alpha = cupy.asarray(coefficient, dtype=values.dtype)
+    if int(alpha.size) != 1:
+        raise ValueError(f"MGS coefficient must be scalar. Got shape={alpha.shape}.")
+    output = values if owns_w else cupy.empty(values.shape, dtype=values.dtype)
+    _mgs_update_kernel(np.dtype(values.dtype).name)(values, direction, alpha, output)
+    return output, True
 
 
 def _norms_block(v: Any, *, cupy: Any, accum_dtype: np.dtype) -> Any:
     """Column norms using the scalar norm's fused map/reduce precision policy."""
     values = cupy.asarray(v)
     dtype = np.dtype(values.dtype)
-    if dtype in {np.dtype(np.complex64), np.dtype(np.complex128)} and hasattr(
-        cupy, "ReductionKernel"
-    ):
+    if dtype in {np.dtype(np.complex64), np.dtype(np.complex128)}:
         kernel = _norm_reduction_kernel(dtype.name, np.dtype(accum_dtype).name)
         return kernel(values, axis=0)
     return cupy.linalg.norm(cupy.asarray(values, dtype=accum_dtype), axis=0)
@@ -1085,15 +1133,18 @@ def gmres_cupy_native(
             w = _apply_minv(_apply(A_mv, V[col, :]))
             h0 = _norm(w, cupy=cupy, accum_dtype=acc_dtype)
             if orth_mode == "mgs":
+                w_owned = False
                 for k in range(col + 1):
                     hik = _dot(V[k, :], w, cupy=cupy, accum_dtype=acc_dtype)
                     H[col, k] = hik
-                    w = w - cupy.asarray(hik, dtype=op_dtype) * V[k, :]
+                    w, w_owned = _mgs_subtract_scaled(w, V[k, :], hik, cupy=cupy, owns_w=w_owned)
                 if reorthogonalize:
                     for k in range(col + 1):
                         hik2 = _dot(V[k, :], w, cupy=cupy, accum_dtype=acc_dtype)
                         H[col, k] = H[col, k] + hik2
-                        w = w - cupy.asarray(hik2, dtype=op_dtype) * V[k, :]
+                        w, w_owned = _mgs_subtract_scaled(
+                            w, V[k, :], hik2, cupy=cupy, owns_w=w_owned
+                        )
             else:
                 h_row = cupy.zeros((col + 1,), dtype=acc_dtype)
                 for k in range(col + 1):
@@ -1388,15 +1439,18 @@ def fgmres_cupy_native(
             h0 = _norm(w, cupy=cupy, accum_dtype=acc_dtype)
 
             if orth_mode == "mgs":
+                w_owned = False
                 for k in range(col + 1):
                     hik = _dot(V[k, :], w, cupy=cupy, accum_dtype=acc_dtype)
                     H[col, k] = hik
-                    w = w - cupy.asarray(hik, dtype=op_dtype) * V[k, :]
+                    w, w_owned = _mgs_subtract_scaled(w, V[k, :], hik, cupy=cupy, owns_w=w_owned)
                 if reorthogonalize:
                     for k in range(col + 1):
                         hik2 = _dot(V[k, :], w, cupy=cupy, accum_dtype=acc_dtype)
                         H[col, k] = H[col, k] + hik2
-                        w = w - cupy.asarray(hik2, dtype=op_dtype) * V[k, :]
+                        w, w_owned = _mgs_subtract_scaled(
+                            w, V[k, :], hik2, cupy=cupy, owns_w=w_owned
+                        )
             else:
                 h_row = cupy.zeros((col + 1,), dtype=acc_dtype)
                 for k in range(col + 1):
@@ -1676,15 +1730,18 @@ def lgmres_cupy_native(
             h0 = _norm(w, cupy=cupy, accum_dtype=acc_dtype)
 
             if orth_mode == "mgs":
+                w_owned = False
                 for k in range(col + 1):
                     hik = _dot(V[k, :], w, cupy=cupy, accum_dtype=acc_dtype)
                     H[col, k] = hik
-                    w = w - cupy.asarray(hik, dtype=op_dtype) * V[k, :]
+                    w, w_owned = _mgs_subtract_scaled(w, V[k, :], hik, cupy=cupy, owns_w=w_owned)
                 if reorthogonalize:
                     for k in range(col + 1):
                         hik2 = _dot(V[k, :], w, cupy=cupy, accum_dtype=acc_dtype)
                         H[col, k] = H[col, k] + hik2
-                        w = w - cupy.asarray(hik2, dtype=op_dtype) * V[k, :]
+                        w, w_owned = _mgs_subtract_scaled(
+                            w, V[k, :], hik2, cupy=cupy, owns_w=w_owned
+                        )
             else:
                 h_row = cupy.zeros((col + 1,), dtype=acc_dtype)
                 for k in range(col + 1):
