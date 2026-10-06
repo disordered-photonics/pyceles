@@ -8,7 +8,8 @@ from typing import Any
 import numpy as np
 import pytest
 
-from pyceles.linear import _gcro_cupy, krylov_cupy
+from pyceles.linear import _gcro_cupy, krylov_cupy, solvers
+from pyceles.linear._stopping import _absolute_residual_target
 from pyceles.linear.solvers import solve_linear_system
 from pyceles.simulation import SimulationConfig
 
@@ -20,7 +21,7 @@ from pyceles.simulation import SimulationConfig
 def test_absolute_residual_target_preserves_finite_policy(
     norm: float, rtol: float, atol: float, expected: float
 ) -> None:
-    assert krylov_cupy._absolute_residual_target(norm, rtol=rtol, atol=atol) == expected
+    assert _absolute_residual_target(norm, rtol=rtol, atol=atol) == expected
 
 
 @pytest.mark.parametrize("name", ["rtol", "atol"])
@@ -29,18 +30,18 @@ def test_absolute_residual_target_rejects_invalid_tolerances(name: str, value: f
     tolerances = {"rtol": 1.0e-6, "atol": 0.0}
     tolerances[name] = value
     with pytest.raises(ValueError, match=name):
-        krylov_cupy._absolute_residual_target(1.0, **tolerances)
+        _absolute_residual_target(1.0, **tolerances)
 
 
 @pytest.mark.parametrize("norm", [float("nan"), float("inf"), -float("inf"), -1.0])
 def test_absolute_residual_target_rejects_unusable_rhs_norm(norm: float) -> None:
     with pytest.raises(FloatingPointError, match="RHS norm"):
-        krylov_cupy._absolute_residual_target(norm, rtol=1.0e-6, atol=0.0)
+        _absolute_residual_target(norm, rtol=1.0e-6, atol=0.0)
 
 
 def test_absolute_residual_target_rejects_product_overflow() -> None:
     with pytest.raises(FloatingPointError, match="target overflowed"):
-        krylov_cupy._absolute_residual_target(float(np.finfo(float).max), rtol=2.0, atol=0.0)
+        _absolute_residual_target(float(np.finfo(float).max), rtol=2.0, atol=0.0)
 
 
 @pytest.mark.fake_gpu
@@ -98,8 +99,11 @@ def test_simulation_rejects_nonfinite_relative_tolerance(rtol: float) -> None:
 
 @pytest.mark.parametrize("name", ["rtol", "atol"])
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), -1.0])
-def test_public_iterative_dispatch_rejects_invalid_tolerances_before_actions(
-    name: str, value: float
+@pytest.mark.parametrize(
+    "entrypoint", ["dispatch", "gmres", "bicgstab", "lgmres", "gcrotmk", "lsqr"]
+)
+def test_public_iterative_entrypoints_reject_invalid_tolerances_before_actions(
+    name: str, value: float, entrypoint: str
 ) -> None:
     def unexpected_action(values: np.ndarray) -> np.ndarray:
         pytest.fail("Invalid stopping controls must be rejected before an operator action.")
@@ -107,11 +111,20 @@ def test_public_iterative_dispatch_rejects_invalid_tolerances_before_actions(
     tolerances = {"rtol": 1.0e-6, "atol": 0.0}
     tolerances[name] = value
     with pytest.raises(ValueError, match=name):
-        solve_linear_system(
-            unexpected_action,
-            np.ones(2, dtype=np.complex128),
-            method="gmres",
-            show_progress=False,
-            rtol=tolerances["rtol"],
-            atol=tolerances["atol"],
-        )
+        if entrypoint == "dispatch":
+            solve_linear_system(
+                unexpected_action,
+                np.ones(2, dtype=np.complex128),
+                method="gmres",
+                show_progress=False,
+                rtol=tolerances["rtol"],
+                atol=tolerances["atol"],
+            )
+        else:
+            solver = getattr(solvers, f"{entrypoint}_scipy")
+            actions = (
+                (unexpected_action, unexpected_action)
+                if entrypoint == "lsqr"
+                else (unexpected_action,)
+            )
+            solver(*actions, np.ones(2, dtype=np.complex128), show_progress=False, **tolerances)

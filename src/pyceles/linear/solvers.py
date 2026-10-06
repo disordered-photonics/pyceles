@@ -30,10 +30,9 @@ from tqdm.auto import tqdm
 from pyceles._optional import asnumpy, import_cupy
 
 from ._gcro_cupy import gcro_cupy_native
+from ._stopping import _absolute_residual_target, _validated_tolerances
 from .krylov_cupy import (
-    _absolute_residual_target,
     _resolve_accum_dtype,
-    _validated_tolerances,
     bicgstab_cupy_native,
     block_gmres_cupy_native,
     fgmres_cupy_native,
@@ -986,6 +985,7 @@ def gmres_scipy(
 
     from scipy.sparse.linalg import gmres
 
+    rtol, atol = _validated_tolerances(rtol=rtol, atol=atol)
     b = np.asarray(b)
     n = b.size
     op_dtype = np.result_type(b.dtype, np.complex64)
@@ -1382,10 +1382,13 @@ def lsqr_scipy(
         raise ValueError("`lsqr_scipy` expects a 1D RHS.")
     n = int(b_arr.size)
     op_dtype = np.dtype(dtype if dtype is not None else np.result_type(b_arr.dtype, np.complex64))
-    if float(rtol) < 0.0 or float(atol) < 0.0:
-        raise ValueError("`rtol` and `atol` must be non-negative.")
+    rtol, atol = _validated_tolerances(rtol=rtol, atol=atol)
     if condition_limit is not None and not (float(condition_limit) > 0.0):
         raise ValueError("`condition_limit` must be positive when provided.")
+
+    iter_lim = int(maxiter) if maxiter is not None else max(1, 2 * n)
+    if iter_lim < 1:
+        raise ValueError("`maxiter` must be >= 1 when provided.")
 
     forward_applications = 0
     adjoint_applications = 0
@@ -1454,9 +1457,6 @@ def lsqr_scipy(
             },
         )
 
-    iter_lim = int(maxiter) if maxiter is not None else max(1, 2 * n)
-    if iter_lim < 1:
-        raise ValueError("`maxiter` must be >= 1 when provided.")
     result = lsqr(
         operator,
         rhs,
@@ -1866,6 +1866,7 @@ def bicgstab_scipy(
     """Solve one RHS using BiCGSTAB on the matrix-free scattering operator."""
     from scipy.sparse.linalg import bicgstab
 
+    rtol, atol = _validated_tolerances(rtol=rtol, atol=atol)
     b = np.asarray(b)
     n = b.size
     op_dtype = np.result_type(b.dtype, np.complex64)
@@ -1927,6 +1928,7 @@ def lgmres_scipy(
     """Solve one RHS using LGMRES on the matrix-free scattering operator."""
     from scipy.sparse.linalg import lgmres
 
+    rtol, atol = _validated_tolerances(rtol=rtol, atol=atol)
     b = np.asarray(b)
     n = b.size
     op_dtype = np.result_type(b.dtype, np.complex64)
@@ -1995,6 +1997,7 @@ def gcrotmk_scipy(
     """Solve one RHS using GCROTMK on the matrix-free scattering operator."""
     from scipy.sparse.linalg import gcrotmk
 
+    rtol, atol = _validated_tolerances(rtol=rtol, atol=atol)
     b = np.asarray(b)
     n = b.size
     op_dtype = np.result_type(b.dtype, np.complex64)

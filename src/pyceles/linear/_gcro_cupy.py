@@ -20,8 +20,8 @@ from typing import Any
 import numpy as np
 import numpy.typing as npt
 
+from ._stopping import _absolute_residual_target
 from .krylov_cupy import (
-    _absolute_residual_target,
     _apply_givens_rotation,
     _as_device_matrix,
     _as_device_vector,

@@ -11,6 +11,24 @@ from pyceles.linear.krylov_cupy import lsqr_cupy_native
 from pyceles.linear.solvers import lsqr_scipy
 
 
+@pytest.mark.parametrize("maxiter", [0, -1])
+def test_lsqr_scipy_checks_iteration_limit_before_zero_residual_shortcut(maxiter: int) -> None:
+    def unexpected_action(values: np.ndarray) -> np.ndarray:
+        pytest.fail("Invalid iteration limits must be rejected before operator actions.")
+
+    b = np.ones(2, dtype=np.complex128)
+    with pytest.raises(ValueError, match="maxiter"):
+        lsqr_scipy(
+            unexpected_action,
+            unexpected_action,
+            b,
+            x0=b,
+            initial_residual=np.zeros_like(b),
+            maxiter=maxiter,
+            show_progress=False,
+        )
+
+
 @pytest.mark.parametrize("rhs", [[0.0, 1.0], [1.0, 1.0]])
 @pytest.mark.parametrize("final_check", [False, True])
 def test_lsqr_scipy_rejects_unsolved_singular_system(rhs: list[float], final_check: bool) -> None:

@@ -116,6 +116,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   normal allocation or factorization limits.
 
 ### Fixed
+- SciPy iterative solver entry points now reject non-finite tolerances
+  consistently with the dispatcher; LSQR validates iteration limits before
+  warm-start exits.
 - CuPy direct factorization retires the unfactorized-matrix cache before
   destructive LU, preventing a failed factorization from leaving corrupted
   matrix data available to a retry.
