@@ -1,4 +1,4 @@
-"""Independent QR checks for the fused, per-Arnoldi-step Givens update."""
+"""Ownership and independent QR checks for native CuPy Arnoldi kernels."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ def test_fused_mgs_update_establishes_ownership_before_in_place_reuse(
     rng = np.random.default_rng(5102026)
     n = 257
     source = np.asarray(rng.normal(size=2 * n) + 1j * rng.normal(size=2 * n), dtype=dtype)
-    w = cupy.asarray(source[::2])
+    w = cupy.asarray(source)[::2]
     basis = cupy.asarray(np.asarray(rng.normal(size=n) + 1j * rng.normal(size=n), dtype=dtype))
     coefficient = np.asarray(0.37 - 0.19j, dtype=dtype)
     w_before = w.copy()
@@ -45,6 +45,7 @@ def test_fused_mgs_update_establishes_ownership_before_in_place_reuse(
         updated, basis, second_coefficient, cupy=cupy, owns_w=owns_w
     )
     assert owns_w_again
+    assert updated_again is updated
     np.testing.assert_allclose(cupy.asnumpy(updated_again), expected_second, rtol=2e-6, atol=2e-6)
 
 

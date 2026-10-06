@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+from importlib.util import resolve_name
 from pathlib import Path
 
 import pytest
@@ -23,7 +24,9 @@ def _module_name_from_path(src_root: Path, path: Path) -> str:
     return ".".join(mod_parts)
 
 
-def _resolve_from_module(current_module: str, node: ast.ImportFrom) -> str | None:
+def _resolve_from_module(
+    current_module: str, node: ast.ImportFrom, *, is_package: bool = False
+) -> str | None:
     """Resolve absolute module path for ``from ... import ...`` nodes.
 
     Rationale:
@@ -34,14 +37,34 @@ def _resolve_from_module(current_module: str, node: ast.ImportFrom) -> str | Non
     """
     if node.level == 0:
         return node.module
-    package_parts = current_module.rsplit(".", 1)[0].split(".")
-    drop = int(node.level) - 1
-    if drop > len(package_parts):
+    package = current_module if is_package else current_module.rsplit(".", 1)[0]
+    try:
+        return resolve_name("." * node.level + (node.module or ""), package)
+    except ImportError:
         return None
-    anchor = package_parts[: len(package_parts) - drop]
-    if node.module:
-        return ".".join([*anchor, node.module])
-    return ".".join(anchor)
+
+
+@pytest.mark.parametrize(
+    ("module", "is_package", "statement", "expected"),
+    [
+        ("pyceles.core.projection", False, "from .fields import PlaneWave", "pyceles.core.fields"),
+        ("pyceles.core.periodic", True, "from ..fields import PlaneWave", "pyceles.core.fields"),
+        ("pyceles.core.periodic", True, "from .. import fields", "pyceles.core"),
+        (
+            "pyceles.core.periodic.ewald",
+            False,
+            "from ..fields import PlaneWave",
+            "pyceles.core.fields",
+        ),
+        ("pyceles", True, "from ..fields import PlaneWave", None),
+    ],
+)
+def test_relative_import_resolution_respects_package_initializers(
+    module: str, is_package: bool, statement: str, expected: str | None
+) -> None:
+    node = ast.parse(statement).body[0]
+    assert isinstance(node, ast.ImportFrom)
+    assert _resolve_from_module(module, node, is_package=is_package) == expected
 
 
 def _is_forbidden_module(name: str | None, forbidden: set[str]) -> bool:
@@ -58,7 +81,7 @@ def test_internal_modules_do_not_import_facades() -> None:
 
     Why this exists
     ---------------
-    `pyceles.core.fields` is a public compatibility facade. Internal modules
+    `pyceles.core.fields` is a public facade. Internal modules
     should import canonical implementations directly to avoid accidental
     layering regressions.
 
@@ -106,7 +129,9 @@ def test_internal_modules_do_not_import_facades() -> None:
                     if _is_forbidden_module(alias.name, forbidden_facades):
                         violations.append(f"{rel}:{node.lineno}: import {alias.name}")
             elif isinstance(node, ast.ImportFrom):
-                resolved = _resolve_from_module(current_module, node)
+                resolved = _resolve_from_module(
+                    current_module, node, is_package=path.name == "__init__.py"
+                )
                 # Catch direct facade imports:
                 #   from pyceles.core.fields import ...
                 #   from .fields import ...   (when resolved under pyceles.core)
