@@ -27,7 +27,6 @@ from .fields import (
 )
 from .lattice import DiffractionOrder2D, RectangularLattice2D
 from .operators import (
-    AxisymmetricTGroup,
     CompositeParticleTOperator,
     CouplingOperator,
     DenseTGroup,
@@ -40,8 +39,6 @@ from .operators import (
     apply_W_numpy,
     assemble_dense_A_numpy,
     estimate_translation_cache_bytes,
-    make_axisymmetric_block_group_factory,
-    make_axisymmetric_group_factory,
     make_dense_group_factory,
     make_prepared_A_and_rhs,
     plan_particle_t_groups,
@@ -102,7 +99,6 @@ def clear_caches() -> None:
 __all__ = [
     "AngularSpectrumSLMSource",
     "AngularSpectrumSource",
-    "AxisymmetricTGroup",
     "BesselBeam",
     "CartesianPolarizedBesselBeam",
     "CartesianPolarizedFocusedLaguerreGaussianBeam",
@@ -146,8 +142,6 @@ __all__ = [
     "layered_mie_ab",
     "layered_sphere_T_diagonal",
     "layered_spheres_from_arrays",
-    "make_axisymmetric_block_group_factory",
-    "make_axisymmetric_group_factory",
     "make_dense_group_factory",
     "make_prepared_A_and_rhs",
     "particle_T_diagonal",

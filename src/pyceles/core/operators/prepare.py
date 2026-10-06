@@ -25,7 +25,6 @@ from .coupling_pairwise_cupy import CuPyPairwiseCouplingOperator
 from .coupling_periodic import PeriodicCouplingOperator
 from .coupling_periodic_cupy import CuPyPeriodicCouplingOperator
 from .groups import (
-    AxisymmetricTGroup,
     DenseTGroup,
     DiagonalTGroup,
     ParticleTGroupFactories,
@@ -108,8 +107,9 @@ def _default_group_factory(
     if plan.representation == "diagonal":
         return _prepare_diagonal_group(plan=plan, context=context)
 
-    if plan.representation == "dense":
-        ids = np.asarray(plan.particle_indices, dtype=np.int64)
+    if plan.representation in {"dense", "axisymmetric"}:
+        # Spheroid construction exploits axisymmetry, but its prepared lab-frame
+        # blocks use the same storage and actions as imported dense T matrices.
         archetypes = context.archetypes_for(plan)
         try:
             blocks = particle_T_matrix_blocks(
@@ -119,46 +119,15 @@ def _default_group_factory(
                 n_medium=context.n_medium,
                 dtype=context.dtype,
             )
-        except NotImplementedError as exc:
-            raise NotImplementedError(str(exc)) from exc
         except TypeError as exc:
             raise NotImplementedError(
-                "dense particle-T preparation requires canonical spherical-basis "
-                "T blocks for every particle in the selected group."
+                f"{plan.representation} particle-T preparation requires canonical "
+                "spherical-basis T blocks for every particle in the selected group."
             ) from exc
         return DenseTGroup(
-            particle_indices=ids,
+            particle_indices=np.asarray(plan.particle_indices, dtype=np.int64),
             operator_indices=np.asarray(plan.operator_indices, dtype=np.int64),
             T_blocks=blocks,
-            dtype=context.dtype,
-        )
-
-    if plan.representation == "axisymmetric":
-        ids = np.asarray(plan.particle_indices, dtype=np.int64)
-        archetypes = context.archetypes_for(plan)
-        try:
-            blocks = particle_T_matrix_blocks(
-                lmax=context.lmax,
-                k_medium=context.k,
-                particles=archetypes,
-                n_medium=context.n_medium,
-                dtype=context.dtype,
-            )
-        except NotImplementedError as exc:
-            raise NotImplementedError(str(exc)) from exc
-        except TypeError as exc:
-            raise NotImplementedError(
-                "axisymmetric particle-T preparation requires canonical spherical-basis "
-                "T blocks for every particle in the selected group."
-            ) from exc
-        return AxisymmetricTGroup(
-            particle_indices=ids,
-            operator_indices=np.asarray(plan.operator_indices, dtype=np.int64),
-            T_blocks=blocks,
-            body_metadata={
-                "storage": "shared_spherical_basis_dense_blocks",
-                "n_unique_archetypes": len(archetypes),
-            },
             dtype=context.dtype,
         )
 
@@ -359,12 +328,7 @@ def prepare_matvec(
                 "`cache_translation_blocks=True` is not supported with finite `operator_backend='cupy'` "
                 "(direct raw-kernel coupling path)."
             )
-        # The CuPy backend accepts mixed diagonal/dense groups, including
-        # axisymmetric particles such as spheroids, by uploading explicit
-        # spherical-basis T blocks to the GPU. It does not currently wrap the
-        # narrower callback-only axisymmetric group hooks onto device, because
-        # the current particle families can already use the explicit-block path
-        # and future database-driven particle types are expected to do the same.
+        # Prepare explicit particle-T data on CPU, then keep its actions on GPU.
         cpu_particle_t = _prepare_particle_t_operator(
             lmax=int(lmax),
             k=k_f,
@@ -376,10 +340,7 @@ def prepare_matvec(
         particle_t = cast(
             ParticleTOperator,
             wrap_particle_t_groups_cupy(
-                cast(
-                    tuple[DiagonalTGroup | DenseTGroup | AxisymmetricTGroup, ...],
-                    tuple(cpu_particle_t.groups),
-                ),
+                cpu_particle_t.groups,
                 lmax=int(lmax),
                 n_particles=len(part),
                 dtype=op_dtype,

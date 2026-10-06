@@ -32,15 +32,12 @@ from .coupling_pairwise_cupy import CuPyPairwiseCouplingOperator
 from .coupling_periodic import PeriodicCouplingOperator
 from .coupling_periodic_cupy import CuPyPeriodicCouplingOperator
 from .groups import (
-    AxisymmetricTGroup,
     DenseTGroup,
     DiagonalTGroup,
     ParticleTGroupFactories,
     ParticleTGroupPlan,
     ParticleTPreparationContext,
     PreparedParticleTGroup,
-    make_axisymmetric_block_group_factory,
-    make_axisymmetric_group_factory,
     make_dense_group_factory,
     plan_particle_t_groups,
 )
@@ -66,7 +63,6 @@ from .single_body import CompositeParticleTOperator, ParticleTOperator, build_T_
 __all__ = [
     "AdjointCouplingOperator",
     "Array",
-    "AxisymmetricTGroup",
     "CompositeParticleTOperator",
     "CouplingOperator",
     "CuPyMLFMMCouplingOperator",
@@ -96,8 +92,6 @@ __all__ = [
     "build_T_mode_diagonal",
     "build_mlfmm_cupy_host_cache",
     "estimate_translation_cache_bytes",
-    "make_axisymmetric_block_group_factory",
-    "make_axisymmetric_group_factory",
     "make_dense_group_factory",
     "make_prepared_A_and_rhs",
     "plan_particle_t_groups",

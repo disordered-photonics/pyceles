@@ -50,15 +50,14 @@ class ParticleTPreparationContext:
             for index in np.asarray(plan.archetype_indices, dtype=np.int64)
         )
 
-    def instances_for(self, plan: ParticleTGroupPlan) -> tuple[Particle, ...]:
-        return tuple(
-            self.particles[int(index)]
-            for index in np.asarray(plan.particle_indices, dtype=np.int64)
-        )
-
 
 class PreparedParticleTGroup(Protocol):
-    """Prepared subset of particles sharing one ``T`` representation."""
+    """Prepared subset of particles sharing one ``T`` representation.
+
+    Actions preserve their input and return writable results independent of
+    inputs and reusable group storage. Full-group dispatch may pass these
+    results directly to callers that retain or modify them in place.
+    """
 
     particle_indices: Array
     operator_indices: Array
@@ -84,20 +83,16 @@ type ParticleTGroupFactory = Callable[
     [ParticleTGroupPlan, ParticleTPreparationContext], PreparedParticleTGroup
 ]
 type DenseBlockProvider = Callable[[Sequence[Particle], ParticleTPreparationContext], Array]
-type AxisymmetricSubsetApply = Callable[
-    [Array, Sequence[Particle], ParticleTPreparationContext], Array
-]
-type AxisymmetricLocalBlockApply = Callable[
-    [int, Array, Sequence[Particle], ParticleTPreparationContext], Array
-]
-type AxisymmetricMetadataBuilder = Callable[
-    [Sequence[Particle], ParticleTPreparationContext], object | None
-]
 
 
 @dataclass(frozen=True)
 class ParticleTGroupFactories:
-    """Optional representation-specific group factories for ``prepare_matvec``."""
+    """Preparation-time factories selected by particle representation.
+
+    The representation selects how blocks are obtained, not a separate runtime
+    operator class. Both dense and axisymmetric plans can use
+    :func:`make_dense_group_factory`. Factories run once per planned group.
+    """
 
     diagonal: ParticleTGroupFactory | None = None
     axisymmetric: ParticleTGroupFactory | None = None
@@ -320,6 +315,12 @@ class DiagonalTGroup:
 
 @dataclass
 class DenseTGroup:
+    """Explicit spherical-basis blocks, shared by particle archetype.
+
+    This storage applies equally to imported T matrices and the current
+    spheroid preparation. Actions use the prepared blocks, not provider calls.
+    """
+
     particle_indices: Array
     T_blocks: Array
     operator_indices: Array = field(default_factory=lambda: np.zeros((0,), dtype=np.int64))
@@ -381,117 +382,6 @@ class DenseTGroup:
         return None
 
 
-@dataclass
-class AxisymmetricTGroup:
-    particle_indices: Array
-    T_blocks: Array | None = None
-    operator_indices: Array = field(default_factory=lambda: np.zeros((0,), dtype=np.int64))
-    apply_subset_fn: Callable[[Array], Array] | None = None
-    rhs_subset_fn: Callable[[Array], Array] | None = None
-    apply_local_block_fn: Callable[[int, Array], Array] | None = None
-    body_metadata: object | None = None
-    dtype: np.dtype = COMPLEX128_DTYPE
-    apply_adjoint_subset_fn: Callable[[Array], Array] | None = None
-    _local_indices: tuple[Array, ...] = field(default=(), init=False, repr=False)
-
-    def __post_init__(self) -> None:
-        if self.T_blocks is not None:
-            blocks = np.asarray(self.T_blocks, dtype=self.dtype)
-            if blocks.ndim != 3 or blocks.shape[1] != blocks.shape[2]:
-                raise ValueError(
-                    "Axisymmetric dense fallback must provide blocks of shape (Nu, Nm, Nm)."
-                )
-            self.particle_indices, self.operator_indices = _normalized_operator_indices(
-                self.particle_indices,
-                None if self.operator_indices.size == 0 else self.operator_indices,
-                n_operators=blocks.shape[0],
-            )
-            self.T_blocks = blocks
-            self._local_indices = _operator_local_indices(self.operator_indices, blocks.shape[0])
-        else:
-            self.particle_indices = np.asarray(self.particle_indices, dtype=np.int64).reshape(-1)
-            self.operator_indices = np.arange(self.particle_indices.size, dtype=np.int64)
-
-    @property
-    def supports_adjoint(self) -> bool:
-        return self.T_blocks is not None or self.apply_adjoint_subset_fn is not None
-
-    def apply_subset(self, x_subset: Array) -> Array:
-        if self.T_blocks is not None:
-            return np.asarray(
-                _apply_shared_dense(
-                    self.T_blocks,
-                    self.operator_indices,
-                    np.asarray(x_subset, dtype=self.dtype),
-                    local_indices=self._local_indices,
-                ),
-                dtype=self.dtype,
-            )
-        if self.apply_subset_fn is None:
-            raise NotImplementedError(
-                "Callback-backed axisymmetric particle-T operators must provide an explicit "
-                "forward subset operation."
-            )
-        return np.asarray(
-            self.apply_subset_fn(np.asarray(x_subset, dtype=self.dtype)), dtype=self.dtype
-        )
-
-    def apply_adjoint_subset(self, x_subset: Array) -> Array:
-        if self.T_blocks is not None:
-            return np.asarray(
-                _apply_shared_dense_adjoint(
-                    self.T_blocks,
-                    self.operator_indices,
-                    np.asarray(x_subset, dtype=self.dtype),
-                    local_indices=self._local_indices,
-                ),
-                dtype=self.dtype,
-            )
-        if self.apply_adjoint_subset_fn is None:
-            raise NotImplementedError(
-                "Callback-backed axisymmetric particle-T operators must provide an explicit "
-                "adjoint subset operation."
-            )
-        return np.asarray(
-            self.apply_adjoint_subset_fn(np.asarray(x_subset, dtype=self.dtype)),
-            dtype=self.dtype,
-        )
-
-    def rhs_subset(self, b_subset: Array) -> Array:
-        if self.T_blocks is not None:
-            return self.apply_subset(b_subset)
-        if self.rhs_subset_fn is not None:
-            return np.asarray(
-                self.rhs_subset_fn(np.asarray(b_subset, dtype=self.dtype)), dtype=self.dtype
-            )
-        return self.apply_subset(b_subset)
-
-    def apply_local_block(self, local_particle_index: int, block: Array) -> Array:
-        if self.T_blocks is not None:
-            operator_index = int(self.operator_indices[int(local_particle_index)])
-            return np.asarray(
-                self.T_blocks[operator_index] @ np.asarray(block, dtype=self.dtype),
-                dtype=self.dtype,
-            )
-        if self.apply_local_block_fn is None:
-            raise NotImplementedError(
-                "Callback-backed axisymmetric particle-T operators must provide an explicit "
-                "local-block operation."
-            )
-        return np.asarray(
-            self.apply_local_block_fn(
-                int(local_particle_index), np.asarray(block, dtype=self.dtype)
-            ),
-            dtype=self.dtype,
-        )
-
-    def mode_diagonal(self) -> Array | None:
-        return None
-
-    def degree_diagonals(self) -> tuple[Array, Array] | None:
-        return None
-
-
 def plan_particle_t_groups(particles: Sequence[Particle]) -> tuple[ParticleTGroupPlan, ...]:
     """Plan particle-local groups and retain shared-archetype mappings."""
     collection = ParticleCollection.from_particles(particles)
@@ -507,7 +397,16 @@ def plan_particle_t_groups(particles: Sequence[Particle]) -> tuple[ParticleTGrou
 
 
 def make_dense_group_factory(block_provider: DenseBlockProvider) -> ParticleTGroupFactory:
-    """Build a dense group from one block per unique particle archetype."""
+    """Build explicit blocks once per prepared group, not during operator actions.
+
+    The provider receives unique archetypes and must return canonical lab-frame
+    CELES blocks of shape ``(n_archetypes, n_modes, n_modes)``. The returned
+    storage must remain valid and unchanged for the prepared group's lifetime.
+    A provider reusing scratch must snapshot it before returning.
+
+    Use this factory for either dense or axisymmetric preparation plans.
+    Standard-file imports normally use ``TMatrixParticle`` directly instead.
+    """
 
     def factory(
         plan: ParticleTGroupPlan, context: ParticleTPreparationContext
@@ -524,113 +423,8 @@ def make_dense_group_factory(block_provider: DenseBlockProvider) -> ParticleTGro
     return factory
 
 
-def make_axisymmetric_group_factory(
-    *,
-    apply_subset: AxisymmetricSubsetApply,
-    apply_local_block: AxisymmetricLocalBlockApply,
-    apply_adjoint_subset: AxisymmetricSubsetApply | None = None,
-    rhs_subset: AxisymmetricSubsetApply | None = None,
-    metadata_builder: AxisymmetricMetadataBuilder | None = None,
-) -> ParticleTGroupFactory:
-    """Build an axisymmetric group from high-level per-instance callbacks.
-
-    ``apply_adjoint_subset`` is optional because a callback-backed group may be
-    intentionally forward-only.  When it is omitted, the prepared particle
-    operator reports ``supports_adjoint=False`` and adjoint-dependent solvers
-    reject the system before execution; no approximate transpose is inferred
-    from the forward callback.
-    """
-
-    def factory(
-        plan: ParticleTGroupPlan, context: ParticleTPreparationContext
-    ) -> PreparedParticleTGroup:
-        ids = np.asarray(plan.particle_indices, dtype=np.int64)
-        group_particles = context.instances_for(plan)
-        metadata = None if metadata_builder is None else metadata_builder(group_particles, context)
-
-        def apply_subset_bound(x_subset: Array) -> Array:
-            return np.asarray(
-                apply_subset(np.asarray(x_subset, dtype=context.dtype), group_particles, context),
-                dtype=context.dtype,
-            )
-
-        def apply_local_block_bound(local_particle_index: int, block: Array) -> Array:
-            return np.asarray(
-                apply_local_block(
-                    int(local_particle_index),
-                    np.asarray(block, dtype=context.dtype),
-                    group_particles,
-                    context,
-                ),
-                dtype=context.dtype,
-            )
-
-        def rhs_subset_bound(b_subset: Array) -> Array:
-            if rhs_subset is None:
-                return apply_subset_bound(b_subset)
-            return np.asarray(
-                rhs_subset(np.asarray(b_subset, dtype=context.dtype), group_particles, context),
-                dtype=context.dtype,
-            )
-
-        def apply_adjoint_subset_bound(x_subset: Array) -> Array:
-            if apply_adjoint_subset is None:
-                raise NotImplementedError(
-                    "This callback-backed axisymmetric group does not provide an explicit "
-                    "adjoint subset operation."
-                )
-            return np.asarray(
-                apply_adjoint_subset(
-                    np.asarray(x_subset, dtype=context.dtype), group_particles, context
-                ),
-                dtype=context.dtype,
-            )
-
-        return AxisymmetricTGroup(
-            particle_indices=ids,
-            apply_subset_fn=apply_subset_bound,
-            apply_adjoint_subset_fn=(
-                apply_adjoint_subset_bound if apply_adjoint_subset is not None else None
-            ),
-            rhs_subset_fn=rhs_subset_bound,
-            apply_local_block_fn=apply_local_block_bound,
-            body_metadata=metadata,
-            dtype=context.dtype,
-        )
-
-    return factory
-
-
-def make_axisymmetric_block_group_factory(
-    block_provider: DenseBlockProvider,
-    *,
-    metadata_builder: AxisymmetricMetadataBuilder | None = None,
-) -> ParticleTGroupFactory:
-    """Build an axisymmetric group from one dense block per unique archetype."""
-
-    def factory(
-        plan: ParticleTGroupPlan, context: ParticleTPreparationContext
-    ) -> PreparedParticleTGroup:
-        ids = np.asarray(plan.particle_indices, dtype=np.int64)
-        archetypes = context.archetypes_for(plan)
-        metadata = None if metadata_builder is None else metadata_builder(archetypes, context)
-        return AxisymmetricTGroup(
-            particle_indices=ids,
-            operator_indices=np.asarray(plan.operator_indices, dtype=np.int64),
-            T_blocks=np.asarray(block_provider(archetypes, context), dtype=context.dtype),
-            body_metadata=metadata,
-            dtype=context.dtype,
-        )
-
-    return factory
-
-
 __all__ = [
     "Array",
-    "AxisymmetricLocalBlockApply",
-    "AxisymmetricMetadataBuilder",
-    "AxisymmetricSubsetApply",
-    "AxisymmetricTGroup",
     "DenseBlockProvider",
     "DenseTGroup",
     "DiagonalTGroup",
@@ -639,8 +433,6 @@ __all__ = [
     "ParticleTGroupPlan",
     "ParticleTPreparationContext",
     "PreparedParticleTGroup",
-    "make_axisymmetric_block_group_factory",
-    "make_axisymmetric_group_factory",
     "make_dense_group_factory",
     "plan_particle_t_groups",
 ]

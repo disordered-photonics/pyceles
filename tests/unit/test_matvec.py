@@ -8,7 +8,6 @@ import pytest
 
 from pyceles.core.indexing import n_modes
 from pyceles.core.operators import (
-    AxisymmetricTGroup,
     CompositeParticleTOperator,
     DenseTGroup,
     DiagonalTGroup,
@@ -19,8 +18,6 @@ from pyceles.core.operators import (
     apply_A_numpy,
     assemble_dense_A_numpy,
     estimate_translation_cache_bytes,
-    make_axisymmetric_block_group_factory,
-    make_axisymmetric_group_factory,
     make_dense_group_factory,
     plan_particle_t_groups,
     precompute_T_diagonal,
@@ -441,7 +438,7 @@ def test_prepare_matvec_accepts_rotated_spheroids_with_default_axisymmetric_path
     assert isinstance(prepared.particle_t, CompositeParticleTOperator)
     assert len(prepared.particle_t.groups) == 2
     assert isinstance(prepared.particle_t.groups[0], DiagonalTGroup)
-    assert isinstance(prepared.particle_t.groups[1], AxisymmetricTGroup)
+    assert isinstance(prepared.particle_t.groups[1], DenseTGroup)
     assert prepared.particle_t.groups[1].T_blocks is not None
     assert prepared.supports_adjoint
 
@@ -476,7 +473,7 @@ def test_prepare_matvec_accepts_default_aligned_spheroid_axisymmetric_path():
     assert isinstance(prepared.particle_t, CompositeParticleTOperator)
     assert len(prepared.particle_t.groups) == 2
     assert isinstance(prepared.particle_t.groups[0], DiagonalTGroup)
-    assert isinstance(prepared.particle_t.groups[1], AxisymmetricTGroup)
+    assert isinstance(prepared.particle_t.groups[1], DenseTGroup)
     assert prepared.particle_t.groups[1].T_blocks is not None
 
 
@@ -557,7 +554,7 @@ def test_imported_tmatrix_particle_has_exact_prepared_adjoint():
     )
 
 
-def test_prepare_matvec_accepts_custom_axisymmetric_group_factory():
+def test_prepare_matvec_prepares_axisymmetric_blocks_before_actions():
     lmax, k, positions, radii, n_particle, _, n_medium, x, b = _sample_problem()
     particles: list[Particle] = [
         Sphere(
@@ -577,18 +574,17 @@ def test_prepare_matvec_accepts_custom_axisymmetric_group_factory():
     axis_matrix = np.eye(nm, dtype=np.complex128) * (0.8 + 0.1j)
     axis_matrix[0, 2] = 0.15 - 0.05j
 
-    factories = ParticleTGroupFactories(
-        axisymmetric=make_axisymmetric_group_factory(
-            apply_subset=lambda x_subset, _particles, _context: x_subset @ axis_matrix.T,
-            apply_adjoint_subset=lambda x_subset, _particles, _context: (
-                x_subset @ np.conjugate(axis_matrix)
-            ),
-            apply_local_block=lambda local_i, block, _particles, _context: axis_matrix @ block,
-            metadata_builder=lambda group_particles, _context: {
-                "euler_angles": tuple(group_particles[0].euler_angles)  # type: ignore[attr-defined]
-            },
-        )
-    )
+    provider_calls = 0
+
+    def provide_blocks(archetypes, context):
+        nonlocal provider_calls
+        provider_calls += 1
+        assert len(archetypes) == 1
+        assert isinstance(archetypes[0], Spheroid)
+        assert context.n_modes == nm
+        return axis_matrix[None, :, :]
+
+    factories = ParticleTGroupFactories(axisymmetric=make_dense_group_factory(provide_blocks))
     prepared = prepare_matvec(
         lmax=lmax,
         k=k,
@@ -600,8 +596,8 @@ def test_prepare_matvec_accepts_custom_axisymmetric_group_factory():
     )
 
     assert isinstance(prepared.particle_t, CompositeParticleTOperator)
-    assert isinstance(prepared.particle_t.groups[1], AxisymmetricTGroup)
-    assert prepared.particle_t.groups[1].body_metadata is not None
+    assert isinstance(prepared.particle_t.groups[1], DenseTGroup)
+    assert provider_calls == 1
     assert prepared.supports_adjoint
     y_dense = (
         assemble_dense_A_numpy(prepared, show_progress=False, use_cache=False, store_blocks=False)
@@ -620,61 +616,16 @@ def test_prepare_matvec_accepts_custom_axisymmetric_group_factory():
     expected_adjoint[nm:] = adjoint_input[nm:] @ np.conjugate(axis_matrix)
     actual_adjoint = prepared.particle_t.apply_adjoint(adjoint_input)
     np.testing.assert_allclose(actual_adjoint, expected_adjoint, rtol=1e-12, atol=1e-12)
-
-
-def test_prepare_matvec_accepts_axisymmetric_block_group_factory():
-    lmax, k, positions, radii, n_particle, _, n_medium, x, b = _sample_problem()
-    particles: list[Particle] = [
-        Sphere(
-            position=tuple(positions[0].tolist()),
-            radius=float(radii[0]),
-            refractive_index=complex(n_particle[0]),
-        ),
-        Spheroid(
-            position=tuple(positions[1].tolist()),
-            equatorial_radius=float(radii[1]),
-            polar_radius=float(radii[1]) * 1.25,
-            refractive_index=complex(n_particle[1]),
-            euler_angles=(0.2, 0.4, 0.1),
-        ),
-    ]
-    nm = n_modes(lmax)
-    axis_matrix = np.eye(nm, dtype=np.complex128) * (0.9 - 0.05j)
-    axis_matrix[1, 4] = -0.1 + 0.03j
-
-    factories = ParticleTGroupFactories(
-        axisymmetric=make_axisymmetric_block_group_factory(
-            lambda _group_particles, _context: axis_matrix[None, :, :],
-            metadata_builder=lambda group_particles, _context: {
-                "euler_angles": tuple(group_particles[0].euler_angles)  # type: ignore[attr-defined]
-            },
-        )
-    )
-    prepared = prepare_matvec(
-        lmax=lmax,
-        k=k,
-        particles=particles,
-        n_medium=n_medium,
-        radial_lut_dr=0.5,
-        cache_translation_blocks=False,
-        particle_t_group_factories=factories,
-    )
-
-    assert isinstance(prepared.particle_t, CompositeParticleTOperator)
-    assert isinstance(prepared.particle_t.groups[1], AxisymmetricTGroup)
-    assert prepared.particle_t.groups[1].T_blocks is not None
-    y_dense = (
-        assemble_dense_A_numpy(prepared, show_progress=False, use_cache=False, store_blocks=False)
-        @ x[: 2 * nm]
-    )
-    y_mv = prepared.apply_A(x[: 2 * nm])
-    rhs = prepared.rhs_Tb(b[: 2 * nm])
-    np.testing.assert_allclose(y_mv, y_dense, rtol=1e-12, atol=1e-12)
-    assert rhs.shape == (2 * nm,)
+    # Dense assembly also requests local T blocks. None of these actions may
+    # call the preparation provider again.
+    assert provider_calls == 1
 
 
 @pytest.mark.reference
-def test_sphere_and_layered_match_when_forced_through_dense_factory():
+@pytest.mark.parametrize("representation", ("dense", "axisymmetric"))
+def test_sphere_and_layered_match_when_forced_through_dense_factory(
+    representation: ParticleTRepresentation,
+):
     lmax, k, positions, radii, n_particle, _, n_medium, x, b = _sample_problem()
     base_particles: list[Particle] = [
         Sphere(
@@ -700,19 +651,18 @@ def test_sphere_and_layered_match_when_forced_through_dense_factory():
         _ForcedRepresentationParticle(
             position=particle.position,
             base_particle=particle,
-            representation="dense",
+            representation=representation,
         )
         for particle in base_particles
     ]
 
-    factories = ParticleTGroupFactories(
-        dense=make_dense_group_factory(
-            lambda group_particles, context: np.stack(
-                [np.diag(row) for row in _wrapped_particle_t_diag(group_particles, context)],
-                axis=0,
-            )
+    factory = make_dense_group_factory(
+        lambda group_particles, context: np.stack(
+            [np.diag(row) for row in _wrapped_particle_t_diag(group_particles, context)],
+            axis=0,
         )
     )
+    factories = ParticleTGroupFactories(dense=factory, axisymmetric=factory)
     forced = prepare_matvec(
         lmax=lmax,
         k=k,
@@ -731,75 +681,9 @@ def test_sphere_and_layered_match_when_forced_through_dense_factory():
         forced.rhs_Tb(b[:n]), reference.rhs_Tb(b[:n]), rtol=1e-12, atol=1e-12
     )
 
-
-@pytest.mark.reference
-def test_sphere_and_layered_match_when_forced_through_axisymmetric_factory():
-    lmax, k, positions, radii, n_particle, _, n_medium, x, b = _sample_problem()
-    base_particles: list[Particle] = [
-        Sphere(
-            position=tuple(positions[0].tolist()),
-            radius=float(radii[0]),
-            refractive_index=complex(n_particle[0]),
-        ),
-        LayeredSphere(
-            position=tuple(positions[1].tolist()),
-            layer_radii=(40.0, float(radii[1])),
-            layer_refractive_indices=(1.7 + 0j, complex(n_particle[1])),
-        ),
-    ]
-    reference = prepare_matvec(
-        lmax=lmax,
-        k=k,
-        particles=base_particles,
-        n_medium=n_medium,
-        radial_lut_dr=0.5,
-        cache_translation_blocks=False,
-    )
-    forced_particles = [
-        _ForcedRepresentationParticle(
-            position=particle.position,
-            base_particle=particle,
-            representation="axisymmetric",
-        )
-        for particle in base_particles
-    ]
-
-    factories = ParticleTGroupFactories(
-        axisymmetric=make_axisymmetric_group_factory(
-            apply_subset=lambda x_subset, group_particles, context: (
-                _wrapped_particle_t_diag(group_particles, context) * x_subset
-            ),
-            apply_local_block=lambda local_i, block, group_particles, context: (
-                _wrapped_particle_t_diag(group_particles, context)[local_i][:, None] * block
-            ),
-            metadata_builder=lambda group_particles, context: {
-                "forced_from_diagonal": True,
-                "n_particles": len(group_particles),
-                "n_modes": context.n_modes,
-            },
-        )
-    )
-    forced = prepare_matvec(
-        lmax=lmax,
-        k=k,
-        particles=forced_particles,
-        n_medium=n_medium,
-        radial_lut_dr=0.5,
-        cache_translation_blocks=False,
-        particle_t_group_factories=factories,
-    )
-
-    n = len(base_particles) * n_modes(lmax)
-    assert isinstance(forced.particle_t, CompositeParticleTOperator)
-    assert isinstance(forced.particle_t.groups[0], AxisymmetricTGroup)
-    assert not forced.supports_adjoint
-    with pytest.raises(NotImplementedError, match="exact T/W adjoint"):
-        forced.make_adjoint()
+    assert forced.supports_adjoint
     np.testing.assert_allclose(
-        forced.apply_A(x[:n]), reference.apply_A(x[:n]), rtol=1e-12, atol=1e-12
-    )
-    np.testing.assert_allclose(
-        forced.rhs_Tb(b[:n]), reference.rhs_Tb(b[:n]), rtol=1e-12, atol=1e-12
+        forced.apply_adjoint(x[:n]), reference.apply_adjoint(x[:n]), rtol=1e-12, atol=1e-12
     )
 
 
@@ -1010,6 +894,9 @@ def test_prepared_operator_accepts_generic_coupling_protocol():
         dtype=np.dtype(prepared.dtype),
     )
     np.testing.assert_allclose(generic_prepared.apply_A(x), x, rtol=1e-12, atol=1e-12)
+    assert not generic_prepared.supports_adjoint
+    with pytest.raises(NotImplementedError, match="exact T/W adjoint"):
+        generic_prepared.make_adjoint()
 
 
 def test_estimate_translation_cache_bytes():
@@ -1279,3 +1166,72 @@ def test_prepare_matvec_normalizes_numpy_backend_name() -> None:
     )
 
     assert isinstance(prepared.coupling, PairwiseCouplingOperator)
+
+
+@pytest.mark.parametrize("kind", ("diagonal", "dense"))
+@pytest.mark.parametrize("action", ("apply", "apply_adjoint", "rhs"))
+@pytest.mark.parametrize("nrhs", (1, 2))
+def test_explicit_particle_t_results_own_their_storage(kind, action, nrhs):
+    ids = np.array([0, 1], dtype=np.int64)
+    operators = np.zeros(2, dtype=np.int64)
+    group: DiagonalTGroup | DenseTGroup
+    if kind == "diagonal":
+        storage = np.full((1, 6), 0.5 + 0.2j, dtype=np.complex128)
+        group = DiagonalTGroup(
+            particle_indices=ids,
+            operator_indices=operators,
+            T_M=np.ones((1, 2), dtype=np.complex128),
+            T_N=np.ones((1, 2), dtype=np.complex128),
+            T_diag=storage,
+        )
+    else:
+        storage = (np.eye(6, dtype=np.complex128) * (0.5 + 0.2j))[None, :, :]
+        storage[0, 0, 1] = 0.3 - 0.1j
+        group = DenseTGroup(particle_indices=ids, operator_indices=operators, T_blocks=storage)
+    original_storage = storage.copy()
+    storage.setflags(write=False)
+    operator = CompositeParticleTOperator(lmax=1, n_particles=2, groups=(group,))
+    values: np.ndarray = np.arange(12 * nrhs, dtype=np.complex128)
+    if nrhs > 1:
+        values = values.reshape(12, nrhs)
+    original = values.copy()
+    result = getattr(operator, action)(values)
+    expected = result.copy()
+    getattr(operator, action)(-values)
+    np.testing.assert_array_equal(result, expected)
+    assert result.flags.writeable
+    assert not np.shares_memory(result, storage)
+    assert not np.shares_memory(result, values)
+    result.fill(42)
+    np.testing.assert_array_equal(values, original)
+    np.testing.assert_array_equal(storage, original_storage)
+
+
+def test_prepared_dense_action_does_not_modify_input_or_block_storage():
+    storage = 2.0 * np.eye(6, dtype=np.complex128)[None, :, :]
+    group = DenseTGroup(particle_indices=np.array([0]), T_blocks=storage)
+    prepared = PreparedOperator(
+        lmax=1,
+        k=1.0,
+        positions=np.zeros((1, 3)),
+        particle_t=CompositeParticleTOperator(lmax=1, n_particles=1, groups=(group,)),
+        coupling=_ScalingCoupling(0.1),
+    )
+    values = np.arange(1, 7, dtype=np.complex128)
+    result = prepared.apply_A(values)
+    prepared.apply_A(-values)
+    np.testing.assert_allclose(result, 0.8 * values)
+    np.testing.assert_array_equal(storage, 2.0 * np.eye(6)[None, :, :])
+
+
+def test_dense_local_block_result_does_not_alias_input_or_storage():
+    block = np.eye(6, dtype=np.complex128)
+    storage = (2.0 * block)[None, :, :]
+    group = DenseTGroup(particle_indices=np.array([0]), T_blocks=storage)
+    result = group.apply_local_block(0, block)
+    assert not np.shares_memory(result, block)
+    assert not np.shares_memory(result, storage)
+    np.testing.assert_allclose(result, 2.0 * block)
+    result.fill(0)
+    np.testing.assert_array_equal(block, np.eye(6))
+    np.testing.assert_array_equal(storage, 2.0 * np.eye(6)[None, :, :])

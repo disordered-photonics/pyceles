@@ -25,6 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   coupling, including single-level and multilevel sampled-far traversals.
 
 ### Changed
+- Breaking: removed callback-backed `AxisymmetricTGroup` and its two factory
+  helpers. Spheroids and imported matrices now share `DenseTGroup`; custom
+  preparation uses `make_dense_group_factory` without per-action callbacks.
 - Dense source-block assembly now writes into destination-matrix views instead
   of allocating full weighted and packed batches. The finite CuPy fallback
   keeps intermediate operator actions on device while retaining host matrix

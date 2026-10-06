@@ -45,9 +45,11 @@ class ParticleTOperator(Protocol):
     """Prepared particle-local (single-particle) scattering operator `T`.
 
     Full-vector transforms returned by :meth:`apply`, :meth:`apply_adjoint`, and
-    :meth:`rhs` must be writable storage that does not alias the corresponding
-    input. :class:`~pyceles.core.operators.base.PreparedOperator` deliberately
-    reuses that owned result as the final ``A(x)``/``A^H(x)`` output to avoid an
+    :meth:`rhs` must be writable storage independent of the input and reusable
+    operator workspace, and remain valid after later actions. Views of a fresh
+    result allocation are fine.
+    :class:`~pyceles.core.operators.base.PreparedOperator` deliberately reuses
+    that owned result as the final ``A(x)``/``A^H(x)`` output to avoid an
     additional solution-sized allocation.
     """
 

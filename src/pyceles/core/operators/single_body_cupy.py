@@ -19,9 +19,9 @@ from pyceles._optional import asnumpy, coerce_array, import_cupy, is_cupy_array
 from pyceles.core.indexing import n_modes
 
 from .groups import (
-    AxisymmetricTGroup,
     DenseTGroup,
     DiagonalTGroup,
+    PreparedParticleTGroup,
     _normalized_operator_indices,
     _operator_local_indices,
 )
@@ -151,7 +151,6 @@ class CuPyDenseTGroup:
     T_blocks: Array
     operator_indices: Array = field(default_factory=lambda: np.zeros((0,), dtype=np.int64))
     dtype: np.dtype = DEFAULT_COMPLEX_DTYPE
-    body_metadata: object | None = None
     _T_blocks_gpu: object | None = field(default=None, init=False, repr=False)
     _local_indices_host: tuple[Array, ...] = field(default=(), init=False, repr=False)
     _local_indices_gpu: dict[int, object] = field(default_factory=dict, init=False, repr=False)
@@ -408,7 +407,7 @@ class CuPyCompositeParticleTOperator:
 
 
 def wrap_particle_t_groups_cupy(
-    groups: Sequence[DiagonalTGroup | DenseTGroup | AxisymmetricTGroup],
+    groups: Sequence[PreparedParticleTGroup],
     *,
     lmax: int,
     n_particles: int,
@@ -436,17 +435,6 @@ def wrap_particle_t_groups_cupy(
                     particle_indices=np.asarray(group.particle_indices, dtype=np.int64),
                     T_blocks=np.asarray(group.T_blocks, dtype=dtype),
                     operator_indices=np.asarray(group.operator_indices, dtype=np.int64),
-                    dtype=dtype,
-                )
-            )
-            continue
-        if isinstance(group, AxisymmetricTGroup) and group.T_blocks is not None:
-            gpu_groups.append(
-                CuPyDenseTGroup(
-                    particle_indices=np.asarray(group.particle_indices, dtype=np.int64),
-                    T_blocks=np.asarray(group.T_blocks, dtype=dtype),
-                    operator_indices=np.asarray(group.operator_indices, dtype=np.int64),
-                    body_metadata=group.body_metadata,
                     dtype=dtype,
                 )
             )

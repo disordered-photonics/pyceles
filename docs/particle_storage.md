@@ -23,8 +23,8 @@ single-body representation and each group stores one operator per unique
 archetype plus a local instance-to-operator map. Current representations are:
 
 - diagonal mode data for homogeneous, PEC, and layered spheres;
-- shared spherical-basis dense blocks for the current axisymmetric fallback;
-- shared dense blocks supplied by custom particle factories.
+- shared spherical-basis dense blocks for spheroids, imported T matrices, and
+  custom block providers.
 
 Consequently, persistent geometry storage is approximately `O(N + U metadata)`
 and persistent prepared single-body storage is `O(U operator_size)`, rather than
@@ -40,6 +40,28 @@ million genuinely distinct dense lab-frame T matrices remain intrinsically
 large; no storage container can compress them without additional structure.
 Future representations can add body-frame rotations, block sparsity, low-rank
 forms, or on-the-fly operators behind the same instance/archetype contract.
+
+## Preparation and application boundaries
+
+The current spheroid and imported-matrix paths both use `DenseTGroup`. The
+`axisymmetric` planning category selects spheroid preparation; it does not
+imply a different runtime storage format. Spheroid generation still exploits
+axisymmetry before producing lab-frame spherical-basis blocks.
+
+For standard files, use `load_tmatrix_h5` and `TMatrixData.as_particle` as shown
+below. A custom generator used through low-level `prepare_matvec` can instead
+provide one canonical block per unique archetype through
+`make_dense_group_factory`, assigned to the appropriate
+`ParticleTGroupFactories` slot (`dense` or `axisymmetric`). It runs once for
+that preparation group. Forward, adjoint, RHS, and preconditioner-block actions
+then use the stored data without calling the generator again. Provider storage
+must remain valid and unchanged while the prepared operator uses it; a provider
+that returns reusable scratch must make its own snapshot before returning.
+
+Particle-T action results are writable and independent of their inputs and
+reusable operator storage. Callers may retain or modify a result without
+changing later actions. Arbitrary per-action callback adapters are not part of
+the shipped particle-T implementations.
 
 ## Imported dense T matrices
 
