@@ -6,10 +6,11 @@ so each output has a unique owner and no atomics are required. A small
 compile-time RHS tile reuses translation work for block right-hand sides.
 
 The scalar-mode decomposition is deliberate. A general output-mode tile was
-useful while exploring the kernel, but repeated geometry work and register
-pressure made it consistently worse on the supported workloads. Keeping one
-scalar mode per block removes that tuning dimension without restricting the
-particle T matrix: polarization coupling remains fully general in W.
+useful while exploring the kernel, with workload-dependent tradeoffs. One
+scalar mode provides a deliberately simple schedule for the supported
+workloads; it is not a claim that larger tiles never win. RHS tiling reuses
+the same translation rather than partitioning output modes. Neither choice
+restricts the particle T matrix.
 """
 
 from __future__ import annotations
@@ -123,28 +124,36 @@ extern "C" __global__ void {name}(
 
     __shared__ {real_type} x_re_shared[{nmodes * rhs_tile}];
     __shared__ {real_type} x_im_shared[{nmodes * rhs_tile}];
-    const int first_destination = blockIdx.x * blockDim.x + threadIdx.x;
     const int m1 = mode_m[n1];
 
     for (int rhs_base = blockIdx.z * {rhs_tile}; rhs_base < nrhs;
          rhs_base += gridDim.z * {rhs_tile}) {{
-        for (int source_idx = 0; source_idx < ns; ++source_idx) {{
-            for (int entry = threadIdx.x; entry < {nmodes * rhs_tile};
-                 entry += blockDim.x) {{
-                const int n2 = entry / {rhs_tile};
-                const int rhs = rhs_base + entry % {rhs_tile};
-                const long long x_idx =
-                    (((long long)source_idx * {nmodes} + n2) * nrhs) + rhs;
-                const {complex_type} value =
-                    rhs < nrhs ? x[x_idx] : {complex_type}(0, 0);
-                x_re_shared[entry] = value.real();
-                x_im_shared[entry] = value.imag();
-            }}
-            __syncthreads();
+        // The destination tile is block-uniform: padding lanes still stage
+        // every source and participate in both barriers. Keep one owned
+        // output per lane across the complete ascending source traversal.
+        for (long long destination_base = (long long)blockIdx.x * blockDim.x;
+             destination_base < ns;
+             destination_base += (long long)blockDim.x * gridDim.x) {{
+            const long long s1 = destination_base + threadIdx.x;
+            {real_type} total_m_re[{rhs_tile}] = {{}};
+            {real_type} total_m_im[{rhs_tile}] = {{}};
+            {real_type} total_n_re[{rhs_tile}] = {{}};
+            {real_type} total_n_im[{rhs_tile}] = {{}};
+            for (int source_idx = 0; source_idx < ns; ++source_idx) {{
+                for (int entry = threadIdx.x; entry < {nmodes * rhs_tile};
+                     entry += blockDim.x) {{
+                    const int n2 = entry / {rhs_tile};
+                    const int rhs = rhs_base + entry % {rhs_tile};
+                    const long long x_idx =
+                        (((long long)source_idx * {nmodes} + n2) * nrhs) + rhs;
+                    const {complex_type} value =
+                        rhs < nrhs ? x[x_idx] : {complex_type}(0, 0);
+                    x_re_shared[entry] = value.real();
+                    x_im_shared[entry] = value.imag();
+                }}
+                __syncthreads();
 
-            for (int s1 = first_destination; s1 < ns;
-                 s1 += blockDim.x * gridDim.x) {{
-                if (s1 != source_idx) {{
+                if (s1 < ns && s1 != source_idx) {{
                     const {real_type} x21 = ({real_type})
                         (positions[3 * {geom_dst}] - positions[3 * {geom_src}]);
                     const {real_type} y21 = ({real_type})
@@ -258,19 +267,29 @@ extern "C" __global__ void {name}(
                     }}
                     #pragma unroll
                     for (int rr = 0; rr < {rhs_tile}; ++rr) {{
-                        const int rhs = rhs_base + rr;
-                        if (rhs < nrhs) {{
-                            const long long ym =
-                                ((long long)n1 * nrhs + rhs) * ns + s1;
-                            const long long yn =
-                                ym + (long long){scalar_modes} * nrhs * ns;
-                            wx[ym] += {complex_type}(re_m[rr], im_m[rr]);
-                            wx[yn] += {complex_type}(re_n[rr], im_n[rr]);
-                        }}
+                        // Preserve the per-pair subtotal and source order.
+                        // Do not fold each mode/p term into the source total.
+                        total_m_re[rr] += re_m[rr];
+                        total_m_im[rr] += im_m[rr];
+                        total_n_re[rr] += re_n[rr];
+                        total_n_im[rr] += im_n[rr];
+                    }}
+                }}
+                __syncthreads();
+            }}
+            if (s1 < ns) {{
+                #pragma unroll
+                for (int rr = 0; rr < {rhs_tile}; ++rr) {{
+                    const int rhs = rhs_base + rr;
+                    if (rhs < nrhs) {{
+                        const long long ym =
+                            (s1 * {nmodes} + n1) * nrhs + rhs;
+                        const long long yn = ym + (long long){scalar_modes} * nrhs;
+                        wx[ym] = {complex_type}(total_m_re[rr], total_m_im[rr]);
+                        wx[yn] = {complex_type}(total_n_re[rr], total_n_im[rr]);
                     }}
                 }}
             }}
-            __syncthreads();
         }}
     }}
 }}
@@ -408,7 +427,10 @@ class CuPyPairwiseCouplingOperator:
         arr, squeezed = self._array(x)
         nrhs = int(arr.shape[2])
         rhs_tile = 1 if nrhs == 1 else min(4, nrhs)
-        output = cupy.zeros((self.n_modes, nrhs, self.n_particles), dtype=self.dtype)
+        # Each destination is written once when at least one non-self source
+        # exists.  A one-particle system has no launched interaction, so keep
+        # the mathematically required zero output as well.
+        output = cupy.zeros((self.n_particles, self.n_modes, nrhs), dtype=self.dtype)
         (
             _forward_kernel,
             positions,
@@ -448,10 +470,9 @@ class CuPyPairwiseCouplingOperator:
                     output.reshape(-1),
                 ),
             )
-        result = cupy.ascontiguousarray(output.transpose(2, 0, 1))
         if squeezed:
-            return result.reshape(self.n_particles * self.n_modes)
-        return result.reshape(self.n_particles * self.n_modes, nrhs)
+            return output.reshape(self.n_particles * self.n_modes)
+        return output.reshape(self.n_particles * self.n_modes, nrhs)
 
     def apply(self, x: np.ndarray | object) -> np.ndarray | object:
         out = self._apply_gpu(x)

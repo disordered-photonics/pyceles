@@ -131,6 +131,34 @@ def test_cupy_pairwise_scalar_mode_blocks_match_numpy(
     np.testing.assert_allclose(actual_block, reference_block, rtol=tolerance, atol=tolerance)
 
 
+@pytest.mark.parametrize("compute_dtype", (np.complex64, np.complex128))
+def test_cupy_pairwise_single_particle_has_zero_coupling(compute_dtype) -> None:
+    particles = spheres_from_arrays(
+        positions=np.zeros((1, 3), dtype=float),
+        radii=np.asarray([20.0]),
+        refractive_indices=np.asarray([1.59 + 0.0j]),
+    )
+    prepared = prepare_matvec(
+        lmax=2,
+        k=2.0 * np.pi / 550.0,
+        particles=particles,
+        n_medium=1.0 + 0j,
+        radial_lut_dr=0.5,
+        cache_translation_blocks=False,
+        operator_dtype=compute_dtype,
+        coupling_backend="pairwise",
+        backend="cupy",
+    )
+    rng = np.random.default_rng(20261007)
+    x = np.asarray(
+        rng.standard_normal(n_modes(2)) + 1j * rng.standard_normal(n_modes(2)),
+        dtype=compute_dtype,
+    )
+    np.testing.assert_array_equal(asnumpy(prepared.apply_W(x)), np.zeros_like(x))
+    coupling = cast(AdjointCouplingOperator, prepared.coupling)
+    np.testing.assert_array_equal(asnumpy(coupling.apply_adjoint(x)), np.zeros_like(x))
+
+
 @pytest.mark.parametrize(
     ("compute_dtype", "tolerance"),
     ((np.complex64, 5.0e-6), (np.complex128, 1.0e-12)),
