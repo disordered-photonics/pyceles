@@ -97,6 +97,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reverse hierarchy through bounded source frontiers instead of retaining all
   hierarchy levels during LSQR; dense/debug leaf plans keep the resident
   reference traversal.
+- Reworked finite CuPy pairwise coupling around a source-parallel fused kernel
+  with exact forward/adjoint and block-RHS actions.
 - Exact adjoint paths reuse forward dense T/coupling storage and bound
   Rayleigh reverse-scan metadata, reducing persistent memory for dense and
   periodic adjoint workloads.

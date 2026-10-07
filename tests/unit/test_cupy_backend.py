@@ -91,10 +91,10 @@ def _random_uniform_sphere_particles(*, n_particles: int, seed: int = 4) -> Part
         (5, np.complex64),  # 70 modes in two 64-thread blocks
     ),
 )
-def test_cupy_pairwise_partial_mode_tiles_match_numpy(
+def test_cupy_pairwise_scalar_mode_blocks_match_numpy(
     lmax: int, compute_dtype: type[np.complexfloating[Any, Any]]
 ) -> None:
-    """Keep helper lanes alive through cooperative setup for partial tiles."""
+    """The scalar-mode production blocks agree with the NumPy reference."""
 
     particles = _small_cluster_particles()
     kwargs: dict[str, Any] = dict(

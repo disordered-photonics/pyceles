@@ -1,20 +1,22 @@
 """Fused CuPy pairwise coupling for direct GPU matvecs.
 
-We explicitly ship the CuPy direct backend as a fused RawKernel rather than as
-a composition of higher-level CuPy operations. That higher-level decomposition
-was explored separately during development, but for the direct `O(N^2)` pairwise
-matvec it produced too many small GPU operations, too many temporary arrays,
-too much Python-side orchestration, and too much kernel-launch overhead to stay
-competitive.
+The direct pairwise path assigns one CUDA lane to one destination particle and
+one block to one scalar output mode. Sources are visited in the same launch,
+so each output has a unique owner and no atomics are required. A small
+compile-time RHS tile reuses translation work for block right-hand sides.
 
-The shipped CuPy path therefore keeps the translation tables on device and
-accumulates the pairwise coupling inside the fused kernel.
+The scalar-mode decomposition is deliberate. A general output-mode tile was
+useful while exploring the kernel, but repeated geometry work and register
+pressure made it consistently worse on the supported workloads. Keeping one
+scalar mode per block removes that tuning dimension without restricting the
+particle T matrix: polarization coupling remains fully general in W.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from functools import cache
+from operator import index
 from typing import Any
 
 import numpy as np
@@ -33,422 +35,252 @@ COMPLEX128_DTYPE = np.dtype(np.complex128)
 
 
 @cache
-def _translation_matvec_raw_kernel(lmax: int, dtype_str: str):
+def _source_parallel_kernel(
+    lmax: int, dtype_str: str, adjoint: bool = False, rhs_tile_size: int = 1
+):
+    """Compile one fixed scalar-mode kernel for ``W`` or ``W^H``."""
+
     cupy, _ = import_cupy()
-    lmax = int(lmax)
     dtype = np.dtype(dtype_str)
-    if dtype not in (np.dtype(np.complex64), np.dtype(np.complex128)):
+    if dtype == np.dtype(np.complex64):
+        real_type = "float"
+        complex_type = "complex<float>"
+        math = {
+            "atan2": "atan2f",
+            "floor": "floorf",
+            "max": "fmaxf",
+            "sincos": "sincosf",
+            "sqrt": "sqrtf",
+        }
+    elif dtype == np.dtype(np.complex128):
+        real_type = "double"
+        complex_type = "complex<double>"
+        math = {
+            "atan2": "atan2",
+            "floor": "floor",
+            "max": "fmax",
+            "sincos": "sincos",
+            "sqrt": "sqrt",
+        }
+    else:
         raise TypeError(f"Unsupported CuPy raw-kernel dtype {dtype!r}.")
 
-    real_type = "float" if dtype == np.dtype(np.complex64) else "double"
-    complex_type = "complex<float>" if dtype == np.dtype(np.complex64) else "complex<double>"
-    math = {
-        "atan2": "atan2f" if real_type == "float" else "atan2",
-        "floor": "floorf" if real_type == "float" else "floor",
-        "max": "fmaxf" if real_type == "float" else "fmax",
-        "sincos": "sincosf" if real_type == "float" else "sincos",
-        "sqrt": "sqrtf" if real_type == "float" else "sqrt",
-    }
-    kernel_name = (
-        "translation_matrix_product_c64"
-        if real_type == "float"
-        else "translation_matrix_product_c128"
-    )
-
-    n_orders = 2 * lmax + 1
-    n_p_pdm = n_orders * (n_orders + 1) // 2
-    n_phase = 2 * n_orders - 1
-    source = f"""
-    #include <cupy/complex.cuh>
-    // This kernel evaluates one direct many-body coupling matvec y = W x.
-    //
-    // Conventions:
-    // - `s1` is the destination particle index (row block of W).
-    // - `s2` is the source particle index (column block of W).
-    // - `n1`/`n2` are CELES/SMUTHI SVWF mode indices within one particle block.
-    // - `re_ab` / `im_ab` store the translation prefactors in the same compact
-    //   loop order as the nested (n1, n2, p) traversal below.
-    //
-    // Launch geometry:
-    // - one CUDA block handles one destination particle `s1` and one tile of
-    //   output modes `n1`
-    // - threads in that block reuse the same geometry-dependent quantities for
-    //   each source particle through shared memory
-    //
-    // This structure avoids the earlier one-launch-per-source pattern, which
-    // left the GPU badly under-occupied for low-lmax many-particle cases.
-
-    __device__ {real_type} assoc_legendre_function(
-        const int l,
-        const int m,
-        const {real_type}* ct_powers,
-        const {real_type}* st_powers,
-        const {real_type}* plm_coeffs
-    ) {{
-        {real_type} plm = 0;
-        const {real_type} st_pow = st_powers[m];
-        int jj = 0;
-        for (int lambda = l - m; lambda >= 0; lambda -= 2) {{
-            const int idx = jj * ({n_orders} * {n_orders}) + m * {n_orders} + l;
-            plm += st_pow * ct_powers[lambda] * plm_coeffs[idx];
-            jj += 1;
-        }}
-        return plm;
-    }}
-
-    __device__ {real_type} hankel_lookup_linear(
-        const int p,
-        const {real_type} r,
-        const {real_type}* table,
-        const {real_type} inv_dr,
-        const int last_index
-    ) {{
-        if (r <= ({real_type})0) {{
-            return table[p];
-        }}
-        {real_type} t = r * inv_dr;
-        int i0 = (int){math["floor"]}(t);
-        {real_type} frac = t - ({real_type})i0;
-        if (i0 < 0) {{
-            i0 = 0;
-            frac = ({real_type})0;
-        }}
-        if (i0 >= last_index) {{
-            i0 = last_index - 1;
-            frac = ({real_type})1;
-        }}
-        const int base0 = i0 * {n_orders} + p;
-        const int base1 = (i0 + 1) * {n_orders} + p;
-        return (({real_type})1 - frac) * table[base0] + frac * table[base1];
-    }}
-
-    extern "C" __global__ void {kernel_name}(
-        const int ns,
-        const int nmodes,
-        const int nrhs,
-        const double* positions,
-        const {real_type}* re_h,
-        const {real_type}* im_h,
-        const {real_type} inv_dr,
-        const int last_index,
-        const {real_type}* plm_coeffs,
-        const {real_type}* re_ab,
-        const {real_type}* im_ab,
-        const int* mode_m,
-        const int* pair_offset,
-        const int* pair_pmin,
-        const int* pair_pcount,
-        const {complex_type}* x,
-        {complex_type}* wx
-    ) {{
-        const int n1 = blockIdx.x * blockDim.x + threadIdx.x;
-        // Keep out-of-range mode lanes in the block. Shared radial/Legendre/
-        // phase tables are filled cooperatively with threadIdx.x strides of
-        // blockDim.x, so helper lanes in a partial final mode tile must remain
-        // alive even though they do no mode-dependent work. Keeping every lane
-        // alive also makes the block-wide synchronization structure uniform.
-        const bool active_mode = n1 < nmodes;
-        __shared__ {real_type} re_h_shared[{n_orders}];
-        __shared__ {real_type} im_h_shared[{n_orders}];
-        __shared__ {real_type} p_pdm_shared[{n_p_pdm}];
-        __shared__ {real_type} cos_mphi_shared[{n_phase}];
-        __shared__ {real_type} sin_mphi_shared[{n_phase}];
-        __shared__ {real_type} ct_pow_shared[{n_orders}];
-        __shared__ {real_type} st_pow_shared[{n_orders}];
-        __shared__ {real_type} r_shared;
-        __shared__ {real_type} ct_shared;
-        __shared__ {real_type} st_shared;
-        __shared__ {real_type} phi_shared;
-
-        const int m1 = active_mode ? mode_m[n1] : 0;
-
-        for (int rhs = blockIdx.z; rhs < nrhs; rhs += gridDim.z) {{
-            for (int s1 = blockIdx.y; s1 < ns; s1 += gridDim.y) {{
-                {real_type} re_incr = ({real_type})0;
-                {real_type} im_incr = ({real_type})0;
-
-                for (int s2 = 0; s2 < ns; ++s2) {{
-                    if (s2 == s1) {{
-                        continue;
-                    }}
-
-                    if (threadIdx.x == 0) {{
-                        // Geometry and angular factors depend only on the particle pair
-                        // (s1, s2), not on the output mode. Compute them once per block
-                        // and let all mode threads reuse them. The heavier table
-                        // fills below are then distributed cooperatively.
-                        const {real_type} x21 = positions[3 * s1] - positions[3 * s2];
-                        const {real_type} y21 = positions[3 * s1 + 1] - positions[3 * s2 + 1];
-                        const {real_type} z21 = positions[3 * s1 + 2] - positions[3 * s2 + 2];
-                        r_shared = {math["sqrt"]}(x21 * x21 + y21 * y21 + z21 * z21);
-                        ct_shared = z21 / r_shared;
-                        st_shared = {math["sqrt"]}(
-                            {math["max"]}(({real_type})0, ({real_type})1 - ct_shared * ct_shared)
-                        );
-                        phi_shared = {math["atan2"]}(y21, x21);
-                        ct_pow_shared[0] = ({real_type})1;
-                        st_pow_shared[0] = ({real_type})1;
-                        for (int p = 1; p < {n_orders}; ++p) {{
-                            ct_pow_shared[p] = ct_pow_shared[p - 1] * ct_shared;
-                            st_pow_shared[p] = st_pow_shared[p - 1] * st_shared;
-                        }}
-                    }}
-                    __syncthreads();
-
-                    for (int p = threadIdx.x; p < {n_orders}; p += blockDim.x) {{
-                        re_h_shared[p] = hankel_lookup_linear(p, r_shared, re_h, inv_dr, last_index);
-                        im_h_shared[p] = hankel_lookup_linear(p, r_shared, im_h, inv_dr, last_index);
-                    }}
-                    for (int table_idx = threadIdx.x; table_idx < {n_p_pdm};
-                         table_idx += blockDim.x) {{
-                        int p = 0;
-                        while (table_idx >= (p + 1) * (p + 2) / 2) {{
-                            ++p;
-                        }}
-                        const int absdm = table_idx - p * (p + 1) / 2;
-                        p_pdm_shared[table_idx] = assoc_legendre_function(
-                            p, absdm, ct_pow_shared, st_pow_shared, plm_coeffs
-                        );
-                    }}
-                    for (int idx = threadIdx.x; idx < {n_phase}; idx += blockDim.x) {{
-                        const int dm = idx - 2 * {lmax};
-                        {math["sincos"]}(
-                            ({real_type})dm * phi_shared,
-                            &sin_mphi_shared[idx],
-                            &cos_mphi_shared[idx]
-                        );
-                    }}
-                    __syncthreads();
-
-                    if (active_mode) {{
-                    for (int n2 = 0; n2 < nmodes; ++n2) {{
-                        // We intentionally read x[s2, n2] directly from global memory.
-                        // Profiling on the 5k-particle c64 benchmark showed that
-                        // staging this small mode vector in shared memory did not
-                        // produce a material end-to-end speedup, while it made the
-                        // kernel more verbose and stateful.
-                        const int x_idx = ((s2 * nmodes + n2) * nrhs) + rhs;
-                        const {complex_type} x_tmp = x[x_idx];
-                        const {real_type} re_x_tmp = x_tmp.real();
-                        const {real_type} im_x_tmp = x_tmp.imag();
-                        const int delta_m = mode_m[n2] - m1;
-                        const int phase_idx = delta_m + 2 * {lmax};
-                        const int pair_idx = n1 * nmodes + n2;
-                        const int base = pair_offset[pair_idx];
-                        const int p_min = pair_pmin[pair_idx];
-                        const int p_count = pair_pcount[pair_idx];
-                        // The compact ab5 interval stores only parity-admissible
-                        // orders. Stride p by two without a per-term branch or an
-                        // additional order-index table.
-                        for (int ip = 0; ip < p_count; ++ip) {{
-                            const int p = p_min + 2 * ip;
-                            const int ab_idx = base + ip;
-                            const {real_type} plm = p_pdm_shared[p * (p + 1) / 2 + abs(delta_m)];
-                            const {real_type} re_abp = re_ab[ab_idx] * plm;
-                            const {real_type} im_abp = im_ab[ab_idx] * plm;
-                            const {real_type} re_abph =
-                                re_abp * re_h_shared[p] - im_abp * im_h_shared[p];
-                            const {real_type} im_abph =
-                                re_abp * im_h_shared[p] + im_abp * re_h_shared[p];
-                            const {real_type} re_phase =
-                                re_abph * cos_mphi_shared[phase_idx] - im_abph * sin_mphi_shared[phase_idx];
-                            const {real_type} im_phase =
-                                re_abph * sin_mphi_shared[phase_idx] + im_abph * cos_mphi_shared[phase_idx];
-                            re_incr += re_phase * re_x_tmp - im_phase * im_x_tmp;
-                            im_incr += re_phase * im_x_tmp + im_phase * re_x_tmp;
-                        }}
-                    }}
-                    }}
-                    __syncthreads();
-                }}
-
-                if (active_mode) {{
-                    const int y_idx = ((s1 * nmodes + n1) * nrhs) + rhs;
-                    wx[y_idx] = {complex_type}(re_incr, im_incr);
-                }}
-            }}
-        }}
-    }}
-    """
-    return cupy.RawKernel(source, kernel_name)
-
-
-@cache
-def _translation_matvec_adjoint_raw_kernel(lmax: int, dtype_str: str):
-    """Return the fused kernel for the exact pairwise ``Wᴴ`` action.
-
-    The forward kernel assigns one block to each destination particle.  The
-    adjoint assigns one block to each source particle and accumulates the
-    conjugate-transposed forward block over all destinations.  Keeping this as
-    a separate launch geometry avoids atomics and does not require a dense
-    ``O(N² n_mode²)`` device matrix.
-    """
-    cupy, _ = import_cupy()
     lmax_i = int(lmax)
-    dtype = np.dtype(dtype_str)
-    if dtype not in (np.dtype(np.complex64), np.dtype(np.complex128)):
-        raise TypeError(f"Unsupported CuPy raw-kernel dtype {dtype!r}.")
-    real_type = "float" if dtype == np.dtype(np.complex64) else "double"
-    complex_type = "complex<float>" if dtype == np.dtype(np.complex64) else "complex<double>"
-    math = {
-        "atan2": "atan2f" if real_type == "float" else "atan2",
-        "floor": "floorf" if real_type == "float" else "floor",
-        "max": "fmaxf" if real_type == "float" else "fmax",
-        "sincos": "sincosf" if real_type == "float" else "sincos",
-        "sqrt": "sqrtf" if real_type == "float" else "sqrt",
-    }
-    kernel_name = (
-        "translation_matrix_adjoint_product_c64"
-        if real_type == "float"
-        else "translation_matrix_adjoint_product_c128"
-    )
+    rhs_tile = index(rhs_tile_size)
+    if rhs_tile < 1:
+        raise ValueError("rhs_tile_size must be positive.")
+    nmodes = n_modes(lmax_i)
+    scalar_modes = nmodes // 2
     n_orders = 2 * lmax_i + 1
     n_p_pdm = n_orders * (n_orders + 1) // 2
     n_phase = 2 * n_orders - 1
+    action = "adjoint" if adjoint else "forward"
+    name = f"pairwise_source_parallel_{action}_{real_type}_l{lmax_i}_r{rhs_tile}"
+
+    # W^H reverses the displacement, transposes the mode pair, and conjugates
+    # the scalar translation coefficient.
+    delta = "m1 - mode_m[n2]" if adjoint else "mode_m[n2] - m1"
+    pair = f"n2 * {nmodes} + n1" if adjoint else f"n1 * {nmodes} + n2"
+    geom_dst, geom_src = ("source_idx", "s1") if adjoint else ("s1", "source_idx")
+    imag_sign = "-" if adjoint else ""
+
     source = f"""
-    #include <cupy/complex.cuh>
-    __device__ {real_type} assoc_legendre_function(
-        const int l, const int m, const {real_type}* ct_powers,
-        const {real_type}* st_powers, const {real_type}* plm_coeffs
-    ) {{
-        {real_type} plm = 0;
-        const {real_type} st_pow = st_powers[m];
-        int jj = 0;
-        for (int lambda = l - m; lambda >= 0; lambda -= 2) {{
-            const int idx = jj * ({n_orders} * {n_orders}) + m * {n_orders} + l;
-            plm += st_pow * ct_powers[lambda] * plm_coeffs[idx];
-            ++jj;
-        }}
-        return plm;
+#include <cupy/complex.cuh>
+
+__device__ {real_type} assoc_legendre_function(
+    const int l, const int m, const {real_type}* ct_powers,
+    const {real_type}* st_powers, const {real_type}* plm_coeffs
+) {{
+    {real_type} plm = 0;
+    const {real_type} st_pow = st_powers[m];
+    int jj = 0;
+    for (int lambda = l - m; lambda >= 0; lambda -= 2) {{
+        const int idx = jj * ({n_orders} * {n_orders}) + m * {n_orders} + l;
+        plm += st_pow * ct_powers[lambda] * plm_coeffs[idx];
+        ++jj;
     }}
-    __device__ {real_type} hankel_lookup_linear(
-        const int p, const {real_type} r, const {real_type}* table,
-        const {real_type} inv_dr, const int last_index
-    ) {{
-        if (r <= ({real_type})0) return table[p];
-        {real_type} t = r * inv_dr;
-        int i0 = (int){math["floor"]}(t);
-        {real_type} frac = t - ({real_type})i0;
-        if (i0 < 0) {{ i0 = 0; frac = ({real_type})0; }}
-        if (i0 >= last_index) {{ i0 = last_index - 1; frac = ({real_type})1; }}
-        const int base0 = i0 * {n_orders} + p;
-        const int base1 = (i0 + 1) * {n_orders} + p;
-        return (({real_type})1 - frac) * table[base0] + frac * table[base1];
-    }}
-    extern "C" __global__ void {kernel_name}(
-        const int ns, const int nmodes, const int nrhs,
-        const double* positions, const {real_type}* re_h,
-        const {real_type}* im_h, const {real_type} inv_dr,
-        const int last_index, const {real_type}* plm_coeffs,
-        const {real_type}* re_ab, const {real_type}* im_ab,
-        const int* mode_m, const int* pair_offset,
-        const int* pair_pmin, const int* pair_pcount,
-        const {complex_type}* x, {complex_type}* wx
-    ) {{
-        const int n2 = blockIdx.x * blockDim.x + threadIdx.x;
-        const bool active_mode = n2 < nmodes;
-        __shared__ {real_type} re_h_shared[{n_orders}];
-        __shared__ {real_type} im_h_shared[{n_orders}];
-        __shared__ {real_type} p_pdm_shared[{n_p_pdm}];
-        __shared__ {real_type} cos_mphi_shared[{n_phase}];
-        __shared__ {real_type} sin_mphi_shared[{n_phase}];
-        __shared__ {real_type} ct_pow_shared[{n_orders}];
-        __shared__ {real_type} st_pow_shared[{n_orders}];
-        __shared__ {real_type} r_shared;
-        __shared__ {real_type} ct_shared;
-        __shared__ {real_type} st_shared;
-        __shared__ {real_type} phi_shared;
-        const int m2 = active_mode ? mode_m[n2] : 0;
-        for (int rhs = blockIdx.z; rhs < nrhs; rhs += gridDim.z) {{
-            for (int s2 = blockIdx.y; s2 < ns; s2 += gridDim.y) {{
-                {real_type} re_incr = ({real_type})0;
-                {real_type} im_incr = ({real_type})0;
-                for (int s1 = 0; s1 < ns; ++s1) {{
-                    if (s1 == s2) continue;
-                    if (threadIdx.x == 0) {{
-                        const {real_type} x21 = positions[3 * s1] - positions[3 * s2];
-                        const {real_type} y21 = positions[3 * s1 + 1] - positions[3 * s2 + 1];
-                        const {real_type} z21 = positions[3 * s1 + 2] - positions[3 * s2 + 2];
-                        r_shared = {math["sqrt"]}(x21 * x21 + y21 * y21 + z21 * z21);
-                        ct_shared = z21 / r_shared;
-                        st_shared = {math["sqrt"]}({math["max"]}(({real_type})0,
-                            ({real_type})1 - ct_shared * ct_shared));
-                        phi_shared = {math["atan2"]}(y21, x21);
-                        ct_pow_shared[0] = ({real_type})1;
-                        st_pow_shared[0] = ({real_type})1;
-                        for (int p = 1; p < {n_orders}; ++p) {{
-                            ct_pow_shared[p] = ct_pow_shared[p - 1] * ct_shared;
-                            st_pow_shared[p] = st_pow_shared[p - 1] * st_shared;
+    return plm;
+}}
+
+extern "C" __global__ void {name}(
+    const int ns, const int nrhs,
+    const double* __restrict__ positions,
+    const {real_type}* __restrict__ re_h,
+    const {real_type}* __restrict__ im_h,
+    const {real_type} inv_dr, const int last_index,
+    const {real_type}* __restrict__ plm_coeffs,
+    const {real_type}* __restrict__ re_ab,
+    const {real_type}* __restrict__ im_ab,
+    const int* __restrict__ mode_m,
+    const int* __restrict__ pair_offset,
+    const int* __restrict__ pair_pmin,
+    const int* __restrict__ pair_pcount,
+    const {complex_type}* __restrict__ x,
+    {complex_type}* __restrict__ wx
+) {{
+    const int n1 = blockIdx.y;
+    if (n1 >= {scalar_modes}) return;
+
+    __shared__ {real_type} x_re_shared[{nmodes * rhs_tile}];
+    __shared__ {real_type} x_im_shared[{nmodes * rhs_tile}];
+    const int first_destination = blockIdx.x * blockDim.x + threadIdx.x;
+    const int m1 = mode_m[n1];
+
+    for (int rhs_base = blockIdx.z * {rhs_tile}; rhs_base < nrhs;
+         rhs_base += gridDim.z * {rhs_tile}) {{
+        for (int source_idx = 0; source_idx < ns; ++source_idx) {{
+            for (int entry = threadIdx.x; entry < {nmodes * rhs_tile};
+                 entry += blockDim.x) {{
+                const int n2 = entry / {rhs_tile};
+                const int rhs = rhs_base + entry % {rhs_tile};
+                const long long x_idx =
+                    (((long long)source_idx * {nmodes} + n2) * nrhs) + rhs;
+                const {complex_type} value =
+                    rhs < nrhs ? x[x_idx] : {complex_type}(0, 0);
+                x_re_shared[entry] = value.real();
+                x_im_shared[entry] = value.imag();
+            }}
+            __syncthreads();
+
+            for (int s1 = first_destination; s1 < ns;
+                 s1 += blockDim.x * gridDim.x) {{
+                if (s1 != source_idx) {{
+                    const {real_type} x21 = ({real_type})
+                        (positions[3 * {geom_dst}] - positions[3 * {geom_src}]);
+                    const {real_type} y21 = ({real_type})
+                        (positions[3 * {geom_dst} + 1] - positions[3 * {geom_src} + 1]);
+                    const {real_type} z21 = ({real_type})
+                        (positions[3 * {geom_dst} + 2] - positions[3 * {geom_src} + 2]);
+                    const {real_type} r = {math["sqrt"]}(
+                        x21 * x21 + y21 * y21 + z21 * z21);
+                    const {real_type} ct = z21 / r;
+                    const {real_type} st = {math["sqrt"]}({math["max"]}(
+                        ({real_type})0, ({real_type})1 - ct * ct));
+                    const {real_type} phi = {math["atan2"]}(y21, x21);
+
+                    {real_type} ct_powers[{n_orders}];
+                    {real_type} st_powers[{n_orders}];
+                    {real_type} re_h_local[{n_orders}];
+                    {real_type} im_h_local[{n_orders}];
+                    {real_type} p_pdm[{n_p_pdm}];
+                    {real_type} cos_mphi[{n_phase}];
+                    {real_type} sin_mphi[{n_phase}];
+                    ct_powers[0] = ({real_type})1;
+                    st_powers[0] = ({real_type})1;
+                    for (int p = 1; p < {n_orders}; ++p) {{
+                        ct_powers[p] = ct_powers[p - 1] * ct;
+                        st_powers[p] = st_powers[p - 1] * st;
+                    }}
+                    int i0 = 0;
+                    {real_type} frac = ({real_type})0;
+                    if (r > ({real_type})0) {{
+                        const {real_type} t = r * inv_dr;
+                        i0 = (int){math["floor"]}(t);
+                        frac = t - ({real_type})i0;
+                        if (i0 < 0) {{ i0 = 0; frac = ({real_type})0; }}
+                        if (i0 >= last_index) {{
+                            i0 = last_index - 1; frac = ({real_type})1;
                         }}
                     }}
-                    __syncthreads();
-                    for (int p = threadIdx.x; p < {n_orders}; p += blockDim.x) {{
-                        re_h_shared[p] = hankel_lookup_linear(p, r_shared, re_h, inv_dr, last_index);
-                        im_h_shared[p] = hankel_lookup_linear(p, r_shared, im_h, inv_dr, last_index);
+                    const {real_type} one_minus_frac = ({real_type})1 - frac;
+                    for (int p = 0; p < {n_orders}; ++p) {{
+                        const long long lo = (long long)i0 * {n_orders} + p;
+                        const long long hi = lo + {n_orders};
+                        re_h_local[p] = r <= ({real_type})0 ? re_h[p] :
+                            one_minus_frac * re_h[lo] + frac * re_h[hi];
+                        im_h_local[p] = r <= ({real_type})0 ? im_h[p] :
+                            one_minus_frac * im_h[lo] + frac * im_h[hi];
+                        for (int abs_m = 0; abs_m <= p; ++abs_m) {{
+                            p_pdm[p * (p + 1) / 2 + abs_m] =
+                                assoc_legendre_function(
+                                    p, abs_m, ct_powers, st_powers, plm_coeffs);
+                        }}
                     }}
-                    for (int table_idx = threadIdx.x; table_idx < {n_p_pdm}; table_idx += blockDim.x) {{
-                        int p = 0;
-                        while (table_idx >= (p + 1) * (p + 2) / 2) ++p;
-                        const int absdm = table_idx - p * (p + 1) / 2;
-                        p_pdm_shared[table_idx] = assoc_legendre_function(
-                            p, absdm, ct_pow_shared, st_pow_shared, plm_coeffs);
-                    }}
-                    for (int idx = threadIdx.x; idx < {n_phase}; idx += blockDim.x) {{
+                    for (int idx = 0; idx < {n_phase}; ++idx) {{
                         const int dm = idx - 2 * {lmax_i};
-                        {math["sincos"]}(({real_type})dm * phi_shared,
-                            &sin_mphi_shared[idx], &cos_mphi_shared[idx]);
+                        {math["sincos"]}(({real_type})dm * phi,
+                            &sin_mphi[idx], &cos_mphi[idx]);
                     }}
-                    __syncthreads();
-                    if (active_mode) {{
-                        for (int n1 = 0; n1 < nmodes; ++n1) {{
-                            const int x_idx = ((s1 * nmodes + n1) * nrhs) + rhs;
-                            const {complex_type} x_tmp = x[x_idx];
-                            const {real_type} re_x_tmp = x_tmp.real();
-                            const {real_type} im_x_tmp = x_tmp.imag();
-                            const int delta_m = m2 - mode_m[n1];
-                            const int phase_idx = delta_m + 2 * {lmax_i};
-                            const int pair_idx = n1 * nmodes + n2;
-                            const int base = pair_offset[pair_idx];
-                            const int p_min = pair_pmin[pair_idx];
-                            const int p_count = pair_pcount[pair_idx];
-                            for (int ip = 0; ip < p_count; ++ip) {{
-                                const int p = p_min + 2 * ip;
-                                const int ab_idx = base + ip;
-                                const int absdm = delta_m < 0 ? -delta_m : delta_m;
-                                const {real_type} plm = p_pdm_shared[p * (p + 1) / 2 + absdm];
-                                const {real_type} re_abp = re_ab[ab_idx] * plm;
-                                const {real_type} im_abp = im_ab[ab_idx] * plm;
-                                const {real_type} re_abph = re_abp * re_h_shared[p] - im_abp * im_h_shared[p];
-                                const {real_type} im_abph = re_abp * im_h_shared[p] + im_abp * re_h_shared[p];
-                                const {real_type} re_phase = re_abph * cos_mphi_shared[phase_idx] - im_abph * sin_mphi_shared[phase_idx];
-                                const {real_type} im_phase = re_abph * sin_mphi_shared[phase_idx] + im_abph * cos_mphi_shared[phase_idx];
-                                re_incr += re_phase * re_x_tmp + im_phase * im_x_tmp;
-                                im_incr += re_phase * im_x_tmp - im_phase * re_x_tmp;
-                            }}
+
+                    {real_type} re_m[{rhs_tile}] = {{}};
+                    {real_type} im_m[{rhs_tile}] = {{}};
+                    {real_type} re_n[{rhs_tile}] = {{}};
+                    {real_type} im_n[{rhs_tile}] = {{}};
+                    for (int n2 = 0; n2 < {scalar_modes}; ++n2) {{
+                        const int delta_m = {delta};
+                        const int abs_dm = delta_m < 0 ? -delta_m : delta_m;
+                        const int phase_idx = delta_m + 2 * {lmax_i};
+                        const int pair_a = {pair};
+                        const int pair_b = pair_a + {scalar_modes};
+                        {real_type} a_re = 0, a_im = 0;
+                        {real_type} b_re = 0, b_im = 0;
+                        const int base_a = pair_offset[pair_a];
+                        const int start_a = pair_pmin[pair_a];
+                        for (int ip = 0; ip < pair_pcount[pair_a]; ++ip) {{
+                            const int p = start_a + 2 * ip;
+                            const {real_type} v = re_ab[base_a + ip] *
+                                p_pdm[p * (p + 1) / 2 + abs_dm];
+                            a_re += v * re_h_local[p];
+                            a_im += v * im_h_local[p];
+                        }}
+                        const int base_b = pair_offset[pair_b];
+                        const int start_b = pair_pmin[pair_b];
+                        for (int ip = 0; ip < pair_pcount[pair_b]; ++ip) {{
+                            const int p = start_b + 2 * ip;
+                            const {real_type} v = im_ab[base_b + ip] *
+                                p_pdm[p * (p + 1) / 2 + abs_dm];
+                            b_re += v * re_h_local[p];
+                            b_im += v * im_h_local[p];
+                        }}
+                        const {real_type} c = cos_mphi[phase_idx];
+                        const {real_type} s = sin_mphi[phase_idx];
+                        const {real_type} ar = a_re * c - a_im * s;
+                        const {real_type} ai = {imag_sign}(a_re * s + a_im * c);
+                        const {real_type} br = -b_im * c - b_re * s;
+                        const {real_type} bi = {imag_sign}(-b_im * s + b_re * c);
+                        #pragma unroll
+                        for (int rr = 0; rr < {rhs_tile}; ++rr) {{
+                            const int xm = n2 * {rhs_tile} + rr;
+                            const int xn = (n2 + {scalar_modes}) * {rhs_tile} + rr;
+                            const {real_type} xm_re = x_re_shared[xm];
+                            const {real_type} xm_im = x_im_shared[xm];
+                            const {real_type} xn_re = x_re_shared[xn];
+                            const {real_type} xn_im = x_im_shared[xn];
+                            re_m[rr] += ar * xm_re - ai * xm_im;
+                            im_m[rr] += ar * xm_im + ai * xm_re;
+                            re_m[rr] += br * xn_re - bi * xn_im;
+                            im_m[rr] += br * xn_im + bi * xn_re;
+                            re_n[rr] += br * xm_re - bi * xm_im;
+                            im_n[rr] += br * xm_im + bi * xm_re;
+                            re_n[rr] += ar * xn_re - ai * xn_im;
+                            im_n[rr] += ar * xn_im + ai * xn_re;
                         }}
                     }}
-                    __syncthreads();
-                }}
-                if (active_mode) {{
-                    const int y_idx = ((s2 * nmodes + n2) * nrhs) + rhs;
-                    wx[y_idx] = {complex_type}(re_incr, im_incr);
+                    #pragma unroll
+                    for (int rr = 0; rr < {rhs_tile}; ++rr) {{
+                        const int rhs = rhs_base + rr;
+                        if (rhs < nrhs) {{
+                            const long long ym =
+                                ((long long)n1 * nrhs + rhs) * ns + s1;
+                            const long long yn =
+                                ym + (long long){scalar_modes} * nrhs * ns;
+                            wx[ym] += {complex_type}(re_m[rr], im_m[rr]);
+                            wx[yn] += {complex_type}(re_n[rr], im_n[rr]);
+                        }}
+                    }}
                 }}
             }}
+            __syncthreads();
         }}
     }}
-    """
-    return cupy.RawKernel(source, kernel_name)
+}}
+"""
+    return cupy.RawKernel(source, name)
 
 
 @dataclass
 class CuPyPairwiseCouplingOperator:
-    """Direct GPU pairwise coupling using dtype-specific fused RawKernels.
-
-    The free-space coupling `W` is geometry-only and does not depend on the
-    particle single-body representation.  Forward and adjoint actions use the
-    same dtype-specific fused kernels, so diagonal and explicit dense particle
-    ``T`` groups (including imported third-party matrices) share one path.
-    """
+    """Direct GPU pairwise coupling with exact forward and adjoint actions."""
 
     lmax: int
     k: float
@@ -487,13 +319,10 @@ class CuPyPairwiseCouplingOperator:
     def real_dtype(self) -> np.dtype:
         return np.dtype(np.float32 if self.dtype == np.dtype(np.complex64) else np.float64)
 
-    def _raw_kernel_resources(self):
+    def _raw_kernel_resources(self, *, rhs_tile_size: int = 1):
         cupy, _ = import_cupy()
         real_dtype = self.real_dtype
         if self._positions_gpu is None:
-            # Subtract absolute coordinates in float64 inside the kernel,
-            # then narrow the displacement to the compute precision. Casting
-            # positions first can merge distinct particles far from the origin.
             self._positions_gpu = cupy.asarray(
                 np.ascontiguousarray(self.positions, dtype=np.float64).reshape(-1)
             )
@@ -507,12 +336,10 @@ class CuPyPairwiseCouplingOperator:
         if self._lut_re_gpu is None or self._lut_im_gpu is None:
             lut = np.asarray(self.radial_lut.h, dtype=self.dtype).T.copy()
             self._lut_re_gpu = cupy.asarray(
-                np.ascontiguousarray(lut.real.reshape(-1)),
-                dtype=real_dtype,
+                np.ascontiguousarray(lut.real.reshape(-1)), dtype=real_dtype
             )
             self._lut_im_gpu = cupy.asarray(
-                np.ascontiguousarray(lut.imag.reshape(-1)),
-                dtype=real_dtype,
+                np.ascontiguousarray(lut.imag.reshape(-1)), dtype=real_dtype
             )
         if self._mode_m_gpu is None:
             _, _, mode_m = mode_metadata_tables(self.lmax)
@@ -527,7 +354,7 @@ class CuPyPairwiseCouplingOperator:
             self._pair_pmin_gpu = cupy.asarray(pair_pmin.reshape(-1))
             self._pair_pcount_gpu = cupy.asarray(pair_pcount.reshape(-1))
         return (
-            _translation_matvec_raw_kernel(self.lmax, self.dtype.str),
+            _source_parallel_kernel(self.lmax, self.dtype.str, False, rhs_tile_size),
             self._positions_gpu,
             self._lut_re_gpu,
             self._lut_im_gpu,
@@ -540,193 +367,99 @@ class CuPyPairwiseCouplingOperator:
             self._pair_pcount_gpu,
         )
 
-    def _launch_config(self, *, nrhs: int = 1) -> tuple[int, int, int, int]:
+    def _array(self, x: np.ndarray | object):
+        cupy, _ = import_cupy()
+        raw = coerce_array(x, dtype=self.dtype, prefer_cupy=True)
+        expected = self.n_particles * self.n_modes
+        if int(raw.ndim) == 1:
+            if int(raw.size) != expected:
+                raise ValueError(f"Input length must be {expected}; got {int(raw.size)}.")
+            return cupy.ascontiguousarray(raw.reshape(self.n_particles, self.n_modes, 1)), True
+        if int(raw.ndim) == 2:
+            if int(raw.shape[0]) != expected:
+                raise ValueError(
+                    f"Input first dimension must be {expected}; got {int(raw.shape[0])}."
+                )
+            return cupy.ascontiguousarray(
+                raw.reshape(self.n_particles, self.n_modes, int(raw.shape[1]))
+            ), False
+        raise ValueError(f"Input must be 1D or 2D. Got shape {tuple(raw.shape)}.")
+
+    def _launch_config(self, nrhs: int) -> tuple[int, int, int, int]:
         cupy, _ = import_cupy()
         props = cupy.cuda.runtime.getDeviceProperties(cupy.cuda.runtime.getDevice())
         max_threads = int(props["maxThreadsPerBlock"])
-        warp_size = int(props["warpSize"])
-        nmodes_total = self.n_modes
-        # Keep one block responsible for one destination particle and one tile of
-        # output modes. This materially improves occupancy over the earlier
-        # one-launch-per-source structure while retaining shared geometry reuse.
-        #
-        # The heuristic is intentionally simple and hardware-aware:
-        # - complex128 keeps one warp per block to limit register pressure,
-        # - complex64 uses up to two warps when available,
-        # - the tile is capped by both the device limit and the actual mode count.
-        #
-        # We also tested allowing "helper" threads above the active mode count
-        # so extra lanes could participate in the cooperative pair setup.
-        # On the 5k-particle c64 benchmark that was slower overall, so we keep
-        # the tighter mode-count-capped launch.
-        #
-        # This remains valid for modestly larger lmax because `blocks_x` grows as
-        # needed. For very large N we cap the grid height at the device maximum
-        # and let the kernel walk destination particles with a grid-stride loop.
-        #
-        # Forcing `48` and `64` threads per block in the case of `lmax=4` case
-        # (`nmodes=48`) by forcing on the 5k-particle c64 benchmark did not bring
-        # any material advantage over the default policy, so we keep the leaner
-        # mode-count-capped heuristic.
-        target_threads = warp_size if self.dtype == np.dtype(np.complex128) else 2 * warp_size
-        threads_per_block = max(warp_size, min(max_threads, target_threads, nmodes_total))
-        blocks_x = (nmodes_total + threads_per_block - 1) // threads_per_block
-        max_grid_y = int(props["maxGridSize"][1])
-        max_grid_z = int(props["maxGridSize"][2])
-        grid_y = min(self.n_particles, max_grid_y)
-        grid_z = min(max(1, int(nrhs)), max_grid_z)
-        return int(blocks_x), int(threads_per_block), int(grid_y), int(grid_z)
-
-    def _apply_gpu(self, x: np.ndarray | object):
-        cupy, _ = import_cupy()
-        (
-            kernel,
-            positions_gpu,
-            lut_re_gpu,
-            lut_im_gpu,
-            plm_coeff_gpu,
-            compact_re_ab_gpu,
-            compact_im_ab_gpu,
-            mode_m_gpu,
-            pair_offset_gpu,
-            pair_pmin_gpu,
-            pair_pcount_gpu,
-        ) = self._raw_kernel_resources()
-
-        arr_raw = coerce_array(x, dtype=self.dtype, prefer_cupy=True)
-        squeezed = False
-        if int(arr_raw.ndim) == 1:
-            if int(arr_raw.size) != self.n_particles * self.n_modes:
-                raise ValueError(
-                    "Input length must match n_particles * n_modes. "
-                    f"Got {int(arr_raw.size)} for {self.n_particles * self.n_modes}."
-                )
-            arr = cupy.asarray(arr_raw, dtype=self.dtype).reshape(self.n_particles, self.n_modes, 1)
-            squeezed = True
-        elif int(arr_raw.ndim) == 2:
-            if int(arr_raw.shape[0]) != self.n_particles * self.n_modes:
-                raise ValueError(
-                    "Input first dimension must match n_particles * n_modes. "
-                    f"Got {int(arr_raw.shape[0])} for {self.n_particles * self.n_modes}."
-                )
-            arr = cupy.asarray(arr_raw, dtype=self.dtype).reshape(
-                self.n_particles, self.n_modes, int(arr_raw.shape[1])
-            )
-        else:
-            raise ValueError(f"Input must be 1D or 2D. Got shape {tuple(arr_raw.shape)}.")
-
-        arr = cupy.ascontiguousarray(arr)
-        nrhs = int(arr.shape[2])
-        y = cupy.empty((self.n_particles, self.n_modes, nrhs), dtype=self.dtype)
-
-        blocks_x, threads_per_block, grid_y, grid_z = self._launch_config(nrhs=nrhs)
-        inv_dr = self.real_dtype.type(self.radial_lut._inv_dr)
-        kernel(
-            (blocks_x, grid_y, grid_z),
-            (threads_per_block,),
-            (
-                np.int32(self.n_particles),
-                np.int32(self.n_modes),
-                np.int32(nrhs),
-                positions_gpu,
-                lut_re_gpu,
-                lut_im_gpu,
-                inv_dr,
-                np.int32(self.radial_lut._last_index),
-                plm_coeff_gpu,
-                compact_re_ab_gpu,
-                compact_im_ab_gpu,
-                mode_m_gpu,
-                pair_offset_gpu,
-                pair_pmin_gpu,
-                pair_pcount_gpu,
-                arr.reshape(-1),
-                y.reshape(-1),
-            ),
+        target = 64 if self.dtype == np.dtype(np.complex64) else 32
+        threads = min(max_threads, target)
+        blocks_x = min(
+            int(props["maxGridSize"][0]),
+            (self.n_particles + threads - 1) // threads,
         )
-        if squeezed:
-            return y.reshape(self.n_particles * self.n_modes)
-        return y.reshape(self.n_particles * self.n_modes, nrhs)
+        grid_y = self.n_modes // 2
+        rhs_tile = 1 if nrhs == 1 else min(4, nrhs)
+        grid_z = min(
+            int(props["maxGridSize"][2]),
+            (nrhs + rhs_tile - 1) // rhs_tile,
+        )
+        return int(blocks_x), int(threads), int(grid_y), int(grid_z)
 
-    def _apply_adjoint_gpu(self, x: np.ndarray | object):
+    def _apply_gpu(self, x: np.ndarray | object, *, adjoint: bool = False):
         cupy, _ = import_cupy()
-        resources = self._raw_kernel_resources()
+        arr, squeezed = self._array(x)
+        nrhs = int(arr.shape[2])
+        rhs_tile = 1 if nrhs == 1 else min(4, nrhs)
+        output = cupy.zeros((self.n_modes, nrhs, self.n_particles), dtype=self.dtype)
         (
             _forward_kernel,
-            positions_gpu,
-            lut_re_gpu,
-            lut_im_gpu,
-            plm_coeff_gpu,
-            compact_re_ab_gpu,
-            compact_im_ab_gpu,
-            mode_m_gpu,
-            pair_offset_gpu,
-            pair_pmin_gpu,
-            pair_pcount_gpu,
-        ) = resources
-        kernel = _translation_matvec_adjoint_raw_kernel(self.lmax, self.dtype.str)
-
-        arr_raw = coerce_array(x, dtype=self.dtype, prefer_cupy=True)
-        squeezed = False
-        expected = self.n_particles * self.n_modes
-        if int(arr_raw.ndim) == 1:
-            if int(arr_raw.size) != expected:
-                raise ValueError(
-                    "Input length must match n_particles * n_modes. "
-                    f"Got {int(arr_raw.size)} for {expected}."
-                )
-            arr = cupy.asarray(arr_raw, dtype=self.dtype).reshape(self.n_particles, self.n_modes, 1)
-            squeezed = True
-        elif int(arr_raw.ndim) == 2:
-            if int(arr_raw.shape[0]) != expected:
-                raise ValueError(
-                    "Input first dimension must match n_particles * n_modes. "
-                    f"Got {int(arr_raw.shape[0])} for {expected}."
-                )
-            arr = cupy.asarray(arr_raw, dtype=self.dtype).reshape(
-                self.n_particles, self.n_modes, int(arr_raw.shape[1])
+            positions,
+            lut_re,
+            lut_im,
+            plm_coeff,
+            re_ab,
+            im_ab,
+            mode_m,
+            pair_offset,
+            pair_pmin,
+            pair_pcount,
+        ) = self._raw_kernel_resources(rhs_tile_size=rhs_tile)
+        if self.n_particles and nrhs:
+            kernel = _source_parallel_kernel(self.lmax, self.dtype.str, adjoint, rhs_tile)
+            blocks_x, threads, grid_y, grid_z = self._launch_config(nrhs)
+            inv_dr = self.real_dtype.type(self.radial_lut._inv_dr)
+            kernel(
+                (blocks_x, grid_y, grid_z),
+                (threads,),
+                (
+                    np.int32(self.n_particles),
+                    np.int32(nrhs),
+                    positions,
+                    lut_re,
+                    lut_im,
+                    inv_dr,
+                    np.int32(self.radial_lut._last_index),
+                    plm_coeff,
+                    re_ab,
+                    im_ab,
+                    mode_m,
+                    pair_offset,
+                    pair_pmin,
+                    pair_pcount,
+                    arr.reshape(-1),
+                    output.reshape(-1),
+                ),
             )
-        else:
-            raise ValueError(f"Input must be 1D or 2D. Got shape {tuple(arr_raw.shape)}.")
-        arr = cupy.ascontiguousarray(arr)
-        nrhs = int(arr.shape[2])
-        y = cupy.empty((self.n_particles, self.n_modes, nrhs), dtype=self.dtype)
-        blocks_x, threads_per_block, grid_y, grid_z = self._launch_config(nrhs=nrhs)
-        inv_dr = self.real_dtype.type(self.radial_lut._inv_dr)
-        kernel(
-            (blocks_x, grid_y, grid_z),
-            (threads_per_block,),
-            (
-                np.int32(self.n_particles),
-                np.int32(self.n_modes),
-                np.int32(nrhs),
-                positions_gpu,
-                lut_re_gpu,
-                lut_im_gpu,
-                inv_dr,
-                np.int32(self.radial_lut._last_index),
-                plm_coeff_gpu,
-                compact_re_ab_gpu,
-                compact_im_ab_gpu,
-                mode_m_gpu,
-                pair_offset_gpu,
-                pair_pmin_gpu,
-                pair_pcount_gpu,
-                arr.reshape(-1),
-                y.reshape(-1),
-            ),
-        )
+        result = cupy.ascontiguousarray(output.transpose(2, 0, 1))
         if squeezed:
-            return y.reshape(expected)
-        return y.reshape(expected, nrhs)
+            return result.reshape(self.n_particles * self.n_modes)
+        return result.reshape(self.n_particles * self.n_modes, nrhs)
 
     def apply(self, x: np.ndarray | object) -> np.ndarray | object:
         out = self._apply_gpu(x)
         return out if is_cupy_array(x) else asnumpy(out)
 
     def apply_adjoint(self, x: np.ndarray | object) -> np.ndarray | object:
-        out = self._apply_adjoint_gpu(x)
+        out = self._apply_gpu(x, adjoint=True)
         return out if is_cupy_array(x) else asnumpy(out)
 
 
-__all__ = ["CuPyPairwiseCouplingOperator"]
+__all__ = ["CuPyPairwiseCouplingOperator", "_source_parallel_kernel"]

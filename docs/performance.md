@@ -126,8 +126,8 @@ NVIDIA RTX 2000 Ada Laptop GPU, Python 3.12, NumPy/SciPy 2.5/1.18, and CuPy
 | --- | ---: | ---: | ---: |
 | NumPy, `complex128/complex128` | 383.3 s | 20.57 s | 165.96 s |
 | NumPy, `complex64/complex128` | 321.3 s | 19.35 s | 132.67 s |
-| CuPy, `complex128/complex128` | 4.31 s | 1.78 s | 0.86 s |
-| CuPy, `complex64/complex128` | 0.38 s | 0.71 s | 0.62 s |
+| CuPy, `complex128/complex128` | 1.15 s | 1.79 s | 0.86 s |
+| CuPy, `complex64/complex128` | 0.23 s | 0.70 s | 0.62 s |
 
 The reference field slice uses `y=0`, `x=[-4000,4000]`, `z=[-3000,5000]`,
 and `dx=40`. The benchmark is most useful when refreshed with the same
@@ -204,9 +204,13 @@ together when making a new comparison.
 ## Finite implementation choices
 
 The finite path emphasizes scalar-Legendre translation evaluation, reusable
-translation tables and radial LUTs, optional exact W-block caching, explicit
-compute/accumulation precision, the rotated-frame tilted-beam initial-field
-fast path, and mode-index contraction for CuPy scattered fields.
+translation tables and radial LUTs, explicit compute/accumulation precision,
+the source-parallel CuPy pairwise kernel, the rotated-frame tilted-beam
+initial-field fast path, and mode-index contraction for CuPy scattered fields.
+The direct CuPy kernel has exact forward and Hermitian-adjoint actions,
+supports block right-hand sides, and uses one scalar output mode per CUDA
+block. That fixed mode decomposition is intentional: exploratory multi-mode
+tiles repeated pair geometry and were slower on the measured workloads.
 
 Several alternatives remain deliberately out of the default API because they
 do not improve the general workload enough to justify their memory or
