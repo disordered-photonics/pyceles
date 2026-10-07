@@ -925,35 +925,36 @@ def test_rayleigh_near_cache_memory_plan_keeps_small_cache_on_device() -> None:
 
 
 @pytest.mark.fake_gpu
-def test_cupy_near_apply_batch_is_bounded_by_structural_row_size() -> None:
-    positions = np.zeros((700, 3), dtype=float)
+def test_cupy_near_owner_metadata_is_stable_and_cached() -> None:
+    # Include an inactive owner and asymmetric degrees in the two directions.
+    positions = np.zeros((5, 3), dtype=float)
     operator = CuPyPeriodicCouplingOperator(
-        lmax=3,
+        lmax=1,
         k=2.0 * np.pi / 550.0,
         positions=positions,
-        ab5=translation_ab5_table(3, dtype=np.complex64),
+        ab5=translation_ab5_table(1, dtype=np.complex64),
         periodic=PeriodicSpec(
             lattice=pcl.RectangularLattice2D(6000.0, 6000.0),
-            options=PeriodicOptions(
-                method="rayleigh",
-                eta=0.0015,
-                real_shells=1,
-                reciprocal_shells=1,
-                rayleigh_z_cut=550.0,
-                rayleigh_reciprocal_shells=1,
-            ),
+            options=PeriodicOptions(method="rayleigh"),
         ),
         k_parallel=np.zeros(2),
         dtype=np.dtype(np.complex64),
-        circumscribing_radii=np.full(positions.shape[0], 40.0),
     )
-
-    total = 2_000_000
-    batch = operator._near_apply_batch_size(total=total)
-    expected = (256 * 1024**2) // (((2 * operator.lmax + 1) ** 2) * operator.dtype.itemsize)
-
-    assert batch == expected
-    assert 1 <= batch < total
+    sources = np.asarray([0, 0, 1, 2, 4, 4], dtype=np.int32)
+    destinations = np.asarray([4, 1, 0, 0, 0, 2], dtype=np.int32)
+    operator._near_sources = sources
+    operator._near_destinations = destinations
+    for adjoint in (False, True):
+        grouping = sources if adjoint else destinations
+        metadata = operator._near_owner_metadata(adjoint=adjoint)
+        pointers, order, owners = metadata
+        np.testing.assert_array_equal(order, np.argsort(grouping, kind="stable"))
+        counts = np.bincount(grouping, minlength=positions.shape[0])
+        np.testing.assert_array_equal(np.diff(pointers), counts)
+        np.testing.assert_array_equal(owners, np.flatnonzero(counts))
+        assert pointers[0] == 0
+        assert pointers[-1] == sources.size
+        assert operator._near_owner_metadata(adjoint=adjoint) is metadata
 
 
 @pytest.mark.reference

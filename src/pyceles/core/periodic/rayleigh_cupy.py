@@ -375,67 +375,29 @@ def scatter_add_complex(target: Any, indices: Any, values: Any, *, cupy: Any) ->
 
 
 @cache
-def _sparse_near_kernel_source(dtype_name: str) -> tuple[str, str]:
-    scalar, complex_type, suffix, _, _ = _cuda_types(dtype_name)
-    kernel_name = f"pyceles_rayleigh_sparse_near_{suffix}"
-    source = f"""
-#include <cupy/complex.cuh>
-extern "C" __global__
-void {kernel_name}(
-    const long long n_pairs,
-    const long long n_modes,
-    const long long n_structural,
-    const long long n_rhs,
-    const int* sources,
-    const int* destinations,
-    const {complex_type}* structural,
-    const long long* row_ptr,
-    const int* input_modes,
-    const int* structural_channels,
-    const {complex_type}* coefficients,
-    const {complex_type}* values,
-    {scalar}* output)
-{{
-    const long long flat = (long long)blockDim.x * blockIdx.x + threadIdx.x;
-    const long long total = n_pairs * n_modes * n_rhs;
-    if (flat >= total) return;
-    const long long rhs = flat % n_rhs;
-    const long long mode_lane = flat / n_rhs;
-    const long long output_mode = mode_lane % n_modes;
-    const long long pair = mode_lane / n_modes;
-    const long long source = (long long)sources[pair];
-    {complex_type} accumulator = {complex_type}(0.0, 0.0);
-    for (long long entry = row_ptr[output_mode]; entry < row_ptr[output_mode + 1]; ++entry) {{
-        const long long input_mode = (long long)input_modes[entry];
-        const long long structural_channel = (long long)structural_channels[entry];
-        const {complex_type} incident = coefficients[
-            (source * n_modes + input_mode) * n_rhs + rhs
-        ];
-        accumulator += structural[pair * n_structural + structural_channel]
-            * values[entry] * incident;
-    }}
-    const long long destination = (long long)destinations[pair];
-    const long long output_index = (
-        (destination * n_modes + output_mode) * n_rhs + rhs
-    ) * 2;
-    atomicAdd(output + output_index, ({scalar})accumulator.real());
-    atomicAdd(output + output_index + 1, ({scalar})accumulator.imag());
-}}
-"""
-    return kernel_name, source
+def _sparse_near_owned_kernel_source(
+    dtype_name: str, adjoint: bool = False, rhs_tile_size: int = 1
+) -> tuple[str, str]:
+    """Pair the two CELES polarization rows and reuse coupling across RHSs.
 
-
-@cache
-def _sparse_near_kernel(dtype_name: str) -> Any:
-    cp, _ = import_cupy()
-    name, source = _sparse_near_kernel_source(dtype_name)
-    return cp.RawKernel(source, name)
-
-
-@cache
-def _sparse_near_adjoint_kernel_source(dtype_name: str) -> tuple[str, str]:
-    scalar, complex_type, suffix, _, _ = _cuda_types(dtype_name)
-    kernel_name = f"pyceles_rayleigh_sparse_near_adjoint_{suffix}"
+    The CSR is the canonical ``sparse_translation_contraction`` output (or
+    its transpose), not an arbitrary sparse matrix. In tau-major ordering,
+    every structural channel has the form [[A, B], [B, A]]. One top-half
+    row therefore determines both output polarizations. Structural storage
+    remains in its original pair-major order, including for the adjoint.
+    """
+    _, complex_type, suffix, _, _ = _cuda_types(dtype_name)
+    rhs_tile = int(rhs_tile_size)
+    if rhs_tile not in (1, 2, 3, 4):
+        raise ValueError("Rayleigh near RHS tile must be between one and four.")
+    action = "adjoint" if adjoint else "forward"
+    kernel_name = f"pyceles_rayleigh_sparse_near_owned_{action}_{suffix}_r{rhs_tile}"
+    input_particle = "destinations[pair]" if adjoint else "sources[pair]"
+    coupling = (
+        f"pyceles_conj_{suffix}(structural[pair * n_structural + channel] * values[entry])"
+        if adjoint
+        else "structural[pair * n_structural + channel] * values[entry]"
+    )
     source = f"""
 #include <cupy/complex.cuh>
 
@@ -446,56 +408,168 @@ __device__ inline {complex_type} pyceles_conj_{suffix}(const {complex_type} valu
 
 extern "C" __global__
 void {kernel_name}(
-    const long long n_pairs,
+    const long long n_owners,
     const long long n_modes,
     const long long n_structural,
     const long long n_rhs,
-    const int* input_particles,
-    const int* output_particles,
+    const int* owners,
+    const long long* owner_ptr,
+    const int* pair_order,
+    const int* sources,
+    const int* destinations,
     const {complex_type}* structural,
     const long long* row_ptr,
     const int* input_modes,
     const int* structural_channels,
     const {complex_type}* coefficients,
     const {complex_type}* values,
-    {scalar}* output)
+    {complex_type}* output)
 {{
+    const long long n_scalar = n_modes / 2;
+    const long long n_rhs_tiles = (n_rhs + {rhs_tile} - 1) / {rhs_tile};
     const long long flat = (long long)blockDim.x * blockIdx.x + threadIdx.x;
-    const long long total = n_pairs * n_modes * n_rhs;
+    const long long total = n_owners * n_scalar * n_rhs_tiles;
     if (flat >= total) return;
-    const long long rhs = flat % n_rhs;
-    const long long mode_lane = flat / n_rhs;
-    const long long output_mode = mode_lane % n_modes;
-    const long long pair = mode_lane / n_modes;
-    const long long input_particle = (long long)input_particles[pair];
-    {complex_type} accumulator = {complex_type}(0.0, 0.0);
-    for (long long entry = row_ptr[output_mode]; entry < row_ptr[output_mode + 1]; ++entry) {{
-        const long long input_mode = (long long)input_modes[entry];
-        const long long structural_channel = (long long)structural_channels[entry];
-        const {complex_type} incident = coefficients[
-            (input_particle * n_modes + input_mode) * n_rhs + rhs
-        ];
-        const {complex_type} coupling = structural[
-            pair * n_structural + structural_channel
-        ] * values[entry];
-        accumulator += pyceles_conj_{suffix}(coupling) * incident;
+    const long long rhs_base = (flat % n_rhs_tiles) * {rhs_tile};
+    const long long mode_lane = flat / n_rhs_tiles;
+    const long long output_mode = mode_lane % n_scalar;
+    const long long owner = (long long)owners[mode_lane / n_scalar];
+    {complex_type} acc_m[{rhs_tile}];
+    {complex_type} acc_n[{rhs_tile}];
+    #pragma unroll
+    for (int rr = 0; rr < {rhs_tile}; ++rr) {{
+        acc_m[rr] = {complex_type}(0, 0);
+        acc_n[rr] = {complex_type}(0, 0);
     }}
-    const long long output_particle = (long long)output_particles[pair];
-    const long long output_index = (
-        (output_particle * n_modes + output_mode) * n_rhs + rhs
-    ) * 2;
-    atomicAdd(output + output_index, ({scalar})accumulator.real());
-    atomicAdd(output + output_index + 1, ({scalar})accumulator.imag());
+    for (long long grouped = owner_ptr[owner]; grouped < owner_ptr[owner + 1]; ++grouped) {{
+        const long long pair = (long long)pair_order[grouped];
+        const long long input_particle = (long long){input_particle};
+        for (long long entry = row_ptr[output_mode]; entry < row_ptr[output_mode + 1]; ++entry) {{
+            const long long input_mode = (long long)input_modes[entry];
+            const long long other_mode = input_mode < n_scalar
+                ? input_mode + n_scalar : input_mode - n_scalar;
+            const long long channel = (long long)structural_channels[entry];
+            const {complex_type} factor = {coupling};
+            const long long first = (input_particle * n_modes + input_mode) * n_rhs;
+            const long long other = (input_particle * n_modes + other_mode) * n_rhs;
+            #pragma unroll
+            for (int rr = 0; rr < {rhs_tile}; ++rr) {{
+                const long long rhs = rhs_base + rr;
+                if (rhs < n_rhs) {{
+                    acc_m[rr] += factor * coefficients[first + rhs];
+                    acc_n[rr] += factor * coefficients[other + rhs];
+                }}
+            }}
+        }}
+    }}
+    const long long out_m = (owner * n_modes + output_mode) * n_rhs;
+    const long long out_n = out_m + n_scalar * n_rhs;
+    #pragma unroll
+    for (int rr = 0; rr < {rhs_tile}; ++rr) {{
+        const long long rhs = rhs_base + rr;
+        if (rhs < n_rhs) {{
+            output[out_m + rhs] += acc_m[rr];
+            output[out_n + rhs] += acc_n[rr];
+        }}
+    }}
 }}
 """
     return kernel_name, source
 
 
 @cache
-def _sparse_near_adjoint_kernel(dtype_name: str) -> Any:
+def _sparse_near_owned_kernel(
+    dtype_name: str, adjoint: bool = False, rhs_tile_size: int = 1
+) -> Any:
     cp, _ = import_cupy()
-    name, source = _sparse_near_adjoint_kernel_source(dtype_name)
+    name, source = _sparse_near_owned_kernel_source(dtype_name, adjoint, rhs_tile_size)
     return cp.RawKernel(source, name)
+
+
+def _apply_sparse_near_owned_cupy(
+    *,
+    target: Any,
+    structural: Any,
+    coefficients: Any,
+    sources: Any,
+    destinations: Any,
+    owner_ptr: Any,
+    pair_order: Any,
+    owners: Any,
+    row_ptr: Any,
+    input_modes: Any,
+    structural_channels: Any,
+    values: Any,
+    cupy: Any,
+    adjoint: bool,
+) -> None:
+    """Apply canonical polarized CSR with one writer per output entry."""
+
+    dtype = np.dtype(target.dtype)
+    if dtype not in {np.dtype(np.complex64), np.dtype(np.complex128)}:
+        raise TypeError(f"Unsupported Rayleigh sparse-near dtype {dtype!r}.")
+    output = cupy.asarray(target, dtype=dtype)
+    if not output.flags.c_contiguous:
+        raise ValueError("Sparse Rayleigh target must be C-contiguous; it is updated in place.")
+    structure = cupy.ascontiguousarray(cupy.asarray(structural, dtype=dtype))
+    coeff = cupy.ascontiguousarray(cupy.asarray(coefficients, dtype=dtype))
+    source = cupy.ascontiguousarray(sources, dtype=cupy.int32).reshape(-1)
+    destination = cupy.ascontiguousarray(destinations, dtype=cupy.int32).reshape(-1)
+    pointers = cupy.ascontiguousarray(row_ptr, dtype=cupy.int64).reshape(-1)
+    in_modes = cupy.ascontiguousarray(input_modes, dtype=cupy.int32).reshape(-1)
+    channels = cupy.ascontiguousarray(structural_channels, dtype=cupy.int32).reshape(-1)
+    factors = cupy.ascontiguousarray(values, dtype=dtype).reshape(-1)
+    owner_pointers = cupy.ascontiguousarray(owner_ptr, dtype=cupy.int64).reshape(-1)
+    grouped_pairs = cupy.ascontiguousarray(pair_order, dtype=cupy.int32).reshape(-1)
+    owner_indices = cupy.ascontiguousarray(owners, dtype=cupy.int32).reshape(-1)
+    if output.ndim != 3 or coeff.ndim != 3 or structure.ndim != 2:
+        raise ValueError("Sparse Rayleigh near inputs must have ranks 3, 3, and 2.")
+    if output.shape != coeff.shape:
+        raise ValueError("Sparse Rayleigh target and coefficient blocks must have equal shapes.")
+    if source.size != destination.size or source.size != structure.shape[0]:
+        raise ValueError("Sparse Rayleigh pair arrays must have equal lengths.")
+    if owner_pointers.size != output.shape[0] + 1:
+        raise ValueError("Sparse Rayleigh owner pointers must cover every particle.")
+    if grouped_pairs.size != source.size:
+        raise ValueError("Sparse Rayleigh grouped pair indices have the wrong length.")
+    if not (in_modes.size == channels.size == factors.size):
+        raise ValueError("Sparse Rayleigh contraction arrays must have equal lengths.")
+    n_modes = int(output.shape[1])
+    n_rhs = int(output.shape[2])
+    if n_modes % 2:
+        raise ValueError("Sparse Rayleigh near coupling requires both CELES polarizations.")
+    if pointers.size != n_modes + 1:
+        raise ValueError("Sparse Rayleigh row pointers must cover every output mode.")
+    n_owners = int(owner_indices.size)
+    if n_owners == 0 or n_modes == 0 or n_rhs == 0:
+        return
+    rhs_tile = min(4, n_rhs)
+    rhs_tiles = (n_rhs + rhs_tile - 1) // rhs_tile
+    total = n_owners * (n_modes // 2) * rhs_tiles
+    threads = 128
+    blocks = (total + threads - 1) // threads
+    _sparse_near_owned_kernel(dtype.name, adjoint, rhs_tile)(
+        (blocks,),
+        (threads,),
+        (
+            np.int64(n_owners),
+            np.int64(n_modes),
+            np.int64(structure.shape[1]),
+            np.int64(n_rhs),
+            owner_indices,
+            owner_pointers,
+            grouped_pairs,
+            source,
+            destination,
+            structure,
+            pointers,
+            in_modes,
+            channels,
+            coeff,
+            factors,
+            output,
+        ),
+    )
 
 
 def apply_sparse_near_coupling_cupy(
@@ -510,57 +584,34 @@ def apply_sparse_near_coupling_cupy(
     structural_channels: Any,
     values: Any,
     cupy: Any,
+    owner_ptr: Any,
+    pair_order: Any,
+    owners: Any,
 ) -> None:
-    """Accumulate sparse exact-near translation contractions on device."""
-    dtype = np.dtype(target.dtype)
-    if dtype not in {np.dtype(np.complex64), np.dtype(np.complex128)}:
-        raise TypeError(f"Unsupported Rayleigh sparse-near dtype {dtype!r}.")
-    output = cupy.asarray(target, dtype=dtype)
-    structure = cupy.ascontiguousarray(cupy.asarray(structural, dtype=dtype))
-    coeff = cupy.ascontiguousarray(cupy.asarray(coefficients, dtype=dtype))
-    if output.ndim != 3 or coeff.ndim != 3 or structure.ndim != 2:
-        raise ValueError("Sparse Rayleigh near inputs must have ranks 3, 3, and 2.")
-    if output.shape != coeff.shape:
-        raise ValueError("Sparse Rayleigh target and coefficient blocks must have equal shapes.")
-    source = cupy.asarray(sources, dtype=cupy.int32).reshape(-1)
-    destination = cupy.asarray(destinations, dtype=cupy.int32).reshape(-1)
-    if int(source.size) != int(destination.size) or int(source.size) != int(structure.shape[0]):
-        raise ValueError("Sparse Rayleigh pair arrays must have equal lengths.")
-    pointers = cupy.asarray(row_ptr, dtype=cupy.int64).reshape(-1)
-    in_modes = cupy.asarray(input_modes, dtype=cupy.int32).reshape(-1)
-    channels = cupy.asarray(structural_channels, dtype=cupy.int32).reshape(-1)
-    factors = cupy.asarray(values, dtype=dtype).reshape(-1)
-    if not (int(in_modes.size) == int(channels.size) == int(factors.size)):
-        raise ValueError("Sparse Rayleigh contraction arrays must have equal lengths.")
-    _n_particles, n_modes, n_rhs = (int(value) for value in output.shape)
-    if int(pointers.size) != n_modes + 1:
-        raise ValueError("Sparse Rayleigh row pointers must cover every output mode.")
-    total = int(source.size) * n_modes * n_rhs
-    if total == 0:
-        return
-    scalar_dtype = cupy.float32 if dtype == np.dtype(np.complex64) else cupy.float64
-    output_scalar = output.view(scalar_dtype).reshape(-1)
-    threads = 128
-    blocks = (total + threads - 1) // threads
-    kernel = _sparse_near_kernel(dtype.name)
-    kernel(
-        (blocks,),
-        (threads,),
-        (
-            np.int64(source.size),
-            np.int64(n_modes),
-            np.int64(structure.shape[1]),
-            np.int64(n_rhs),
-            source,
-            destination,
-            structure,
-            pointers,
-            in_modes,
-            channels,
-            coeff,
-            factors,
-            output_scalar,
-        ),
+    """Add exact-near coupling with one writer per output entry.
+
+    Mode CSR must come from ``sparse_translation_contraction`` in canonical
+    tau-major CELES ordering: the two polarization blocks are paired, not
+    independent sparse matrices. The prepared topology supplies unique
+    destination owners and a stable partition of the pair indices. Neither
+    inputs nor the structural cache are modified. The target must be
+    contiguous and disjoint from them.
+    """
+    _apply_sparse_near_owned_cupy(
+        target=target,
+        structural=structural,
+        coefficients=coefficients,
+        sources=sources,
+        destinations=destinations,
+        owner_ptr=owner_ptr,
+        pair_order=pair_order,
+        owners=owners,
+        row_ptr=row_ptr,
+        input_modes=input_modes,
+        structural_channels=structural_channels,
+        values=values,
+        cupy=cupy,
+        adjoint=False,
     )
 
 
@@ -576,66 +627,32 @@ def apply_sparse_near_adjoint_cupy(
     structural_channels: Any,
     values: Any,
     cupy: Any,
+    owner_ptr: Any,
+    pair_order: Any,
+    owners: Any,
 ) -> None:
-    """Accumulate the exact Hermitian adjoint of sparse near contractions.
+    """Add W^H from forward structural storage and transposed mode CSR.
 
-    ``row_ptr`` and companion arrays must be the transposed output-mode CSR
-    metadata returned by ``transpose_sparse_translation_contraction``.
-    Structural sums and contraction values remain in their forward storage;
-    the CUDA kernel conjugates their product while swapping pair endpoints.
+    Owners group the original sources, independently of forward ownership.
+    ``transpose_sparse_translation_contraction`` preserves forward values;
+    their product with the forward structural sums is conjugated on device.
+    The same contiguous, disjoint target contract as the forward path holds.
     """
-
-    dtype = np.dtype(target.dtype)
-    if dtype not in {np.dtype(np.complex64), np.dtype(np.complex128)}:
-        raise TypeError(f"Unsupported Rayleigh sparse-near dtype {dtype!r}.")
-    output = cupy.asarray(target, dtype=dtype)
-    structure = cupy.ascontiguousarray(cupy.asarray(structural, dtype=dtype))
-    coeff = cupy.ascontiguousarray(cupy.asarray(coefficients, dtype=dtype))
-    if output.ndim != 3 or coeff.ndim != 3 or structure.ndim != 2:
-        raise ValueError("Sparse Rayleigh near inputs must have ranks 3, 3, and 2.")
-    if output.shape != coeff.shape:
-        raise ValueError("Sparse Rayleigh target and coefficient blocks must have equal shapes.")
-    input_index = cupy.asarray(input_particles, dtype=cupy.int32).reshape(-1)
-    output_index = cupy.asarray(output_particles, dtype=cupy.int32).reshape(-1)
-    if int(input_index.size) != int(output_index.size) or int(input_index.size) != int(
-        structure.shape[0]
-    ):
-        raise ValueError("Sparse Rayleigh pair arrays must have equal lengths.")
-    pointers = cupy.asarray(row_ptr, dtype=cupy.int64).reshape(-1)
-    in_modes = cupy.asarray(input_modes, dtype=cupy.int32).reshape(-1)
-    channels = cupy.asarray(structural_channels, dtype=cupy.int32).reshape(-1)
-    factors = cupy.asarray(values, dtype=dtype).reshape(-1)
-    if not (int(in_modes.size) == int(channels.size) == int(factors.size)):
-        raise ValueError("Sparse Rayleigh contraction arrays must have equal lengths.")
-    _n_particles, n_modes, n_rhs = (int(value) for value in output.shape)
-    if int(pointers.size) != n_modes + 1:
-        raise ValueError("Sparse Rayleigh row pointers must cover every output mode.")
-    total = int(input_index.size) * n_modes * n_rhs
-    if total == 0:
-        return
-    scalar_dtype = cupy.float32 if dtype == np.dtype(np.complex64) else cupy.float64
-    output_scalar = output.view(scalar_dtype).reshape(-1)
-    threads = 128
-    blocks = (total + threads - 1) // threads
-    kernel = _sparse_near_adjoint_kernel(dtype.name)
-    kernel(
-        (blocks,),
-        (threads,),
-        (
-            np.int64(input_index.size),
-            np.int64(n_modes),
-            np.int64(structure.shape[1]),
-            np.int64(n_rhs),
-            input_index,
-            output_index,
-            structure,
-            pointers,
-            in_modes,
-            channels,
-            coeff,
-            factors,
-            output_scalar,
-        ),
+    _apply_sparse_near_owned_cupy(
+        target=target,
+        structural=structural,
+        coefficients=coefficients,
+        sources=output_particles,
+        destinations=input_particles,
+        owner_ptr=owner_ptr,
+        pair_order=pair_order,
+        owners=owners,
+        row_ptr=row_ptr,
+        input_modes=input_modes,
+        structural_channels=structural_channels,
+        values=values,
+        cupy=cupy,
+        adjoint=True,
     )
 
 

@@ -152,6 +152,9 @@ class CuPyPeriodicCouplingOperator:
     _rayleigh_scan_chunk_size: int | None = field(default=None, init=False, repr=False)
     _near_destinations: Array | None = field(default=None, init=False, repr=False)
     _near_sources: Array | None = field(default=None, init=False, repr=False)
+    _near_owner_metadata_cache: dict[str, tuple[Array, Array, Array]] = field(
+        default_factory=dict, init=False, repr=False
+    )
     _near_structural_sums_gpu: Any | None = field(default=None, init=False, repr=False)
     _near_cache_memory_plan: RayleighNearCacheMemoryPlan | None = field(
         default=None, init=False, repr=False
@@ -471,15 +474,6 @@ class CuPyPeriodicCouplingOperator:
             ),
         )
 
-    def _near_apply_batch_size(self, *, total: int) -> int:
-        """Return a bounded launch batch for sparse exact-near contractions."""
-        n_structural = (2 * int(self.lmax) + 1) ** 2
-        bytes_per_pair = int(self.dtype.itemsize) * n_structural
-        return self._memory_bounded_batch_size(
-            total=int(total),
-            bytes_per_item=int(bytes_per_pair),
-        )
-
     def _near_pairs(self) -> tuple[Array, Array]:
         """Return flat source-major exact-near destination/source indices."""
         if self._near_destinations is None or self._near_sources is None:
@@ -489,6 +483,25 @@ class CuPyPeriodicCouplingOperator:
             self._near_destinations = destinations
             self._near_sources = sources
         return self._near_destinations, self._near_sources
+
+    def _near_owner_metadata(self, *, adjoint: bool) -> tuple[Array, Array, Array]:
+        """Return grouped pair order and owners for an atomic-free near apply."""
+
+        key = "adjoint" if adjoint else "forward"
+        cached = self._near_owner_metadata_cache.get(key)
+        if cached is not None:
+            return cached
+        destinations, sources = self._near_pairs()
+        grouped_by = sources if adjoint else destinations
+        pair_order = np.argsort(grouped_by, kind="stable").astype(np.int32, copy=False)
+        counts = np.bincount(np.asarray(grouped_by, dtype=np.int64), minlength=self.n_particles)
+        owner_ptr = np.empty(self.n_particles + 1, dtype=np.int64)
+        owner_ptr[0] = 0
+        np.cumsum(counts, out=owner_ptr[1:])
+        owners = np.flatnonzero(counts).astype(np.int32, copy=False)
+        metadata = (owner_ptr, pair_order, owners)
+        self._near_owner_metadata_cache[key] = metadata
+        return metadata
 
     def _near_sparse_contraction_device(self) -> tuple[Any, Any, Any, Any]:
         """Return output-mode CSR data for the sparse translation contraction."""
@@ -596,6 +609,11 @@ class CuPyPeriodicCouplingOperator:
         degrees, orders = valid_structural_indices(int(self.lmax))
         total += pending("near_sources", sources, np.int32)
         total += pending("near_destinations", destinations, np.int32)
+        for prefix, adjoint in (("near_forward", False), ("near_adjoint", True)):
+            owner_ptr, pair_order, owners = self._near_owner_metadata(adjoint=adjoint)
+            total += pending(f"{prefix}_owner_ptr", owner_ptr, np.int64)
+            total += pending(f"{prefix}_pair_order", pair_order, np.int32)
+            total += pending(f"{prefix}_owners", owners, np.int32)
         total += pending("near_structural_degrees", degrees, np.int32)
         total += pending("near_structural_orders", orders, np.int32)
         if self._positions_gpu is None:
@@ -892,26 +910,32 @@ class CuPyPeriodicCouplingOperator:
         if total:
             src_gpu = self._rayleigh_device_array("near_sources", sources, dtype=cp.int32)
             dst_gpu = self._rayleigh_device_array("near_destinations", destinations, dtype=cp.int32)
+            owner_ptr, pair_order, owners = self._near_owner_metadata(adjoint=False)
+            owner_ptr_gpu = self._rayleigh_device_array(
+                "near_forward_owner_ptr", owner_ptr, dtype=cp.int64
+            )
+            pair_order_gpu = self._rayleigh_device_array(
+                "near_forward_pair_order", pair_order, dtype=cp.int32
+            )
+            owners_gpu = self._rayleigh_device_array("near_forward_owners", owners, dtype=cp.int32)
             row_ptr, input_modes, structural_channels, contraction_values = (
                 self._near_sparse_contraction_device()
             )
-            pair_batch = self._near_apply_batch_size(total=total)
-            for start in range(0, total, pair_batch):
-                stop = min(total, start + pair_batch)
-                structural = sums_gpu[start:stop]
-                apply_sparse_near_coupling_cupy(
-                    target=y,
-                    structural=structural,
-                    coefficients=arr,
-                    sources=src_gpu[start:stop],
-                    destinations=dst_gpu[start:stop],
-                    row_ptr=row_ptr,
-                    input_modes=input_modes,
-                    structural_channels=structural_channels,
-                    values=contraction_values,
-                    cupy=cp,
-                )
-                del structural
+            apply_sparse_near_coupling_cupy(
+                target=y,
+                structural=sums_gpu,
+                coefficients=arr,
+                sources=src_gpu,
+                destinations=dst_gpu,
+                row_ptr=row_ptr,
+                input_modes=input_modes,
+                structural_channels=structural_channels,
+                values=contraction_values,
+                cupy=cp,
+                owner_ptr=owner_ptr_gpu,
+                pair_order=pair_order_gpu,
+                owners=owners_gpu,
+            )
 
         flat = y.reshape(self.n_particles * self.n_modes, int(arr.shape[2]))
         return flat[:, 0] if squeezed else flat
@@ -940,26 +964,32 @@ class CuPyPeriodicCouplingOperator:
         if total:
             src_gpu = self._rayleigh_device_array("near_sources", sources, dtype=cp.int32)
             dst_gpu = self._rayleigh_device_array("near_destinations", destinations, dtype=cp.int32)
+            owner_ptr, pair_order, owners = self._near_owner_metadata(adjoint=True)
+            owner_ptr_gpu = self._rayleigh_device_array(
+                "near_adjoint_owner_ptr", owner_ptr, dtype=cp.int64
+            )
+            pair_order_gpu = self._rayleigh_device_array(
+                "near_adjoint_pair_order", pair_order, dtype=cp.int32
+            )
+            owners_gpu = self._rayleigh_device_array("near_adjoint_owners", owners, dtype=cp.int32)
             row_ptr, input_modes, structural_channels, contraction_values = (
                 self._near_sparse_adjoint_contraction_device()
             )
-            pair_batch = self._near_apply_batch_size(total=total)
-            for start in range(0, total, pair_batch):
-                stop = min(total, start + pair_batch)
-                structural = sums_gpu[start:stop]
-                apply_sparse_near_adjoint_cupy(
-                    target=y,
-                    structural=structural,
-                    coefficients=arr,
-                    input_particles=dst_gpu[start:stop],
-                    output_particles=src_gpu[start:stop],
-                    row_ptr=row_ptr,
-                    input_modes=input_modes,
-                    structural_channels=structural_channels,
-                    values=contraction_values,
-                    cupy=cp,
-                )
-                del structural
+            apply_sparse_near_adjoint_cupy(
+                target=y,
+                structural=sums_gpu,
+                coefficients=arr,
+                input_particles=dst_gpu,
+                output_particles=src_gpu,
+                row_ptr=row_ptr,
+                input_modes=input_modes,
+                structural_channels=structural_channels,
+                values=contraction_values,
+                cupy=cp,
+                owner_ptr=owner_ptr_gpu,
+                pair_order=pair_order_gpu,
+                owners=owners_gpu,
+            )
         return y
 
     def _dense_blocks_for_sources(self, source_indices: tuple[int, ...]) -> Any:

@@ -20,6 +20,7 @@ from pyceles.core.periodic.rayleigh import _scan_far_numpy, build_rayleigh_plan
 from pyceles.core.periodic.rayleigh_cupy import (
     _scan_far_indexed_cupy,
     apply_rayleigh_far_to_points_cupy,
+    apply_sparse_near_adjoint_cupy,
     apply_sparse_near_coupling_cupy,
     scan_far_cupy,
 )
@@ -294,7 +295,6 @@ def test_periodic_cupy_dense_assembly_from_cached_blocks_matches_matvec(
 )
 def test_periodic_cupy_rayleigh_hybrid_matches_numpy_scan_and_near_cache(
     cupy_runtime: tuple[Any, Any],
-    monkeypatch: pytest.MonkeyPatch,
     dtype: Any,
     accum_dtype: Any,
     rtol: float,
@@ -335,7 +335,6 @@ def test_periodic_cupy_rayleigh_hybrid_matches_numpy_scan_and_near_cache(
     )
     cpu = PeriodicCouplingOperator(**cast(Any, kwargs), accum_dtype=np.dtype(accum_dtype))
     gpu = CuPyPeriodicCouplingOperator(**cast(Any, kwargs), accum_dtype=np.dtype(accum_dtype))
-    monkeypatch.setattr(gpu, "_near_apply_batch_size", lambda **_kwargs: 1)
     rng = np.random.default_rng(20260725)
     x = rng.normal(size=(18, 2)) + 1j * rng.normal(size=(18, 2))
 
@@ -354,23 +353,33 @@ def test_periodic_cupy_rayleigh_hybrid_matches_numpy_scan_and_near_cache(
     assert gpu._rayleigh_plan_cache is not None
 
 
+@pytest.mark.parametrize("dtype", (np.complex64, np.complex128))
+@pytest.mark.parametrize("nrhs", (1, 3, 5))
 def test_periodic_cupy_sparse_rayleigh_near_kernel_matches_dense_lmax4(
     cupy_runtime: tuple[Any, Any],
+    dtype: Any,
+    nrhs: int,
 ) -> None:
     cp, _ = cupy_runtime
     lmax = 4
     nm = n_modes(lmax)
-    _cpu, gpu = _small_periodic_case(dtype=np.complex64, lmax=lmax)
+    _cpu, gpu = _small_periodic_case(dtype=dtype, lmax=lmax)
     row_ptr, input_modes, channels, values = gpu._near_sparse_contraction_device()
     rng = np.random.default_rng(20260809)
     sources = np.asarray([0, 1, 0], dtype=np.int32)
     destinations = np.asarray([1, 0, 1], dtype=np.int32)
     structural = (
         rng.normal(size=(sources.size, 81)) + 1j * rng.normal(size=(sources.size, 81))
-    ).astype(np.complex64)
-    coefficients = (rng.normal(size=(2, nm, 2)) + 1j * rng.normal(size=(2, nm, 2))).astype(
-        np.complex64
+    ).astype(dtype)
+    coefficients = (rng.normal(size=(2, nm, nrhs)) + 1j * rng.normal(size=(2, nm, nrhs))).astype(
+        dtype
     )
+    pair_order = np.argsort(destinations, kind="stable").astype(np.int32, copy=False)
+    counts = np.bincount(destinations, minlength=coefficients.shape[0]).astype(np.int64)
+    owner_ptr = np.empty(coefficients.shape[0] + 1, dtype=np.int64)
+    owner_ptr[0] = 0
+    np.cumsum(counts, out=owner_ptr[1:])
+    owners = np.flatnonzero(counts).astype(np.int32, copy=False)
 
     target = cp.zeros_like(cp.asarray(coefficients))
     apply_sparse_near_coupling_cupy(
@@ -384,6 +393,9 @@ def test_periodic_cupy_sparse_rayleigh_near_kernel_matches_dense_lmax4(
         structural_channels=channels,
         values=values,
         cupy=cp,
+        owner_ptr=cp.asarray(owner_ptr),
+        pair_order=cp.asarray(pair_order),
+        owners=cp.asarray(owners),
     )
     cp.cuda.Stream.null.synchronize()
 
@@ -399,7 +411,71 @@ def test_periodic_cupy_sparse_rayleigh_near_kernel_matches_dense_lmax4(
                 factors[:, None] * coefficients[source, input_np[start:stop]], axis=0
             )
 
-    np.testing.assert_allclose(cp.asnumpy(target), expected, rtol=5e-5, atol=8e-5)
+    tolerance = 8e-5 if np.dtype(dtype) == np.dtype(np.complex64) else 2e-11
+    np.testing.assert_allclose(cp.asnumpy(target), expected, rtol=tolerance, atol=tolerance)
+
+
+@pytest.mark.parametrize("dtype", (np.complex64, np.complex128))
+@pytest.mark.parametrize("nrhs", (1, 3, 5))
+def test_periodic_cupy_sparse_rayleigh_owned_adjoint_matches_dense_lmax4(
+    cupy_runtime: tuple[Any, Any],
+    dtype: Any,
+    nrhs: int,
+) -> None:
+    cp, _ = cupy_runtime
+    lmax = 4
+    nm = n_modes(lmax)
+    _cpu, gpu = _small_periodic_case(dtype=dtype, lmax=lmax)
+    row_ptr, input_modes, channels, values = gpu._near_sparse_adjoint_contraction_device()
+    rng = np.random.default_rng(20260810)
+    sources = np.asarray([0, 1, 0], dtype=np.int32)
+    destinations = np.asarray([1, 0, 1], dtype=np.int32)
+    structural = (
+        rng.normal(size=(sources.size, 81)) + 1j * rng.normal(size=(sources.size, 81))
+    ).astype(dtype)
+    coefficients = (rng.normal(size=(2, nm, nrhs)) + 1j * rng.normal(size=(2, nm, nrhs))).astype(
+        dtype
+    )
+    pair_order = np.argsort(sources, kind="stable").astype(np.int32, copy=False)
+    counts = np.bincount(sources, minlength=coefficients.shape[0]).astype(np.int64)
+    owner_ptr = np.empty(coefficients.shape[0] + 1, dtype=np.int64)
+    owner_ptr[0] = 0
+    np.cumsum(counts, out=owner_ptr[1:])
+    owners = np.flatnonzero(counts).astype(np.int32, copy=False)
+
+    target = cp.zeros_like(cp.asarray(coefficients))
+    apply_sparse_near_adjoint_cupy(
+        target=target,
+        structural=cp.asarray(structural),
+        coefficients=cp.asarray(coefficients),
+        input_particles=cp.asarray(destinations),
+        output_particles=cp.asarray(sources),
+        row_ptr=row_ptr,
+        input_modes=input_modes,
+        structural_channels=channels,
+        values=values,
+        cupy=cp,
+        owner_ptr=cp.asarray(owner_ptr),
+        pair_order=cp.asarray(pair_order),
+        owners=cp.asarray(owners),
+    )
+    cp.cuda.Stream.null.synchronize()
+
+    pointers_np, input_np, channels_np, values_np = (
+        cp.asnumpy(item) for item in (row_ptr, input_modes, channels, values)
+    )
+    expected = np.zeros_like(coefficients)
+    for pair, (source, destination) in enumerate(zip(sources, destinations, strict=True)):
+        for output_mode in range(nm):
+            start = int(pointers_np[output_mode])
+            stop = int(pointers_np[output_mode + 1])
+            factors = np.conj(values_np[start:stop] * structural[pair, channels_np[start:stop]])
+            expected[source, output_mode] += np.sum(
+                factors[:, None] * coefficients[destination, input_np[start:stop]], axis=0
+            )
+
+    tolerance = 8e-5 if np.dtype(dtype) == np.dtype(np.complex64) else 2e-11
+    np.testing.assert_allclose(cp.asnumpy(target), expected, rtol=tolerance, atol=tolerance)
 
 
 def test_periodic_cupy_rayleigh_wide_scan_state_matches_c128_recurrence(
