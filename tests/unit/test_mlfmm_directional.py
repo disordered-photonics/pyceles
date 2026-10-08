@@ -288,3 +288,12 @@ def test_directional_phase_mediation_tracks_exact_axial_recenter_channels() -> N
         )
     ) / np.linalg.norm(np.concatenate(exact_channels))
     assert rel < 0.8
+
+
+@pytest.mark.parametrize("beta_perm", ([1, 2, 0], [0, 0, 2], [0, 1, 3]))
+def test_uploaded_beta_reflection_rejects_invalid_involutions(beta_perm: list[int]) -> None:
+    from pyceles.core.operators.mlfmm_cupy import _beta_reflection_permutation
+
+    reflection = (np.arange(2, dtype=np.int32)[:, None] * 3 + beta_perm).reshape(-1)
+    with pytest.raises(ValueError, match=r"permutation|involution"):
+        _beta_reflection_permutation(reflection, n_alpha=2, n_beta=3)

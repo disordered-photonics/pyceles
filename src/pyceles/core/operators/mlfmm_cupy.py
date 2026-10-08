@@ -308,15 +308,17 @@ class CuPyDirectionalTransformsData:
     The CuPy path stores beta factors and azimuthal phases instead of dense
     `(n_alpha*n_beta, n_scalar)` F matrices. Repeated apply expands the
     directional channels on demand, which trades explicit `m` sums for a much
-    lower resident memory footprint on coarse high-frequency levels.
+    lower resident memory footprint on coarse high-frequency levels. Physical
+    beta reflection is absorbed once into the uploaded factors; adjoint maps
+    use their conjugate transposes, not reflected copies of channel batches.
     """
 
     box_order: int
     grid_order: int
     grid: CuPyDirectionalGridData
     nscl: int
-    fth_beta: Any
-    fph_beta: Any
+    fth_reflected_beta: Any
+    fph_reflected_beta: Any
     m_of_scalar: Any
     phase_by_m: Any
     mode_indices_by_m: tuple[Any, ...]
@@ -1264,6 +1266,11 @@ def _beta_reflection_permutation(
 
     reflection_grid = np.asarray(reflection, dtype=np.int32).reshape(int(n_alpha), int(n_beta))
     beta_perm = np.ascontiguousarray(reflection_grid[0], dtype=np.int32)
+    beta_indices = np.arange(int(n_beta), dtype=np.int32)
+    if not np.array_equal(np.sort(beta_perm), beta_indices):
+        raise ValueError("Directional beta reflection must be a permutation.")
+    if not np.array_equal(beta_perm[beta_perm], beta_indices):
+        raise ValueError("Directional beta reflection must be an involution.")
     expected = np.arange(int(n_alpha), dtype=np.int32)[:, None] * int(n_beta) + beta_perm[None, :]
     if not np.array_equal(reflection_grid, expected):
         raise ValueError("Directional reflection must preserve alpha and permute beta only.")
@@ -1331,8 +1338,12 @@ def _upload_directional_transforms(
             beta_reflection_permutation=cupy.asarray(beta_reflection, dtype=cupy.int32),
         ),
         nscl=nscl,
-        fth_beta=cupy.asarray(np.ascontiguousarray(fth_beta, dtype=np.complex128)),
-        fph_beta=cupy.asarray(np.ascontiguousarray(fph_beta, dtype=np.complex128)),
+        fth_reflected_beta=cupy.asarray(
+            np.ascontiguousarray(fth_beta[beta_reflection], dtype=np.complex128)
+        ),
+        fph_reflected_beta=cupy.asarray(
+            np.ascontiguousarray(fph_beta[beta_reflection], dtype=np.complex128)
+        ),
         m_of_scalar=cupy.asarray(np.ascontiguousarray(m_of_scalar, dtype=np.int32)),
         phase_by_m=cupy.asarray(np.ascontiguousarray(phase_by_m, dtype=np.complex128)),
         mode_indices_by_m=mode_indices_by_m,
@@ -3928,12 +3939,9 @@ def _apply_directional_map(
     n_chan = int(arr.shape[1])
     n_rhs = int(arr.shape[3])
     source_order = int(arr.shape[2])
-    flat = arr.transpose(0, 1, 3, 2).reshape(-1, source_order)
-    if str(map_data.storage) == "dense":
-        dense = cupy.asarray(map_data.matrix, dtype=cupy.complex128)
-        mapped_flat = flat @ dense.T
-        target_order = int(dense.shape[0])
-    elif str(map_data.storage) == "packed_stencil":
+    # Packed stencils consume the original channel/RHS layout. In particular,
+    # do not materialize a transposed multi-RHS matrix for this early-return path.
+    if str(map_data.storage) == "packed_stencil":
         packed_cols, packed_vals, width_i32 = map_data.matrix
         width = int(width_i32)
         target_order = int(map_data.target_order)
@@ -3959,11 +3967,29 @@ def _apply_directional_map(
             ),
         )
         return out
+    flat = arr.transpose(0, 1, 3, 2).reshape(-1, source_order)
+    if str(map_data.storage) == "dense":
+        dense = cupy.asarray(map_data.matrix, dtype=cupy.complex128)
+        mapped_flat = flat @ dense.T
+        target_order = int(dense.shape[0])
     else:
         sparse = map_data.matrix
         mapped_flat = (sparse @ flat.T).T
         target_order = int(sparse.shape[0])
     return mapped_flat.reshape(n_batch, n_chan, n_rhs, target_order).transpose(0, 1, 3, 2)
+
+
+@cache
+def _directional_phase_add_kernel() -> Any:
+    """Broadcast a phase into an owned c128 channel view without a product tensor."""
+
+    cupy, _ = import_cupy()
+    return cupy.ElementwiseKernel(
+        "complex128 phase, complex128 beta_values",
+        "complex128 output",
+        "output += phase * beta_values;",
+        "pyceles_mlfmm_directional_phase_add_c128",
+    )
 
 
 def _box_outgoing_to_directional_cupy(
@@ -3995,14 +4021,14 @@ def _box_outgoing_to_directional_cupy(
     )
     out_arr.fill(0)
     work = out_arr.reshape(n_batch, 4, n_alpha, n_beta, n_rhs)
-    beta_perm = directional.grid.beta_reflection_permutation
-    fth_reflected = directional.fth_beta[beta_perm]
-    fph_reflected = directional.fph_beta[beta_perm]
+    fth_reflected = directional.fth_reflected_beta
+    fph_reflected = directional.fph_reflected_beta
 
     # An FFT over alpha was tested on large-scale CuPy MLFMM smokes. It gave
     # effectively identical runtime while increasing peak memory, so keep the
     # simpler explicit phase contraction until profiling shows a different
     # bottleneck.
+    phase_add = _directional_phase_add_kernel()
     for im, mode_idx in enumerate(directional.mode_indices_by_m):
         if int(mode_idx.size) == 0:
             continue
@@ -4015,10 +4041,10 @@ def _box_outgoing_to_directional_cupy(
         b_theta_beta = cupy.matmul(fth_m[None, :, :], b_m)
         b_phi_beta = cupy.matmul(fph_m[None, :, :], b_m)
         phase = directional.phase_by_m[:, im].reshape(1, n_alpha, 1, 1)
-        work[:, 0] += phase * a_theta_beta[:, None, :, :]
-        work[:, 1] += phase * a_phi_beta[:, None, :, :]
-        work[:, 2] += phase * b_theta_beta[:, None, :, :]
-        work[:, 3] += phase * b_phi_beta[:, None, :, :]
+        phase_add(phase, a_theta_beta[:, None, :, :], work[:, 0])
+        phase_add(phase, a_phi_beta[:, None, :, :], work[:, 1])
+        phase_add(phase, b_theta_beta[:, None, :, :], work[:, 2])
+        phase_add(phase, b_phi_beta[:, None, :, :], work[:, 3])
     return out_arr
 
 
@@ -4041,9 +4067,10 @@ def _directional_to_box_regular_cupy(
     n_alpha = int(directional.grid.n_alpha)
     n_beta = int(directional.grid.n_beta)
     nscl = int(directional.nscl)
-    reflected = channels.reshape(n_batch, 4, n_alpha, n_beta, n_rhs)[
-        :, :, :, directional.grid.beta_reflection_permutation, :
-    ]
+    # P is an involution, hence F^H P C = (P F)^H C. The uploaded
+    # factors already contain P; keep this O(batch * directions * RHS) input
+    # as a view instead of materializing its reflected copy.
+    channel_grid = channels.reshape(n_batch, 4, n_alpha, n_beta, n_rhs)
     out_arr = (
         cupy.asarray(out, dtype=cupy.complex128)
         if out is not None
@@ -4054,29 +4081,40 @@ def _directional_to_box_regular_cupy(
     top.fill(0)
     bottom.fill(0)
     phase_adj = cupy.conjugate(directional.phase_by_m)
-    fth_h_all = cupy.conjugate(cupy.swapaxes(directional.fth_beta, 0, 1))
-    fph_h_all = cupy.conjugate(cupy.swapaxes(directional.fph_beta, 0, 1))
+    fth_h_all = cupy.conjugate(cupy.swapaxes(directional.fth_reflected_beta, 0, 1))
+    fph_h_all = cupy.conjugate(cupy.swapaxes(directional.fph_reflected_beta, 0, 1))
 
     for im, mode_idx in enumerate(directional.mode_indices_by_m):
         if int(mode_idx.size) == 0:
             continue
         phase_m = phase_adj[:, im]
-        a_theta_m = cupy.einsum("a,bakr->bkr", phase_m, reflected[:, 0], optimize=True)
-        a_phi_m = cupy.einsum("a,bakr->bkr", phase_m, reflected[:, 1], optimize=True)
-        b_theta_m = cupy.einsum("a,bakr->bkr", phase_m, reflected[:, 2], optimize=True)
-        b_phi_m = cupy.einsum("a,bakr->bkr", phase_m, reflected[:, 3], optimize=True)
+        a_theta_m = cupy.einsum("a,bakr->bkr", phase_m, channel_grid[:, 0], optimize=True)
+        a_phi_m = cupy.einsum("a,bakr->bkr", phase_m, channel_grid[:, 1], optimize=True)
+        b_theta_m = cupy.einsum("a,bakr->bkr", phase_m, channel_grid[:, 2], optimize=True)
+        b_phi_m = cupy.einsum("a,bakr->bkr", phase_m, channel_grid[:, 3], optimize=True)
         fth_h = fth_h_all[mode_idx, :]
         fph_h = fph_h_all[mode_idx, :]
-        fth_a_theta = cupy.matmul(fth_h[None, :, :], a_theta_m)
-        fph_a_phi = cupy.matmul(fph_h[None, :, :], a_phi_m)
-        fph_b_theta = cupy.matmul(fph_h[None, :, :], b_theta_m)
-        fth_b_phi = cupy.matmul(fth_h[None, :, :], b_phi_m)
-        top[:, mode_idx, :] = fth_a_theta + fph_a_phi - 1j * fph_b_theta + 1j * fth_b_phi
-        fth_b_theta = cupy.matmul(fth_h[None, :, :], b_theta_m)
-        fph_b_phi = cupy.matmul(fph_h[None, :, :], b_phi_m)
-        fph_a_theta = cupy.matmul(fph_h[None, :, :], a_theta_m)
-        fth_a_phi = cupy.matmul(fth_h[None, :, :], a_phi_m)
-        bottom[:, mode_idx, :] = fth_b_theta + fph_b_phi - 1j * fph_a_theta + 1j * fth_a_phi
+        # G_theta = i F_phi and G_phi = -i F_theta. Combine the
+        # alpha-projected beta channels BEFORE applying the beta matrices:
+        #   u = a_theta + i b_phi; v = a_phi - i b_theta
+        #   top = F_theta^H u + F_phi^H v
+        #   bottom = i (F_theta^H v - F_phi^H u).
+        # This is four, rather than eight, beta matrix products. The changed
+        # summation grouping is intentional; all intermediates remain c128.
+        u = a_theta_m + 1j * b_phi_m
+        v = a_phi_m - 1j * b_theta_m
+        del a_theta_m, a_phi_m, b_theta_m, b_phi_m
+        theta_u = cupy.matmul(fth_h[None, :, :], u)
+        phi_v = cupy.matmul(fph_h[None, :, :], v)
+        theta_u += phi_v
+        top[:, mode_idx, :] = theta_u
+        del theta_u, phi_v
+        theta_v = cupy.matmul(fth_h[None, :, :], v)
+        phi_u = cupy.matmul(fph_h[None, :, :], u)
+        theta_v -= phi_u
+        theta_v *= 1j
+        bottom[:, mode_idx, :] = theta_v
+        del theta_v, phi_u, u, v
     return out_arr
 
 
@@ -4096,22 +4134,23 @@ def _box_outgoing_to_directional_adjoint_cupy(
     n_alpha = int(directional.grid.n_alpha)
     n_beta = int(directional.grid.n_beta)
     nscl = int(directional.nscl)
-    reflected = channels.reshape(n_batch, 4, n_alpha, n_beta, n_rhs)[
-        :, :, :, directional.grid.beta_reflection_permutation, :
-    ]
+    # P is an involution, hence F^H P C = (P F)^H C. The uploaded
+    # factors already contain P; keep this O(batch * directions * RHS) input
+    # as a view instead of materializing its reflected copy.
+    channel_grid = channels.reshape(n_batch, 4, n_alpha, n_beta, n_rhs)
     out = cupy.zeros((n_batch, 2 * nscl, n_rhs), dtype=cupy.complex128)
     top = out[:, :nscl, :]
     bottom = out[:, nscl:, :]
-    fth_h_all = cupy.conjugate(cupy.swapaxes(directional.fth_beta, 0, 1))
-    fph_h_all = cupy.conjugate(cupy.swapaxes(directional.fph_beta, 0, 1))
+    fth_h_all = cupy.conjugate(cupy.swapaxes(directional.fth_reflected_beta, 0, 1))
+    fph_h_all = cupy.conjugate(cupy.swapaxes(directional.fph_reflected_beta, 0, 1))
     phase_adj = cupy.conjugate(directional.phase_by_m)
     for im, mode_idx in enumerate(directional.mode_indices_by_m):
         if int(mode_idx.size) == 0:
             continue
-        a_theta = cupy.einsum("a,bakr->bkr", phase_adj[:, im], reflected[:, 0], optimize=True)
-        a_phi = cupy.einsum("a,bakr->bkr", phase_adj[:, im], reflected[:, 1], optimize=True)
-        b_theta = cupy.einsum("a,bakr->bkr", phase_adj[:, im], reflected[:, 2], optimize=True)
-        b_phi = cupy.einsum("a,bakr->bkr", phase_adj[:, im], reflected[:, 3], optimize=True)
+        a_theta = cupy.einsum("a,bakr->bkr", phase_adj[:, im], channel_grid[:, 0], optimize=True)
+        a_phi = cupy.einsum("a,bakr->bkr", phase_adj[:, im], channel_grid[:, 1], optimize=True)
+        b_theta = cupy.einsum("a,bakr->bkr", phase_adj[:, im], channel_grid[:, 2], optimize=True)
+        b_phi = cupy.einsum("a,bakr->bkr", phase_adj[:, im], channel_grid[:, 3], optimize=True)
         fth_h = fth_h_all[mode_idx, :]
         fph_h = fph_h_all[mode_idx, :]
         top[:, mode_idx, :] = cupy.matmul(fth_h[None, :, :], a_theta) + cupy.matmul(
@@ -4151,10 +4190,10 @@ def _directional_to_box_regular_adjoint_cupy(
     bottom = states[:, nscl:, :]
     out = cupy.zeros((n_batch, 4, ndir, n_rhs), dtype=cupy.complex128)
     work = out.reshape(n_batch, 4, n_alpha, n_beta, n_rhs)
-    beta_perm = directional.grid.beta_reflection_permutation
-    fth_reflected = directional.fth_beta[beta_perm]
-    fph_reflected = directional.fph_beta[beta_perm]
+    fth_reflected = directional.fth_reflected_beta
+    fph_reflected = directional.fph_reflected_beta
 
+    phase_add = _directional_phase_add_kernel()
     for im, mode_idx in enumerate(directional.mode_indices_by_m):
         if int(mode_idx.size) == 0:
             continue
@@ -4167,10 +4206,10 @@ def _directional_to_box_regular_adjoint_cupy(
         bottom_theta = cupy.matmul(fth_m[None, :, :], bottom_m)
         bottom_phi = cupy.matmul(fph_m[None, :, :], bottom_m)
         phase = directional.phase_by_m[:, im].reshape(1, n_alpha, 1, 1)
-        work[:, 0] += phase * (top_theta[:, None, :, :] + 1j * bottom_phi[:, None, :, :])
-        work[:, 1] += phase * (top_phi[:, None, :, :] - 1j * bottom_theta[:, None, :, :])
-        work[:, 2] += phase * (1j * top_phi[:, None, :, :] + bottom_theta[:, None, :, :])
-        work[:, 3] += phase * (-1j * top_theta[:, None, :, :] + bottom_phi[:, None, :, :])
+        phase_add(phase, (top_theta + 1j * bottom_phi)[:, None, :, :], work[:, 0])
+        phase_add(phase, (top_phi - 1j * bottom_theta)[:, None, :, :], work[:, 1])
+        phase_add(phase, (1j * top_phi + bottom_theta)[:, None, :, :], work[:, 2])
+        phase_add(phase, (-1j * top_theta + bottom_phi)[:, None, :, :], work[:, 3])
     return out
 
 

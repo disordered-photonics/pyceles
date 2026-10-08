@@ -280,12 +280,18 @@ def test_cupy_mlfmm_directional_upload_uses_structured_factors() -> None:
 
     assert not hasattr(uploaded, "forward_F")
     assert not hasattr(uploaded, "inverse_A_adj")
-    assert tuple(uploaded.fth_beta.shape) == (transforms.grid.beta.size, transforms.Fth.shape[1])
-    assert tuple(uploaded.fph_beta.shape) == (transforms.grid.beta.size, transforms.Fph.shape[1])
+    assert tuple(uploaded.fth_reflected_beta.shape) == (
+        transforms.grid.beta.size,
+        transforms.Fth.shape[1],
+    )
+    assert tuple(uploaded.fph_reflected_beta.shape) == (
+        transforms.grid.beta.size,
+        transforms.Fph.shape[1],
+    )
     dense_bytes = int(transforms.Fth.nbytes + transforms.Fph.nbytes)
     structured_bytes = int(
-        uploaded.fth_beta.nbytes
-        + uploaded.fph_beta.nbytes
+        uploaded.fth_reflected_beta.nbytes
+        + uploaded.fph_reflected_beta.nbytes
         + uploaded.phase_by_m.nbytes
         + uploaded.m_of_scalar.nbytes
     )
