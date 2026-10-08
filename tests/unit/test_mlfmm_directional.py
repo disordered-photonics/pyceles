@@ -41,7 +41,7 @@ def test_directional_transform_maps_are_finite_and_shape_consistent() -> None:
     channels = box_outgoing_to_directional(transforms, box_state)
     recovered = directional_to_box_regular(transforms, *channels)
 
-    assert len(channels) == 4
+    assert len(channels) == 2
     for channel in channels:
         assert channel.shape == (transforms.grid.directions.shape[0],)
         assert np.all(np.isfinite(channel))
@@ -152,7 +152,7 @@ def test_structured_directional_adjoint_matches_dense() -> None:
             rng.standard_normal(n_dir) + 1j * rng.standard_normal(n_dir),
             dtype=np.complex128,
         )
-        for _ in range(4)
+        for _ in range(2)
     )
 
     expected = directional_to_box_regular(dense, *channels)

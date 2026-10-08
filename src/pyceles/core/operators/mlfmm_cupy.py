@@ -39,6 +39,7 @@ from .mlfmm import (
     MLFMMTransferOperators,
 )
 from .mlfmm_directional import (
+    _SAMPLED_DIRECTIONAL_CHANNELS,
     MLFMMDirectionalStructuredTransforms,
     MLFMMDirectionalTransformData,
     structured_directional_transforms,
@@ -3073,7 +3074,7 @@ def _weighted_add_unique_complex128_raw_kernel() -> Any:
         const complex<double>* weights,
         complex<double>* out
     ) {
-        const long long width = 4LL * n_dirs * nrhs;
+        const long long width = 2LL * n_dirs * nrhs;
         const long long tid = (long long)blockIdx.x * (long long)blockDim.x + (long long)threadIdx.x;
         const long long total = n_pairs * width;
         for (long long i = tid; i < total; i += (long long)blockDim.x * (long long)gridDim.x) {
@@ -3085,7 +3086,7 @@ def _weighted_add_unique_complex128_raw_kernel() -> Any:
             const long long dir = rem / nrhs;
             const long long rhs = rem - dir * nrhs;
             const long long out_row = dst[pair_idx];
-            const long long out_idx = ((out_row * 4LL + chan) * n_dirs + dir) * nrhs + rhs;
+            const long long out_idx = ((out_row * 2LL + chan) * n_dirs + dir) * nrhs + rhs;
             out[out_idx] += values[i] * weights[dir];
         }
     }
@@ -3108,7 +3109,7 @@ def _weighted_gather_add_unique_complex128_raw_kernel() -> Any:
         const complex<double>* weights,
         complex<double>* out
     ) {
-        const long long width = 4LL * n_dirs * nrhs;
+        const long long width = 2LL * n_dirs * nrhs;
         const long long tid = (long long)blockIdx.x * (long long)blockDim.x + (long long)threadIdx.x;
         const long long total = n_pairs * width;
         for (long long i = tid; i < total; i += (long long)blockDim.x * (long long)gridDim.x) {
@@ -3121,8 +3122,8 @@ def _weighted_gather_add_unique_complex128_raw_kernel() -> Any:
             const long long rhs = rem - dir * nrhs;
             const long long src_row = src[pair_idx];
             const long long dst_row = dst[pair_idx];
-            const long long src_idx = ((src_row * 4LL + chan) * n_dirs + dir) * nrhs + rhs;
-            const long long out_idx = ((dst_row * 4LL + chan) * n_dirs + dir) * nrhs + rhs;
+            const long long src_idx = ((src_row * 2LL + chan) * n_dirs + dir) * nrhs + rhs;
+            const long long out_idx = ((dst_row * 2LL + chan) * n_dirs + dir) * nrhs + rhs;
             out[out_idx] += source_values[src_idx] * weights[dir];
         }
     }
@@ -3184,7 +3185,7 @@ def _weighted_add_at_complex128(
     *,
     cupy: Any,
 ) -> None:
-    """Apply weighted `add.at` accumulation for `(pair, 4, ndir, nrhs)` batches."""
+    """Apply weighted `add.at` accumulation for `(pair, 2, ndir, nrhs)` batches."""
 
     idx = cupy.asarray(indices, dtype=cupy.int32).reshape(-1)
     if int(idx.size) == 0:
@@ -3194,12 +3195,13 @@ def _weighted_add_at_complex128(
     w = cupy.asarray(weights, dtype=cupy.complex128).reshape(-1)
     if vals.ndim != 4 or int(vals.shape[0]) != int(idx.size):
         raise ValueError(
-            "Weighted add-at expects values with shape (n_pairs, 4, ndir, nrhs). "
+            "Weighted add-at expects values with shape (n_pairs, 2, ndir, nrhs). "
             f"Got {tuple(int(v) for v in vals.shape)} for n_pairs={int(idx.size)}."
         )
-    if int(vals.shape[1]) != 4:
+    if int(vals.shape[1]) != _SAMPLED_DIRECTIONAL_CHANNELS:
         raise ValueError(
-            f"Weighted add-at expects 4 directional channels, got {int(vals.shape[1])}."
+            "Weighted add-at expects "
+            f"{_SAMPLED_DIRECTIONAL_CHANNELS} directional channels, got {int(vals.shape[1])}."
         )
     if int(vals.shape[2]) != int(w.size):
         raise ValueError(
@@ -3264,10 +3266,15 @@ def _weighted_gather_add_complex128(
     w = cupy.asarray(weights, dtype=cupy.complex128).reshape(-1)
     if src_arr.ndim != 4:
         raise ValueError(
-            f"Weighted gather-add expects source shape (nbox, 4, ndir, nrhs), got ndim={src_arr.ndim}."
+            f"Weighted gather-add expects source shape (nbox, {_SAMPLED_DIRECTIONAL_CHANNELS}, ndir, nrhs), got ndim={src_arr.ndim}."
         )
-    if int(src_arr.shape[1]) != 4 or int(tgt.shape[1]) != 4:
-        raise ValueError("Weighted gather-add expects 4 directional channels.")
+    if (
+        int(src_arr.shape[1]) != _SAMPLED_DIRECTIONAL_CHANNELS
+        or int(tgt.shape[1]) != _SAMPLED_DIRECTIONAL_CHANNELS
+    ):
+        raise ValueError(
+            f"Weighted gather-add expects {_SAMPLED_DIRECTIONAL_CHANNELS} directional channels."
+        )
     if int(src_arr.shape[2]) != int(w.size):
         raise ValueError(
             "Weighted gather-add direction count mismatch between source and weights: "
@@ -3288,7 +3295,7 @@ def _weighted_gather_add_complex128(
         raise ValueError("Weighted gather-add index out of bounds.")
 
     threads = 256
-    total = int(src.size) * 4 * int(w.size) * int(src_arr.shape[3])
+    total = int(src.size) * _SAMPLED_DIRECTIONAL_CHANNELS * int(w.size) * int(src_arr.shape[3])
     blocks = max(1, (total + threads - 1) // threads)
     kernel = _weighted_gather_add_unique_complex128_raw_kernel()
     kernel(
@@ -3326,7 +3333,7 @@ def _transfer_up_packed_unique_complex128_raw_kernel() -> Any:
         const complex<double>* source_values,
         complex<double>* out
     ) {
-        const long long span = 4LL * n_target * n_rhs;
+        const long long span = 2LL * n_target * n_rhs;
         const long long tid = (long long)blockIdx.x * (long long)blockDim.x + (long long)threadIdx.x;
         const long long total = n_pairs * span;
         for (long long i = tid; i < total; i += (long long)blockDim.x * (long long)gridDim.x) {
@@ -3342,7 +3349,7 @@ def _transfer_up_packed_unique_complex128_raw_kernel() -> Any:
             const long long dst_box = dst_rows[pair_idx];
             const int row_base = (int)(dst_dir * (long long)width);
 
-            const long long src_base = ((src_box * 4LL + chan) * n_source) * n_rhs + rhs;
+            const long long src_base = ((src_box * 2LL + chan) * n_source) * n_rhs + rhs;
             complex<double> acc = complex<double>(0.0, 0.0);
             for (int k = 0; k < width; ++k) {
                 const int col = packed_cols[row_base + k];
@@ -3353,7 +3360,7 @@ def _transfer_up_packed_unique_complex128_raw_kernel() -> Any:
                 const complex<double> x = source_values[src_base + (long long)col * n_rhs];
                 acc += w * x;
             }
-            const long long out_idx = ((dst_box * 4LL + chan) * n_target + dst_dir) * n_rhs + rhs;
+            const long long out_idx = ((dst_box * 2LL + chan) * n_target + dst_dir) * n_rhs + rhs;
             out[out_idx] += acc * phase[dst_dir];
         }
     }
@@ -3380,7 +3387,7 @@ def _transfer_down_packed_unique_complex128_raw_kernel() -> Any:
         const complex<double>* source_values,
         complex<double>* out
     ) {
-        const long long span = 4LL * n_target * n_rhs;
+        const long long span = 2LL * n_target * n_rhs;
         const long long tid = (long long)blockIdx.x * (long long)blockDim.x + (long long)threadIdx.x;
         const long long total = n_pairs * span;
         for (long long i = tid; i < total; i += (long long)blockDim.x * (long long)gridDim.x) {
@@ -3396,7 +3403,7 @@ def _transfer_down_packed_unique_complex128_raw_kernel() -> Any:
             const long long dst_box = dst_rows[pair_idx];
             const int row_base = (int)(dst_dir * (long long)width);
 
-            const long long src_base = ((src_box * 4LL + chan) * n_source) * n_rhs + rhs;
+            const long long src_base = ((src_box * 2LL + chan) * n_source) * n_rhs + rhs;
             complex<double> acc = complex<double>(0.0, 0.0);
             for (int k = 0; k < width; ++k) {
                 const int col = packed_cols[row_base + k];
@@ -3407,7 +3414,7 @@ def _transfer_down_packed_unique_complex128_raw_kernel() -> Any:
                 const complex<double> x = source_values[src_base + (long long)col * n_rhs];
                 acc += w * (phase[col] * x);
             }
-            const long long out_idx = ((dst_box * 4LL + chan) * n_target + dst_dir) * n_rhs + rhs;
+            const long long out_idx = ((dst_box * 2LL + chan) * n_target + dst_dir) * n_rhs + rhs;
             out[out_idx] += acc;
         }
     }
@@ -3438,7 +3445,10 @@ def _transfer_up_packed_unique_complex128(
     src_arr = cupy.asarray(source_values, dtype=cupy.complex128)
     tgt = cupy.asarray(target, dtype=cupy.complex128)
     if src_arr.ndim != 4 or tgt.ndim != 4:
-        raise ValueError("Packed transfer expects source/target shape (nbox,4,ndir,nrhs).")
+        raise ValueError(
+            "Packed transfer expects source/target shape "
+            f"(nbox,{_SAMPLED_DIRECTIONAL_CHANNELS},ndir,nrhs)."
+        )
     n_source = int(map_data.source_order)
     n_target = int(map_data.target_order)
     if int(src_arr.shape[2]) != n_source or int(tgt.shape[2]) != n_target:
@@ -3448,8 +3458,13 @@ def _transfer_up_packed_unique_complex128(
         )
     if int(src_arr.shape[3]) != int(tgt.shape[3]):
         raise ValueError("Packed transfer RHS mismatch between source and target.")
-    if int(src_arr.shape[1]) != 4 or int(tgt.shape[1]) != 4:
-        raise ValueError("Packed transfer expects 4 directional channels.")
+    if (
+        int(src_arr.shape[1]) != _SAMPLED_DIRECTIONAL_CHANNELS
+        or int(tgt.shape[1]) != _SAMPLED_DIRECTIONAL_CHANNELS
+    ):
+        raise ValueError(
+            f"Packed transfer expects {_SAMPLED_DIRECTIONAL_CHANNELS} directional channels."
+        )
     packed_cols, packed_vals, width_i32 = map_data.matrix
     phase_arr = cupy.asarray(phase, dtype=cupy.complex128).reshape(-1)
     if int(phase_arr.size) != n_target:
@@ -3458,7 +3473,7 @@ def _transfer_up_packed_unique_complex128(
         )
     width = int(width_i32)
     threads = 256
-    total = int(src.size) * 4 * n_target * int(src_arr.shape[3])
+    total = int(src.size) * _SAMPLED_DIRECTIONAL_CHANNELS * n_target * int(src_arr.shape[3])
     blocks = max(1, (total + threads - 1) // threads)
     _transfer_up_packed_unique_complex128_raw_kernel()(
         (int(blocks),),
@@ -3503,7 +3518,10 @@ def _transfer_down_packed_unique_complex128(
     src_arr = cupy.asarray(source_values, dtype=cupy.complex128)
     tgt = cupy.asarray(target, dtype=cupy.complex128)
     if src_arr.ndim != 4 or tgt.ndim != 4:
-        raise ValueError("Packed transfer expects source/target shape (nbox,4,ndir,nrhs).")
+        raise ValueError(
+            "Packed transfer expects source/target shape "
+            f"(nbox,{_SAMPLED_DIRECTIONAL_CHANNELS},ndir,nrhs)."
+        )
     n_source = int(map_data.source_order)
     n_target = int(map_data.target_order)
     if int(src_arr.shape[2]) != n_source or int(tgt.shape[2]) != n_target:
@@ -3513,8 +3531,13 @@ def _transfer_down_packed_unique_complex128(
         )
     if int(src_arr.shape[3]) != int(tgt.shape[3]):
         raise ValueError("Packed transfer RHS mismatch between source and target.")
-    if int(src_arr.shape[1]) != 4 or int(tgt.shape[1]) != 4:
-        raise ValueError("Packed transfer expects 4 directional channels.")
+    if (
+        int(src_arr.shape[1]) != _SAMPLED_DIRECTIONAL_CHANNELS
+        or int(tgt.shape[1]) != _SAMPLED_DIRECTIONAL_CHANNELS
+    ):
+        raise ValueError(
+            f"Packed transfer expects {_SAMPLED_DIRECTIONAL_CHANNELS} directional channels."
+        )
     packed_cols, packed_vals, width_i32 = map_data.matrix
     phase_arr = cupy.asarray(phase, dtype=cupy.complex128).reshape(-1)
     if int(phase_arr.size) != n_source:
@@ -3523,7 +3546,7 @@ def _transfer_down_packed_unique_complex128(
         )
     width = int(width_i32)
     threads = 256
-    total = int(src.size) * 4 * n_target * int(src_arr.shape[3])
+    total = int(src.size) * _SAMPLED_DIRECTIONAL_CHANNELS * n_target * int(src_arr.shape[3])
     blocks = max(1, (total + threads - 1) // threads)
     _transfer_down_packed_unique_complex128_raw_kernel()(
         (int(blocks),),
@@ -3564,7 +3587,7 @@ def _transfer_up_csr_unique_complex128_raw_kernel() -> Any:
         const complex<double>* source_values,
         complex<double>* out
     ) {
-        const long long span = 4LL * n_target * n_rhs;
+        const long long span = 2LL * n_target * n_rhs;
         const long long tid = (long long)blockIdx.x * (long long)blockDim.x + (long long)threadIdx.x;
         const long long total = n_pairs * span;
         for (long long i = tid; i < total; i += (long long)blockDim.x * (long long)gridDim.x) {
@@ -3580,7 +3603,7 @@ def _transfer_up_csr_unique_complex128_raw_kernel() -> Any:
             const long long dst_box = dst_rows[pair_idx];
             const int start = indptr[dst_dir];
             const int end = indptr[dst_dir + 1];
-            const long long src_base = ((src_box * 4LL + chan) * n_source) * n_rhs + rhs;
+            const long long src_base = ((src_box * 2LL + chan) * n_source) * n_rhs + rhs;
 
             complex<double> acc = complex<double>(0.0, 0.0);
             for (int p = start; p < end; ++p) {
@@ -3589,7 +3612,7 @@ def _transfer_up_csr_unique_complex128_raw_kernel() -> Any:
                 const complex<double> x = source_values[src_base + (long long)col * n_rhs];
                 acc += w * x;
             }
-            const long long out_idx = ((dst_box * 4LL + chan) * n_target + dst_dir) * n_rhs + rhs;
+            const long long out_idx = ((dst_box * 2LL + chan) * n_target + dst_dir) * n_rhs + rhs;
             out[out_idx] += acc * phase[dst_dir];
         }
     }
@@ -3616,7 +3639,7 @@ def _transfer_down_csr_unique_complex128_raw_kernel() -> Any:
         const complex<double>* source_values,
         complex<double>* out
     ) {
-        const long long span = 4LL * n_target * n_rhs;
+        const long long span = 2LL * n_target * n_rhs;
         const long long tid = (long long)blockIdx.x * (long long)blockDim.x + (long long)threadIdx.x;
         const long long total = n_pairs * span;
         for (long long i = tid; i < total; i += (long long)blockDim.x * (long long)gridDim.x) {
@@ -3632,7 +3655,7 @@ def _transfer_down_csr_unique_complex128_raw_kernel() -> Any:
             const long long dst_box = dst_rows[pair_idx];
             const int start = indptr[dst_dir];
             const int end = indptr[dst_dir + 1];
-            const long long src_base = ((src_box * 4LL + chan) * n_source) * n_rhs + rhs;
+            const long long src_base = ((src_box * 2LL + chan) * n_source) * n_rhs + rhs;
 
             complex<double> acc = complex<double>(0.0, 0.0);
             for (int p = start; p < end; ++p) {
@@ -3641,7 +3664,7 @@ def _transfer_down_csr_unique_complex128_raw_kernel() -> Any:
                 const complex<double> x = source_values[src_base + (long long)col * n_rhs];
                 acc += w * (phase[col] * x);
             }
-            const long long out_idx = ((dst_box * 4LL + chan) * n_target + dst_dir) * n_rhs + rhs;
+            const long long out_idx = ((dst_box * 2LL + chan) * n_target + dst_dir) * n_rhs + rhs;
             out[out_idx] += acc;
         }
     }
@@ -3672,7 +3695,10 @@ def _transfer_up_sparse_unique_complex128(
     src_arr = cupy.asarray(source_values, dtype=cupy.complex128)
     tgt = cupy.asarray(target, dtype=cupy.complex128)
     if src_arr.ndim != 4 or tgt.ndim != 4:
-        raise ValueError("Sparse transfer expects source/target shape (nbox,4,ndir,nrhs).")
+        raise ValueError(
+            "Sparse transfer expects source/target shape "
+            f"(nbox,{_SAMPLED_DIRECTIONAL_CHANNELS},ndir,nrhs)."
+        )
     n_source = int(map_data.source_order)
     n_target = int(map_data.target_order)
     if int(src_arr.shape[2]) != n_source or int(tgt.shape[2]) != n_target:
@@ -3682,8 +3708,13 @@ def _transfer_up_sparse_unique_complex128(
         )
     if int(src_arr.shape[3]) != int(tgt.shape[3]):
         raise ValueError("Sparse transfer RHS mismatch between source and target.")
-    if int(src_arr.shape[1]) != 4 or int(tgt.shape[1]) != 4:
-        raise ValueError("Sparse transfer expects 4 directional channels.")
+    if (
+        int(src_arr.shape[1]) != _SAMPLED_DIRECTIONAL_CHANNELS
+        or int(tgt.shape[1]) != _SAMPLED_DIRECTIONAL_CHANNELS
+    ):
+        raise ValueError(
+            f"Sparse transfer expects {_SAMPLED_DIRECTIONAL_CHANNELS} directional channels."
+        )
     sparse = map_data.matrix
     phase_arr = cupy.asarray(phase, dtype=cupy.complex128).reshape(-1)
     if int(phase_arr.size) != n_target:
@@ -3691,7 +3722,7 @@ def _transfer_up_sparse_unique_complex128(
             f"Sparse transfer-up phase length mismatch: {int(phase_arr.size)} vs {n_target}."
         )
     threads = 256
-    total = int(src.size) * 4 * n_target * int(src_arr.shape[3])
+    total = int(src.size) * _SAMPLED_DIRECTIONAL_CHANNELS * n_target * int(src_arr.shape[3])
     blocks = max(1, (total + threads - 1) // threads)
     _transfer_up_csr_unique_complex128_raw_kernel()(
         (int(blocks),),
@@ -3736,7 +3767,10 @@ def _transfer_down_sparse_unique_complex128(
     src_arr = cupy.asarray(source_values, dtype=cupy.complex128)
     tgt = cupy.asarray(target, dtype=cupy.complex128)
     if src_arr.ndim != 4 or tgt.ndim != 4:
-        raise ValueError("Sparse transfer expects source/target shape (nbox,4,ndir,nrhs).")
+        raise ValueError(
+            "Sparse transfer expects source/target shape "
+            f"(nbox,{_SAMPLED_DIRECTIONAL_CHANNELS},ndir,nrhs)."
+        )
     n_source = int(map_data.source_order)
     n_target = int(map_data.target_order)
     if int(src_arr.shape[2]) != n_source or int(tgt.shape[2]) != n_target:
@@ -3746,8 +3780,13 @@ def _transfer_down_sparse_unique_complex128(
         )
     if int(src_arr.shape[3]) != int(tgt.shape[3]):
         raise ValueError("Sparse transfer RHS mismatch between source and target.")
-    if int(src_arr.shape[1]) != 4 or int(tgt.shape[1]) != 4:
-        raise ValueError("Sparse transfer expects 4 directional channels.")
+    if (
+        int(src_arr.shape[1]) != _SAMPLED_DIRECTIONAL_CHANNELS
+        or int(tgt.shape[1]) != _SAMPLED_DIRECTIONAL_CHANNELS
+    ):
+        raise ValueError(
+            f"Sparse transfer expects {_SAMPLED_DIRECTIONAL_CHANNELS} directional channels."
+        )
     sparse = map_data.matrix
     phase_arr = cupy.asarray(phase, dtype=cupy.complex128).reshape(-1)
     if int(phase_arr.size) != n_source:
@@ -3755,7 +3794,7 @@ def _transfer_down_sparse_unique_complex128(
             f"Sparse transfer-down phase length mismatch: {int(phase_arr.size)} vs {n_source}."
         )
     threads = 256
-    total = int(src.size) * 4 * n_target * int(src_arr.shape[3])
+    total = int(src.size) * _SAMPLED_DIRECTIONAL_CHANNELS * n_target * int(src_arr.shape[3])
     blocks = max(1, (total + threads - 1) // threads)
     _transfer_down_csr_unique_complex128_raw_kernel()(
         (int(blocks),),
@@ -3922,14 +3961,17 @@ def _apply_directional_map(
     Parameters
     ----------
     values:
-        Shape `(nbatch, 4, n_source, nrhs)`.
+        Shape `(nbatch, 2, n_source, nrhs)`.
     map_data:
         Device transfer map metadata.
     """
 
     arr = cupy.asarray(values, dtype=cupy.complex128)
-    if arr.ndim != 4 or int(arr.shape[1]) != 4:
-        raise ValueError("Directional transfer input must have shape (nbatch, 4, n_source, nrhs).")
+    if arr.ndim != 4 or int(arr.shape[1]) != _SAMPLED_DIRECTIONAL_CHANNELS:
+        raise ValueError(
+            "Directional transfer input must have shape "
+            f"(nbatch,{_SAMPLED_DIRECTIONAL_CHANNELS},n_source,nrhs)."
+        )
     if int(arr.shape[2]) != int(map_data.source_order):
         raise ValueError(
             "Directional transfer source-order mismatch: "
@@ -3980,15 +4022,15 @@ def _apply_directional_map(
 
 
 @cache
-def _directional_phase_add_kernel() -> Any:
-    """Broadcast a phase into an owned c128 channel view without a product tensor."""
+def _directional_phase_add_pair_kernel() -> Any:
+    """Add a signed imaginary pair without materializing its combination."""
 
     cupy, _ = import_cupy()
     return cupy.ElementwiseKernel(
-        "complex128 phase, complex128 beta_values",
+        "complex128 phase, complex128 first, complex128 second, complex128 imag_sign",
         "complex128 output",
-        "output += phase * beta_values;",
-        "pyceles_mlfmm_directional_phase_add_c128",
+        "output += phase * (first + imag_sign * second);",
+        "pyceles_mlfmm_directional_phase_add_pair_c128",
     )
 
 
@@ -4017,10 +4059,13 @@ def _box_outgoing_to_directional_cupy(
     out_arr = (
         cupy.asarray(out, dtype=cupy.complex128)
         if out is not None
-        else cupy.empty((n_batch, 4, ndir, n_rhs), dtype=cupy.complex128)
+        else cupy.empty(
+            (n_batch, _SAMPLED_DIRECTIONAL_CHANNELS, ndir, n_rhs),
+            dtype=cupy.complex128,
+        )
     )
     out_arr.fill(0)
-    work = out_arr.reshape(n_batch, 4, n_alpha, n_beta, n_rhs)
+    work = out_arr.reshape(n_batch, _SAMPLED_DIRECTIONAL_CHANNELS, n_alpha, n_beta, n_rhs)
     fth_reflected = directional.fth_reflected_beta
     fph_reflected = directional.fph_reflected_beta
 
@@ -4028,7 +4073,7 @@ def _box_outgoing_to_directional_cupy(
     # effectively identical runtime while increasing peak memory, so keep the
     # simpler explicit phase contraction until profiling shows a different
     # bottleneck.
-    phase_add = _directional_phase_add_kernel()
+    phase_add_pair = _directional_phase_add_pair_kernel()
     for im, mode_idx in enumerate(directional.mode_indices_by_m):
         if int(mode_idx.size) == 0:
             continue
@@ -4041,10 +4086,22 @@ def _box_outgoing_to_directional_cupy(
         b_theta_beta = cupy.matmul(fth_m[None, :, :], b_m)
         b_phi_beta = cupy.matmul(fph_m[None, :, :], b_m)
         phase = directional.phase_by_m[:, im].reshape(1, n_alpha, 1, 1)
-        phase_add(phase, a_theta_beta[:, None, :, :], work[:, 0])
-        phase_add(phase, a_phi_beta[:, None, :, :], work[:, 1])
-        phase_add(phase, b_theta_beta[:, None, :, :], work[:, 2])
-        phase_add(phase, b_phi_beta[:, None, :, :], work[:, 3])
+        # The sampled far translator is channel-independent, so the mixed
+        # representation can be formed before transport.
+        phase_add_pair(
+            phase,
+            a_theta_beta[:, None, :, :],
+            b_phi_beta[:, None, :, :],
+            1j,
+            work[:, 0],
+        )
+        phase_add_pair(
+            phase,
+            a_phi_beta[:, None, :, :],
+            b_theta_beta[:, None, :, :],
+            -1j,
+            work[:, 1],
+        )
     return out_arr
 
 
@@ -4058,9 +4115,10 @@ def _directional_to_box_regular_cupy(
     """Map batched directional channels to regular box SVWF states on device."""
 
     channels = cupy.asarray(directional_channels, dtype=cupy.complex128)
-    if int(channels.shape[1]) != 4:
+    if int(channels.shape[1]) != _SAMPLED_DIRECTIONAL_CHANNELS:
         raise ValueError(
-            f"directional channel batch must have 4 channels, got {int(channels.shape[1])}."
+            "directional channel batch must have "
+            f"{_SAMPLED_DIRECTIONAL_CHANNELS} channels, got {int(channels.shape[1])}."
         )
     n_batch = int(channels.shape[0])
     n_rhs = int(channels.shape[3])
@@ -4070,7 +4128,7 @@ def _directional_to_box_regular_cupy(
     # P is an involution, hence F^H P C = (P F)^H C. The uploaded
     # factors already contain P; keep this O(batch * directions * RHS) input
     # as a view instead of materializing its reflected copy.
-    channel_grid = channels.reshape(n_batch, 4, n_alpha, n_beta, n_rhs)
+    channel_grid = channels.reshape(n_batch, _SAMPLED_DIRECTIONAL_CHANNELS, n_alpha, n_beta, n_rhs)
     out_arr = (
         cupy.asarray(out, dtype=cupy.complex128)
         if out is not None
@@ -4088,33 +4146,16 @@ def _directional_to_box_regular_cupy(
         if int(mode_idx.size) == 0:
             continue
         phase_m = phase_adj[:, im]
-        a_theta_m = cupy.einsum("a,bakr->bkr", phase_m, channel_grid[:, 0], optimize=True)
-        a_phi_m = cupy.einsum("a,bakr->bkr", phase_m, channel_grid[:, 1], optimize=True)
-        b_theta_m = cupy.einsum("a,bakr->bkr", phase_m, channel_grid[:, 2], optimize=True)
-        b_phi_m = cupy.einsum("a,bakr->bkr", phase_m, channel_grid[:, 3], optimize=True)
+        u_m = cupy.einsum("a,bakr->bkr", phase_m, channel_grid[:, 0], optimize=True)
+        v_m = cupy.einsum("a,bakr->bkr", phase_m, channel_grid[:, 1], optimize=True)
         fth_h = fth_h_all[mode_idx, :]
         fph_h = fph_h_all[mode_idx, :]
-        # G_theta = i F_phi and G_phi = -i F_theta. Combine the
-        # alpha-projected beta channels BEFORE applying the beta matrices:
-        #   u = a_theta + i b_phi; v = a_phi - i b_theta
-        #   top = F_theta^H u + F_phi^H v
-        #   bottom = i (F_theta^H v - F_phi^H u).
-        # This is four, rather than eight, beta matrix products. The changed
-        # summation grouping is intentional; all intermediates remain c128.
-        u = a_theta_m + 1j * b_phi_m
-        v = a_phi_m - 1j * b_theta_m
-        del a_theta_m, a_phi_m, b_theta_m, b_phi_m
-        theta_u = cupy.matmul(fth_h[None, :, :], u)
-        phi_v = cupy.matmul(fph_h[None, :, :], v)
-        theta_u += phi_v
-        top[:, mode_idx, :] = theta_u
-        del theta_u, phi_v
-        theta_v = cupy.matmul(fth_h[None, :, :], v)
-        phi_u = cupy.matmul(fph_h[None, :, :], u)
-        theta_v -= phi_u
-        theta_v *= 1j
-        bottom[:, mode_idx, :] = theta_v
-        del theta_v, phi_u, u, v
+        theta_u = cupy.matmul(fth_h[None, :, :], u_m)
+        phi_v = cupy.matmul(fph_h[None, :, :], v_m)
+        top[:, mode_idx, :] = theta_u + phi_v
+        theta_v = cupy.matmul(fth_h[None, :, :], v_m)
+        phi_u = cupy.matmul(fph_h[None, :, :], u_m)
+        bottom[:, mode_idx, :] = 1j * (theta_v - phi_u)
     return out_arr
 
 
@@ -4126,40 +4167,11 @@ def _box_outgoing_to_directional_adjoint_cupy(
 ) -> Any:
     """Apply the adjoint of the outgoing directional transform on device."""
 
-    channels = cupy.asarray(directional_channels, dtype=cupy.complex128)
-    if channels.ndim != 4 or int(channels.shape[1]) != 4:
-        raise ValueError("Directional adjoint input must have shape (batch, 4, ndir, nrhs).")
-    n_batch = int(channels.shape[0])
-    n_rhs = int(channels.shape[3])
-    n_alpha = int(directional.grid.n_alpha)
-    n_beta = int(directional.grid.n_beta)
-    nscl = int(directional.nscl)
-    # P is an involution, hence F^H P C = (P F)^H C. The uploaded
-    # factors already contain P; keep this O(batch * directions * RHS) input
-    # as a view instead of materializing its reflected copy.
-    channel_grid = channels.reshape(n_batch, 4, n_alpha, n_beta, n_rhs)
-    out = cupy.zeros((n_batch, 2 * nscl, n_rhs), dtype=cupy.complex128)
-    top = out[:, :nscl, :]
-    bottom = out[:, nscl:, :]
-    fth_h_all = cupy.conjugate(cupy.swapaxes(directional.fth_reflected_beta, 0, 1))
-    fph_h_all = cupy.conjugate(cupy.swapaxes(directional.fph_reflected_beta, 0, 1))
-    phase_adj = cupy.conjugate(directional.phase_by_m)
-    for im, mode_idx in enumerate(directional.mode_indices_by_m):
-        if int(mode_idx.size) == 0:
-            continue
-        a_theta = cupy.einsum("a,bakr->bkr", phase_adj[:, im], channel_grid[:, 0], optimize=True)
-        a_phi = cupy.einsum("a,bakr->bkr", phase_adj[:, im], channel_grid[:, 1], optimize=True)
-        b_theta = cupy.einsum("a,bakr->bkr", phase_adj[:, im], channel_grid[:, 2], optimize=True)
-        b_phi = cupy.einsum("a,bakr->bkr", phase_adj[:, im], channel_grid[:, 3], optimize=True)
-        fth_h = fth_h_all[mode_idx, :]
-        fph_h = fph_h_all[mode_idx, :]
-        top[:, mode_idx, :] = cupy.matmul(fth_h[None, :, :], a_theta) + cupy.matmul(
-            fph_h[None, :, :], a_phi
-        )
-        bottom[:, mode_idx, :] = cupy.matmul(fth_h[None, :, :], b_theta) + cupy.matmul(
-            fph_h[None, :, :], b_phi
-        )
-    return out
+    return _directional_to_box_regular_cupy(
+        directional,
+        directional_channels,
+        cupy=cupy,
+    )
 
 
 def _directional_to_box_regular_adjoint_cupy(
@@ -4168,49 +4180,13 @@ def _directional_to_box_regular_adjoint_cupy(
     *,
     cupy: Any,
 ) -> Any:
-    """Apply the adjoint of the regular directional receive transform.
+    """Apply the adjoint of the regular directional receive transform."""
 
-    This is the algebraic equivalent of applying the outgoing transform to
-    zero-padded electric/magnetic box states and combining the two four-channel
-    results, but writes directly into the final directional buffer.  Avoiding
-    those padded states and intermediate channel arrays is important for the
-    bounded streamed-adjoint memory contract.
-    """
-
-    states = cupy.asarray(box_states, dtype=cupy.complex128)
-    nscl = int(directional.nscl)
-    if states.ndim != 3 or int(states.shape[1]) != 2 * nscl:
-        raise ValueError("Regular-transform adjoint input must have shape (batch, 2*nscl, nrhs).")
-    n_batch = int(states.shape[0])
-    n_rhs = int(states.shape[2])
-    n_alpha = int(directional.grid.n_alpha)
-    n_beta = int(directional.grid.n_beta)
-    ndir = int(directional.grid.n_directions)
-    top = states[:, :nscl, :]
-    bottom = states[:, nscl:, :]
-    out = cupy.zeros((n_batch, 4, ndir, n_rhs), dtype=cupy.complex128)
-    work = out.reshape(n_batch, 4, n_alpha, n_beta, n_rhs)
-    fth_reflected = directional.fth_reflected_beta
-    fph_reflected = directional.fph_reflected_beta
-
-    phase_add = _directional_phase_add_kernel()
-    for im, mode_idx in enumerate(directional.mode_indices_by_m):
-        if int(mode_idx.size) == 0:
-            continue
-        fth_m = fth_reflected[:, mode_idx]
-        fph_m = fph_reflected[:, mode_idx]
-        top_m = top[:, mode_idx, :]
-        bottom_m = bottom[:, mode_idx, :]
-        top_theta = cupy.matmul(fth_m[None, :, :], top_m)
-        top_phi = cupy.matmul(fph_m[None, :, :], top_m)
-        bottom_theta = cupy.matmul(fth_m[None, :, :], bottom_m)
-        bottom_phi = cupy.matmul(fph_m[None, :, :], bottom_m)
-        phase = directional.phase_by_m[:, im].reshape(1, n_alpha, 1, 1)
-        phase_add(phase, (top_theta + 1j * bottom_phi)[:, None, :, :], work[:, 0])
-        phase_add(phase, (top_phi - 1j * bottom_theta)[:, None, :, :], work[:, 1])
-        phase_add(phase, (1j * top_phi + bottom_theta)[:, None, :, :], work[:, 2])
-        phase_add(phase, (-1j * top_theta + bottom_phi)[:, None, :, :], work[:, 3])
-    return out
+    return _box_outgoing_to_directional_cupy(
+        directional,
+        box_states,
+        cupy=cupy,
+    )
 
 
 def _leaf_translation_blocks_from_pair_deltas(
@@ -5499,11 +5475,21 @@ def _ensure_single_level_workspace(
             (int(key.n_leaves), int(key.box_nm), int(key.nrhs)), dtype=cupy.complex128
         ),
         outgoing=cupy.empty(
-            (int(key.n_leaves), 4, int(key.n_directions), int(key.nrhs)),
+            (
+                int(key.n_leaves),
+                _SAMPLED_DIRECTIONAL_CHANNELS,
+                int(key.n_directions),
+                int(key.nrhs),
+            ),
             dtype=cupy.complex128,
         ),
         incoming=cupy.empty(
-            (int(key.n_leaves), 4, int(key.n_directions), int(key.nrhs)),
+            (
+                int(key.n_leaves),
+                _SAMPLED_DIRECTIONAL_CHANNELS,
+                int(key.n_directions),
+                int(key.nrhs),
+            ),
             dtype=cupy.complex128,
         ),
         incoming_box=cupy.empty(
@@ -5556,7 +5542,10 @@ def _ensure_multilevel_workspace(
             level = levels[level_idx]
             parity = int((level_idx - hf_start) & 1)
             level_elements = (
-                int(level.n_boxes) * 4 * int(level.directional.grid.n_directions) * int(key.nrhs)
+                int(level.n_boxes)
+                * _SAMPLED_DIRECTIONAL_CHANNELS
+                * int(level.directional.grid.n_directions)
+                * int(key.nrhs)
             )
             max_elements_by_parity[parity] = max(
                 max_elements_by_parity[parity], int(level_elements)
@@ -5923,7 +5912,12 @@ def _apply_multilevel_far_adjoint(
     levels = multilevel.levels
     incoming = [
         cupy.zeros(
-            (int(level.n_boxes), 4, int(level.directional.grid.n_directions), nrhs),
+            (
+                int(level.n_boxes),
+                _SAMPLED_DIRECTIONAL_CHANNELS,
+                int(level.directional.grid.n_directions),
+                nrhs,
+            ),
             dtype=cupy.complex128,
         )
         for level in levels
@@ -6012,9 +6006,12 @@ def _multilevel_incoming_roll_view(
     n_boxes = int(level.n_boxes)
     n_dirs = int(level.directional.grid.n_directions)
     n_rhs = int(nrhs)
-    required = int(n_boxes * 4 * n_dirs * n_rhs)
+    required = int(n_boxes * _SAMPLED_DIRECTIONAL_CHANNELS * n_dirs * n_rhs)
     if workspace is None:
-        return cupy.zeros((n_boxes, 4, n_dirs, n_rhs), dtype=cupy.complex128)
+        return cupy.zeros(
+            (n_boxes, _SAMPLED_DIRECTIONAL_CHANNELS, n_dirs, n_rhs),
+            dtype=cupy.complex128,
+        )
     parity = int((int(level_idx) - int(hf_start)) & 1)
     backing = workspace.incoming_roll_even if parity == 0 else workspace.incoming_roll_odd
     if backing is None:
@@ -6030,7 +6027,7 @@ def _multilevel_incoming_roll_view(
         )
     # Fused transfer/gather kernels flatten directional tensors; reshaping from a
     # 1D contiguous arena guarantees each per-level view is contiguous.
-    view = backing[:required].reshape(n_boxes, 4, n_dirs, n_rhs)
+    view = backing[:required].reshape(n_boxes, _SAMPLED_DIRECTIONAL_CHANNELS, n_dirs, n_rhs)
     if not bool(view.flags.c_contiguous):
         raise RuntimeError(
             "Internal CuPy MLFMM error: rolling incoming view must be contiguous. "
@@ -6052,7 +6049,12 @@ def _multilevel_outgoing_roll_view(
 ) -> Any:
     """Return one reusable rolling outgoing buffer view for one hierarchy level."""
 
-    shape = (int(level.n_boxes), 4, int(level.directional.grid.n_directions), int(nrhs))
+    shape = (
+        int(level.n_boxes),
+        _SAMPLED_DIRECTIONAL_CHANNELS,
+        int(level.directional.grid.n_directions),
+        int(nrhs),
+    )
     if workspace is None:
         arr = cupy.empty(shape, dtype=cupy.complex128)
         if zero:
@@ -6216,7 +6218,7 @@ def _level_chunk_bytes_per_box(*, level: CuPyMLFMMLevelData, nrhs: int) -> int:
 
     return (
         3
-        * 4
+        * _SAMPLED_DIRECTIONAL_CHANNELS
         * int(level.directional.grid.n_directions)
         * int(nrhs)
         * np.dtype(np.complex128).itemsize
@@ -6227,7 +6229,10 @@ def _level_group_bytes_per_box(*, level: CuPyMLFMMLevelData, nrhs: int) -> int:
     """Return incoming-buffer bytes per destination box in one frontier group."""
 
     return (
-        4 * int(level.directional.grid.n_directions) * int(nrhs) * np.dtype(np.complex128).itemsize
+        _SAMPLED_DIRECTIONAL_CHANNELS
+        * int(level.directional.grid.n_directions)
+        * int(nrhs)
+        * np.dtype(np.complex128).itemsize
     )
 
 
@@ -6532,7 +6537,12 @@ def _iter_zero_directional_chunks_for_level(
     ndirs = int(level.directional.grid.n_directions)
     for box_ids in _iter_id_chunks(level_box_ids, chunk_size=int(chunk_box_cap)):
         values = cupy.zeros(
-            (int(box_ids.shape[0]), 4, ndirs, int(nrhs)),
+            (
+                int(box_ids.shape[0]),
+                _SAMPLED_DIRECTIONAL_CHANNELS,
+                ndirs,
+                int(nrhs),
+            ),
             dtype=cupy.complex128,
         )
         yield box_ids, values
@@ -6828,7 +6838,7 @@ def _build_child_incoming_chunk_streamed(
     child_incoming = cupy.zeros(
         (
             int(child_chunk_ids.shape[0]),
-            4,
+            _SAMPLED_DIRECTIONAL_CHANNELS,
             int(levels[int(child_level)].directional.grid.n_directions),
             int(nrhs),
         ),
@@ -6913,7 +6923,12 @@ def _build_outgoing_subset_streamed(
             int(n_boxes_sel),
         )
     outgoing = cupy.empty(
-        (n_boxes_sel, 4, int(level.directional.grid.n_directions), int(nrhs)),
+        (
+            n_boxes_sel,
+            _SAMPLED_DIRECTIONAL_CHANNELS,
+            int(level.directional.grid.n_directions),
+            int(nrhs),
+        ),
         dtype=cupy.complex128,
     )
     _record_stream_pool_peak(cupy, stream_stats)
@@ -7214,7 +7229,12 @@ def _build_incoming_adjoint_subset_streamed(
     n_boxes_sel = int(box_ids.size)
     if n_boxes_sel == 0:
         return cupy.zeros(
-            (0, 4, int(level.directional.grid.n_directions), int(nrhs)),
+            (
+                0,
+                _SAMPLED_DIRECTIONAL_CHANNELS,
+                int(level.directional.grid.n_directions),
+                int(nrhs),
+            ),
             dtype=cupy.complex128,
         )
 
@@ -7246,7 +7266,12 @@ def _build_incoming_adjoint_subset_streamed(
         return incoming_adjoint
 
     incoming_adjoint = cupy.zeros(
-        (n_boxes_sel, 4, int(level.directional.grid.n_directions), int(nrhs)),
+        (
+            n_boxes_sel,
+            _SAMPLED_DIRECTIONAL_CHANNELS,
+            int(level.directional.grid.n_directions),
+            int(nrhs),
+        ),
         dtype=cupy.complex128,
     )
     _record_stream_pool_peak(cupy, stream_stats)
@@ -7427,7 +7452,12 @@ def _scatter_outgoing_adjoint_subset_streamed(
                 f"{int(next_child_level)} vs {int(child_level)}."
             )
         child_adjoint = cupy.zeros(
-            (int(child_chunk_ids.shape[0]), 4, child_ndirs, int(nrhs)),
+            (
+                int(child_chunk_ids.shape[0]),
+                _SAMPLED_DIRECTIONAL_CHANNELS,
+                child_ndirs,
+                int(nrhs),
+            ),
             dtype=cupy.complex128,
         )
         for shift, child_local, parent_rows in chunk_matches:
@@ -8513,7 +8543,7 @@ def _resolve_multilevel_stream_runtime_plan(
     hf_end_level = multilevel.levels[int(multilevel.hf_end_level)]
     hf_start_incoming_bytes = (
         int(hf_start_level.n_boxes)
-        * 4
+        * _SAMPLED_DIRECTIONAL_CHANNELS
         * int(hf_start_level.directional.grid.n_directions)
         * n_rhs
         * np.dtype(np.complex128).itemsize
@@ -8558,7 +8588,7 @@ def _multilevel_full_incoming_bytes(
         level = multilevel.levels[level_idx]
         total += (
             int(level.n_boxes)
-            * 4
+            * _SAMPLED_DIRECTIONAL_CHANNELS
             * int(level.directional.grid.n_directions)
             * int(nrhs)
             * np.dtype(np.complex128).itemsize
@@ -8579,7 +8609,12 @@ def _multilevel_rolling_incoming_bytes_theoretical(
     for level_idx in range(hf_start, hf_end + 1):
         level = multilevel.levels[level_idx]
         parity = int((level_idx - hf_start) & 1)
-        elements = int(level.n_boxes) * 4 * int(level.directional.grid.n_directions) * int(nrhs)
+        elements = (
+            int(level.n_boxes)
+            * _SAMPLED_DIRECTIONAL_CHANNELS
+            * int(level.directional.grid.n_directions)
+            * int(nrhs)
+        )
         max_elements_by_parity[parity] = max(max_elements_by_parity[parity], int(elements))
     bytes_per_complex = np.dtype(np.complex128).itemsize
     return int((max_elements_by_parity[0] + max_elements_by_parity[1]) * bytes_per_complex)
@@ -8596,7 +8631,7 @@ def _multilevel_outgoing_hierarchy_bytes(
     for level in multilevel.levels:
         total += (
             int(level.n_boxes)
-            * 4
+            * _SAMPLED_DIRECTIONAL_CHANNELS
             * int(level.directional.grid.n_directions)
             * int(nrhs)
             * np.dtype(np.complex128).itemsize
@@ -8616,7 +8651,7 @@ def _multilevel_stream_full_level_incoming_bytes_theoretical(
         level = multilevel.levels[level_idx]
         incoming_bytes = (
             int(level.n_boxes)
-            * 4
+            * _SAMPLED_DIRECTIONAL_CHANNELS
             * int(level.directional.grid.n_directions)
             * int(nrhs)
             * np.dtype(np.complex128).itemsize
@@ -8638,7 +8673,7 @@ def _multilevel_stream_full_level_live_bytes_theoretical(
         live_bytes = (
             3
             * int(level.n_boxes)
-            * 4
+            * _SAMPLED_DIRECTIONAL_CHANNELS
             * int(level.directional.grid.n_directions)
             * int(nrhs)
             * np.dtype(np.complex128).itemsize
@@ -8660,7 +8695,12 @@ def _multilevel_rolling_outgoing_bytes_theoretical(
     for level_idx in range(hf_start, hf_end + 1):
         level = multilevel.levels[level_idx]
         parity = int((level_idx - hf_start) & 1)
-        elements = int(level.n_boxes) * 4 * int(level.directional.grid.n_directions) * int(nrhs)
+        elements = (
+            int(level.n_boxes)
+            * _SAMPLED_DIRECTIONAL_CHANNELS
+            * int(level.directional.grid.n_directions)
+            * int(nrhs)
+        )
         max_elements_by_parity[parity] = max(max_elements_by_parity[parity], int(elements))
     bytes_per_complex = np.dtype(np.complex128).itemsize
     return int((max_elements_by_parity[0] + max_elements_by_parity[1]) * bytes_per_complex)

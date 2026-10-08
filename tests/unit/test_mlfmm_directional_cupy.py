@@ -21,7 +21,7 @@ pytestmark = pytest.mark.gpu
 def test_directional_transfer_layouts(nrhs: int, storage: str) -> None:
     cp, _ = import_cupy()
     rng = np.random.default_rng(101)
-    host = rng.standard_normal((2, 4, 7, 2 * nrhs)) + 1j * rng.standard_normal((2, 4, 7, 2 * nrhs))
+    host = rng.standard_normal((2, 2, 7, 2 * nrhs)) + 1j * rng.standard_normal((2, 2, 7, 2 * nrhs))
     source = cp.asarray(host)[..., ::2]  # Device-strided, not just a sliced host upload.
     before = source.copy()
     cols = np.array([[0, 3, -1], [1, 5, 6], [2, 4, -1]], dtype=np.int32)
@@ -74,35 +74,43 @@ def test_directional_maps_and_adjoint_match_independent_dense(
     theta = dense.Fth[dense.grid.reflection_permutation]
     phi = dense.Fph[dense.grid.reflection_permutation]
     zeros = np.zeros_like(theta)
-    outgoing = np.block([[theta, zeros], [phi, zeros], [zeros, theta], [zeros, phi]])
+    n_dir = theta.shape[0]
+    outgoing_four = np.block([[theta, zeros], [phi, zeros], [zeros, theta], [zeros, phi]])
+    identity = np.eye(n_dir, dtype=np.complex128)
+    mixing = np.block(
+        [
+            [identity, np.zeros_like(identity), np.zeros_like(identity), 1j * identity],
+            [np.zeros_like(identity), identity, -1j * identity, np.zeros_like(identity)],
+        ]
+    )
+    outgoing = mixing @ outgoing_four
     theta_h = theta.conj().T
     phi_h = phi.conj().T
     receive = np.block(
         [
-            [theta_h, phi_h, -1j * phi_h, 1j * theta_h],
-            [-1j * phi_h, 1j * theta_h, theta_h, phi_h],
+            [theta_h, phi_h],
+            [-1j * phi_h, 1j * theta_h],
         ]
     )
     rng = np.random.default_rng(210 + order)
     n_modes = 2 * theta.shape[1]
-    n_dir = theta.shape[0]
     states_storage = rng.standard_normal((2, n_modes, 2 * nrhs)) + 1j * rng.standard_normal(
         (2, n_modes, 2 * nrhs)
     )
-    channel_storage = rng.standard_normal((2, 4, n_dir, 2 * nrhs)) + 1j * rng.standard_normal(
-        (2, 4, n_dir, 2 * nrhs)
+    channel_storage = rng.standard_normal((2, 2, n_dir, 2 * nrhs)) + 1j * rng.standard_normal(
+        (2, 2, n_dir, 2 * nrhs)
     )
     states = cp.asarray(states_storage)[..., ::2]
     channels = cp.asarray(channel_storage)[..., ::2]
     host_states = states_storage[..., ::2]
     host_channels = channel_storage[..., ::2]
-    flat_channels = host_channels.reshape(2, 4 * n_dir, nrhs)
-    forward_out = cp.full((2, 4, n_dir, nrhs), complex(np.nan, np.nan))
+    flat_channels = host_channels.reshape(2, 2 * n_dir, nrhs)
+    forward_out = cp.full((2, 2, n_dir, nrhs), complex(np.nan, np.nan))
     receive_out = cp.full((2, n_modes, nrhs), complex(np.nan, np.nan))
     cases = (
         (
             _box_outgoing_to_directional_cupy(device, states, out=forward_out, cupy=cp),
-            np.einsum("ij,bjr->bir", outgoing, host_states).reshape(2, 4, n_dir, nrhs),
+            np.einsum("ij,bjr->bir", outgoing, host_states).reshape(2, 2, n_dir, nrhs),
         ),
         (
             _directional_to_box_regular_cupy(device, channels, out=receive_out, cupy=cp),
@@ -114,7 +122,7 @@ def test_directional_maps_and_adjoint_match_independent_dense(
         ),
         (
             _directional_to_box_regular_adjoint_cupy(device, states, cupy=cp),
-            np.einsum("ij,bjr->bir", receive.conj().T, host_states).reshape(2, 4, n_dir, nrhs),
+            np.einsum("ij,bjr->bir", receive.conj().T, host_states).reshape(2, 2, n_dir, nrhs),
         ),
     )
     for actual, expected in cases:
@@ -125,22 +133,25 @@ def test_directional_maps_and_adjoint_match_independent_dense(
     np.testing.assert_array_equal(asnumpy(channels), host_channels)
 
 
-def test_phase_add_updates_only_the_supplied_strided_channel() -> None:
-    from pyceles.core.operators.mlfmm_cupy import _directional_phase_add_kernel
+def test_phase_add_pair_updates_only_the_supplied_strided_channel() -> None:
+    from pyceles.core.operators.mlfmm_cupy import _directional_phase_add_pair_kernel
 
     cp, _ = import_cupy()
     rng = np.random.default_rng(44)
-    storage_host = rng.standard_normal((2, 4, 5, 7, 6)) + 1j * rng.standard_normal((2, 4, 5, 7, 6))
+    storage_host = rng.standard_normal((2, 2, 5, 7, 6)) + 1j * rng.standard_normal((2, 2, 5, 7, 6))
     phase_host = np.exp(1j * np.arange(5)).reshape(1, 5, 1, 1)
-    beta_host = rng.standard_normal((2, 1, 7, 3)) + 1j * rng.standard_normal((2, 1, 7, 3))
+    first_host = rng.standard_normal((2, 1, 7, 3)) + 1j * rng.standard_normal((2, 1, 7, 3))
+    second_host = rng.standard_normal((2, 1, 7, 3)) + 1j * rng.standard_normal((2, 1, 7, 3))
     storage = cp.asarray(storage_host)
     target = storage[:, 1, :, :, ::2]
     phase = cp.asarray(phase_host)
-    beta = cp.asarray(beta_host)
-    returned = _directional_phase_add_kernel()(phase, beta, target)
+    first = cp.asarray(first_host)
+    second = cp.asarray(second_host)
+    returned = _directional_phase_add_pair_kernel()(phase, first, second, 1j, target)
     expected = storage_host.copy()
-    expected[:, 1, :, :, ::2] += phase_host * beta_host
+    expected[:, 1, :, :, ::2] += phase_host * (first_host + 1j * second_host)
     assert returned is target
     np.testing.assert_allclose(asnumpy(storage), expected, rtol=2e-12, atol=2e-12)
     np.testing.assert_array_equal(asnumpy(phase), phase_host)
-    np.testing.assert_array_equal(asnumpy(beta), beta_host)
+    np.testing.assert_array_equal(asnumpy(first), first_host)
+    np.testing.assert_array_equal(asnumpy(second), second_host)

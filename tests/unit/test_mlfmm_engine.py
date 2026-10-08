@@ -1098,8 +1098,8 @@ def test_multilevel_downward_transfer_matches_exact_recenter_oracle(transfer_sca
 
     rng = np.random.default_rng(321)
     parent_channels = rng.standard_normal(
-        (4, parent_level.directional.grid.directions.shape[0])
-    ) + 1j * rng.standard_normal((4, parent_level.directional.grid.directions.shape[0]))
+        (2, parent_level.directional.grid.directions.shape[0])
+    ) + 1j * rng.standard_normal((2, parent_level.directional.grid.directions.shape[0]))
     shifted = (
         parent_channels
         * np.asarray(transfer.phase_down_by_shift[shift], dtype=np.complex128)[None, :]
@@ -1111,8 +1111,6 @@ def test_multilevel_downward_transfer_matches_exact_recenter_oracle(transfer_sca
         child_level.directional,
         child_channels[0],
         child_channels[1],
-        child_channels[2],
-        child_channels[3],
     )
 
     delta = np.asarray(
@@ -1122,8 +1120,6 @@ def test_multilevel_downward_transfer_matches_exact_recenter_oracle(transfer_sca
         parent_level.directional,
         parent_channels[0],
         parent_channels[1],
-        parent_channels[2],
-        parent_channels[3],
     )
     exact_child_state = translation_block_rect(
         child_level.box_order,

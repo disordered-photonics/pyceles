@@ -30,7 +30,6 @@ from pyceles.core.operators.mlfmm_cupy import (
 )
 from pyceles.core.operators.mlfmm_directional import (
     box_outgoing_to_directional,
-    directional_to_box_regular,
     directional_transforms,
 )
 from pyceles.core.particles import Particle, ParticleCollection, spheres_from_arrays
@@ -312,7 +311,7 @@ def test_cupy_mlfmm_structured_directional_maps_match_dense_reference() -> None:
     for batch in range(state.shape[0]):
         for rhs in range(state.shape[2]):
             expected = box_outgoing_to_directional(transforms, state[batch, :, rhs])
-            for channel in range(4):
+            for channel in range(2):
                 np.testing.assert_allclose(
                     got[batch, channel, :, rhs],
                     expected[channel],
@@ -324,16 +323,18 @@ def test_cupy_mlfmm_structured_directional_maps_match_dense_reference() -> None:
         rng.standard_normal(got.shape) + 1j * rng.standard_normal(got.shape),
         dtype=np.complex128,
     )
+    theta = transforms.Fth[transforms.grid.reflection_permutation]
+    phi = transforms.Fph[transforms.grid.reflection_permutation]
+    receive = np.block(
+        [
+            [theta.conj().T, phi.conj().T],
+            [-1j * phi.conj().T, 1j * theta.conj().T],
+        ]
+    )
     got_box = asnumpy(_directional_to_box_regular_cupy(uploaded, cupy.asarray(channels), cupy=cupy))
     for batch in range(channels.shape[0]):
         for rhs in range(channels.shape[3]):
-            expected_box = directional_to_box_regular(
-                transforms,
-                channels[batch, 0, :, rhs],
-                channels[batch, 1, :, rhs],
-                channels[batch, 2, :, rhs],
-                channels[batch, 3, :, rhs],
-            )
+            expected_box = receive @ channels[batch, :, :, rhs].reshape(-1)
             np.testing.assert_allclose(
                 got_box[batch, :, rhs],
                 expected_box,

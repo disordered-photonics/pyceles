@@ -23,6 +23,7 @@ from pyceles.core.translation import (
 from .base import CouplingOperator
 from .coupling_pairwise import PairwiseCouplingOperator
 from .mlfmm_directional import (
+    _SAMPLED_DIRECTIONAL_CHANNELS,
     MLFMMDirectionalInterpolation,
     MLFMMDirectionalStructuredTransforms,
     MLFMMDirectionalTransformData,
@@ -1047,10 +1048,16 @@ def _single_level_memory_diagnostics(
             "nrhs_reference": 1,
             "near_total_bytes_estimate": int(n_particles * nm * near_itemsize),
             "leaf_box_states_bytes": int(n_leaves * box_nm * far_itemsize),
-            "outgoing_hierarchy_bytes": int(n_leaves * 4 * ndir * far_itemsize),
-            "incoming_hierarchy_bytes": int(n_leaves * 4 * ndir * far_itemsize),
+            "outgoing_hierarchy_bytes": int(
+                n_leaves * _SAMPLED_DIRECTIONAL_CHANNELS * ndir * far_itemsize
+            ),
+            "incoming_hierarchy_bytes": int(
+                n_leaves * _SAMPLED_DIRECTIONAL_CHANNELS * ndir * far_itemsize
+            ),
             "incoming_box_bytes": int(n_leaves * box_nm * far_itemsize),
-            "full_far_hierarchy_bytes": int(n_leaves * (8 * ndir + 2 * box_nm) * far_itemsize),
+            "full_far_hierarchy_bytes": int(
+                n_leaves * (2 * _SAMPLED_DIRECTIONAL_CHANNELS * ndir + 2 * box_nm) * far_itemsize
+            ),
         },
         "prepared_bytes": {
             "directional_transform_bytes": int(directional_transform_bytes),
@@ -1078,13 +1085,19 @@ def _multilevel_memory_diagnostics(
     near_itemsize = int(np.dtype(near_dtype).itemsize)
     outgoing_bytes = int(
         sum(
-            level.coords.shape[0] * 4 * level.directional.grid.directions.shape[0] * far_itemsize
+            level.coords.shape[0]
+            * _SAMPLED_DIRECTIONAL_CHANNELS
+            * level.directional.grid.directions.shape[0]
+            * far_itemsize
             for level in operators.levels
         )
     )
     incoming_bytes = int(
         sum(
-            level.coords.shape[0] * 4 * level.directional.grid.directions.shape[0] * far_itemsize
+            level.coords.shape[0]
+            * _SAMPLED_DIRECTIONAL_CHANNELS
+            * level.directional.grid.directions.shape[0]
+            * far_itemsize
             for level in operators.levels
         )
     )
@@ -1832,7 +1845,10 @@ def apply_single_level_mlfmm(
             dtype=far_out_dtype,
         )
     ndir = int(operators.directional.grid.directions.shape[0])
-    outgoing = np.zeros((len(operators.partition.leaves), 4, ndir), dtype=far_out_dtype)
+    outgoing = np.zeros(
+        (len(operators.partition.leaves), _SAMPLED_DIRECTIONAL_CHANNELS, ndir),
+        dtype=far_out_dtype,
+    )
     for leaf_id, box_state in enumerate(leaf_states):
         channels = box_outgoing_to_directional(operators.directional, box_state)
         for chan_idx, channel in enumerate(channels):
@@ -1850,8 +1866,6 @@ def apply_single_level_mlfmm(
             operators.directional,
             incoming[leaf_id, 0],
             incoming[leaf_id, 1],
-            incoming[leaf_id, 2],
-            incoming[leaf_id, 3],
         )
 
     if operators.leaf_groups:
@@ -2248,7 +2262,10 @@ def _apply_single_level_mlfmm_adjoint(
             dtype=far_dtype,
         )
     ndir = int(operators.directional.grid.directions.shape[0])
-    incoming_adj = np.zeros((len(operators.partition.leaves), 4, ndir), dtype=far_dtype)
+    incoming_adj = np.zeros(
+        (len(operators.partition.leaves), _SAMPLED_DIRECTIONAL_CHANNELS, ndir),
+        dtype=far_dtype,
+    )
     for leaf_id, state in enumerate(leaf_box):
         channels = directional_to_box_regular_adjoint(operators.directional, state)
         for channel_idx, channel in enumerate(channels):
@@ -2268,8 +2285,6 @@ def _apply_single_level_mlfmm_adjoint(
             operators.directional,
             outgoing_adj[leaf_id, 0],
             outgoing_adj[leaf_id, 1],
-            outgoing_adj[leaf_id, 2],
-            outgoing_adj[leaf_id, 3],
         )
     if operators.leaf_groups:
         y_far = _receive_leaf_boxes_to_particles(
@@ -2340,7 +2355,12 @@ def _apply_multilevel_mlfmm_adjoint(
         )
     incoming_adj = [
         np.zeros(
-            (level.coords.shape[0], 4, level.directional.grid.directions.shape[0]), dtype=far_dtype
+            (
+                level.coords.shape[0],
+                _SAMPLED_DIRECTIONAL_CHANNELS,
+                level.directional.grid.directions.shape[0],
+            ),
+            dtype=far_dtype,
         )
         for level in operators.levels
     ]
@@ -2416,8 +2436,6 @@ def _apply_multilevel_mlfmm_adjoint(
             operators.levels[leaf_level].directional,
             outgoing_adj[leaf_level][leaf_id, 0],
             outgoing_adj[leaf_level][leaf_id, 1],
-            outgoing_adj[leaf_level][leaf_id, 2],
-            outgoing_adj[leaf_level][leaf_id, 3],
         )
     if operators.leaf_groups:
         y_far = _receive_leaf_boxes_to_particles(
@@ -2481,7 +2499,11 @@ def apply_multilevel_mlfmm(
     )
     outgoing = [
         np.zeros(
-            (level.coords.shape[0], 4, level.directional.grid.directions.shape[0]),
+            (
+                level.coords.shape[0],
+                _SAMPLED_DIRECTIONAL_CHANNELS,
+                level.directional.grid.directions.shape[0],
+            ),
             dtype=far_out_dtype,
         )
         for level in operators.levels
@@ -2592,8 +2614,6 @@ def apply_multilevel_mlfmm(
             operators.levels[leaf_level].directional,
             incoming[leaf_level][leaf_id, 0],
             incoming[leaf_level][leaf_id, 1],
-            incoming[leaf_level][leaf_id, 2],
-            incoming[leaf_level][leaf_id, 3],
         )
 
     if operators.leaf_groups:
