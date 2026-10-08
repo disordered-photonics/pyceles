@@ -54,10 +54,12 @@ def test_directional_transfer_layouts(nrhs: int, storage: str) -> None:
 
 
 @pytest.mark.parametrize("order", (3, 8))
+@pytest.mark.parametrize("sampling", ((1.0, 1.0), (1.5, 1.25)))
 @pytest.mark.parametrize("nrhs", (1, 3))
 def test_directional_maps_and_adjoint_match_independent_dense(
     order: int,
     nrhs: int,
+    sampling: tuple[float, float],
 ) -> None:
     from pyceles.core.operators.mlfmm_cupy import (
         _box_outgoing_to_directional_adjoint_cupy,
@@ -69,7 +71,9 @@ def test_directional_maps_and_adjoint_match_independent_dense(
     from pyceles.core.operators.mlfmm_directional import directional_transforms
 
     cp, _ = import_cupy()
-    dense = directional_transforms(order, grid_order=order + 2)
+    dense = directional_transforms(
+        order, grid_order=order + 2, alpha_factor=sampling[0], beta_factor=sampling[1]
+    )
     device = _upload_directional_transforms(dense, cupy=cp)
     theta = dense.Fth[dense.grid.reflection_permutation]
     phi = dense.Fph[dense.grid.reflection_permutation]
@@ -83,7 +87,14 @@ def test_directional_maps_and_adjoint_match_independent_dense(
             [np.zeros_like(identity), identity, -1j * identity, np.zeros_like(identity)],
         ]
     )
-    outgoing = mixing @ outgoing_four
+    linear_outgoing = mixing @ outgoing_four
+    outgoing = np.concatenate(
+        (
+            (linear_outgoing[:n_dir] + 1j * linear_outgoing[n_dir:]) / np.sqrt(2.0),
+            (linear_outgoing[:n_dir] - 1j * linear_outgoing[n_dir:]) / np.sqrt(2.0),
+        ),
+        axis=0,
+    )
     theta_h = theta.conj().T
     phi_h = phi.conj().T
     receive = np.block(
@@ -91,6 +102,13 @@ def test_directional_maps_and_adjoint_match_independent_dense(
             [theta_h, phi_h],
             [-1j * phi_h, 1j * theta_h],
         ]
+    )
+    receive = np.concatenate(
+        (
+            (receive[:, :n_dir] - 1j * receive[:, n_dir:]) / np.sqrt(2.0),
+            (receive[:, :n_dir] + 1j * receive[:, n_dir:]) / np.sqrt(2.0),
+        ),
+        axis=1,
     )
     rng = np.random.default_rng(210 + order)
     n_modes = 2 * theta.shape[1]
@@ -133,25 +151,49 @@ def test_directional_maps_and_adjoint_match_independent_dense(
     np.testing.assert_array_equal(asnumpy(channels), host_channels)
 
 
-def test_phase_add_pair_updates_only_the_supplied_strided_channel() -> None:
-    from pyceles.core.operators.mlfmm_cupy import _directional_phase_add_pair_kernel
+def test_phase_add_updates_only_the_supplied_strided_channel() -> None:
+    from pyceles.core.operators.mlfmm_cupy import _directional_phase_add_kernel
 
     cp, _ = import_cupy()
     rng = np.random.default_rng(44)
     storage_host = rng.standard_normal((2, 2, 5, 7, 6)) + 1j * rng.standard_normal((2, 2, 5, 7, 6))
     phase_host = np.exp(1j * np.arange(5)).reshape(1, 5, 1, 1)
     first_host = rng.standard_normal((2, 1, 7, 3)) + 1j * rng.standard_normal((2, 1, 7, 3))
-    second_host = rng.standard_normal((2, 1, 7, 3)) + 1j * rng.standard_normal((2, 1, 7, 3))
     storage = cp.asarray(storage_host)
     target = storage[:, 1, :, :, ::2]
     phase = cp.asarray(phase_host)
     first = cp.asarray(first_host)
-    second = cp.asarray(second_host)
-    returned = _directional_phase_add_pair_kernel()(phase, first, second, 1j, target)
+    returned = _directional_phase_add_kernel()(phase, first, target)
     expected = storage_host.copy()
-    expected[:, 1, :, :, ::2] += phase_host * (first_host + 1j * second_host)
+    expected[:, 1, :, :, ::2] += phase_host * first_host
     assert returned is target
     np.testing.assert_allclose(asnumpy(storage), expected, rtol=2e-12, atol=2e-12)
     np.testing.assert_array_equal(asnumpy(phase), phase_host)
     np.testing.assert_array_equal(asnumpy(first), first_host)
-    np.testing.assert_array_equal(asnumpy(second), second_host)
+
+
+@pytest.mark.parametrize("reuse", (False, True))
+def test_directional_sum_difference_owned_and_strided(reuse: bool) -> None:
+    from pyceles.core.operators.mlfmm_cupy import _directional_sum_difference_kernel
+
+    cp, _ = import_cupy()
+    rng = np.random.default_rng(91)
+    first_host = rng.standard_normal((3, 5, 6)) + 1j * rng.standard_normal((3, 5, 6))
+    second_host = rng.standard_normal((3, 5, 6)) + 1j * rng.standard_normal((3, 5, 6))
+    first_storage = cp.asarray(first_host)
+    second_storage = cp.asarray(second_host)
+    first = first_storage[..., ::2]
+    second = second_storage[..., ::2]
+    kernel = _directional_sum_difference_kernel()
+    if reuse:
+        plus, minus = kernel(first, second, first, second)
+        assert plus.data.ptr == first.data.ptr
+        assert minus.data.ptr == second.data.ptr
+    else:
+        plus, minus = kernel(first, second)
+        np.testing.assert_array_equal(asnumpy(first_storage), first_host)
+        np.testing.assert_array_equal(asnumpy(second_storage), second_host)
+    np.testing.assert_allclose(asnumpy(plus), first_host[..., ::2] + second_host[..., ::2])
+    np.testing.assert_allclose(asnumpy(minus), first_host[..., ::2] - second_host[..., ::2])
+    np.testing.assert_array_equal(asnumpy(first_storage[..., 1::2]), first_host[..., 1::2])
+    np.testing.assert_array_equal(asnumpy(second_storage[..., 1::2]), second_host[..., 1::2])

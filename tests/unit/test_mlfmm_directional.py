@@ -297,3 +297,27 @@ def test_uploaded_beta_reflection_rejects_invalid_involutions(beta_perm: list[in
     reflection = (np.arange(2, dtype=np.int32)[:, None] * 3 + beta_perm).reshape(-1)
     with pytest.raises(ValueError, match=r"permutation|involution"):
         _beta_reflection_permutation(reflection, n_alpha=2, n_beta=3)
+
+
+def test_compact_host_directional_payload_preserves_nondefault_sampling() -> None:
+    from pyceles.core.operators.mlfmm_cupy import (
+        _copy_directional_host,
+        _directional_structured_host_view,
+    )
+
+    dense = directional_transforms(4, grid_order=6, alpha_factor=1.5, beta_factor=1.25)
+    structured = structured_directional_transforms(
+        4, grid_order=6, alpha_factor=1.5, beta_factor=1.25
+    )
+    cache = _copy_directional_host(dense)
+    for payload in (dense, cache):
+        grid, theta, phi, modes = _directional_structured_host_view(payload)
+        assert grid.n_alpha == dense.grid.alpha.size
+        assert grid.n_beta == dense.grid.beta.size
+        np.testing.assert_array_equal(grid.alpha, dense.grid.alpha)
+        np.testing.assert_array_equal(
+            grid.reflection_permutation, dense.grid.reflection_permutation
+        )
+        np.testing.assert_array_equal(theta, structured.fth_beta)
+        np.testing.assert_array_equal(phi, structured.fph_beta)
+        np.testing.assert_array_equal(modes, structured.m_of_scalar)

@@ -74,6 +74,14 @@ translation operators. The current hierarchy is uniform-depth rather than
 adaptive. NumPy and CuPy share the validated hierarchy construction; repeated
 CuPy applies run on device.
 
+The sampled-far boundary uses a unitary two-channel polarization basis on both
+backends. This is internal: particle coefficients and the public operator
+interface retain their canonical layout. CuPy prepares the circular boundary
+factors in grouped device layouts, avoiding repeated submatrix gathers and
+full-table conjugation during sampled-far actions. The change primarily helps
+large/deep hierarchies; small configurations can remain dominated by setup,
+exact-near work, or solver overhead.
+
 The implementation keeps sampled-far interactions in the numerically safer
 precision used by the directional translations. CuPy exact-near evaluation is
 batched so that temporary dense mode blocks do not grow into an unbounded

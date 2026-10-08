@@ -279,20 +279,19 @@ def test_cupy_mlfmm_directional_upload_uses_structured_factors() -> None:
 
     assert not hasattr(uploaded, "forward_F")
     assert not hasattr(uploaded, "inverse_A_adj")
-    assert tuple(uploaded.fth_reflected_beta.shape) == (
-        transforms.grid.beta.size,
-        transforms.Fth.shape[1],
-    )
-    assert tuple(uploaded.fph_reflected_beta.shape) == (
-        transforms.grid.beta.size,
-        transforms.Fph.shape[1],
-    )
+    groups = uploaded.mode_groups
+    assert len(groups) == 2 * transforms.box_order + 1
+    indices = np.concatenate([asnumpy(group.indices) for group in groups])
+    np.testing.assert_array_equal(np.sort(indices), np.arange(transforms.Fth.shape[1]))
+    for group in groups:
+        assert tuple(group.hplus_beta.shape) == (transforms.grid.beta.size, group.indices.size)
+        assert group.hplus_beta.flags.c_contiguous
+        assert group.hminus_beta.flags.c_contiguous
     dense_bytes = int(transforms.Fth.nbytes + transforms.Fph.nbytes)
+    factor_bytes = sum(group.hplus_beta.nbytes + group.hminus_beta.nbytes for group in groups)
+    assert factor_bytes == 2 * transforms.grid.beta.size * transforms.Fth.shape[1] * 16
     structured_bytes = int(
-        uploaded.fth_reflected_beta.nbytes
-        + uploaded.fph_reflected_beta.nbytes
-        + uploaded.phase_by_m.nbytes
-        + uploaded.m_of_scalar.nbytes
+        factor_bytes + uploaded.phase_by_m.nbytes + sum(group.indices.nbytes for group in groups)
     )
     assert structured_bytes < dense_bytes // 4
 
@@ -330,6 +329,14 @@ def test_cupy_mlfmm_structured_directional_maps_match_dense_reference() -> None:
             [theta.conj().T, phi.conj().T],
             [-1j * phi.conj().T, 1j * theta.conj().T],
         ]
+    )
+    n_dir = theta.shape[0]
+    receive = np.concatenate(
+        (
+            (receive[:, :n_dir] - 1j * receive[:, n_dir:]) / np.sqrt(2.0),
+            (receive[:, :n_dir] + 1j * receive[:, n_dir:]) / np.sqrt(2.0),
+        ),
+        axis=1,
     )
     got_box = asnumpy(_directional_to_box_regular_cupy(uploaded, cupy.asarray(channels), cupy=cupy))
     for batch in range(channels.shape[0]):

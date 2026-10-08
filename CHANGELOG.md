@@ -25,6 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   coupling, including single-level and multilevel sampled-far traversals.
 
 ### Changed
+- Finite MLFMM sampled-far transport now uses a unitary two-channel
+  polarization representation on both NumPy and CuPy without changing the
+  particle-coefficient layout. CuPy additionally prepares grouped circular
+  boundary factors once, reducing repeated factor gathering and temporary
+  conjugation in large sampled hierarchies.
 - Breaking: removed callback-backed `AxisymmetricTGroup` and its two factory
   helpers. Spheroids and imported matrices now share `DenseTGroup`; custom
   preparation uses `make_dense_group_factory` without per-action callbacks.

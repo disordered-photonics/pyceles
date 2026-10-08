@@ -1027,12 +1027,10 @@ def test_multilevel_transfer_anterpolation_is_interpolation_transpose() -> None:
     np.testing.assert_allclose(lhs, rhs, rtol=1.0e-12, atol=1.0e-12)
 
 
-def test_directional_g_operators_are_derived_from_f_basis() -> None:
+def test_directional_receive_adjoint_factors_match_canonical_basis() -> None:
     transforms = directional_transforms(8, grid_order=8)
-    np.testing.assert_allclose(transforms.Gth, 1j * transforms.Fph, rtol=0.0, atol=0.0)
-    np.testing.assert_allclose(transforms.Gph, -1j * transforms.Fth, rtol=0.0, atol=0.0)
-    np.testing.assert_allclose(transforms.Gth_adj, -1j * transforms.Fph_adj, rtol=0.0, atol=0.0)
-    np.testing.assert_allclose(transforms.Gph_adj, 1j * transforms.Fth_adj, rtol=0.0, atol=0.0)
+    np.testing.assert_array_equal(transforms.Fth_adj, transforms.Fth.conj().T)
+    np.testing.assert_array_equal(transforms.Fph_adj, transforms.Fph.conj().T)
 
 
 @pytest.mark.reference
