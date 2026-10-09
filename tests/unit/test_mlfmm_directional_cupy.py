@@ -8,9 +8,15 @@ import numpy as np
 import pytest
 
 from pyceles._optional import asnumpy, import_cupy
-from pyceles.core.operators.mlfmm_cupy import (
+from pyceles.core.operators.mlfmm_directional_cupy import (
     CuPyDirectionalInterpolationData,
     _apply_directional_map,
+    _box_outgoing_to_directional_adjoint_cupy,
+    _box_outgoing_to_directional_cupy,
+    _directional_phase_add_kernel,
+    _directional_sum_difference_kernel,
+    _directional_to_box_regular_adjoint_cupy,
+    _directional_to_box_regular_cupy,
 )
 
 pytestmark = pytest.mark.gpu
@@ -61,14 +67,8 @@ def test_directional_maps_and_adjoint_match_independent_dense(
     nrhs: int,
     sampling: tuple[float, float],
 ) -> None:
-    from pyceles.core.operators.mlfmm_cupy import (
-        _box_outgoing_to_directional_adjoint_cupy,
-        _box_outgoing_to_directional_cupy,
-        _directional_to_box_regular_adjoint_cupy,
-        _directional_to_box_regular_cupy,
-        _upload_directional_transforms,
-    )
     from pyceles.core.operators.mlfmm_directional import directional_transforms
+    from pyceles.core.operators.mlfmm_directional_cupy import _upload_directional_transforms
 
     cp, _ = import_cupy()
     dense = directional_transforms(
@@ -152,8 +152,6 @@ def test_directional_maps_and_adjoint_match_independent_dense(
 
 
 def test_phase_add_updates_only_the_supplied_strided_channel() -> None:
-    from pyceles.core.operators.mlfmm_cupy import _directional_phase_add_kernel
-
     cp, _ = import_cupy()
     rng = np.random.default_rng(44)
     storage_host = rng.standard_normal((2, 2, 5, 7, 6)) + 1j * rng.standard_normal((2, 2, 5, 7, 6))
@@ -174,8 +172,6 @@ def test_phase_add_updates_only_the_supplied_strided_channel() -> None:
 
 @pytest.mark.parametrize("reuse", (False, True))
 def test_directional_sum_difference_owned_and_strided(reuse: bool) -> None:
-    from pyceles.core.operators.mlfmm_cupy import _directional_sum_difference_kernel
-
     cp, _ = import_cupy()
     rng = np.random.default_rng(91)
     first_host = rng.standard_normal((3, 5, 6)) + 1j * rng.standard_normal((3, 5, 6))
@@ -197,3 +193,51 @@ def test_directional_sum_difference_owned_and_strided(reuse: bool) -> None:
     np.testing.assert_allclose(asnumpy(minus), first_host[..., ::2] - second_host[..., ::2])
     np.testing.assert_array_equal(asnumpy(first_storage[..., 1::2]), first_host[..., 1::2])
     np.testing.assert_array_equal(asnumpy(second_storage[..., 1::2]), second_host[..., 1::2])
+
+
+@pytest.mark.parametrize("action", ("emit", "receive"))
+def test_directional_output_contract_and_strided_storage(action: str) -> None:
+    from pyceles.core.operators.mlfmm_directional import directional_transforms
+    from pyceles.core.operators.mlfmm_directional_cupy import _upload_directional_transforms
+
+    cp, _ = import_cupy()
+    prepared = _upload_directional_transforms(directional_transforms(2, grid_order=3), cupy=cp)
+    nrhs = 2
+    states_shape = (2, 2 * prepared.nscl, nrhs)
+    channels_shape = (2, 2, prepared.grid.n_directions, nrhs)
+    apply: Any
+    input_shape: tuple[int, ...]
+    output_shape: tuple[int, ...]
+    if action == "emit":
+        apply = _box_outgoing_to_directional_cupy
+        input_shape, output_shape = states_shape, channels_shape
+    else:
+        apply = _directional_to_box_regular_cupy
+        input_shape, output_shape = channels_shape, states_shape
+    rng = np.random.default_rng(602)
+    host = rng.standard_normal(input_shape) + 1j * rng.standard_normal(input_shape)
+    values = cp.asarray(host)
+    expected = apply(prepared, values, cupy=cp)
+    invalid_outputs = (
+        (np.full(output_shape, 13 + 2j, dtype=np.complex128), TypeError, "CuPy"),
+        (cp.full(output_shape, 13 + 2j, dtype=cp.complex64), ValueError, "complex128"),
+        (cp.full((int(np.prod(output_shape)),), 13 + 2j, dtype=cp.complex128), ValueError, "shape"),
+    )
+    for invalid, error, message in invalid_outputs:
+        before = asnumpy(invalid).copy()
+        with pytest.raises(error, match=message):
+            apply(prepared, values, out=invalid, cupy=cp)
+        np.testing.assert_array_equal(asnumpy(invalid), before)
+
+    # Changing only the last-axis stride keeps a reshape that splits ndir into
+    # alpha/beta a view. The unused lanes must never be cleared or overwritten.
+    storage = cp.full((*output_shape[:-1], 2 * nrhs), 13 + 2j, dtype=cp.complex128)
+    target = storage[..., ::2]
+    actual = apply(prepared, values, out=target, cupy=cp)
+    assert actual is target
+    np.testing.assert_allclose(asnumpy(target), asnumpy(expected), rtol=2e-12, atol=2e-12)
+    np.testing.assert_array_equal(asnumpy(storage[..., 1::2]), 13 + 2j)
+    np.testing.assert_array_equal(asnumpy(values), host)
+
+    with pytest.raises(ValueError, match="shape"):
+        apply(prepared, values.reshape(-1), cupy=cp)

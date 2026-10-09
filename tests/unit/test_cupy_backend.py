@@ -22,15 +22,17 @@ from pyceles.core.operators import (
     prepare_mlfmm_cupy_data,
 )
 from pyceles.core.operators.mlfmm_cupy import (
-    _box_outgoing_to_directional_cupy,
     _combine_near_far_outputs,
-    _directional_to_box_regular_cupy,
-    _upload_directional_transforms,
     _upload_offset_batches,
 )
 from pyceles.core.operators.mlfmm_directional import (
     box_outgoing_to_directional,
     directional_transforms,
+)
+from pyceles.core.operators.mlfmm_directional_cupy import (
+    _box_outgoing_to_directional_cupy,
+    _directional_to_box_regular_cupy,
+    _upload_directional_transforms,
 )
 from pyceles.core.particles import Particle, ParticleCollection, spheres_from_arrays
 from pyceles.core.translation import RadialLUT

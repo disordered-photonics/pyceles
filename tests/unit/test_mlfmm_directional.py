@@ -292,7 +292,7 @@ def test_directional_phase_mediation_tracks_exact_axial_recenter_channels() -> N
 
 @pytest.mark.parametrize("beta_perm", ([1, 2, 0], [0, 0, 2], [0, 1, 3]))
 def test_uploaded_beta_reflection_rejects_invalid_involutions(beta_perm: list[int]) -> None:
-    from pyceles.core.operators.mlfmm_cupy import _beta_reflection_permutation
+    from pyceles.core.operators.mlfmm_directional_cupy import _beta_reflection_permutation
 
     reflection = (np.arange(2, dtype=np.int32)[:, None] * 3 + beta_perm).reshape(-1)
     with pytest.raises(ValueError, match=r"permutation|involution"):
@@ -300,7 +300,7 @@ def test_uploaded_beta_reflection_rejects_invalid_involutions(beta_perm: list[in
 
 
 def test_compact_host_directional_payload_preserves_nondefault_sampling() -> None:
-    from pyceles.core.operators.mlfmm_cupy import (
+    from pyceles.core.operators.mlfmm_directional_cupy import (
         _copy_directional_host,
         _directional_structured_host_view,
     )
