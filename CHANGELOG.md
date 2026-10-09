@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-10
+
 ### Added
 - Added provider-neutral import of published spectral `.tmat.h5` dense
   T-matrices through `load_tmatrix_h5` and the `TMatrixParticle` descriptor,

@@ -4,6 +4,18 @@ pyceles requires Python 3.12 or newer and uses a `src/`-layout package with
 project metadata in `pyproject.toml`. The current release metadata lists
 CPython 3.12, 3.13, and 3.14.
 
+## Published package
+
+For a released version from PyPI:
+
+```bash
+python -m pip install -U pyceles
+```
+
+pyceles requires Python 3.12 or newer. For the GPU-first performance path,
+install one CuPy wheel matching the CUDA major version available on the
+machine; see [CuPy GPU backend](#cupy-gpu-backend) below.
+
 ## Development checkout
 
 From the repository root:
