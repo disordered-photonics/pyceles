@@ -254,7 +254,6 @@ def _render_source_showcase(
         abs_limits=abs_limits,
         rowwise_percentile=99.5,
         show_progress=bool(show_progress),
-        center_pixel_policy="none",
     )
     fig.suptitle(
         (

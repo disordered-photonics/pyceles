@@ -630,7 +630,6 @@ def plot_source_showcase_slices(
     rowwise_percentile: float = 99.5,
     show_progress: bool = True,
     force_general_initial_field: bool | None = None,
-    center_pixel_policy: Literal["none", "interpolate"] = "interpolate",
 ):
     """Plot source-centric near-field showcase on x=const, y=const, z=const slices.
 
@@ -679,7 +678,6 @@ def plot_source_showcase_slices(
                 plane_value=float(plane_value),
                 show_progress=bool(show_progress),
                 force_general_initial_field=force_general_initial_field,
-                center_pixel_policy=center_pixel_policy,
             )
         )
 

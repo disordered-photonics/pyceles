@@ -6,9 +6,9 @@ import pytest
 from pyceles.core.fields import PlaneWave
 from pyceles.core.particles import Sphere
 from pyceles.postprocessing.nearfield import NearFieldComponents, compute_near_field_slice
+from pyceles.postprocessing.nearfield import periodic as nf_periodic
 from pyceles.postprocessing.nearfield import workflows as nf_workflows
 from pyceles.postprocessing.nearfield.slice import (
-    interpolate_center_pixels,
     reshape_field_points,
     slice_plane_metadata,
 )
@@ -44,11 +44,11 @@ def _make_run():
     )
 
 
-def test_slice_helpers_cover_metadata_reshape_and_center_interpolation():
+def test_slice_helpers_cover_metadata_and_reshape():
     assert slice_plane_metadata("x") == (0, 1, 2, "y", "z")
     assert slice_plane_metadata("y") == (1, 0, 2, "x", "z")
     assert slice_plane_metadata("z") == (2, 0, 1, "x", "y")
-    with pytest.raises(ValueError, match="plane must be one of"):
+    with pytest.raises(ValueError, match="`plane` must be one of"):
         slice_plane_metadata("bad")
 
     pts_flat, lead_shape = reshape_field_points(np.array([1.0, 2.0, 3.0]))
@@ -62,41 +62,8 @@ def test_slice_helpers_cover_metadata_reshape_and_center_interpolation():
     with pytest.raises(ValueError, match="`points` must be shaped"):
         reshape_field_points(np.zeros((2, 2), dtype=float))
 
-    axis_0_grid, axis_1_grid = np.meshgrid(np.array([-1.0, 0.0, 1.0]), np.array([-1.0, 0.0, 1.0]))
-    e_map = np.zeros((3, 3, 3), dtype=np.complex128)
-    h_map = np.zeros_like(e_map)
-    neighbors = np.array(
-        [
-            [1.0 + 0.0j, 0.0 + 0.0j, 0.0 + 0.0j],
-            [3.0 + 0.0j, 0.0 + 0.0j, 0.0 + 0.0j],
-            [5.0 + 0.0j, 0.0 + 0.0j, 0.0 + 0.0j],
-            [7.0 + 0.0j, 0.0 + 0.0j, 0.0 + 0.0j],
-        ],
-        dtype=np.complex128,
-    )
-    e_map[0, 1] = neighbors[0]
-    e_map[2, 1] = neighbors[1]
-    e_map[1, 0] = neighbors[2]
-    e_map[1, 2] = neighbors[3]
-    h_map[:] = 2.0 * e_map
-    e_map[1, 1] = 99.0 + 0.0j
-    h_map[1, 1] = 199.0 + 0.0j
-    run = type(
-        "Run", (), {"positions": np.array([[0.0, 0.0, 0.0], [4.0, 4.0, 4.0]], dtype=float)}
-    )()
-    field_maps = {"total": (e_map, h_map)}
-    interpolate_center_pixels(
-        run=run,
-        axis_0_grid=axis_0_grid,
-        axis_1_grid=axis_1_grid,
-        field_maps=field_maps,
-        plane="y",
-        plane_value=0.0,
-    )
-    np.testing.assert_allclose(e_map[1, 1], np.mean(neighbors, axis=0))
-    np.testing.assert_allclose(h_map[1, 1], 2.0 * np.mean(neighbors, axis=0))
 
-
+@pytest.mark.parametrize("periodic", [False, True], ids=["finite", "periodic"])
 @pytest.mark.parametrize(
     ("plane", "plane_value", "expected_first", "expected_last", "axis_labels"),
     [
@@ -105,25 +72,27 @@ def test_slice_helpers_cover_metadata_reshape_and_center_interpolation():
         ("z", 4.0, np.array([-1.0, -2.0, 4.0]), np.array([1.0, 2.0, 4.0]), ("x", "y")),
     ],
 )
-def test_compute_near_field_slice_builds_expected_plane_points_and_interpolates(
+def test_near_field_slice_preserves_evaluator_samples_and_dtype(
     monkeypatch,
     plane: str,
     plane_value: float,
     expected_first: np.ndarray,
     expected_last: np.ndarray,
     axis_labels: tuple[str, str],
+    periodic: bool,
 ):
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
-    def _fake_compute_near_field(run, *, points, show_progress, force_general_initial_field):
+    def _fake_compute_near_field(run, *, points, show_progress, **kwargs):
         del run
         pts = np.asarray(points, dtype=float)
         captured["points"] = pts.copy()
         captured["show_progress"] = show_progress
-        captured["force_general_initial_field"] = force_general_initial_field
+        captured.update(kwargs)
         shape = pts.shape[:-1]
-        vec = np.zeros((*shape, 3), dtype=np.complex64)
-        return NearFieldComponents(
+        vec = np.zeros((*shape, 3), dtype=np.complex128)
+        vec[shape[0] // 2, shape[1] // 2] = [1000 + 2.0**-30, -2j, np.nan]
+        fields = NearFieldComponents(
             E_initial=vec + 1.0,
             H_initial=vec + 2.0,
             E_scattered=vec + 3.0,
@@ -134,22 +103,33 @@ def test_compute_near_field_slice_builds_expected_plane_points_and_interpolates(
             H_total=vec + 8.0,
             inside_mask=np.zeros(shape, dtype=bool),
         )
+        captured["fields"] = fields
+        captured["snapshots"] = {
+            name: (getattr(fields, f"E_{name}").copy(), getattr(fields, f"H_{name}").copy())
+            for name in ("initial", "scattered", "internal", "total")
+        }
+        return fields
 
-    interp_calls: list[dict[str, object]] = []
-
-    def _fake_interpolate_center_pixels(**kwargs):
-        interp_calls.append(kwargs)
-
-    monkeypatch.setattr(nf_workflows, "compute_near_field", _fake_compute_near_field)
-    monkeypatch.setattr(nf_workflows, "interpolate_center_pixels", _fake_interpolate_center_pixels)
+    module = nf_periodic if periodic else nf_workflows
+    evaluator = "compute_periodic_near_field" if periodic else "compute_near_field"
+    monkeypatch.setattr(module, evaluator, _fake_compute_near_field)
 
     run = type(
         "Run",
         (),
-        {"config": type("Cfg", (), {"compute_dtype": "complex64"})(), "particles": tuple()},
+        {
+            "config": type("Cfg", (), {"compute_dtype": "complex64"})(),
+            "particles": tuple(),
+            "positions": np.zeros((1, 3)),
+        },
     )()
+    run.positions[0, slice_plane_metadata(plane)[0]] = plane_value
 
-    out = compute_near_field_slice(
+    slice_fn = (
+        nf_periodic.compute_periodic_near_field_slice if periodic else compute_near_field_slice
+    )
+    options = {} if periodic else {"force_general_initial_field": True}
+    out = slice_fn(
         run,
         axis_0_min=-1.0,
         axis_0_max=1.0,
@@ -159,21 +139,22 @@ def test_compute_near_field_slice_builds_expected_plane_points_and_interpolates(
         plane=plane,
         plane_value=plane_value,
         show_progress=False,
-        force_general_initial_field=True,
-        center_pixel_policy="interpolate",
+        **options,
     )
 
     pts = cast(np.ndarray, captured["points"])
     np.testing.assert_allclose(pts[0, 0], expected_first)
     np.testing.assert_allclose(pts[-1, -1], expected_last)
     assert captured["show_progress"] is False
-    assert captured["force_general_initial_field"] is True
+    if not periodic:
+        assert captured["force_general_initial_field"] is True
     assert out.axis_0_label == axis_labels[0]
     assert out.axis_1_label == axis_labels[1]
-    assert out.field_maps["total"][0].dtype == np.complex64
-    assert len(interp_calls) == 1
-    assert interp_calls[0]["plane"] == plane
-    assert interp_calls[0]["plane_value"] == float(plane_value)
+    for name, (e, h) in out.field_maps.items():
+        assert e is getattr(captured["fields"], f"E_{name}")
+        assert h is getattr(captured["fields"], f"H_{name}")
+        np.testing.assert_array_equal(e, captured["snapshots"][name][0])
+        np.testing.assert_array_equal(h, captured["snapshots"][name][1])
 
 
 @pytest.mark.parametrize(
@@ -183,7 +164,6 @@ def test_compute_near_field_slice_builds_expected_plane_points_and_interpolates(
         ({"axis_0_min": 2.0, "axis_0_max": 1.0}, "`axis_0_max` must be >="),
         ({"axis_1_min": 2.0, "axis_1_max": 1.0}, "`axis_1_max` must be >="),
         ({"plane": "bad"}, "`plane` must be one of"),
-        ({"center_pixel_policy": "bad"}, "`center_pixel_policy` must be 'none' or 'interpolate'"),
     ],
 )
 def test_compute_near_field_slice_validates_public_inputs(kwargs: dict[str, Any], match: str):
@@ -204,7 +184,6 @@ def test_compute_near_field_slice_uses_axis_bounds():
         axis_1_max=100.0,
         dx=100.0,
         show_progress=False,
-        center_pixel_policy="none",
     )
     assert out.axis_0.shape == out.axis_1.shape
     assert out.inside.shape == out.axis_0.shape

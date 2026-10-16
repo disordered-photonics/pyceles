@@ -22,7 +22,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Translation and near-field radial tables support passive complex wavenumbers,
   retain double-precision sample generation and expose physical outgoing intervals.
 
+### Changed
+- Breaking: removed `center_pixel_policy` from finite/periodic slice helpers
+  and near-field showcase plotting. Particle-centre fields use analytic limits.
+
 ### Fixed
+- Planar slices preserve evaluated field values and accumulation dtype,
+  including singular or unavailable samples represented by NaNs.
 - Evaluate regular SVWF radial factors at their analytic origin limits,
   preserving particle-centre fields and nonzero-radius higher-order scaling.
 - Use native outgoing Hankel functions in layered internal fields to avoid

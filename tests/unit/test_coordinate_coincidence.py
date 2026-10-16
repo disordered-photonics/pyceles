@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -9,7 +8,6 @@ import pytest
 from pyceles.core.geometry_bounds import coincident_point_mask
 from pyceles.core.sources import DipoleSource
 from pyceles.postprocessing.nearfield import initial
-from pyceles.postprocessing.nearfield.slice import interpolate_center_pixels
 
 
 def test_coincidence_is_absolute_componentwise_and_closed_at_boundary() -> None:
@@ -91,24 +89,3 @@ def test_zero_dipole_field_has_no_singularity_at_its_center(dtype):
     )
     np.testing.assert_array_equal(e, 0)
     np.testing.assert_array_equal(h, 0)
-
-
-@pytest.mark.parametrize("offset", ((0, 0, 128), (1, 0, 0), (0, 1, 0), (0, 0, 0)))
-def test_slice_interpolates_only_actual_center_pixels(offset: tuple[int, int, int]) -> None:
-    origin = float(2**30)
-    u, v = np.meshgrid(origin + np.asarray([0, 128, 256]), origin + np.asarray([0, 128, 256]))
-    position = np.asarray([[origin + 128, origin + 128, origin]]) + offset
-    e = np.ones((3, 3, 3), dtype=np.complex128)
-    h = e.copy()
-    e[1, 1] = h[1, 1] = 9
-    interpolate_center_pixels(
-        run=SimpleNamespace(positions=position),
-        axis_0_grid=u,
-        axis_1_grid=v,
-        field_maps={"field": (e, h)},
-        plane="z",
-        plane_value=origin,
-    )
-    expected = 1 if offset == (0, 0, 0) else 9
-    np.testing.assert_array_equal(e[1, 1], expected)
-    np.testing.assert_array_equal(h[1, 1], expected)

@@ -11,6 +11,7 @@ class NearFieldSlice:
 
     `field_maps` stores complex vector fields `(E, H)` for each family
     (`initial`, `scattered`, `internal`, `total`) sampled on the same grid.
+    Field arrays retain the evaluator's values and accumulation dtype.
     """
 
     axis_0: np.ndarray
@@ -32,7 +33,39 @@ def slice_plane_metadata(plane: str) -> tuple[int, int, int, str, str]:
         return 1, 0, 2, "x", "z"
     if p == "z":
         return 2, 0, 1, "x", "y"
-    raise ValueError("plane must be one of 'x', 'y', or 'z'.")
+    raise ValueError("`plane` must be one of 'x', 'y', or 'z'.")
+
+
+def _slice_grid(
+    *,
+    axis_0_min: float,
+    axis_0_max: float,
+    axis_1_min: float,
+    axis_1_max: float,
+    dx: float,
+    plane: str,
+    plane_value: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Build one Cartesian slice grid for finite and periodic field evaluators."""
+    if float(dx) <= 0:
+        raise ValueError(f"`dx` must be > 0. Got {dx!r}.")
+    if float(axis_0_max) < float(axis_0_min):
+        raise ValueError(
+            f"`axis_0_max` must be >= `axis_0_min`. Got {axis_0_max!r} < {axis_0_min!r}."
+        )
+    if float(axis_1_max) < float(axis_1_min):
+        raise ValueError(
+            f"`axis_1_max` must be >= `axis_1_min`. Got {axis_1_max!r} < {axis_1_min!r}."
+        )
+    normal, axis_0, axis_1, _, _ = slice_plane_metadata(plane)
+    values_0 = np.arange(float(axis_0_min), float(axis_0_max) + float(dx), float(dx))
+    values_1 = np.arange(float(axis_1_min), float(axis_1_max) + float(dx), float(dx))
+    grid_0, grid_1 = np.meshgrid(values_0, values_1, indexing="xy")
+    points = np.empty((*grid_0.shape, 3), dtype=float)
+    points[..., normal] = float(plane_value)
+    points[..., axis_0] = grid_0
+    points[..., axis_1] = grid_1
+    return grid_0, grid_1, points
 
 
 def reshape_field_points(points: np.ndarray) -> tuple[np.ndarray, tuple[int, ...]]:
@@ -50,57 +83,8 @@ def reshape_field_points(points: np.ndarray) -> tuple[np.ndarray, tuple[int, ...
     raise ValueError(f"`points` must be shaped (3,), (N,3), or (...,3). Got shape {arr.shape}.")
 
 
-def _neighbor_mean_inplace(arr: np.ndarray, i0: int, i1: int) -> None:
-    """Replace one sample with the mean of available 4-neighborhood samples."""
-    n0, n1 = arr.shape[0], arr.shape[1]
-    values = []
-    for d0, d1 in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-        j0 = i0 + d0
-        j1 = i1 + d1
-        if 0 <= j0 < n0 and 0 <= j1 < n1:
-            values.append(arr[j0, j1])
-    if values:
-        arr[i0, i1] = np.mean(np.asarray(values), axis=0)
-
-
-def interpolate_center_pixels(
-    *,
-    run,
-    axis_0_grid: np.ndarray,
-    axis_1_grid: np.ndarray,
-    field_maps: dict[str, tuple[np.ndarray, np.ndarray]],
-    plane: str,
-    plane_value: float,
-) -> None:
-    """Patch singular center pixels by local interpolation on exact center hits."""
-    p = np.asarray(run.positions, dtype=float)
-    normal_idx, axis_0_idx, axis_1_idx, _, _ = slice_plane_metadata(plane)
-    on_plane = np.isclose(p[:, normal_idx], plane_value, rtol=0.0, atol=1e-12)
-    u = p[on_plane, axis_0_idx]
-    v = p[on_plane, axis_1_idx]
-
-    if u.size == 0:
-        return
-
-    axis_0_values = np.asarray(axis_0_grid[0, :], dtype=float)
-    axis_1_values = np.asarray(axis_1_grid[:, 0], dtype=float)
-    for uu, vv in zip(u, v, strict=True):
-        i0 = int(np.argmin(np.abs(axis_0_values - uu)))
-        i1 = int(np.argmin(np.abs(axis_1_values - vv)))
-        if not (
-            np.isclose(axis_0_values[i0], uu, rtol=0.0, atol=1e-12)
-            and np.isclose(axis_1_values[i1], vv, rtol=0.0, atol=1e-12)
-        ):
-            continue
-        for key in field_maps:
-            e_map, h_map = field_maps[key]
-            _neighbor_mean_inplace(e_map, i1, i0)
-            _neighbor_mean_inplace(h_map, i1, i0)
-
-
 __all__ = [
     "NearFieldSlice",
-    "interpolate_center_pixels",
     "reshape_field_points",
     "slice_plane_metadata",
 ]

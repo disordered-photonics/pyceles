@@ -467,7 +467,6 @@ def main() -> None:
             plane_value=0.0,
             show_progress=not args.quiet,
             force_general_initial_field=bool(args.force_general_initial_field),
-            center_pixel_policy="interpolate",
         )
         phases.append(nearfield_summary)
 
