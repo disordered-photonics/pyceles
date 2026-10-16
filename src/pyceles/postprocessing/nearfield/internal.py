@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import numpy.typing as npt
-from scipy.special import spherical_jn, spherical_yn
+from scipy.special import spherical_jn
 from tqdm.auto import tqdm
 
 from pyceles._cupy_memory import cupy_allocator_snapshot
@@ -21,6 +22,7 @@ from pyceles.core.particles import (
     TMatrixParticle,
     particle_contains_points,
 )
+from pyceles.core.radial import dx_xz_hankel1, passive_wavenumber, sph_hankel1
 from pyceles.core.spherical import spherical_functions_trigon
 from pyceles.core.tmatrix import (
     _spheroid_internal_block,
@@ -32,10 +34,83 @@ from .classification import InternalPointClassification
 from .common import build_internal_mode_tensors, contract_modes, mode_indices_by_l
 
 
+def _regular_radial_factors(
+    l: int, kr: np.ndarray, *, dtype: npt.DTypeLike
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Sample j_l, j_l/z and (z*j_l)'/z for l >= 1, including the origin.
+
+    Native SciPy evaluation and normalization precede the field-compute cast.
+    No nonzero radial argument is replaced by a length-dependent floor.
+    """
+    argument = np.asarray(kr, dtype=np.complex128)
+    jl = np.asarray(spherical_jn(l, argument))
+    jl_over_z = np.divide(
+        jl,
+        argument,
+        out=np.full_like(jl, 1 / 3 if l == 1 else 0),
+        where=argument != 0,
+    )
+    derivative_over_z = jl_over_z + spherical_jn(l, argument, derivative=True)
+    return jl.astype(dtype), jl_over_z.astype(dtype), np.asarray(derivative_over_z, dtype=dtype)
+
+
+def _layered_radial_factors(
+    l: int,
+    kr: np.ndarray,
+    *,
+    a_m: np.ndarray,
+    b_m: np.ndarray,
+    a_n: np.ndarray,
+    b_n: np.ndarray,
+    dtype: npt.DTypeLike,
+) -> tuple[tuple[np.ndarray, ...], tuple[np.ndarray, ...]]:
+    """Combine regular and outgoing factors for both material polarizations."""
+    regular = _regular_radial_factors(l, kr, dtype=np.complex128)
+    outgoing = np.zeros((3, kr.size), dtype=np.complex128)
+    active = (b_m != 0) | (b_n != 0)
+    # The regular core has no outgoing contribution, including at its centre.
+    if np.any(active):
+        argument = kr[active]
+        hl = sph_hankel1(l, argument)
+        outgoing[:, active] = (hl, hl / argument, dx_xz_hankel1(l, argument) / argument)
+    return (
+        tuple(
+            np.asarray(a_m * j + b_m * h, dtype=dtype)
+            for j, h in zip(regular, outgoing, strict=True)
+        ),
+        tuple(
+            np.asarray(a_n * j + b_n * h, dtype=dtype)
+            for j, h in zip(regular, outgoing, strict=True)
+        ),
+    )
+
+
+def _internal_spherical_frame(
+    displacements: np.ndarray,
+    radii: np.ndarray,
+    *,
+    xp: Any,
+    dtype: np.dtype,
+) -> tuple[Any, ...]:
+    """Use the z-axis at the origin; regular radial limits remove that choice."""
+    rvec = xp.asarray(displacements, dtype=dtype)
+    r = xp.asarray(radii, dtype=dtype)
+    nonzero = r != 0
+    safe_r = xp.where(nonzero, r, 1.0)
+    ct = xp.where(nonzero, rvec[:, 2] / safe_r, 1.0)
+    st = xp.hypot(rvec[:, 0], rvec[:, 1]) / safe_r
+    phi = xp.where(nonzero, xp.arctan2(rvec[:, 1], rvec[:, 0]), 0.0)
+    ca, sa = xp.cos(phi), xp.sin(phi)
+    e_r = xp.stack((st * ca, st * sa, ct), axis=1)
+    e_theta = xp.stack((ct * ca, ct * sa, -st), axis=1)
+    e_phi = xp.stack((-sa, ca, xp.zeros_like(phi)), axis=1)
+    return ct, st, phi, e_r, e_theta, e_phi
+
+
 def compute_internal_field(
     field_points: np.ndarray,
     coeffs: np.ndarray,
-    k: float,
+    k: complex,
     lmax: int,
     *,
     particles: Sequence[Particle],
@@ -51,7 +126,7 @@ def compute_internal_field(
         field_points,
         particles=particles,
         coeffs=coeffs,
-        k=k,
+        k=passive_wavenumber(k),
         lmax=lmax,
         classification=_point_classification,
         n_medium=n_medium,
@@ -68,7 +143,7 @@ def _compute_internal_field_homogeneous_spheres(
     radii: np.ndarray,
     coeffs: np.ndarray,
     *,
-    k: float,
+    k: complex,
     lmax: int,
     n_particle: np.ndarray,
     classification: InternalPointClassification | None = None,
@@ -313,7 +388,7 @@ def _sphere_internal_material_tables(
     radii: np.ndarray,
     n_particle: np.ndarray,
     lmax: int,
-    k: float,
+    k: complex,
     n_medium: complex,
     compute_dtype: np.dtype,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -349,7 +424,7 @@ def _compute_internal_field_homogeneous_spheres_numpy_batched(
     radii: np.ndarray,
     coeffs: np.ndarray,
     *,
-    k: float,
+    k: complex,
     lmax: int,
     n_particle: np.ndarray,
     classification: InternalPointClassification | None,
@@ -409,32 +484,21 @@ def _compute_internal_field_homogeneous_spheres_numpy_batched(
 
         rvec_full = field_points[point_batch] - positions[sphere_batch]
         r = np.linalg.norm(rvec_full, axis=1)
-        r_safe = np.where(r < 1.0e-12, 1.0e-12, r)
-        rvec = np.asarray(rvec_full, dtype=real_dtype)
-        r_safe_angular = np.asarray(r_safe, dtype=real_dtype)
         k_group = k * (group_refractive_indices[group_batch] / n_medium)
-        kr = np.asarray(k_group * r_safe, dtype=compute_dtype)
-        x = rvec[:, 0]
-        y = rvec[:, 1]
-        z = rvec[:, 2]
-        rho = np.sqrt(x * x + y * y)
-        ct = z / r_safe_angular
-        st = rho / r_safe_angular
-        phi = np.arctan2(y, x)
-        cos_phi = np.cos(phi)
-        sin_phi = np.sin(phi)
-        e_r = np.stack([st * cos_phi, st * sin_phi, ct], axis=1)
-        e_theta = np.stack([ct * cos_phi, ct * sin_phi, -st], axis=1)
-        e_phi = np.stack([-sin_phi, cos_phi, np.zeros_like(phi)], axis=1)
+        kr = k_group * r
+        ct, st, phi, e_r, e_theta, e_phi = _internal_spherical_frame(
+            rvec_full,
+            r,
+            xp=np,
+            dtype=real_dtype,
+        )
         pi_all, tau_all, p_all = spherical_functions_trigon(ct, st, lmax, xp=np, return_plm=True)
         e_batch = np.zeros((stop - start, 3), dtype=accum_dtype)
         h_batch = np.zeros_like(e_batch)
         h_factor = np.asarray(-1j * group_refractive_indices[group_batch], dtype=compute_dtype)
 
         for l in range(1, lmax + 1):
-            z_l = np.asarray(spherical_jn(l, kr), dtype=compute_dtype)
-            dz_l = np.asarray(spherical_jn(l, kr, derivative=True), dtype=compute_dtype)
-            dxxz = np.asarray(z_l + kr * dz_l, dtype=compute_dtype)
+            z_l, z_over_kr, dxxz_over_kr = _regular_radial_factors(l, kr, dtype=compute_dtype)
             m_vals, abs_m, n1_idx, n2_idx = mode_by_l[l - 1]
             m_all, n_all = build_internal_mode_tensors(
                 l=l,
@@ -448,8 +512,8 @@ def _compute_internal_field_homogeneous_spheres_numpy_batched(
                 tau_all=tau_all,
                 p_all=p_all,
                 z_l=z_l,
-                dxxz=dxxz,
-                kr=kr,
+                z_over_kr=z_over_kr,
+                dxxz_over_kr=dxxz_over_kr,
                 compute_dtype=compute_dtype,
             )
             a_int = (
@@ -483,7 +547,7 @@ def _compute_internal_field_homogeneous_spheres_cupy(
     radii: np.ndarray,
     coeffs: np.ndarray,
     *,
-    k: float,
+    k: complex,
     lmax: int,
     n_particle: np.ndarray,
     classification: InternalPointClassification | None,
@@ -500,7 +564,6 @@ def _compute_internal_field_homogeneous_spheres_cupy(
     )
     accum_dtype_cp = cupy.complex64 if accum_dtype == np.dtype(np.complex64) else cupy.complex128
     real_dtype = np.dtype(np.float32 if compute_dtype == np.dtype(np.complex64) else np.float64)
-    real_dtype_cp = cupy.float32 if real_dtype == np.dtype(np.float32) else cupy.float64
 
     n_points = int(field_points.shape[0])
     pair_points, pair_spheres = _radial_internal_point_pairs(
@@ -556,26 +619,14 @@ def _compute_internal_field_homogeneous_spheres_cupy(
 
         rvec_full = field_points[point_batch] - positions[sphere_batch]
         r_host = np.linalg.norm(rvec_full, axis=1)
-        r_safe_host = np.where(r_host < 1.0e-12, 1.0e-12, r_host)
-        rvec_host = np.asarray(rvec_full, dtype=real_dtype)
         k_group = k * (group_refractive_indices[group_batch] / n_medium)
-        kr_host = np.asarray(k_group * r_safe_host, dtype=compute_dtype)
-
-        rvec = cupy.asarray(rvec_host, dtype=real_dtype_cp)
-        r_safe = cupy.asarray(r_safe_host, dtype=real_dtype_cp)
-        kr = cupy.asarray(kr_host, dtype=compute_dtype_cp)
-        x = rvec[:, 0]
-        y = rvec[:, 1]
-        z = rvec[:, 2]
-        rho = cupy.sqrt(x * x + y * y)
-        ct = z / r_safe
-        st = rho / r_safe
-        phi = cupy.arctan2(y, x)
-        cos_phi = cupy.cos(phi)
-        sin_phi = cupy.sin(phi)
-        e_r = cupy.stack([st * cos_phi, st * sin_phi, ct], axis=1)
-        e_theta = cupy.stack([ct * cos_phi, ct * sin_phi, -st], axis=1)
-        e_phi = cupy.stack([-sin_phi, cos_phi, cupy.zeros_like(phi)], axis=1)
+        kr_host = k_group * r_host
+        ct, st, phi, e_r, e_theta, e_phi = _internal_spherical_frame(
+            rvec_full,
+            r_host,
+            xp=cupy,
+            dtype=real_dtype,
+        )
         pi_all, tau_all, p_all = spherical_functions_trigon(ct, st, lmax, xp=cupy, return_plm=True)
 
         e_batch = cupy.zeros((stop - start, 3), dtype=accum_dtype_cp)
@@ -584,15 +635,10 @@ def _compute_internal_field_homogeneous_spheres_cupy(
         minus_i = cupy.asarray(-1j, dtype=compute_dtype_cp)
         h_factor = minus_i * n_s_batch
         for l in range(1, lmax + 1):
-            z_l = cupy.asarray(
-                np.asarray(spherical_jn(l, kr_host), dtype=compute_dtype),
-                dtype=compute_dtype_cp,
+            z_l, z_over_kr, dxxz_over_kr = (
+                cupy.asarray(value)
+                for value in _regular_radial_factors(l, kr_host, dtype=compute_dtype)
             )
-            dz_l = cupy.asarray(
-                np.asarray(spherical_jn(l, kr_host, derivative=True), dtype=compute_dtype),
-                dtype=compute_dtype_cp,
-            )
-            dxxz = z_l + kr * dz_l
             m_vals, abs_m, n1_idx, n2_idx = mode_by_l[l - 1]
             m_all, n_all = build_internal_mode_tensors(
                 l=l,
@@ -606,8 +652,8 @@ def _compute_internal_field_homogeneous_spheres_cupy(
                 tau_all=tau_all,
                 p_all=p_all,
                 z_l=z_l,
-                dxxz=dxxz,
-                kr=kr,
+                z_over_kr=z_over_kr,
+                dxxz_over_kr=dxxz_over_kr,
                 compute_dtype=compute_dtype,
             )
             m_all = m_all.astype(compute_dtype_cp, copy=False)
@@ -669,7 +715,7 @@ def _prepare_layered_radial_plan(
     pair_archetypes: np.ndarray,
     *,
     lmax: int,
-    k: float,
+    k: complex,
     n_medium: complex,
     compute_dtype: np.dtype,
 ) -> _LayeredRadialPlan:
@@ -692,7 +738,7 @@ def _prepare_layered_radial_plan(
         layer_indices = np.asarray(archetype.layer_refractive_indices, dtype=np.complex128)
         ratios = layered_internal_ab_ratios(
             lmax=lmax,
-            k_medium=float(k),
+            k_medium=k,
             layer_radii=archetype.layer_radii,
             layer_refractive_indices=archetype.layer_refractive_indices,
             n_medium=n_medium,
@@ -752,7 +798,7 @@ def _compute_internal_field_layered_spheres_numpy_batched(
     coeffs: np.ndarray,
     layered_indices: np.ndarray,
     *,
-    k: float,
+    k: complex,
     lmax: int,
     classification: InternalPointClassification | None,
     n_medium: complex,
@@ -809,25 +855,15 @@ def _compute_internal_field_layered_spheres_numpy_batched(
         archetype_batch = pair_archetypes[start:stop]
         rvec_full = field_points[point_batch] - particles.positions[global_particle_batch]
         r = np.linalg.norm(rvec_full, axis=1)
-        r_safe = np.where(r < 1.0e-12, 1.0e-12, r)
-        rvec = np.asarray(rvec_full, dtype=real_dtype)
-        r_safe_angular = np.asarray(r_safe, dtype=real_dtype)
         flat_layer_ids = _layered_flat_layer_ids(archetype_batch, r, radial_plan)
         n_layer = radial_plan.refractive_indices[flat_layer_ids]
-        kr = np.asarray(k * (n_layer / n_medium) * r_safe, dtype=compute_dtype)
-
-        x = rvec[:, 0]
-        y = rvec[:, 1]
-        z = rvec[:, 2]
-        rho = np.sqrt(x * x + y * y)
-        ct = z / r_safe_angular
-        st = rho / r_safe_angular
-        phi = np.arctan2(y, x)
-        cos_phi = np.cos(phi)
-        sin_phi = np.sin(phi)
-        e_r = np.stack([st * cos_phi, st * sin_phi, ct], axis=1)
-        e_theta = np.stack([ct * cos_phi, ct * sin_phi, -st], axis=1)
-        e_phi = np.stack([-sin_phi, cos_phi, np.zeros_like(phi)], axis=1)
+        kr = k * (n_layer / n_medium) * r
+        ct, st, phi, e_r, e_theta, e_phi = _internal_spherical_frame(
+            rvec_full,
+            r,
+            xp=np,
+            dtype=real_dtype,
+        )
         pi_all, tau_all, p_all = spherical_functions_trigon(ct, st, lmax, xp=np, return_plm=True)
         e_batch = np.zeros((stop - start, 3), dtype=accum_dtype)
         h_batch = np.zeros_like(e_batch)
@@ -839,22 +875,17 @@ def _compute_internal_field_layered_spheres_numpy_batched(
             a_n = radial_plan.n_regular[flat_layer_ids, l]
             b_n = radial_plan.n_outgoing[flat_layer_ids, l]
 
-            jl = np.asarray(spherical_jn(l, kr), dtype=compute_dtype)
-            djl = np.asarray(spherical_jn(l, kr, derivative=True), dtype=compute_dtype)
-            use_h = (b_m != 0) | (b_n != 0)
-            yl = np.zeros_like(jl)
-            dyl = np.zeros_like(djl)
-            if np.any(use_h):
-                yl[use_h] = np.asarray(spherical_yn(l, kr[use_h]), dtype=compute_dtype)
-                dyl[use_h] = np.asarray(
-                    spherical_yn(l, kr[use_h], derivative=True), dtype=compute_dtype
+            (z_m, z_m_over_kr, dxxz_m_over_kr), (z_n, z_n_over_kr, dxxz_n_over_kr) = (
+                _layered_radial_factors(
+                    l,
+                    kr,
+                    a_m=a_m,
+                    b_m=b_m,
+                    a_n=a_n,
+                    b_n=b_n,
+                    dtype=compute_dtype,
                 )
-            hl = np.asarray(jl + 1j * yl, dtype=compute_dtype)
-            dhl = np.asarray(djl + 1j * dyl, dtype=compute_dtype)
-            z_m = np.asarray(a_m * jl + b_m * hl, dtype=compute_dtype)
-            dxxz_m = np.asarray(a_m * (jl + kr * djl) + b_m * (hl + kr * dhl), dtype=compute_dtype)
-            z_n = np.asarray(a_n * jl + b_n * hl, dtype=compute_dtype)
-            dxxz_n = np.asarray(a_n * (jl + kr * djl) + b_n * (hl + kr * dhl), dtype=compute_dtype)
+            )
             m_vals, abs_m, n1_idx, n2_idx = mode_by_l[l - 1]
             m_m, n_m = build_internal_mode_tensors(
                 l=l,
@@ -868,8 +899,8 @@ def _compute_internal_field_layered_spheres_numpy_batched(
                 tau_all=tau_all,
                 p_all=p_all,
                 z_l=z_m,
-                dxxz=dxxz_m,
-                kr=kr,
+                z_over_kr=z_m_over_kr,
+                dxxz_over_kr=dxxz_m_over_kr,
                 compute_dtype=compute_dtype,
             )
             m_n, n_n = build_internal_mode_tensors(
@@ -884,8 +915,8 @@ def _compute_internal_field_layered_spheres_numpy_batched(
                 tau_all=tau_all,
                 p_all=p_all,
                 z_l=z_n,
-                dxxz=dxxz_n,
-                kr=kr,
+                z_over_kr=z_n_over_kr,
+                dxxz_over_kr=dxxz_n_over_kr,
                 compute_dtype=compute_dtype,
             )
             a_out = coeffs_host[global_particle_batch[:, None], n1_idx]
@@ -915,7 +946,7 @@ def _compute_internal_field_layered_spheres_cupy(
     coeffs: np.ndarray,
     layered_indices: np.ndarray,
     *,
-    k: float,
+    k: complex,
     lmax: int,
     classification: InternalPointClassification | None,
     n_medium: complex,
@@ -930,7 +961,6 @@ def _compute_internal_field_layered_spheres_cupy(
     )
     accum_dtype_cp = cupy.complex64 if accum_dtype == np.dtype(np.complex64) else cupy.complex128
     real_dtype = np.dtype(np.float32 if compute_dtype == np.dtype(np.complex64) else np.float64)
-    real_dtype_cp = cupy.float32 if real_dtype == np.dtype(np.float32) else cupy.float64
 
     n_points = int(field_points.shape[0])
     selected = np.asarray(layered_indices, dtype=np.int64).reshape(-1)
@@ -985,30 +1015,15 @@ def _compute_internal_field_layered_spheres_cupy(
         archetype_batch = pair_archetypes[start:stop]
         rvec_full = field_points[point_batch] - particles.positions[global_particle_batch]
         r_host = np.linalg.norm(rvec_full, axis=1)
-        r_safe_host = np.where(r_host < 1.0e-12, 1.0e-12, r_host)
-        rvec_host = np.asarray(rvec_full, dtype=real_dtype)
         flat_layer_ids = _layered_flat_layer_ids(archetype_batch, r_host, radial_plan)
         n_layer_host = radial_plan.refractive_indices[flat_layer_ids]
-        kr_host = np.asarray(
-            k * (n_layer_host / n_medium) * r_safe_host,
-            dtype=compute_dtype,
+        kr_host = k * (n_layer_host / n_medium) * r_host
+        ct, st, phi, e_r, e_theta, e_phi = _internal_spherical_frame(
+            rvec_full,
+            r_host,
+            xp=cupy,
+            dtype=real_dtype,
         )
-
-        rvec = cupy.asarray(rvec_host, dtype=real_dtype_cp)
-        r_safe = cupy.asarray(r_safe_host, dtype=real_dtype_cp)
-        kr = cupy.asarray(kr_host, dtype=compute_dtype_cp)
-        x = rvec[:, 0]
-        y = rvec[:, 1]
-        z = rvec[:, 2]
-        rho = cupy.sqrt(x * x + y * y)
-        ct = z / r_safe
-        st = rho / r_safe
-        phi = cupy.arctan2(y, x)
-        cos_phi = cupy.cos(phi)
-        sin_phi = cupy.sin(phi)
-        e_r = cupy.stack([st * cos_phi, st * sin_phi, ct], axis=1)
-        e_theta = cupy.stack([ct * cos_phi, ct * sin_phi, -st], axis=1)
-        e_phi = cupy.stack([-sin_phi, cos_phi, cupy.zeros_like(phi)], axis=1)
         pi_all, tau_all, p_all = spherical_functions_trigon(ct, st, lmax, xp=cupy, return_plm=True)
         e_batch = cupy.zeros((stop - start, 3), dtype=accum_dtype_cp)
         h_batch = cupy.zeros_like(e_batch)
@@ -1022,25 +1037,14 @@ def _compute_internal_field_layered_spheres_cupy(
             a_n_host = radial_plan.n_regular[flat_layer_ids, l]
             b_n_host = radial_plan.n_outgoing[flat_layer_ids, l]
 
-            jl_host = np.asarray(spherical_jn(l, kr_host), dtype=compute_dtype)
-            djl_host = np.asarray(spherical_jn(l, kr_host, derivative=True), dtype=compute_dtype)
-            use_h = (b_m_host != 0) | (b_n_host != 0)
-            yl_host = np.zeros_like(jl_host)
-            dyl_host = np.zeros_like(djl_host)
-            if np.any(use_h):
-                yl_host[use_h] = np.asarray(spherical_yn(l, kr_host[use_h]), dtype=compute_dtype)
-                dyl_host[use_h] = np.asarray(
-                    spherical_yn(l, kr_host[use_h], derivative=True), dtype=compute_dtype
-                )
-            hl_host = jl_host + 1j * yl_host
-            dhl_host = djl_host + 1j * dyl_host
-            z_m = a_m_host * jl_host + b_m_host * hl_host
-            dxxz_m = a_m_host * (jl_host + kr_host * djl_host) + b_m_host * (
-                hl_host + kr_host * dhl_host
-            )
-            z_n = a_n_host * jl_host + b_n_host * hl_host
-            dxxz_n = a_n_host * (jl_host + kr_host * djl_host) + b_n_host * (
-                hl_host + kr_host * dhl_host
+            m_radial, n_radial = _layered_radial_factors(
+                l,
+                kr_host,
+                a_m=a_m_host,
+                b_m=b_m_host,
+                a_n=a_n_host,
+                b_n=b_n_host,
+                dtype=compute_dtype,
             )
             m_vals, abs_m, n1_idx, n2_idx = mode_by_l[l - 1]
             m_m, n_m = build_internal_mode_tensors(
@@ -1054,9 +1058,9 @@ def _compute_internal_field_layered_spheres_cupy(
                 pi_all=pi_all,
                 tau_all=tau_all,
                 p_all=p_all,
-                z_l=cupy.asarray(z_m, dtype=compute_dtype_cp),
-                dxxz=cupy.asarray(dxxz_m, dtype=compute_dtype_cp),
-                kr=kr,
+                z_l=cupy.asarray(m_radial[0]),
+                z_over_kr=cupy.asarray(m_radial[1]),
+                dxxz_over_kr=cupy.asarray(m_radial[2]),
                 compute_dtype=compute_dtype,
             )
             m_n, n_n = build_internal_mode_tensors(
@@ -1070,9 +1074,9 @@ def _compute_internal_field_layered_spheres_cupy(
                 pi_all=pi_all,
                 tau_all=tau_all,
                 p_all=p_all,
-                z_l=cupy.asarray(z_n, dtype=compute_dtype_cp),
-                dxxz=cupy.asarray(dxxz_n, dtype=compute_dtype_cp),
-                kr=kr,
+                z_l=cupy.asarray(n_radial[0]),
+                z_over_kr=cupy.asarray(n_radial[1]),
+                dxxz_over_kr=cupy.asarray(n_radial[2]),
                 compute_dtype=compute_dtype,
             )
             m_m = m_m.astype(compute_dtype_cp, copy=False)
@@ -1117,7 +1121,7 @@ def _compute_internal_field_particles(
     particles: Sequence[Particle],
     coeffs: np.ndarray,
     *,
-    k: float,
+    k: complex,
     lmax: int,
     classification: InternalPointClassification | None = None,
     n_medium: complex = 1.0 + 0j,
@@ -1202,7 +1206,7 @@ def _compute_internal_field_particles(
             positions,
             radii,
             c,
-            k=float(k),
+            k=k,
             lmax=lmax,
             n_particle=n_particle,
             classification=classification,
@@ -1237,7 +1241,7 @@ def _compute_internal_field_particles(
             positions,
             radii,
             c_sphere,
-            k=float(k),
+            k=k,
             lmax=lmax,
             n_particle=n_particle,
             classification=classification,
@@ -1253,7 +1257,6 @@ def _compute_internal_field_particles(
         inside |= inside_s
 
     if spheroid_idx.size:
-        eps = 1e-12
         mode_by_l = mode_indices_by_l(lmax)
         sph_iter: Iterable[int] = (int(index) for index in spheroid_idx)
         if show_progress:
@@ -1282,7 +1285,7 @@ def _compute_internal_field_particles(
             if internal_map is None:
                 internal_map = _spheroid_internal_block(
                     lmax=lmax,
-                    k_medium=float(k),
+                    k_medium=k,
                     particle=archetype,
                     n_medium=n_medium_c,
                 )
@@ -1291,36 +1294,27 @@ def _compute_internal_field_particles(
             c_internal = np.asarray(internal_map @ c[j_sphere], dtype=compute_dtype)
             center = part.positions[j_sphere]
             rvec_full = pts[idx] - center[None, :]
-            r2 = np.sum(rvec_full * rvec_full, axis=1)
-            r = np.sqrt(r2)
-            r_safe = np.where(r < eps, eps, r)
-            rvec = np.asarray(rvec_full, dtype=real_dtype)
-            r_safe_angular = np.asarray(r_safe, dtype=real_dtype)
-
-            x = rvec[:, 0]
-            y = rvec[:, 1]
-            z = rvec[:, 2]
-            rho = np.sqrt(x * x + y * y)
-            ct = z / r_safe_angular
-            st = rho / r_safe_angular
-            phi = np.arctan2(y, x)
-
-            e_r = np.stack([st * np.cos(phi), st * np.sin(phi), ct], axis=1)
-            e_theta = np.stack([ct * np.cos(phi), ct * np.sin(phi), -st], axis=1)
-            e_phi = np.stack([-np.sin(phi), np.cos(phi), np.zeros_like(phi)], axis=1)
+            r = np.linalg.norm(rvec_full, axis=1)
+            ct, st, phi, e_r, e_theta, e_phi = _internal_spherical_frame(
+                rvec_full,
+                r,
+                xp=np,
+                dtype=real_dtype,
+            )
             pi_all, tau_all, p_all = spherical_functions_trigon(
                 ct, st, lmax, xp=np, return_plm=True
             )
 
             n_s = complex(archetype.refractive_index)
-            kr_full = float(k) * (n_s / n_medium_c) * r_safe
+            kr_full = k * (n_s / n_medium_c) * r
 
             for l in range(1, lmax + 1):
                 m_vals, abs_m, n1_idx, n2_idx = mode_by_l[l - 1]
                 a_int = c_internal[n1_idx].astype(compute_dtype, copy=False)
                 b_int = c_internal[n2_idx].astype(compute_dtype, copy=False)
-                jl = spherical_jn(l, kr_full)
-                djl = spherical_jn(l, kr_full, derivative=True)
+                jl, jl_over_kr, dxxj_over_kr = _regular_radial_factors(
+                    l, kr_full, dtype=compute_dtype
+                )
                 m_reg, n_reg = build_internal_mode_tensors(
                     l=l,
                     m_vals=m_vals,
@@ -1332,9 +1326,9 @@ def _compute_internal_field_particles(
                     pi_all=pi_all,
                     tau_all=tau_all,
                     p_all=p_all,
-                    z_l=np.asarray(jl, dtype=compute_dtype),
-                    dxxz=np.asarray(jl + kr_full * djl, dtype=compute_dtype),
-                    kr=np.asarray(kr_full, dtype=compute_dtype),
+                    z_l=jl,
+                    z_over_kr=jl_over_kr,
+                    dxxz_over_kr=dxxj_over_kr,
                     compute_dtype=compute_dtype,
                 )
                 e[idx] += contract_modes(a_int, m_reg)
@@ -1352,7 +1346,7 @@ def _compute_internal_field_particles(
             part,
             c,
             layered_idx,
-            k=float(k),
+            k=k,
             lmax=lmax,
             classification=classification,
             n_medium=n_medium_c,

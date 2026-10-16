@@ -100,12 +100,14 @@ def test_fused_scattered_near_field_matches_numpy(
         (np.complex128, 2e-11, 2e-12),
     ],
 )
+@pytest.mark.parametrize("host", [1.0, 1.33 + 0.5j])
 def test_batched_sphere_internal_field_matches_numpy(
     cupy_runtime: tuple[Any, Any],
     lmax: int,
     compute_dtype: Any,
     rtol: float,
     atol: float,
+    host: complex,
 ) -> None:
     """Exercise the multi-pair CuPy internal-field contraction path."""
     del cupy_runtime
@@ -116,7 +118,7 @@ def test_batched_sphere_internal_field_matches_numpy(
     radii = np.full(centers.shape[0], 100.0)
     refractive_indices = np.array([1.5 + 0.0j, 1.45 + 0.01j, 1.6 + 0.0j])
     local_points = np.array(
-        [[10.0, 5.0, 7.0], [-20.0, 12.0, -4.0], [35.0, -15.0, 8.0]],
+        [[0.0, 0.0, 0.0], [10.0, 5.0, 7.0], [-20.0, 12.0, -4.0], [35.0, -15.0, 8.0]],
         dtype=float,
     )
     points = (centers[:, None, :] + local_points[None, :, :]).reshape(-1, 3)
@@ -133,11 +135,11 @@ def test_batched_sphere_internal_field_matches_numpy(
     e_ref, h_ref, inside_ref = compute_internal_field(
         points,
         coeffs,
-        k=2.0 * np.pi / 550.0,
+        k=2.0 * np.pi / 550.0 * host,
         lmax=lmax,
         particles=particles,
         backend="numpy",
-        n_medium=1.0 + 0.0j,
+        n_medium=host,
         show_progress=False,
         compute_dtype=compute_dtype,
         accum_dtype=np.complex128,
@@ -145,11 +147,11 @@ def test_batched_sphere_internal_field_matches_numpy(
     e_gpu, h_gpu, inside_gpu = compute_internal_field(
         points,
         coeffs,
-        k=2.0 * np.pi / 550.0,
+        k=2.0 * np.pi / 550.0 * host,
         lmax=lmax,
         particles=particles,
         backend="cupy",
-        n_medium=1.0 + 0.0j,
+        n_medium=host,
         show_progress=False,
         compute_dtype=compute_dtype,
         accum_dtype=np.complex128,
@@ -233,12 +235,14 @@ def test_cupy_internal_workspace_planner_does_not_change_pool_limit(
         (np.complex128, 2e-11, 2e-12),
     ],
 )
+@pytest.mark.parametrize("host", [1.0, 1.33 + 0.5j])
 def test_batched_layered_internal_field_matches_numpy(
     cupy_runtime: tuple[Any, Any],
     lmax: int,
     compute_dtype: Any,
     rtol: float,
     atol: float,
+    host: complex,
 ) -> None:
     """Exercise batched core/shell radial combinations on a real GPU."""
     del cupy_runtime
@@ -261,7 +265,7 @@ def test_batched_layered_internal_field_matches_numpy(
         dtype=float,
     )
     points = (centers[:, None, :] + local_points[None, :, :]).reshape(-1, 3)
-    classification = classify_internal_points(points, particles, n_medium=1.0)
+    classification = classify_internal_points(points, particles, n_medium=host)
     rng = np.random.default_rng(9100 + lmax)
     coeffs = (
         rng.normal(size=(len(particles), n_modes(lmax)))
@@ -271,24 +275,24 @@ def test_batched_layered_internal_field_matches_numpy(
     e_ref, h_ref, inside_ref = compute_internal_field(
         points,
         coeffs,
-        k=2.0 * np.pi / 550.0,
+        k=2.0 * np.pi / 550.0 * host,
         lmax=lmax,
         particles=particles,
         _point_classification=classification,
         backend="numpy",
-        n_medium=1.0 + 0.0j,
+        n_medium=host,
         compute_dtype=compute_dtype,
         accum_dtype=np.complex128,
     )
     e_gpu, h_gpu, inside_gpu = compute_internal_field(
         points,
         coeffs,
-        k=2.0 * np.pi / 550.0,
+        k=2.0 * np.pi / 550.0 * host,
         lmax=lmax,
         particles=particles,
         _point_classification=classification,
         backend="cupy",
-        n_medium=1.0 + 0.0j,
+        n_medium=host,
         compute_dtype=compute_dtype,
         accum_dtype=np.complex128,
     )

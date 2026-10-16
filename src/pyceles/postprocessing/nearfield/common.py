@@ -51,11 +51,11 @@ def build_internal_mode_tensors(
     tau_all: np.ndarray,
     p_all: np.ndarray,
     z_l: np.ndarray,
-    dxxz: np.ndarray,
-    kr: np.ndarray,
+    z_over_kr: np.ndarray,
+    dxxz_over_kr: np.ndarray,
     compute_dtype: np.dtype,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Build `(M_l, N_l)` mode tensors for one degree and radial basis."""
+    """Build `(batch, 2*l+1, 3)` M/N tensors from normalized radial factors."""
     if is_cupy_array(phi) or is_cupy_array(z_l):
         cupy, _ = import_cupy()
         xp = cupy
@@ -71,31 +71,10 @@ def build_internal_mode_tensors(
     real_scalar = np.float32 if np.dtype(compute_dtype) == np.dtype(np.complex64) else np.float64
     pref = real_scalar(1.0 / np.sqrt(2.0 * l * (l + 1.0)))
     ll = real_scalar(l * (l + 1.0))
-    z_over_kr = z_l / kr
-    dxxz_over_kr = dxxz / kr
 
-    if xp is np:
-        p_lm = p_all[l, abs_m_arr, :].T
-        pi_lm = pi_all[l, abs_m_arr, :].T
-        tau_lm = tau_all[l, abs_m_arr, :].T
-    else:
-        # CuPy reaches this helper through two different layouts:
-        # the scattered-field batching path keeps an explicit `(sphere, batch, m)`
-        # structure, while radial internal-field paths work on one flat pair
-        # batch and therefore see only `(m, batch)`.
-        # Handle both so the common algebra stays centralized instead of
-        # duplicating near-identical tensor assembly in each GPU kernel owner.
-        p_sel = p_all[l][abs_m_arr]
-        pi_sel = pi_all[l][abs_m_arr]
-        tau_sel = tau_all[l][abs_m_arr]
-        if p_sel.ndim == 2:
-            p_lm = xp.transpose(p_sel, (1, 0))
-            pi_lm = xp.transpose(pi_sel, (1, 0))
-            tau_lm = xp.transpose(tau_sel, (1, 0))
-        else:
-            p_lm = xp.transpose(p_sel, (1, 2, 0))
-            pi_lm = xp.transpose(pi_sel, (1, 2, 0))
-            tau_lm = xp.transpose(tau_sel, (1, 2, 0))
+    p_lm = p_all[l][abs_m_arr].T
+    pi_lm = pi_all[l][abs_m_arr].T
+    tau_lm = tau_all[l][abs_m_arr].T
 
     eimphi = xp.asarray(xp.exp(1j * phi[:, None] * m_vals_arr[None, :]), dtype=dtype)
     impi = xp.asarray((1j * m_vals_arr[None, :]) * pi_lm, dtype=dtype)

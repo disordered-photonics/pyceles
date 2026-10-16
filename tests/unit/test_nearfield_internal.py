@@ -6,7 +6,7 @@ from typing import Any
 import numpy as np
 import pytest
 
-from pyceles.core.indexing import n_modes
+from pyceles.core.indexing import index_vswf, n_modes
 from pyceles.core.particles import (
     LayeredSphere,
     ParticleCollection,
@@ -19,9 +19,111 @@ from pyceles.postprocessing.nearfield.internal import (
     _cupy_internal_pair_batch_size,
     _internal_cupy_workspace_bytes_per_pair,
     _internal_pair_batch_size_for_workspace,
+    _layered_radial_factors,
     _radial_internal_point_pairs,
+    _regular_radial_factors,
     compute_internal_field,
 )
+
+
+@pytest.mark.parametrize("host", [1.33, 1.33 + 0.5j])
+@pytest.mark.parametrize("dtype", [np.complex64, np.complex128])
+@pytest.mark.parametrize(
+    "particle",
+    [
+        Sphere((0, 0, 0), 72, 2 + 0.1j),
+        LayeredSphere((0, 0, 0), (36, 72), (1.8 + 0.05j, 2 + 0.1j)),
+        Spheroid((0, 0, 0), 60, 72, 2 + 0.1j),
+    ],
+    ids=["sphere", "layered", "spheroid"],
+)
+def test_internal_centre_matches_limits_from_each_cartesian_direction(host, dtype, particle):
+    directions = np.vstack((np.eye(3), -np.eye(3)))
+    points = np.vstack((np.zeros((1, 3)), -np.zeros((1, 3)), 1e-7 * directions, 1e-14 * directions))
+    rng = np.random.default_rng(191)
+    coefficients = (
+        rng.normal(size=(1, n_modes(2))) + 1j * rng.normal(size=(1, n_modes(2)))
+    ).astype(dtype)
+    e, h, inside = compute_internal_field(
+        points,
+        coefficients,
+        k=2 * np.pi / 600 * host,
+        lmax=2,
+        particles=[particle],
+        n_medium=host,
+        compute_dtype=dtype,
+    )
+    assert np.all(inside)
+    tolerance = 2e-5 if dtype == np.complex64 else 2e-7
+    for field in (e, h):
+        np.testing.assert_array_equal(field[0], field[1])
+        np.testing.assert_allclose(
+            field[1:],
+            np.broadcast_to(field[0], field[1:].shape),
+            rtol=tolerance,
+            atol=tolerance * np.linalg.norm(field[0]),
+        )
+
+
+@pytest.mark.parametrize("dtype", [np.complex64, np.complex128])
+@pytest.mark.parametrize("tau", [1, 2])
+@pytest.mark.parametrize(
+    "particle",
+    [Sphere((0, 0, 0), 72, 2 + 0.1j), LayeredSphere((0, 0, 0), (36, 72), (1.8 + 0.05j, 2 + 0.1j))],
+    ids=["sphere", "layered"],
+)
+def test_pure_quadrupole_retains_its_nonzero_radius_scaling(dtype, tau, particle):
+    """M_l scales as r**l and N_l as r**(l-1) near a regular origin."""
+    direction = np.array([1, 2, 3]) / np.sqrt(14)
+    points = np.array([1e-13, 1e-14, 0])[:, None] * direction
+    coefficients = np.zeros((1, n_modes(2)), dtype=dtype)
+    coefficients[0, index_vswf(2, 1, tau, 2)] = 1
+    e, h, inside = compute_internal_field(
+        points,
+        coefficients,
+        k=2 * np.pi / 600 * (1.33 + 0.5j),
+        lmax=2,
+        particles=[particle],
+        n_medium=1.33 + 0.5j,
+        compute_dtype=dtype,
+    )
+    assert inside.all()
+    tolerance = 2e-5 if dtype == np.complex64 else 2e-13
+    for field, order in ((e, 2 if tau == 1 else 1), (h, 1 if tau == 1 else 2)):
+        assert np.linalg.norm(field[0]) > 0
+        np.testing.assert_allclose(field[1], field[0] * 0.1**order, rtol=tolerance, atol=0)
+        np.testing.assert_array_equal(field[2], 0)
+
+
+@pytest.mark.reference
+def test_layered_outgoing_factors_retain_strongly_attenuated_hankel_values():
+    z = np.array([2 + 40j])
+    zero, one = np.zeros(1), np.ones(1)
+    m, n = _layered_radial_factors(
+        1,
+        z,
+        a_m=zero,
+        b_m=one,
+        a_n=zero,
+        b_n=one,
+        dtype=np.complex128,
+    )
+    # Closed forms for h_1 and (z*h_1)' avoid j_1 + i*y_1 cancellation.
+    h1 = -np.exp(1j * z) / z * (1 + 1j / z)
+    derivative = np.exp(1j * z) * (-1j + 1 / z + 1j / z**2)
+    for factors in (m, n):
+        np.testing.assert_allclose(factors, (h1, h1 / z, derivative / z), rtol=2e-14, atol=0)
+
+
+@pytest.mark.parametrize(("l", "z"), [(1, 1e-46 + 2e-47j), (2, 1e-24 + 2e-25j)])
+def test_regular_factors_are_normalized_before_single_precision_underflow(l, z):
+    argument = np.array([z])
+    jl, jl_over_z, derivative_over_z = _regular_radial_factors(l, argument, dtype=np.complex64)
+    # j_l ~ z**l/(2*l+1)!! can underflow while its N-wave factors remain finite.
+    leading = argument ** (l - 1) / (3 if l == 1 else 15)
+    np.testing.assert_array_equal(jl, 0)
+    np.testing.assert_allclose(jl_over_z, leading, rtol=2e-7, atol=0)
+    np.testing.assert_allclose(derivative_over_z, (l + 1) * leading, rtol=2e-7, atol=0)
 
 
 def test_internal_cupy_pair_workspace_planner_scales_with_order_and_dtype() -> None:

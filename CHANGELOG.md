@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Native sphere, layered-sphere, and spheroid interior E/H evaluation supports
+  passive complex host wavenumbers, including CPU/GPU radial particle paths.
 - Exterior scattered E/H evaluation retains passive complex wavenumbers on
   NumPy and CuPy, including the electric-only GPU evaluator.
 - Plane-wave projection and incident E/H evaluation support passive complex
@@ -21,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retain double-precision sample generation and expose physical outgoing intervals.
 
 ### Fixed
+- Evaluate regular SVWF radial factors at their analytic origin limits,
+  preserving particle-centre fields and nonzero-radius higher-order scaling.
+- Use native outgoing Hankel functions in layered internal fields to avoid
+  cancellation for strongly attenuated arguments.
 - Validate scattered-field LUT coverage and exclude singular masked points
   before radial evaluation. Zero outgoing expansions no longer create
   singular fields or enlarge radial tables.
