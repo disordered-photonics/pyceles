@@ -7,8 +7,8 @@ import pyceles as pcl
 from pyceles.core.fields import PlaneWave
 from pyceles.core.particles import LayeredSphere, Sphere
 from pyceles.core.periodic import plane_wave_k_parallel
+from pyceles.core.radial import sph_hankel1
 from pyceles.postprocessing.nearfield import NearFieldRadialLUT, compute_near_field_components
-from pyceles.postprocessing.nearfield.common import sph_hankel1
 
 
 def _required_float(value: float | None) -> float:

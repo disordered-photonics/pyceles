@@ -11,10 +11,9 @@ from scipy.special import spherical_jn, spherical_yn
 from pyceles._arrays import expose_read_only_view
 
 from .indexing import _translation_orders, index_vswf, iter_modes, n_modes
+from .radial import _cast_radial_table_with_finite_guard, passive_wavenumber, sph_hankel1
 from .spherical import _legendre_scalar_tables, legendre_normalized_trigon_scalar
 from .wigner import wigner_3j
-
-# SciPy spherical_yn is defined for real arguments; CELES assumes real k in the embedding medium.
 
 
 def spherical_bessel_jy(lmax: int, z: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -41,52 +40,6 @@ def spherical_bessel_jy(lmax: int, z: np.ndarray) -> tuple[np.ndarray, np.ndarra
     return j, y
 
 
-def _cast_radial_table_with_finite_guard(
-    values: np.ndarray,
-    dtype: npt.DTypeLike,
-) -> np.ndarray:
-    """Cast radial rows while replacing only their singular guard prefixes.
-
-    Different spherical orders become representable at different radii. A
-    high-order overflow must therefore not flatten otherwise-valid low-order
-    samples. For each radial row independently, retain every representable
-    sample and repeat its first representable value only across that row's
-    leading singular prefix. Non-finite values after the prefix indicate a
-    genuine table-construction failure and are rejected.
-    """
-    source = np.asarray(values)
-    target = np.dtype(dtype)
-    if source.ndim == 0:
-        return source.astype(target, copy=False)
-    if source.dtype == target and np.isfinite(source).all():
-        return source
-
-    real_dtype = np.empty((), dtype=target).real.dtype
-    max_finite = np.finfo(real_dtype).max
-    rows = source.reshape(-1, source.shape[-1])
-    out_rows = np.empty(rows.shape, dtype=target)
-    for row, out_row in zip(rows, out_rows, strict=True):
-        representable = (
-            np.isfinite(row.real)
-            & np.isfinite(row.imag)
-            & (np.abs(row.real) <= max_finite)
-            & (np.abs(row.imag) <= max_finite)
-        )
-        finite_indices = np.flatnonzero(representable)
-        if finite_indices.size == 0:
-            raise FloatingPointError(
-                f"Radial table for dtype {target} has no finite sample in the requested range."
-            )
-        first_finite = int(finite_indices[0])
-        if not np.all(representable[first_finite:]):
-            raise FloatingPointError(
-                "Radial table contains non-finite samples beyond its guard prefix."
-            )
-        out_row[first_finite:] = row[first_finite:].astype(target, copy=False)
-        out_row[:first_finite] = out_row[first_finite]
-    return out_rows.reshape(source.shape)
-
-
 def spherical_bessel_j(lmax: int, z: np.ndarray) -> np.ndarray:
     """Return `j_l(z)` for `l=0..lmax`."""
 
@@ -100,6 +53,10 @@ def spherical_bessel_j(lmax: int, z: np.ndarray) -> np.ndarray:
 class RadialLUT:
     """Lookup table for radial spherical families up to `p=2*lmax`.
 
+    Samples are evaluated in double precision before the storage cast.
+    Validate physical outgoing query bounds once with `validate_interval`
+    before repeated CPU/GPU lookups; the finite singular prefix is padding.
+
     Parameters
     ----------
     interpolation:
@@ -109,20 +66,17 @@ class RadialLUT:
     def __init__(
         self,
         lmax: int,
-        k,
+        k: complex,
         r_max: float,
         dr: float,
         interpolation: str = "linear",
         dtype: npt.DTypeLike = np.complex128,
     ):
         self.lmax = int(lmax)
-        k_c = complex(k)
-        if abs(k_c.imag) > 0:
-            raise ValueError(
-                f"Translation RadialLUT requires real k (embedding medium must be non-absorbing). Got k={k_c}."
-            )
-        self.k = float(k_c.real)
+        self.k = passive_wavenumber(k)
         self.dr = float(dr)
+        if not np.isfinite(dr) or dr <= 0 or not np.isfinite(r_max) or r_max < 0:
+            raise ValueError("Require finite dr > 0 and r_max >= 0")
         self.dtype = np.dtype(dtype)
         interp = str(interpolation).strip().lower()
         if interp not in {"linear", "nearest"}:
@@ -141,25 +95,42 @@ class RadialLUT:
         if z.size > 1:
             z = z.copy()
             z[0] = z[1]
-        j, y = spherical_bessel_jy(2 * self.lmax, z)
-        self.h = _cast_radial_table_with_finite_guard(j + 1j * y, self.dtype)
+        values = sph_hankel1(np.arange(2 * self.lmax + 1)[:, None], z[None, :])
+        self.h, first_indices = _cast_radial_table_with_finite_guard(values, self.dtype)
+        self.minimum_hankel_radius = float(self.r_grid[first_indices.max()])
         self.j = spherical_bessel_j(2 * self.lmax, self.k * self.r_grid).astype(
             self.dtype, copy=False
         )
+        if not np.all(np.isfinite(self.j)):
+            raise FloatingPointError(
+                "Regular radial samples are not representable in the requested dtype"
+            )
+
+    def validate_interval(self, r_min: float, r_max: float) -> None:
+        """Reject outgoing queries that use singular padding or exceed the table.
+
+        Regular j at the origin is valid independently of this outgoing bound.
+        """
+        if not (
+            np.isfinite(r_min)
+            and np.isfinite(r_max)
+            and self.minimum_hankel_radius <= r_min <= r_max <= self.r_grid[-1]
+        ):
+            raise ValueError("Outgoing query interval includes padding or exceeds the radial table")
 
     def hankel_all_p(self, r: float) -> np.ndarray:
         """Return interpolated `h_p^(1)(k r)` for all `p=0..2*lmax` at radius `r`."""
         r = float(r)
         if r <= 0.0:
             return self.h[:, 0]
-        t = r * self._inv_dr
+        t = min(r * self._inv_dr, self._last_index)
         if self.interpolation == "nearest":
             i = int(np.round(t))
             i = max(0, min(i, self._last_index))
             return self.h[:, i]
         i0 = int(np.floor(t))
-        frac = t - i0
         i0 = max(0, min(i0, self._last_index - 1))
+        frac = t - i0
         return (1.0 - frac) * self.h[:, i0] + frac * self.h[:, i0 + 1]
 
     def bessel_j_all_p(self, r: float) -> np.ndarray:
@@ -168,14 +139,14 @@ class RadialLUT:
         r = float(r)
         if r <= 0.0:
             return self.j[:, 0]
-        t = r * self._inv_dr
+        t = min(r * self._inv_dr, self._last_index)
         if self.interpolation == "nearest":
             i = int(np.round(t))
             i = max(0, min(i, self._last_index))
             return self.j[:, i]
         i0 = int(np.floor(t))
-        frac = t - i0
         i0 = max(0, min(i0, self._last_index - 1))
+        frac = t - i0
         return (1.0 - frac) * self.j[:, i0] + frac * self.j[:, i0 + 1]
 
 
@@ -331,7 +302,7 @@ def _translation_ab5_compact_tables(lmax: int, dtype=np.complex64) -> tuple[np.n
 @cache
 def _rectangular_radial_lut_from_base(
     lmax: int,
-    k: float,
+    k: complex,
     r_max: float,
     dr: float,
     dtype_str: str,
@@ -340,7 +311,7 @@ def _rectangular_radial_lut_from_base(
 
     return RadialLUT(
         lmax=int(lmax),
-        k=float(k),
+        k=k,
         r_max=float(r_max),
         dr=float(dr),
         dtype=np.dtype(dtype_str),
@@ -349,7 +320,7 @@ def _rectangular_radial_lut_from_base(
 
 def _translation_radial_values(
     lmax: int,
-    k: float,
+    k: complex,
     r: float,
     *,
     out_dtype: np.dtype,
@@ -361,8 +332,7 @@ def _translation_radial_values(
     fam = str(family).strip().lower()
     if fam == "outgoing_to_regular":
         if radial_lut is None:
-            j, y = spherical_bessel_jy(2 * lmax, np.asarray(k * r, dtype=np.complex128))
-            return np.asarray(j + 1j * y, dtype=out_dtype).reshape((2 * lmax + 1,))
+            return np.asarray(sph_hankel1(np.arange(2 * lmax + 1), k * r), dtype=out_dtype)
         return np.asarray(radial_lut.hankel_all_p(r), dtype=out_dtype)[: 2 * lmax + 1]
     if fam in {"interior", "regular_to_regular"}:
         if radial_lut is None:
@@ -379,7 +349,7 @@ def _translation_radial_values(
 
 def _translation_block_family(
     lmax: int,
-    k: float,
+    k: complex,
     rvec: np.ndarray,
     *,
     ab5: np.ndarray,
@@ -474,7 +444,7 @@ def _translation_plm_coeff_table(lmax: int, dtype=np.float32) -> np.ndarray:
 
 def translation_block(
     lmax: int,
-    k: float,
+    k: complex,
     rvec: np.ndarray,
     *,
     ab5: np.ndarray,
@@ -498,7 +468,7 @@ def translation_block(
 
 def translation_block_regular(
     lmax: int,
-    k: float,
+    k: complex,
     rvec: np.ndarray,
     *,
     ab5: np.ndarray,
@@ -514,7 +484,7 @@ def translation_block_regular(
 
 def translation_block_interior(
     lmax: int,
-    k: float,
+    k: complex,
     rvec: np.ndarray,
     *,
     ab5: np.ndarray,
@@ -534,7 +504,7 @@ def translation_block_interior(
 def translation_block_rect(
     lmax_out: int,
     lmax_in: int,
-    k: float,
+    k: complex,
     rvec: np.ndarray,
     *,
     ab5: np.ndarray | None = None,
@@ -562,7 +532,7 @@ def translation_block_rect(
         )
     full_block = _translation_block_family(
         full_order,
-        float(k),
+        k,
         np.asarray(rvec, dtype=float),
         ab5=(
             np.asarray(ab5, dtype=np.complex128)

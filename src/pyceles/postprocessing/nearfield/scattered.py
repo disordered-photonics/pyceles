@@ -11,10 +11,15 @@ from tqdm.auto import tqdm
 from pyceles._optional import asnumpy, import_cupy
 from pyceles.core.geometry_bounds import conservative_cross_set_max_distance
 from pyceles.core.indexing import n_modes
+from pyceles.core.radial import (
+    _cast_radial_table_with_finite_guard,
+    dx_xz_hankel1,
+    passive_wavenumber,
+    sph_hankel1,
+)
 from pyceles.core.spherical import spherical_functions_trigon
-from pyceles.core.translation import _cast_radial_table_with_finite_guard
 
-from .common import contract_modes, dx_xz_hankel1, mode_indices_by_l, sph_hankel1
+from .common import contract_modes, mode_indices_by_l
 
 
 @cache
@@ -46,15 +51,20 @@ def _mode_indices_by_l_cupy(
 
 @dataclass(frozen=True)
 class NearFieldRadialLUT:
-    """Near-field lookup table for radial outgoing SVWF factors on uniform radius."""
+    """Uniform-radius outgoing values and derivatives, sampled in double precision.
+
+    Validate physical outgoing query bounds with `validate_interval` before
+    repeated lookups. The finite singular prefix is padding, not a field value.
+    """
 
     lmax: int
-    k: float
+    k: complex
     dr: float
     dtype: np.dtype
     ri: np.ndarray
     h: list[np.ndarray]
     dxxz: list[np.ndarray]
+    minimum_hankel_radius: float
     _ri_gpu: Any
     _h_gpu: tuple[Any, ...]
     _dxxz_gpu: tuple[Any, ...]
@@ -63,33 +73,45 @@ class NearFieldRadialLUT:
         self,
         *,
         lmax: int,
-        k: float,
+        k: complex,
         r_max: float,
         dr: float = 1.0,
         dtype: npt.DTypeLike = np.complex128,
     ):
         object.__setattr__(self, "lmax", int(lmax))
-        object.__setattr__(self, "k", float(k))
+        object.__setattr__(self, "k", passive_wavenumber(k))
+        if not np.isfinite(dr) or dr <= 0 or not np.isfinite(r_max) or r_max < 0:
+            raise ValueError("Require finite dr > 0 and r_max >= 0")
         object.__setattr__(self, "dr", float(dr))
         object.__setattr__(self, "dtype", np.dtype(dtype))
-        ri = np.arange(0.0, r_max + dr, dr, dtype=np.float64)
+        ri = float(dr) * np.arange(int(np.ceil(r_max / dr)) + 2, dtype=np.float64)
         x = self.k * ri
         if x.size > 1:
             x = x.copy()
             x[0] = x[1]
         h = [np.zeros_like(x, dtype=self.dtype) for _ in range(self.lmax + 1)]
         dxxz = [np.zeros_like(x, dtype=self.dtype) for _ in range(self.lmax + 1)]
+        first_index = 1
         for l in range(1, self.lmax + 1):
-            h[l] = _cast_radial_table_with_finite_guard(sph_hankel1(l, x)[None, :], self.dtype)[0]
-            dxxz[l] = _cast_radial_table_with_finite_guard(
-                dx_xz_hankel1(l, x)[None, :], self.dtype
-            )[0]
+            h[l], h_first = _cast_radial_table_with_finite_guard(sph_hankel1(l, x), self.dtype)
+            dxxz[l], d_first = _cast_radial_table_with_finite_guard(dx_xz_hankel1(l, x), self.dtype)
+            first_index = max(first_index, int(h_first), int(d_first))
+        object.__setattr__(self, "minimum_hankel_radius", float(ri[first_index]))
         object.__setattr__(self, "ri", ri)
         object.__setattr__(self, "h", h)
         object.__setattr__(self, "dxxz", dxxz)
         object.__setattr__(self, "_ri_gpu", None)
         object.__setattr__(self, "_h_gpu", tuple([None] * (self.lmax + 1)))
         object.__setattr__(self, "_dxxz_gpu", tuple([None] * (self.lmax + 1)))
+
+    def validate_interval(self, r_min: float, r_max: float) -> None:
+        """Reject outgoing queries that use singular padding or exceed the table."""
+        if not (
+            np.isfinite(r_min)
+            and np.isfinite(r_max)
+            and self.minimum_hankel_radius <= r_min <= r_max <= self.ri[-1]
+        ):
+            raise ValueError("Outgoing query interval includes padding or exceeds the radial table")
 
     def interp(self, l: int, r: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Linearly interpolate precomputed radial kernels at requested radii."""

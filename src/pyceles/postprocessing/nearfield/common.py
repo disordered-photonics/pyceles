@@ -4,7 +4,6 @@ from functools import cache
 from typing import cast
 
 import numpy as np
-from scipy.special import spherical_jn, spherical_yn
 
 from pyceles._arrays import expose_read_only_view
 from pyceles._optional import import_cupy, is_cupy_array
@@ -32,18 +31,6 @@ def mode_indices_by_l(
             )
         )
     return tuple(out)
-
-
-def sph_hankel1(l: int, x: np.ndarray) -> np.ndarray:
-    """Spherical Hankel function of first kind h_l^(1)(x)."""
-    return spherical_jn(l, x) + 1j * spherical_yn(l, x)
-
-
-def dx_xz_hankel1(l: int, x: np.ndarray) -> np.ndarray:
-    """Return d/dx (x z_l(x)) for z_l = h_l^(1)."""
-    z = sph_hankel1(l, x)
-    dzdx = spherical_jn(l, x, derivative=True) + 1j * spherical_yn(l, x, derivative=True)
-    return z + x * dzdx
 
 
 def contract_modes(mode_coeffs: np.ndarray, mode_tensor: np.ndarray) -> np.ndarray:
@@ -136,7 +123,5 @@ __all__ = [
     "build_internal_mode_tensors",
     "clear_caches",
     "contract_modes",
-    "dx_xz_hankel1",
     "mode_indices_by_l",
-    "sph_hankel1",
 ]
