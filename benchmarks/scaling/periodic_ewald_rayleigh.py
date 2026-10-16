@@ -8,22 +8,19 @@ quantity is complete wall time to the first converged solution, including
 operator preparation and the Krylov solve; phase timings and iteration counts
 remain available for interpretation.
 
-CuPy is the default production backend and uses complex64 compute with
+CuPy is the default performance backend and uses complex64 compute with
 complex128 accumulation.  NumPy remains available only when explicitly
-requested for small reference probes; no CPU timing is extrapolated from GPU
-results.  Cached Ewald is the practical dense reference while it fits in
-device memory.  Pass ``--no-cache-translation-blocks`` for the bounded-memory
-matrix-free Ewald diagnostic.  Rayleigh uses its compact reciprocal plan and
-sparse exact-near data.  GMRES is the standard solver; GCRO-DR and LSQR are
-retained as explicit expert diagnostics.  Every recorded solve performs its
-terminal physical residual check; the benchmark no longer exposes the old
-proxy-only stopping switch.
+requested for small reference probes.  Cached Ewald is the practical dense
+reference while it fits in device memory.  Pass ``--no-cache-translation-blocks``
+for the bounded-memory matrix-free Ewald diagnostic.  Rayleigh uses its compact
+reciprocal plan and sparse exact-near data.  GMRES is the standard solver;
+GCRO-DR and LSQR are retained as explicit expert diagnostics.
 
-The defaults are the current production ladder: lateral growth at fixed
-``H/lambda=20`` and vertical growth through ``N=16384`` at fixed
-``P/lambda=4.75``.  Override the lists and geometry controls explicitly for
-smaller probes.  The complete preflight runs before any timed solve and
-``--anomaly-policy error`` is the default.
+A default ladder of particle number is used reaching N>10000, with lateral
+growth at fixed ``H/lambda=20`` and vertical growth at fixed ``P/lambda=4.75``.
+Override the lists and geometry controls explicitly for smaller probes.
+The complete preflight runs before any timed solve and ``--anomaly-policy error``
+is the default.
 """
 
 from __future__ import annotations
@@ -823,7 +820,7 @@ def main() -> None:
         default=20.0,
         help=(
             "Fixed occupied height for the lateral family in vacuum-wavelength units. "
-            "The production default is 20.0; override it for diagnostic ladders."
+            "The default is 20.0; override it for other scaling ladders."
         ),
     )
     parser.add_argument(
@@ -838,7 +835,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=12345)
     parser.add_argument("--max-attempts-per-particle", type=int, default=5000)
 
-    # Production precision policies: NumPy reference versus fast CuPy solve.
+    # Precision defaults for NumPy reference and CuPy performance runs.
     parser.add_argument(
         "--numpy-compute-dtype", choices=("complex64", "complex128"), default="complex128"
     )

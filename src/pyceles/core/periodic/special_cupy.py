@@ -231,7 +231,7 @@ def _shifted_delta_sequence_series_cupy(
     z_arr = cp.asarray(z_offset, dtype=cp.float64).reshape(-1)
     x = -(gamma_arr * gamma_arr) / (4.0 * float(eta) * float(eta))
     if upper_gamma is None:
-        # This standalone helper is a parity/reference API. The production
+        # This standalone helper is a parity/reference API. The fused
         # Ewald kernel receives its exact host-built table through the cached
         # reciprocal workspace and never takes this host route per matvec.
         gamma_table = cp.asarray(

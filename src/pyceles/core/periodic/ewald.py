@@ -301,7 +301,7 @@ def _representative_ewald_eta_offsets(
 ) -> Array:
     """Return a compact, cheap set of offsets that stress eta stability.
 
-    This production preflight deliberately avoids all-pairs searches and KD-tree
+    The preparation check avoids all-pairs searches and KD-tree
     dependencies. It combines z-extreme packing probes with two near-self
     synthetic offsets; this is enough to catch the large-area small-eta failures
     seen so far without turning eta selection into an optimization pass.

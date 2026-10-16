@@ -477,7 +477,7 @@ def _compute_scattered_field_cupy_vectorized(
     """Reference CuPy assembly retained for differential benchmarking.
 
     This keeps the same near-field formulas as the NumPy reference path but
-    batches spheres and field points on device. Production dispatch uses the
+    batches spheres and field points on device. Field evaluation uses the
     generated fused kernel above; retaining this implementation makes focused
     kernel parity and regression comparisons possible without restoring a
     public cutoff policy.

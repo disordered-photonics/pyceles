@@ -81,7 +81,7 @@ _SINGLE_LEVEL_LEAF_OTF_MIN_BYTES = 8 * _MIB
 _SINGLE_LEVEL_LEAF_OTF_MAX_BYTES = 256 * _MIB
 
 Offset3 = tuple[int, int, int]
-# CuPy production runs use on-the-fly leaf apply; dense leaf payloads remain
+# CuPy uses on-the-fly leaf apply by default; dense leaf payloads remain
 # available only for validation/debug parity against the CPU reference plan.
 CuPyMLFMMLeafApplyMode = Literal["dense", "on_the_fly"]
 CuPyMLFMMHostCacheRetention = Literal["full", "summary", "none"]
@@ -126,7 +126,7 @@ class CuPyMLFMMHostCachePolicy:
     leaf/box units.
 
     `collect_stream_stats` enables profiling instrumentation for streamed
-    multilevel chunk/build counters. Leave it off for production runs so
+    multilevel chunk/build counters. Leave it off when timing solves so
     repeated applies do not spend time updating per-apply bookkeeping
     dictionaries.
     """
@@ -205,7 +205,7 @@ class CuPyHostSingleLevelData:
     """Compact host single-level payload for CuPy upload.
 
     Dense `aggregation` blocks are populated only for validation/debug uploads;
-    production CuPy runs use the on-the-fly leaf schedule instead.
+    CuPy uses the on-the-fly leaf schedule by default.
     """
 
     box_order: int
@@ -225,7 +225,7 @@ class CuPyHostMultilevelData:
     """Compact host multilevel payload for CuPy upload.
 
     Dense `aggregation` blocks are populated only for validation/debug uploads;
-    production CuPy runs use the on-the-fly leaf schedule instead.
+    CuPy uses the on-the-fly leaf schedule by default.
     """
 
     levels: tuple[CuPyHostLevelData, ...]
@@ -1349,7 +1349,7 @@ def _build_host_single_level(
     """Build compact host payload for one single-level sampled-far stage.
 
     Dense leaf aggregation is preserved only for explicit validation/debug
-    uploads; the production path stores the compact on-the-fly leaf payload.
+    uploads; the default path stores the compact on-the-fly leaf payload.
     """
 
     if str(leaf_apply_mode) == "on_the_fly":
@@ -1401,7 +1401,7 @@ def _build_host_multilevel(
     """Build compact host payload for one multilevel sampled-far stage.
 
     Dense leaf aggregation is preserved only for explicit validation/debug
-    uploads; the production path stores the compact on-the-fly leaf payload.
+    uploads; the default path stores the compact on-the-fly leaf payload.
     """
 
     levels = tuple(
@@ -8060,7 +8060,7 @@ class CuPyMLFMMCouplingOperator:
 
     The MLFMM plan and one-time operators are built on CPU (NumPy reference
     path). This class executes repeated exact-near and sampled-far applies on
-    CuPy device arrays. The intended production configuration is on-the-fly
+    CuPy device arrays. The default configuration is on-the-fly
     leaf apply with streamed sampled-far traversal and compact host-summary
     retention; dense leaf payloads remain available only for validation/debug
     comparisons.
@@ -8748,7 +8748,7 @@ class CuPyMLFMMCouplingOperator:
     def apply_adjoint(self, x: Any) -> Any:
         """Apply the Hermitian adjoint of the finite MLFMM coupling on device.
 
-        Production on-the-fly multilevel plans use the same bounded streamed
+        On-the-fly multilevel plans use the same bounded streamed
         residency policy as the forward action. Dense/debug leaf plans retain
         the resident reverse hierarchy as a simple algebraic reference path.
         """

@@ -836,7 +836,7 @@ def _resolve_multilevel_hf_start_level(
     Starting later than level 2 without remapping ownership omits far
     interactions whose parents are already far at the skipped levels. Such
     coarse-level skipping is therefore an explicit expert/diagnostic choice, not
-    the automatic production policy.
+    the default policy.
     """
 
     leaf = int(leaf_level)

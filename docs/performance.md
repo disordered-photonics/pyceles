@@ -251,7 +251,7 @@ They are singular channels of the artificial periodic lattice, not Ewald
 solver failures. Use `pyceles.core.periodic.rayleigh_report` or
 `suggest_safe_period_scales` before selecting a period. The geometry-only
 report identifies grazing orders but does not predict the minimum of a full
-coupling-norm scan. Production comparisons should vary shell and Rayleigh
+coupling-norm scan. Accuracy comparisons should vary shell and Rayleigh
 truncation controls and compare representative cases with a converged Ewald
 calculation.
 
@@ -271,7 +271,7 @@ orders for output and near-field evaluation. For exterior near fields, choose
 ## Periodic implementation notes
 
 - Periodic many-body solves remain particle-local and operator/Krylov oriented;
-  production workflows do not build a dense cluster T matrix.
+  the particle-T actions do not require a dense cluster T matrix.
 - Adaptive Ewald shell selection includes a propagating-order reciprocal guard.
   `max_shells` is a safety cap, not an accuracy target.
 - The CuPy Ewald path batches structural sums and same-plane classification

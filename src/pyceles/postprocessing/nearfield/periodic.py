@@ -30,10 +30,9 @@ def compute_periodic_near_field(
     slab_tolerance: float = 1e-12,
     show_progress: bool = False,
 ) -> NearFieldComponents:
-    """Evaluate periodic near fields with slab-aware production dispatch.
+    """Evaluate periodic near fields inside and outside the particle slab.
 
-    This production path intentionally does not use replicated real-space image
-    sums. Points above/below the particle slab use the exterior Rayleigh-order
+    Points above/below the particle slab use the exterior Rayleigh-order
     evaluator, while points intersecting the slab use the local periodic
     evaluator. The exterior order basis is explicit: callers must provide
     `field_bmax`, or configure `run.config.periodic.options.output_bmax`.

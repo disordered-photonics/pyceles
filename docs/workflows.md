@@ -467,7 +467,7 @@ Notes:
   `A = I - T W` action. Pairwise finite coupling and periodic Rayleigh, Ewald,
   and direct-sum coupling provide this when particle-T groups expose matching
   forward/adjoint actions, including explicit dense blocks. Finite MLFMM also
-  provides matching forward/adjoint actions on NumPy and CuPy; production CuPy
+  provides matching forward/adjoint actions on NumPy and CuPy; CuPy
   multilevel plans stream both forward and reverse sampled-far traversals with
   bounded hierarchy frontiers. Periodic direct-sum is available on the
   NumPy/reference backend; CuPy periodic workflows currently use Ewald or Rayleigh. LSQR does

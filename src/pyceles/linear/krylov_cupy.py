@@ -644,7 +644,7 @@ def lsqr_cupy_native(
 ) -> CuPyLSQRNativeResult:
     """Run a matrix-free LSQR correction solve on CuPy.
 
-    ``A_mv`` and ``A_h_mv`` must be the production action and its exact
+    ``A_mv`` and ``A_h_mv`` must be the operator action and its exact
     Hermitian adjoint.  Vector storage follows ``operator_dtype`` while all
     norms, inner products, and scalar recurrences follow ``accum_dtype``.
     The returned iterate solves ``A x = b`` from ``x0``; LSQR internally
@@ -652,7 +652,7 @@ def lsqr_cupy_native(
     ``initial_residual``) and never stores a Krylov basis.  ``rhs_norm`` keeps
     tolerance normalization tied to the original right-hand side when a
     correction residual is supplied.  ``true_residual_every`` is opt-in
-    because a physical residual check costs another production forward
+    because a physical residual check costs another forward
     action.
     """
 
@@ -716,7 +716,7 @@ def lsqr_cupy_native(
         # A supplied warm start is semantically a real warm start.  Do not
         # scan the complete device vector merely to special-case an all-zero
         # value; callers that already know the residual can pass
-        # ``initial_residual`` and avoid this production action entirely.
+        # ``initial_residual`` and avoid this operator action entirely.
         residual = b_vec - _apply(A_mv, x0_vec, "A(x0)")
         operator_applications += 1
     residual_norm = _norm(residual, cupy=cupy, accum_dtype=acc_dtype)

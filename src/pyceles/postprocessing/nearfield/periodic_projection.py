@@ -46,8 +46,8 @@ def l1_projection_data(lmax: int) -> tuple[int, int, np.ndarray, np.ndarray]:
 
     The returned kernel contracts periodic structural sums directly into the
     six destination ``l=1`` modes, avoiding full translation-block construction.
-    Its rectangular storage follows the historical even Ewald capacity; the
-    production compact helper below removes any unused capacity degree.
+    Its rectangular storage uses an even Ewald capacity; the compact helper
+    below removes any unused capacity degree.
     """
 
     lmax_i = int(lmax)
@@ -73,9 +73,9 @@ def l1_projection_data(lmax: int) -> tuple[int, int, np.ndarray, np.ndarray]:
     required_order = _l1_required_structural_order(lmax_i)
     lmax_struct = _ewald_capacity_lmax(required_order)
     # This dense helper is retained as a reference representation.  Its
-    # historical Ewald-shaped storage has an even maximum order, so an odd
+    # Ewald-shaped storage has an even maximum order, so an odd
     # required order (for example p<=5 at lmax=4) owns one unused capacity row.
-    # The production compact path below evaluates only ``required_order``.
+    # The compact path below evaluates only ``required_order``.
     structural_order = 2 * lmax_struct
     p_count = required_order + 1
     m_offset = structural_order

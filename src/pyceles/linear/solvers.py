@@ -684,7 +684,7 @@ def gmres_cupy_block(
     while block Frobenius residuals remain available as aggregate diagnostics.
 
     Operator and preconditioner callables must accept the same 2D
-    ``(n, nrhs)`` block interface as the prepared production operators.
+    ``(n, nrhs)`` block interface as the prepared operators.
     """
     cupy, _ = import_cupy()
     b_mat = np.asarray(b)

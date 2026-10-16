@@ -60,7 +60,7 @@ def svwf_rotation_matrix(lmax: int, alpha: float, beta: float, gamma: float) -> 
     """Return the CELES-ordered SVWF rotation matrix for one Euler-angle triplet.
 
     This dense matrix is kept mainly as a reference/inspection helper. The
-    production particle-T path uses `rotate_svwf_tmatrix_block(...)` directly,
+    particle-T implementation uses `rotate_svwf_tmatrix_block(...)` directly,
     so caching the full dense matrix is not important enough to justify keeping
     another angle-keyed cache alive.
     """
