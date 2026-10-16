@@ -48,6 +48,7 @@ from .particles import (
     particle_intrinsic_t_signature,
     particle_t_signature,
 )
+from .radial import dx_xz_hankel1, sph_hankel1
 from .spheroid_ebcm import spheroid_tmatrix_and_internal_block
 from .svwf_rotation import rotate_svwf_tmatrix_block
 
@@ -61,17 +62,23 @@ def _riccati_jh(
     Here `psi=x*j_l(x)` and `xi=x*h_l^(1)(x)`, with derivatives w.r.t. `x`.
     """
     jl = spherical_jn(l, x)
-    yl = spherical_yn(l, x)
-    hl = jl + 1j * yl
-
     djl = spherical_jn(l, x, derivative=True)
-    dyl = spherical_yn(l, x, derivative=True)
-    dhl = djl + 1j * dyl
 
     psi = x * jl
-    xi = x * hl
     dpsi = jl + x * djl
-    dxi = hl + x * dhl
+    xi: complex
+    dxi: complex
+    if complex(x).imag == 0:
+        # Real-axis j+i*y has no exponential cancellation. Keep its roundoff
+        # behavior for lossless responses, including unitary PEC scattering.
+        yl = spherical_yn(l, x)
+        dyl = spherical_yn(l, x, derivative=True)
+        hl = jl + 1j * yl
+        xi = x * hl
+        dxi = hl + x * (djl + 1j * dyl)
+    else:
+        xi = x * complex(sph_hankel1(l, x))
+        dxi = complex(dx_xz_hankel1(l, x))
     return psi, dpsi, xi, dxi
 
 
@@ -221,15 +228,12 @@ def mie_ab(
 
     for l in range(1, lmax + 1):
         jl_x = spherical_jn(l, x)
-        yl_x = spherical_yn(l, x)
-        hl_x = jl_x + 1j * yl_x
+        hl_x = sph_hankel1(l, x)
 
         jl_mx = spherical_jn(l, mx)
 
         # derivatives d/dx
         djl_x = spherical_jn(l, x, derivative=True)
-        dyl_x = spherical_yn(l, x, derivative=True)
-        dhl_x = djl_x + 1j * dyl_x
 
         djl_mx = spherical_jn(l, mx, derivative=True)
 
@@ -241,7 +245,7 @@ def mie_ab(
         # derivatives psi' = j + x j', xi' = h + x h'
         dpsi_x = jl_x + x * djl_x
         dpsi_mx = jl_mx + mx * djl_mx
-        dxi_x = hl_x + x * dhl_x
+        dxi_x = dx_xz_hankel1(l, x)
 
         # Standard Mie formulas
         num_a = m * psi_mx * dpsi_x - psi_x * dpsi_mx
@@ -488,16 +492,13 @@ def sphere_internal_ratios(
     for l in range(1, lmax + 1):
         # outside: j_l(x), h_l(x)
         jl_x = spherical_jn(l, x)
-        yl_x = spherical_yn(l, x)
-        hl_x = jl_x + 1j * yl_x
+        hl_x = sph_hankel1(l, x)
 
         djl_x = spherical_jn(l, x, derivative=True)
-        dyl_x = spherical_yn(l, x, derivative=True)
-        dhl_x = djl_x + 1j * dyl_x
 
         # d/dx (x*z_l(x))
         djx_x = jl_x + x * djl_x
-        dhx_x = hl_x + x * dhl_x
+        dhx_x = dx_xz_hankel1(l, x)
 
         # inside: only j_l(mx)
         jl_mx = spherical_jn(l, mx)

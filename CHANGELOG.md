@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Avoid cancellation in outgoing spherical functions for absorbing arguments,
+  including strongly absorbing layers in a nonabsorbing host.
+
 ## [0.6.0] - 2026-10-10
 
 ### Added

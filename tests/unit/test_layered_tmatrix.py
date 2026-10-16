@@ -86,3 +86,16 @@ def test_layered_internal_ab_shapes_and_finiteness():
         assert B.shape == (3, 6)
         assert np.all(np.isfinite(A[1:, 1:]))
         assert np.all(np.isfinite(B[1:, 1:]))
+
+
+def test_identical_absorbing_layers_match_homogeneous_sphere():
+    material = 1.5 + 40j
+    expected = mie_ab(lmax=3, k_medium=1, radius=1, n_particle=material, n_medium=1)
+    actual = layered_mie_ab(
+        lmax=3,
+        k_medium=1,
+        layer_radii=(0.5, 1.0),
+        layer_refractive_indices=(material, material),
+        n_medium=1,
+    )
+    np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-14)

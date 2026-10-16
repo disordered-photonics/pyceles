@@ -4,9 +4,21 @@ import numpy as np
 import pytest
 from scipy.special import spherical_jn, spherical_yn
 
+from pyceles.core.radial import dx_xz_hankel1, sph_hankel1
 from pyceles.core.translation import spherical_bessel_jy
 
 pytestmark = pytest.mark.reference
+
+
+def test_attenuated_spherical_hankel_matches_closed_forms():
+    z = np.array([0.2, 0.2 + 0.1j, 2 + 20j, 8 + 60j])
+    phase = np.exp(1j * z)
+    np.testing.assert_allclose(sph_hankel1(0, z), -1j * phase / z, rtol=2e-14, atol=0)
+    np.testing.assert_allclose(dx_xz_hankel1(0, z), phase, rtol=2e-14, atol=0)
+    np.testing.assert_allclose(sph_hankel1(1, z), -phase * (z + 1j) / z**2, rtol=2e-14, atol=0)
+    np.testing.assert_allclose(
+        dx_xz_hankel1(1, z), -phase * (1j - 1 / z - 1j / z**2), rtol=2e-14, atol=0
+    )
 
 
 def _dx_xj(n: int, z: np.ndarray) -> np.ndarray:
