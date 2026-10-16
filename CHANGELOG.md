@@ -8,12 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Plane-wave projection and incident E/H evaluation support passive complex
+  hosts and complex amplitudes specified at a finite reference point. Shared
+  homogeneous-spectrum validation preserves complex wavevectors and is
+  independent of the choice of length units; `Simulation` still requires a
+  nonabsorbing host.
 - Finite pairwise prepared operators retain passive complex host wavenumbers
   on NumPy and CuPy, including exact Hermitian-adjoint actions.
 - Translation and near-field radial tables support passive complex wavenumbers,
   retain double-precision sample generation and expose physical outgoing intervals.
 
 ### Fixed
+- Form mixed-polarization plane-wave coefficients before the output cast and
+  apply the spectral magnetic material factor after angular accumulation.
 - Validate physical pairwise LUT queries before iteration, excluding singular
   padding, and skip unused translation tables when no particle pair exists.
 - Preserve the final stored sample at the upper translation-table endpoint.

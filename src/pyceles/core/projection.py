@@ -122,46 +122,19 @@ def incident_coeffs_planewave(
     Nscl = n_scalar(lmax)
     ctype = np.dtype(dtype)
 
-    wavelength = float(source.wavelength)
-    k0 = 2 * np.pi / wavelength
-    nM = complex(source.medium_n)
-    if abs(nM.imag) > 0:
-        raise ValueError(
-            f"Embedding medium refractive index must be real for plane-wave incidence. Got {nM}."
-        )
-    k = k0 * float(nM.real)
-
-    E0 = float(source.amplitude)
+    k = 2 * np.pi / source.wavelength * complex(source.medium_n)
+    E0 = complex(source.amplitude)
     beta = float(source.polar_angle)
     alpha = float(source.azimuthal_angle)
     cb = np.cos(beta)
     sb = np.sin(beta)
 
-    jones_weight = 1.0 + 0.0j
     if polarization_override is None:
         a_te, a_tm = source.jones_coefficients()
-        pure = pure_polarization_label(a_te, a_tm)
-        if pure is None:
-            a_te_field = incident_coeffs_planewave(
-                positions,
-                lmax,
-                source.with_polarization("TE"),
-                dtype=dtype,
-                polarization_override="TE",
-            )
-            a_tm_field = incident_coeffs_planewave(
-                positions,
-                lmax,
-                source.with_polarization("TM"),
-                dtype=dtype,
-                polarization_override="TM",
-            )
-            return np.asarray(a_te * a_te_field + a_tm * a_tm_field, dtype=ctype)
-        polarization_override = pure
-        jones_weight = a_te if pure == "TE" else a_tm
+    else:
+        a_te, a_tm = (1.0, 0.0) if polarization_override == "TE" else (0.0, 1.0)
 
     PI, TAU = spherical_functions_trigon(np.asarray(cb), np.asarray(sb), lmax, xp=np)
-    pol = 1 if str(polarization_override).upper() == "TE" else 2
 
     fp = np.asarray(source.focal_point, dtype=float).reshape(3)
     rel = pos - fp
@@ -175,10 +148,14 @@ def incident_coeffs_planewave(
             for l in range(max(1, abs(m)), lmax + 1):
                 sidx = scalar_index(l, m)
                 idx = (tau - 1) * Nscl + sidx
-                Bdag = transformation_coefficients(PI, TAU, tau, l, m, pol, dagger=True)
+                # Combine Jones weights before the storage cast, including c64 output.
+                Bdag = np.asarray(0.0j)
+                for pol, weight in ((1, a_te), (2, a_tm)):
+                    if weight != 0:
+                        Bdag += weight * transformation_coefficients(
+                            PI, TAU, tau, l, m, pol, dagger=True
+                        )
                 aI[:, idx] = 4.0 * E0 * phase_m * eikr * Bdag
-    if jones_weight != 1.0:
-        aI *= jones_weight
     return np.asarray(aI, dtype=ctype)
 
 

@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from pyceles.core.fields import PlaneWave, incident_coeffs_planewave, transformation_coefficients
-from pyceles.core.indexing import n_modes, n_scalar, scalar_index
+from pyceles.core.indexing import index_vswf, n_modes, n_scalar, scalar_index
 from pyceles.core.spherical import spherical_functions_trigon
 from pyceles.postprocessing.nearfield import compute_initial_field
 
@@ -34,7 +34,7 @@ def _incident_coeffs_planewave_reference(
                 idx = (tau - 1) * Nscl + scalar_index(l, m)
                 aI[:, idx] = (
                     4.0
-                    * float(source.amplitude)
+                    * complex(source.amplitude)
                     * np.exp(-1j * m * alpha)
                     * eikr
                     * transformation_coefficients(PI, TAU, tau, l, m, pol, dagger=True)
@@ -108,3 +108,106 @@ def test_compute_initial_field_plane_wave_direct_branch():
 
     np.testing.assert_allclose(E, E_ref, rtol=1e-13, atol=1e-13)
     np.testing.assert_allclose(H, H_ref, rtol=1e-13, atol=1e-13)
+
+
+def test_mixed_jones_projection_preserves_small_coefficients_in_single_precision():
+    beta = 0.7
+    delta = 2.0**-30
+    source = PlaneWave(
+        wavelength=600,
+        polar_angle=beta,
+        polarization=(1, 1j * (np.cos(beta) + delta)),
+    )
+    coefficients = source.incident_coeffs(np.zeros((1, 3)), 1, dtype=np.complex64)
+    # For l=m=1, tau=1, pi=sqrt(3)/2 and tau=cos(beta)*pi.
+    # The two Jones terms cancel except for the prescribed delta.
+    np.testing.assert_allclose(
+        coefficients[0, index_vswf(1, 1, 1, 1)],
+        1j * np.sqrt(3) * delta,
+        rtol=3e-7,
+        atol=0,
+    )
+
+
+@pytest.mark.reference
+@pytest.mark.parametrize("dtype", [np.complex64, np.complex128])
+def test_plane_wave_coefficients_and_fields_against_treams(dtype):
+    """TREAMS 0.4.8.dev1 (1f5d0d6), parity basis and exp(-i*omega*t).
+
+    Convert each incident coefficient by c_celes=c_treams/D, with
+    D=-i*sqrt(pi)*(-1)^m for positive m and -i*sqrt(pi) otherwise.
+    Cartesian magnetic values are Z0*H. Only selected modes and one exterior
+    point are retained; the source has finite-reference complex amplitude.
+    """
+    source = PlaneWave(
+        wavelength=600,
+        medium_n=1.33 + 0.5j,
+        polar_angle=2.3,
+        azimuthal_angle=-0.62,
+        amplitude=0.3 + 0.9j,
+        focal_point=(-25, 11, -18),
+    )
+    positions = np.array([[-312, -108, -132], [246, -186, -48], [-114, 288, 126], [198, 162, 264]])
+    coefficients = source.incident_coeffs(positions, 3, dtype=dtype)
+    selected = [(0, 1, -1, 1), (0, 2, 1, 2), (1, 3, -2, 1), (2, 2, 0, 2), (3, 1, 1, 2)]
+    expected = np.array(
+        [
+            0.029264287172171236 + 1.39753479647918j,
+            -0.6217323453051632 - 1.6941218179116695j,
+            0.06997343679935414 - 0.09690224569258149j,
+            0j,
+            0.6827233228321632 - 2.970080286389556j,
+        ]
+    )
+    actual = [coefficients[p, index_vswf(l, m, tau, 3)] for p, l, m, tau in selected]
+    tolerance = 2e-6 if dtype == np.complex64 else 2e-13
+    np.testing.assert_allclose(actual, expected, rtol=tolerance, atol=tolerance)
+    e, h = compute_initial_field(
+        np.array([[0, 0, 1050]]),
+        k=2 * np.pi / source.wavelength * source.medium_n,
+        n_medium=source.medium_n,
+        beam=source,
+        polar_angles=np.empty(0),
+        azimuthal_angles=np.empty(0),
+        accum_dtype=dtype,
+        show_progress=False,
+    )
+    np.testing.assert_allclose(
+        e[0],
+        [-10.419436566162155 - 17.783133944154265j, -14.594908411255709 - 24.909524572845775j, 0j],
+        rtol=tolerance,
+        atol=tolerance,
+    )
+    np.testing.assert_allclose(
+        h[0],
+        [
+            -4.634926422385362 - 26.935621923006483j,
+            3.3089157181438025 + 19.22958309080241j,
+            -6.373768512856227 - 37.04080782337484j,
+        ],
+        rtol=tolerance,
+        atol=tolerance,
+    )
+    assert coefficients.dtype == e.dtype == h.dtype == dtype
+
+
+@pytest.mark.api_contract
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"medium_n": 1 - 0.01j},
+        {"medium_n": complex(np.inf, 0)},
+        {"medium_n": 0j},
+        {"wavelength": 0},
+        {"wavelength": np.nan},
+        {"amplitude": complex(0, np.inf)},
+        {"polar_angle": -0.1},
+        {"polar_angle": np.inf},
+        {"azimuthal_angle": np.nan},
+        {"focal_point": (0, np.nan, 0)},
+    ],
+)
+def test_plane_wave_rejects_invalid_finite_reference_parameters(kwargs):
+    parameters = {"wavelength": 600, **kwargs}
+    with pytest.raises(ValueError):
+        PlaneWave(**parameters)

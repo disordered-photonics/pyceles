@@ -12,7 +12,12 @@ from .common import _float_triplet_tuple
 
 @dataclass(frozen=True)
 class PlaneWave:
-    """Monochromatic plane-wave source in a homogeneous medium."""
+    """Homogeneous plane wave with amplitude specified at ``focal_point``.
+
+    The amplitude and Jones weights define E at this finite reference point.
+    Real propagation angles specify parallel phase and attenuation directions
+    in a passive complex host; illumination at infinity is not prescribed.
+    """
 
     wavelength: float
     medium_n: complex = 1.0 + 0j
@@ -20,17 +25,22 @@ class PlaneWave:
     polar_angle: float = 0.0
     azimuthal_angle: float = 0.0
     focal_point: tuple[float, float, float] = (0.0, 0.0, 0.0)
-    amplitude: float = 1.0
+    amplitude: complex = 1.0
 
     def __post_init__(self):
         n = complex(self.medium_n)
-        if abs(n.imag) > 0:
+        if not np.isfinite(n) or n.real <= 0 or n.imag < 0:
             raise ValueError(
-                "Embedding medium refractive index must be real for an incident field coming from infinity. "
-                f"Got medium_n={n!r}"
+                "medium_n must be finite with positive real and nonnegative imaginary parts"
             )
-        if not (n.real > 0):
-            raise ValueError(f"medium_n must be positive. Got {n!r}")
+        if not np.isfinite(self.wavelength) or self.wavelength <= 0:
+            raise ValueError("wavelength must be finite and positive")
+        if not np.isfinite(self.amplitude):
+            raise ValueError("amplitude must be finite")
+        if not np.isfinite(self.polar_angle) or not 0 <= self.polar_angle <= np.pi:
+            raise ValueError("polar_angle must be finite and between 0 and pi")
+        if not np.isfinite(self.azimuthal_angle):
+            raise ValueError("azimuthal_angle must be finite")
         object.__setattr__(
             self, "polarization", _canonicalize_polarization_input(self.polarization)
         )
@@ -39,7 +49,7 @@ class PlaneWave:
         )
 
     def jones_coefficients(self) -> tuple[complex, complex]:
-        """Return the TE/TM Jones weights, including amplitude and phase."""
+        """Return the TE/TM Jones weights, without the overall amplitude."""
         return polarization_to_jones(self.polarization)
 
     def with_polarization(self, polarization: PolarizationInput) -> PlaneWave:

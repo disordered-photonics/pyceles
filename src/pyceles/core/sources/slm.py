@@ -50,8 +50,8 @@ class AngularSpectrumSLMSource:
         return complex(self.base_source.medium_n)
 
     @property
-    def amplitude(self) -> float:
-        return float(self.base_source.amplitude)
+    def amplitude(self) -> complex:
+        return complex(self.base_source.amplitude)
 
     @property
     def beam_width(self) -> float:

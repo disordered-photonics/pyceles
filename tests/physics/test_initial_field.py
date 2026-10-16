@@ -2,7 +2,8 @@ import numpy as np
 import pytest
 
 from pyceles.core.angular import periodic_azimuthal_weights, trapezoidal_weights
-from pyceles.core.fields import FocusedLaguerreGaussianBeam, GaussianBeam
+from pyceles.core.conversions import pwp_to_svwf_regular
+from pyceles.core.fields import FocusedLaguerreGaussianBeam, GaussianBeam, PlaneWave
 from pyceles.core.plane_wave_spectrum import PlaneWaveSpectrum
 from pyceles.postprocessing.nearfield import compute_initial_field
 
@@ -184,6 +185,134 @@ def test_general_initial_field_uses_periodic_azimuth_weights():
 
     np.testing.assert_allclose(e[0], expected_e, rtol=1e-12, atol=1e-12)
     np.testing.assert_allclose(h[0], expected_h, rtol=1e-12, atol=1e-12)
+
+
+@pytest.mark.parametrize("host", [1.33, 1.33 + 0.3j])
+@pytest.mark.parametrize(
+    ("compute_dtype", "accum_dtype"),
+    [(np.complex64, np.complex64), (np.complex64, np.complex128), (np.complex128, np.complex128)],
+)
+@pytest.mark.parametrize("backend", ["numpy", pytest.param("cupy", marks=pytest.mark.gpu)])
+def test_sampled_homogeneous_ray_matches_analytic_plane_wave(
+    host, compute_dtype, accum_dtype, backend, request
+):
+    """A quadrature delta ray must give the same E/H and SVWFs as a plane wave."""
+    if backend == "cupy":
+        request.getfixturevalue("cupy_runtime")
+    alpha = np.array([0.2, 1.1, 2.8, 4.6])
+    beta = np.array([0.3, 0.9, 1.7])
+    source = PlaneWave(
+        wavelength=600,
+        medium_n=host,
+        polar_angle=beta[1],
+        azimuthal_angle=alpha[1],
+        polarization=(0.7 + 0.2j, -0.3 + 0.8j),
+        amplitude=0.3 + 0.9j,
+        focal_point=(20, -30, 15),
+    )
+    k = 2 * np.pi / source.wavelength * host
+    kx = k * np.sin(beta[None, :]) * np.cos(alpha[:, None])
+    ky = k * np.sin(beta[None, :]) * np.sin(alpha[:, None])
+    kz = np.broadcast_to(k * np.cos(beta), kx.shape)
+    reference_phase = np.exp(-1j * np.dot([kx[1, 1], ky[1, 1], kz[1, 1]], source.focal_point))
+    measure = periodic_azimuthal_weights(alpha)[1] * trapezoidal_weights(beta)[1] * np.sin(beta[1])
+    te = np.zeros(kx.shape, dtype=np.complex128)
+    tm = np.zeros_like(te)
+    a_te, a_tm = source.jones_coefficients()
+    te[1, 1] = source.amplitude * a_te * reference_phase / measure
+    tm[1, 1] = source.amplitude * a_tm * reference_phase / measure
+    spectrum = PlaneWaveSpectrum(alpha, beta, kx, ky, kz, te, tm)
+
+    class SampledRay:
+        def angular_spectrum(self, **kwargs):
+            return spectrum
+
+    points = np.array([[0, 0, 0], [120, -75, 30], [-70, 90, -40]])
+    options = dict(
+        k=k,
+        n_medium=host,
+        polar_angles=beta,
+        azimuthal_angles=alpha,
+        compute_dtype=compute_dtype,
+        accum_dtype=accum_dtype,
+        show_progress=False,
+    )
+    expected = compute_initial_field(points, beam=source, **options)
+    # The returned spectrum owns its quadrature, even when a source resamples
+    # the requested grid. Both field and coefficient projection must use it.
+    actual = compute_initial_field(
+        points,
+        beam=SampledRay(),
+        backend=backend,
+        **{**options, "azimuthal_angles": np.array([0, np.pi])},
+    )
+    tolerance = 3e-6 if compute_dtype == np.complex64 else 3e-13
+    for got, ref in zip(actual, expected, strict=True):
+        assert got.dtype == accum_dtype
+        np.testing.assert_allclose(got, ref, rtol=tolerance, atol=tolerance)
+    coefficients = pwp_to_svwf_regular(points, 3, k=k, spectrum=spectrum, dtype=compute_dtype)
+    np.testing.assert_allclose(
+        coefficients,
+        source.incident_coeffs(points, 3, dtype=compute_dtype),
+        rtol=tolerance,
+        atol=tolerance,
+    )
+
+
+@pytest.mark.parametrize("dtype", [np.complex64, np.complex128])
+def test_plane_wave_finite_reference_attenuation_and_coordinate_translation(dtype):
+    """Local amplitude decays along propagation and is invariant under origin shifts."""
+    host = 1.33 + 0.5j
+    k = 2 * np.pi / 600 * host
+    source = PlaneWave(
+        wavelength=600,
+        medium_n=host,
+        amplitude=0.3 + 0.9j,
+        polarization=(1, 0.5j),
+        focal_point=(3, -2, 5),
+    )
+    distances = np.array([-30, 0, 45])
+    points = np.array(source.focal_point) + np.column_stack((np.zeros((3, 2)), distances))
+    options = dict(
+        k=k,
+        n_medium=host,
+        polar_angles=np.empty(0),
+        azimuthal_angles=np.empty(0),
+        accum_dtype=dtype,
+        show_progress=False,
+    )
+    e, h = compute_initial_field(points, beam=source, **options)
+    # At normal incidence TE=y, TM=x, and Z0*H=n*(z cross E).
+    at_reference = source.amplitude * np.array([0.5j, 1, 0])
+    tolerance = 3e-7 if dtype == np.complex64 else 3e-15
+    np.testing.assert_allclose(
+        e,
+        np.exp(1j * k * distances)[:, None] * at_reference,
+        rtol=tolerance,
+        atol=tolerance,
+    )
+    np.testing.assert_allclose(h, host * np.cross([0, 0, 1], e), rtol=tolerance, atol=tolerance)
+    np.testing.assert_allclose(
+        np.linalg.norm(e, axis=1) / np.linalg.norm(e[1]),
+        np.exp(-k.imag * distances),
+        rtol=tolerance,
+        atol=tolerance,
+    )
+    offset = np.array([2**40, -(2**40), 2**40])
+    translated = PlaneWave(
+        wavelength=source.wavelength,
+        medium_n=host,
+        amplitude=source.amplitude,
+        polarization=source.polarization,
+        focal_point=tuple(np.array(source.focal_point) + offset),
+    )
+    e_shifted, h_shifted = compute_initial_field(points + offset, beam=translated, **options)
+    np.testing.assert_array_equal(e_shifted, e)
+    np.testing.assert_array_equal(h_shifted, h)
+    np.testing.assert_array_equal(
+        translated.incident_coeffs(points + offset, 3, dtype=dtype),
+        source.incident_coeffs(points, 3, dtype=dtype),
+    )
 
 
 def test_focused_laguerre_focal_plane_mirror_symmetry():

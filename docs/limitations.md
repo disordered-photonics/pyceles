@@ -4,7 +4,7 @@ This page records current limitations.
 
 ## Physical and geometrical scope
 
-- The main homogeneous-medium solver path currently assumes real positive host refractive index `n_medium`.
+- `Simulation` currently requires a real positive host refractive index `n_medium`.
 - All particles in one simulation currently share the same `lmax`.
 - T-matrix superposition assumes disjoint particle circumscribing spheres. This is enforced by default through `Simulation` geometry checks.
 - At the moment, this restriction is especially limiting for close spheroids because their circumscribing spheres can in principle overlap even when physical spheroids do not.

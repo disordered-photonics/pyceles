@@ -17,6 +17,7 @@ from pyceles.core.angular import (
     trapezoidal_weights,
 )
 from pyceles.core.geometry_bounds import coincident_point_mask
+from pyceles.core.radial import passive_wavenumber
 from pyceles.core.sources import (
     GaussianBeam,
     LocalExpansionSource,
@@ -364,7 +365,7 @@ def _compute_initial_field_gaussian_rotated_fast(
 def compute_initial_field(
     field_points: np.ndarray,
     *,
-    k: float,
+    k: complex,
     n_medium: complex,
     beam,
     polar_angles: np.ndarray,
@@ -376,11 +377,22 @@ def compute_initial_field(
     compute_dtype: npt.DTypeLike = np.complex128,
     accum_dtype: npt.DTypeLike = np.complex128,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Compute the incident field for the configured source model."""
-    if (not bool(force_general_initial_field)) and isinstance(beam, GaussianBeam):
+    """Compute incident E and Z0*H for the configured source.
+
+    Plane-wave phases use double precision. The general spectral path uses
+    compute_dtype for contractions and accum_dtype for angular-row sums of
+    both fields; the magnetic material factor follows angular accumulation.
+    """
+    k_valid = passive_wavenumber(k)
+    k = k_valid.real if k_valid.imag == 0 else k_valid
+    if (
+        (not bool(force_general_initial_field))
+        and isinstance(beam, GaussianBeam)
+        and k_valid.imag == 0
+    ):
         fast = _compute_initial_field_gaussian_rotated_fast(
             field_points,
-            k=float(k),
+            k=k_valid.real,
             n_medium=complex(n_medium),
             beam=beam,
             polar_angles=np.asarray(polar_angles, float),
@@ -395,7 +407,7 @@ def compute_initial_field(
 
     return _compute_initial_field_general(
         field_points,
-        k=float(k),
+        k=k,
         n_medium=complex(n_medium),
         beam=beam,
         polar_angles=np.asarray(polar_angles, float),
@@ -411,7 +423,7 @@ def compute_initial_field(
 def _compute_initial_field_general(
     field_points: np.ndarray,
     *,
-    k: float,
+    k: complex,
     n_medium: complex,
     beam,
     polar_angles: np.ndarray,
@@ -427,6 +439,8 @@ def _compute_initial_field_general(
     n_medium_c = complex(n_medium)
 
     if isinstance(beam, LocalExpansionSource):
+        if k.imag != 0:
+            raise ValueError("Local outgoing-source field evaluation requires a real wavenumber")
         src_pos = np.asarray(beam.source_positions(), dtype=float).reshape(-1, 3)
         src_coeffs = np.asarray(beam.outgoing_coeffs(1, dtype=compute_dtype), dtype=compute_dtype)
         hit = coincident_point_mask(pts, src_pos)
@@ -435,7 +449,7 @@ def _compute_initial_field_general(
             pts,
             src_pos,
             src_coeffs,
-            k=float(k),
+            k=k.real,
             lmax=1,
             n_medium=n_medium_c,
             particle_distance_resolution=float(getattr(beam, "radial_lut_dr", 0.0)),
@@ -463,11 +477,11 @@ def _compute_initial_field_general(
         cb = np.cos(beta_pw)
         sb = np.sin(beta_pw)
         khat = np.array([sb * ca, sb * sa, cb], dtype=np.float64)
-        kvec = float(k) * khat
+        kvec = k * khat
 
         ehat_te = np.array([-sa, ca, 0.0], dtype=np.float64)
         ehat_tm = np.array([cb * ca, cb * sa, -sb], dtype=np.float64)
-        a_te, a_tm = polarization_to_jones(beam.polarization)
+        a_te, a_tm = beam.jones_coefficients()
         ehat = a_te * ehat_te + a_tm * ehat_tm
         hhat = np.cross(khat, ehat)
 
@@ -478,7 +492,7 @@ def _compute_initial_field_general(
 
     if hasattr(beam, "angular_spectrum"):
         spectrum = beam.angular_spectrum(
-            k=float(k),
+            k=k,
             polar_angles=np.asarray(polar_angles, float),
             azimuthal_angles=np.asarray(azimuthal_angles, float),
         )
@@ -491,7 +505,8 @@ def _compute_initial_field_general(
 
     e = np.zeros((pts.shape[0], 3), dtype=accum_dtype)
     h = np.zeros_like(e)
-    alpha_weights = periodic_azimuthal_weights(np.asarray(azimuthal_angles, float))
+    spectrum.require_homogeneous_wavevectors(k)
+    alpha_weights = periodic_azimuthal_weights(spectrum.alpha)
 
     beta = np.asarray(spectrum.beta, dtype=float)
     alpha = np.asarray(spectrum.alpha, dtype=float)
@@ -502,9 +517,7 @@ def _compute_initial_field_general(
     cosb = np.cos(beta).astype(np.float64)
     beta_weights = trapezoidal_weights(beta).astype(np.float64)
 
-    kx_all = np.asarray(spectrum.kx, dtype=np.float64)
-    ky_all = np.asarray(spectrum.ky, dtype=np.float64)
-    kz_all = np.asarray(spectrum.kz, dtype=np.float64)
+    kx_all, ky_all, kz_all = spectrum.kx, spectrum.ky, spectrum.kz
 
     n_points = pts.shape[0]
     n_alpha = alpha.shape[0]
@@ -529,10 +542,6 @@ def _compute_initial_field_general(
     w_te_all = coeff_te * weighted_beta
     w_tm_all = coeff_tm * weighted_beta
 
-    khx_all = kx_all / float(k)
-    khy_all = ky_all / float(k)
-    khz_all = kz_all / float(k)
-
     ex_te = -sin_a
     ey_te = cos_a
     ez_te = np.zeros_like(ex_te)
@@ -540,21 +549,14 @@ def _compute_initial_field_general(
     ey_tm = cosb_row * sin_a
     ez_tm = -sinb_row
 
-    hx_te = khy_all * ez_te - khz_all * ey_te
-    hy_te = khz_all * ex_te - khx_all * ez_te
-    hz_te = khx_all * ey_te - khy_all * ex_te
-
-    hx_tm = khy_all * ez_tm - khz_all * ey_tm
-    hy_tm = khz_all * ex_tm - khx_all * ez_tm
-    hz_tm = khx_all * ey_tm - khy_all * ex_tm
-
     v_all = np.empty((n_alpha, beta.size, 6), dtype=compute_dtype)
     v_all[:, :, 0] = w_te_all * ex_te + w_tm_all * ex_tm
     v_all[:, :, 1] = w_te_all * ey_te + w_tm_all * ey_tm
     v_all[:, :, 2] = w_te_all * ez_te + w_tm_all * ez_tm
-    v_all[:, :, 3] = w_te_all * hx_te + w_tm_all * hx_tm
-    v_all[:, :, 4] = w_te_all * hy_te + w_tm_all * hy_tm
-    v_all[:, :, 5] = w_te_all * hz_te + w_tm_all * hz_tm
+    # d cross e_phi = -e_theta; d cross e_theta = e_phi.
+    v_all[:, :, 3] = -w_te_all * ex_tm + w_tm_all * ex_te
+    v_all[:, :, 4] = -w_te_all * ey_tm + w_tm_all * ey_te
+    v_all[:, :, 5] = -w_te_all * ez_tm + w_tm_all * ez_te
 
     if str(backend).lower() == "cupy":
         cupy, _ = import_cupy()
@@ -581,9 +583,9 @@ def _compute_initial_field_general(
             active_beta = np.flatnonzero((w_te_all[ja, :] != 0) | (w_tm_all[ja, :] != 0))
             if active_beta.size == 0:
                 continue
-            kx = cupy.asarray(kx_all[ja, active_beta], dtype=cupy.float64)
-            ky = cupy.asarray(ky_all[ja, active_beta], dtype=cupy.float64)
-            kz = cupy.asarray(kz_all[ja, active_beta], dtype=cupy.float64)
+            kx = cupy.asarray(kx_all[ja, active_beta])
+            ky = cupy.asarray(ky_all[ja, active_beta])
+            kz = cupy.asarray(kz_all[ja, active_beta])
             v = cupy.asarray(v_all[ja, active_beta, :], dtype=compute_dtype_cp)
             for s in range(0, n_points, batch_size_eff):
                 e_idx = min(n_points, s + batch_size_eff)
@@ -599,9 +601,8 @@ def _compute_initial_field_general(
                 e_gpu[s:e_idx, 0] += weighted_acc[:, 0]
                 e_gpu[s:e_idx, 1] += weighted_acc[:, 1]
                 e_gpu[s:e_idx, 2] += weighted_acc[:, 2]
-                h_gpu[s:e_idx, 0] += n_medium_c * weighted_acc[:, 3]
-                h_gpu[s:e_idx, 1] += n_medium_c * weighted_acc[:, 4]
-                h_gpu[s:e_idx, 2] += n_medium_c * weighted_acc[:, 5]
+                h_gpu[s:e_idx] += weighted_acc[:, 3:]
+        h_gpu *= n_medium_c
         return asnumpy(e_gpu).astype(accum_dtype, copy=False), asnumpy(h_gpu).astype(
             accum_dtype, copy=False
         )
@@ -633,10 +634,9 @@ def _compute_initial_field_general(
             e[s:e_idx, 0] += weighted_acc[:, 0]
             e[s:e_idx, 1] += weighted_acc[:, 1]
             e[s:e_idx, 2] += weighted_acc[:, 2]
-            h[s:e_idx, 0] += n_medium_c * weighted_acc[:, 3]
-            h[s:e_idx, 1] += n_medium_c * weighted_acc[:, 4]
-            h[s:e_idx, 2] += n_medium_c * weighted_acc[:, 5]
+            h[s:e_idx] += weighted_acc[:, 3:]
 
+    h *= n_medium_c
     return e, h
 
 

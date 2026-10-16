@@ -118,7 +118,7 @@ def pwp_to_svwf_regular(
     positions: np.ndarray,
     lmax: int,
     *,
-    k: float,
+    k: complex,
     spectrum: PlaneWaveSpectrum,
     dtype: npt.DTypeLike = np.complex128,
 ) -> np.ndarray:
@@ -129,9 +129,7 @@ def pwp_to_svwf_regular(
     Nm = n_modes(lmax)
     ctype = np.dtype(dtype)
 
-    k = float(k)
-    if (not np.isfinite(k)) or (k <= 0.0):
-        raise ValueError(f"`k` must be finite and > 0. Got {k!r}.")
+    spectrum.require_homogeneous_wavevectors(k)
 
     alpha = spectrum.alpha
     beta = spectrum.beta
@@ -140,19 +138,6 @@ def pwp_to_svwf_regular(
     kx = spectrum.kx
     ky = spectrum.ky
     kz = spectrum.kz
-
-    agrid = alpha[:, None]
-    bgrid = beta[None, :]
-    expected_kx = k * np.sin(bgrid) * np.cos(agrid)
-    expected_ky = k * np.sin(bgrid) * np.sin(agrid)
-    expected_kz = np.broadcast_to(k * np.cos(bgrid), expected_kx.shape)
-    k_atol = max(1e-12, 1e-10 * abs(k))
-    if not np.allclose(kx, expected_kx, rtol=1e-10, atol=k_atol):
-        raise ValueError("Spectrum `kx` is inconsistent with `k`, `alpha`, and `beta`.")
-    if not np.allclose(ky, expected_ky, rtol=1e-10, atol=k_atol):
-        raise ValueError("Spectrum `ky` is inconsistent with `k`, `alpha`, and `beta`.")
-    if not np.allclose(kz, expected_kz, rtol=1e-10, atol=k_atol):
-        raise ValueError("Spectrum `kz` is inconsistent with `k`, `alpha`, and `beta`.")
 
     wa, wb, Bdag_pol1, Bdag_pol2, _B_te, _B_tm, _m_of_mode, _eima, mode_weight = (
         _cached_pwp_conversion_tables(

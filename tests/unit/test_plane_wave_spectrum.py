@@ -54,3 +54,27 @@ def test_empty_spectrum_components_are_independent_and_repr_is_compact() -> None
     assert spectrum.shape == (0, 0)
     assert spectrum.coeff_te is not spectrum.coeff_tm
     assert repr(spectrum) == "PlaneWaveSpectrum(shape=(0, 0), coeff_dtype=dtype('complex64'))"
+
+
+@pytest.mark.parametrize("scale", [1e-12, 1.0, 1e12])
+@pytest.mark.parametrize("host", [1.33, 1.33 + 0.5j])
+def test_homogeneous_wavevector_validation_is_independent_of_length_units(scale, host):
+    unit = _spectrum()
+    k = host * scale
+    spectrum = PlaneWaveSpectrum(
+        unit.alpha,
+        unit.beta,
+        k * unit.kx,
+        k * unit.ky,
+        k * unit.kz,
+        unit.coeff_te,
+        unit.coeff_tm,
+    )
+    spectrum.require_homogeneous_wavevectors(k)
+    assert np.iscomplexobj(spectrum.kx) == np.iscomplexobj(k)
+    for component in (spectrum.kx, spectrum.ky, spectrum.kz):
+        original = component[0, 0]
+        component[0, 0] += k * 1e-6
+        with pytest.raises(ValueError, match="inconsistent with `k`"):
+            spectrum.require_homogeneous_wavevectors(k)
+        component[0, 0] = original

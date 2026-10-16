@@ -96,6 +96,13 @@ source = pcl.PlaneWave(
 )
 ```
 
+For a plane wave, `amplitude` may be complex and specifies the electric field
+at `focal_point`, multiplied by the TE/TM Jones weights. Plane-wave projection
+and incident-field evaluation also accept passive complex host indices: real
+angles then specify parallel phase and attenuation directions. This defines
+local illumination with a finite reference amplitude. `Simulation` currently
+requires a nonabsorbing host.
+
 ## Explicit source cardinality
 
 `SimulationConfig` describes the reusable physical and numerical system; source

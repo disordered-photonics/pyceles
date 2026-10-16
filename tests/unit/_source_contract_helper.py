@@ -28,7 +28,7 @@ def assert_source_compliance(
     assert callable(getattr(source, "has_finite_incident_power", None))
 
     wl = float(src.wavelength)
-    amp = float(src.amplitude)
+    amp = complex(src.amplitude)
     n_medium = complex(src.medium_n)
     assert np.isfinite(wl)
     assert np.isfinite(amp)

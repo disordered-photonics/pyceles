@@ -7,6 +7,8 @@ from dataclasses import dataclass
 import numpy as np
 import numpy.typing as npt
 
+from .radial import passive_wavenumber
+
 
 @dataclass(eq=False, frozen=True, slots=True, repr=False)
 class PlaneWaveSpectrum:
@@ -42,9 +44,8 @@ class PlaneWaveSpectrum:
         beta = np.asarray(self.beta, dtype=float).reshape(-1)
         shape = (alpha.size, beta.size)
         grids = {
-            "kx": np.asarray(self.kx, dtype=float),
-            "ky": np.asarray(self.ky, dtype=float),
-            "kz": np.asarray(self.kz, dtype=float),
+            name: np.asarray(value, dtype=np.complex128 if np.iscomplexobj(value) else np.float64)
+            for name, value in (("kx", self.kx), ("ky", self.ky), ("kz", self.kz))
         }
         coefficients = {
             "coeff_te": np.asarray(self.coeff_te),
@@ -130,6 +131,27 @@ class PlaneWaveSpectrum:
             if left is not right and not np.array_equal(left, right):
                 raise ValueError(
                     f"Cannot combine plane-wave spectra with different `{name}` grids."
+                )
+
+    def require_homogeneous_wavevectors(self, k: complex) -> None:
+        """Require wavevectors along the real directions given by alpha and beta."""
+        k_valid = passive_wavenumber(k)
+        k = k_valid.real if k_valid.imag == 0 else k_valid
+        alpha = self.alpha[:, None]
+        beta = self.beta[None, :]
+        directions = (
+            np.sin(beta) * np.cos(alpha),
+            np.sin(beta) * np.sin(alpha),
+            np.broadcast_to(np.cos(beta), self.shape),
+        )
+        # Compare dimensionless directions at double-precision roundoff, so
+        # changing length units cannot admit a physically different wavevector.
+        for name, direction in zip(("kx", "ky", "kz"), directions, strict=True):
+            if not np.allclose(
+                getattr(self, name) / k, direction, rtol=0.0, atol=np.finfo(float).eps
+            ):
+                raise ValueError(
+                    f"Spectrum `{name}` is inconsistent with `k`, `alpha`, and `beta`."
                 )
 
 
