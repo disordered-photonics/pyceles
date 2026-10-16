@@ -302,10 +302,10 @@ class CuPyPairwiseCouplingOperator:
     """Direct GPU pairwise coupling with exact forward and adjoint actions."""
 
     lmax: int
-    k: float
+    k: complex
     positions: np.ndarray
-    ab5: np.ndarray
-    radial_lut: RadialLUT
+    ab5: np.ndarray | None
+    radial_lut: RadialLUT | None
     dtype: np.dtype = COMPLEX128_DTYPE
     _positions_gpu: Any | None = field(default=None, init=False, repr=False)
     _compact_re_ab_gpu: Any | None = field(default=None, init=False, repr=False)
@@ -338,7 +338,7 @@ class CuPyPairwiseCouplingOperator:
     def real_dtype(self) -> np.dtype:
         return np.dtype(np.float32 if self.dtype == np.dtype(np.complex64) else np.float64)
 
-    def _raw_kernel_resources(self, *, rhs_tile_size: int = 1):
+    def _raw_kernel_resources(self, radial_lut: RadialLUT, *, rhs_tile_size: int = 1):
         cupy, _ = import_cupy()
         real_dtype = self.real_dtype
         if self._positions_gpu is None:
@@ -353,7 +353,7 @@ class CuPyPairwiseCouplingOperator:
             coeff = _translation_plm_coeff_table(self.lmax, dtype=real_dtype).reshape(-1)
             self._plm_coeff_gpu = cupy.asarray(coeff, dtype=real_dtype)
         if self._lut_re_gpu is None or self._lut_im_gpu is None:
-            lut = np.asarray(self.radial_lut.h, dtype=self.dtype).T.copy()
+            lut = np.asarray(radial_lut.h, dtype=self.dtype).T.copy()
             self._lut_re_gpu = cupy.asarray(
                 np.ascontiguousarray(lut.real.reshape(-1)), dtype=real_dtype
             )
@@ -427,27 +427,29 @@ class CuPyPairwiseCouplingOperator:
         arr, squeezed = self._array(x)
         nrhs = int(arr.shape[2])
         rhs_tile = 1 if nrhs == 1 else min(4, nrhs)
-        # Each destination is written once when at least one non-self source
-        # exists.  A one-particle system has no launched interaction, so keep
-        # the mathematically required zero output as well.
+        # No particle pair means W=0, with no translation tables or kernel
+        # resources needed for either the forward or adjoint action.
         output = cupy.zeros((self.n_particles, self.n_modes, nrhs), dtype=self.dtype)
-        (
-            _forward_kernel,
-            positions,
-            lut_re,
-            lut_im,
-            plm_coeff,
-            re_ab,
-            im_ab,
-            mode_m,
-            pair_offset,
-            pair_pmin,
-            pair_pcount,
-        ) = self._raw_kernel_resources(rhs_tile_size=rhs_tile)
-        if self.n_particles and nrhs:
+        if self.n_particles > 1 and nrhs:
+            radial_lut = self.radial_lut
+            if radial_lut is None:
+                raise ValueError("Multi-particle CuPy coupling requires a radial LUT.")
+            (
+                _forward_kernel,
+                positions,
+                lut_re,
+                lut_im,
+                plm_coeff,
+                re_ab,
+                im_ab,
+                mode_m,
+                pair_offset,
+                pair_pmin,
+                pair_pcount,
+            ) = self._raw_kernel_resources(radial_lut, rhs_tile_size=rhs_tile)
             kernel = _source_parallel_kernel(self.lmax, self.dtype.str, adjoint, rhs_tile)
             blocks_x, threads, grid_y, grid_z = self._launch_config(nrhs)
-            inv_dr = self.real_dtype.type(self.radial_lut._inv_dr)
+            inv_dr = self.real_dtype.type(radial_lut._inv_dr)
             kernel(
                 (blocks_x, grid_y, grid_z),
                 (threads,),
@@ -458,7 +460,7 @@ class CuPyPairwiseCouplingOperator:
                     lut_re,
                     lut_im,
                     inv_dr,
-                    np.int32(self.radial_lut._last_index),
+                    np.int32(radial_lut._last_index),
                     plm_coeff,
                     re_ab,
                     im_ab,

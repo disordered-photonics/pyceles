@@ -23,10 +23,10 @@ class PairwiseCouplingOperator:
     """Prepared pairwise free-space coupling operator `W`."""
 
     lmax: int
-    k: float
+    k: complex
     positions: np.ndarray
-    ab5: np.ndarray
-    radial_lut: RadialLUT
+    ab5: np.ndarray | None
+    radial_lut: RadialLUT | None
     dtype: np.dtype = COMPLEX128_DTYPE
     cache_translation_blocks: bool = False
     _W_cache: dict[tuple[int, int], np.ndarray] = field(default_factory=dict)
@@ -59,8 +59,9 @@ class PairwiseCouplingOperator:
         )
 
     def populate(self, *, show_progress: bool = False) -> None:
-        if not self.cache_translation_blocks:
+        if not self.cache_translation_blocks or self.positions.shape[0] < 2:
             return
+        assert self.ab5 is not None
         ns = self.positions.shape[0]
         pair_iter: Iterable[tuple[int, int]] = (
             (i, j) for i in range(ns) for j in range(ns) if i != j
@@ -93,10 +94,10 @@ def require_pairwise_coupling(coupling: CouplingOperator) -> PairwiseCouplingOpe
 
 def apply_W_numpy(
     lmax: int,
-    k: float,
+    k: complex,
     positions: np.ndarray,
     x: np.ndarray,
-    ab5: np.ndarray,
+    ab5: np.ndarray | None,
     *,
     dtype: npt.DTypeLike = np.complex128,
     radial_lut: RadialLUT | None,
@@ -108,6 +109,9 @@ def apply_W_numpy(
     nm = n_modes(lmax)
     arr = np.asarray(x, dtype=out_dtype).reshape(ns, nm)
     y = np.zeros_like(arr, dtype=out_dtype)
+    if ns < 2:
+        return y.reshape(ns * nm)
+    assert ab5 is not None
 
     for i in range(ns):
         for j in range(ns):
@@ -127,10 +131,10 @@ def apply_W_numpy(
 
 def apply_W_adjoint_numpy(
     lmax: int,
-    k: float,
+    k: complex,
     positions: np.ndarray,
     x: np.ndarray,
-    ab5: np.ndarray,
+    ab5: np.ndarray | None,
     *,
     dtype: npt.DTypeLike = np.complex128,
     radial_lut: RadialLUT | None,
@@ -143,6 +147,9 @@ def apply_W_adjoint_numpy(
     arr = np.asarray(x, dtype=out_dtype).reshape(ns, nm)
     arr_conj = np.conjugate(arr)
     y = np.zeros_like(arr, dtype=out_dtype)
+    if ns < 2:
+        return y.reshape(ns * nm)
+    assert ab5 is not None
     for i in range(ns):
         for j in range(ns):
             if i == j:
@@ -160,7 +167,7 @@ def apply_W_adjoint_numpy(
 
 def apply_A_numpy(
     lmax: int,
-    k: float,
+    k: complex,
     positions: np.ndarray,
     x: np.ndarray,
     *,

@@ -35,7 +35,7 @@ class ParticleTPreparationContext:
     """Shared preparation inputs for representation-specific group factories."""
 
     lmax: int
-    k: float
+    k: complex
     particles: ParticleCollection
     n_medium: complex
     dtype: np.dtype

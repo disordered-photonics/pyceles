@@ -7,6 +7,7 @@ from typing import Literal, cast
 
 import numpy as np
 import numpy.typing as npt
+from scipy.spatial import cKDTree
 
 from pyceles._arrays import owned_read_only_view
 from pyceles._cupy_memory import cupy_allocator_snapshot
@@ -16,6 +17,7 @@ from pyceles.core.geometry_bounds import conservative_set_diameter
 from pyceles.core.indexing import n_modes
 from pyceles.core.particles import Particle, ParticleCollection, Sphere, particle_t_signature
 from pyceles.core.periodic import PeriodicSpec
+from pyceles.core.radial import passive_wavenumber
 from pyceles.core.tmatrix import particle_T_diagonal, particle_T_matrix_blocks, sphere_T_diagonal
 from pyceles.core.translation import RadialLUT, translation_ab5_table
 
@@ -145,7 +147,7 @@ def _default_group_factory(
 def _prepare_particle_t_operator(
     *,
     lmax: int,
-    k: float,
+    k: complex,
     particles: Sequence[Particle],
     n_medium: complex,
     dtype: np.dtype,
@@ -155,7 +157,7 @@ def _prepare_particle_t_operator(
     part = ParticleCollection.from_particles(particles)
     context = ParticleTPreparationContext(
         lmax=int(lmax),
-        k=float(k),
+        k=k,
         particles=part,
         n_medium=complex(n_medium),
         dtype=dtype,
@@ -187,7 +189,7 @@ def _infer_rmax(positions: Array) -> float:
 def prepare_matvec(
     *,
     lmax: int,
-    k: float,
+    k: complex,
     particles: Sequence[Particle],
     n_medium: complex = 1.0 + 0j,
     radial_lut_dr: float,
@@ -225,7 +227,9 @@ def prepare_matvec(
         compute_dtype=op_dtype,
         accum_dtype=op_dtype if accum_dtype is None else accum_dtype,
     )
-    k_f = float(k)
+    k_value = passive_wavenumber(k)
+    if k_value.imag and (periodic is not None or coupling_name == "mlfmm"):
+        raise NotImplementedError("Complex wavenumbers require finite pairwise coupling.")
     periodic_spec = periodic
     k_parallel_arr: np.ndarray | None = None
     if periodic_spec is not None:
@@ -245,29 +249,36 @@ def prepare_matvec(
                 "CuPy periodic workflows currently support Ewald or Rayleigh coupling."
             )
 
-    k_abs = float(abs(k_f))
-    if k_abs <= 0.0:
-        raise ValueError(f"`k` must be non-zero for operator preparation. Got {k_f!r}.")
+    k_abs = float(abs(k_value))
     dr_user = float(radial_lut_dr)
-    if dr_user < 0.0:
+    if not np.isfinite(dr_user) or dr_user < 0.0:
         raise ValueError(f"radial_lut_dr must be >= 0, got {dr_user}.")
 
     def make_radial_lut(lut_dtype: np.dtype | None = None) -> RadialLUT:
         dr = (1.0e-2 / k_abs) if dr_user == 0.0 else dr_user
-        return RadialLUT(
+        r_max = _infer_rmax(positions)
+        lut = RadialLUT(
             lmax=int(lmax),
-            k=k_f,
-            r_max=_infer_rmax(positions),
+            k=k_value,
+            r_max=r_max,
             dr=dr,
             dtype=op_dtype if lut_dtype is None else np.dtype(lut_dtype),
         )
+        if coupling_name == "pairwise" and periodic_spec is None and len(positions) > 1:
+            # Resolve the closest physical query at setup without an N-by-N
+            # distance array. Per-row lookup stays unchecked in the hot path.
+            distances, _ = cKDTree(positions).query(positions, k=2)
+            lut.validate_interval(float(distances[:, 1].min()), r_max)
+        return lut
 
     particle_t: ParticleTOperator
     coupling: CouplingOperator
+    ab5: np.ndarray | None
+    lut: RadialLUT | None
     if backend_name == "numpy":
         particle_t = _prepare_particle_t_operator(
             lmax=int(lmax),
-            k=k_f,
+            k=k_value,
             particles=part,
             n_medium=n_medium,
             dtype=op_dtype,
@@ -279,7 +290,7 @@ def prepare_matvec(
             ab5 = translation_ab5_table(int(lmax), dtype=op_dtype)
             coupling = PeriodicCouplingOperator(
                 lmax=int(lmax),
-                k=k_f,
+                k=k_value.real,
                 positions=positions,
                 ab5=ab5,
                 periodic=periodic_spec,
@@ -290,11 +301,12 @@ def prepare_matvec(
                 circumscribing_radii=circumscribing_radii,
             )
         elif coupling_name == "pairwise":
-            lut = make_radial_lut()
-            ab5 = translation_ab5_table(int(lmax), dtype=op_dtype)
+            # W=0 without a particle pair: no outgoing query or table exists.
+            lut = make_radial_lut() if len(part) > 1 else None
+            ab5 = translation_ab5_table(int(lmax), dtype=op_dtype) if len(part) > 1 else None
             coupling = PairwiseCouplingOperator(
                 lmax=int(lmax),
-                k=k_f,
+                k=k_value,
                 positions=positions,
                 ab5=ab5,
                 radial_lut=lut,
@@ -305,7 +317,7 @@ def prepare_matvec(
             lut = make_radial_lut()
             coupling = prepare_mlfmm_coupling(
                 lmax=int(lmax),
-                k=k_f,
+                k=k_value.real,
                 positions=positions,
                 particle_circumscribing_radii=circumscribing_radii,
                 radial_lut=lut,
@@ -331,7 +343,7 @@ def prepare_matvec(
         # Prepare explicit particle-T data on CPU, then keep its actions on GPU.
         cpu_particle_t = _prepare_particle_t_operator(
             lmax=int(lmax),
-            k=k_f,
+            k=k_value,
             particles=part,
             n_medium=n_medium,
             dtype=op_dtype,
@@ -355,7 +367,7 @@ def prepare_matvec(
                 CouplingOperator,
                 CuPyPeriodicCouplingOperator(
                     lmax=int(lmax),
-                    k=k_f,
+                    k=k_value.real,
                     positions=positions,
                     ab5=ab5,
                     periodic=periodic_spec,
@@ -367,13 +379,13 @@ def prepare_matvec(
                 ),
             )
         elif coupling_name == "pairwise":
-            lut = make_radial_lut()
-            ab5 = translation_ab5_table(int(lmax), dtype=op_dtype)
+            lut = make_radial_lut() if len(part) > 1 else None
+            ab5 = translation_ab5_table(int(lmax), dtype=op_dtype) if len(part) > 1 else None
             coupling = cast(
                 CouplingOperator,
                 CuPyPairwiseCouplingOperator(
                     lmax=int(lmax),
-                    k=k_f,
+                    k=k_value,
                     positions=positions,
                     ab5=ab5,
                     radial_lut=lut,
@@ -387,7 +399,7 @@ def prepare_matvec(
             lut = make_radial_lut()
             cpu_mlfmm = prepare_mlfmm_coupling(
                 lmax=int(lmax),
-                k=k_f,
+                k=k_value.real,
                 positions=positions,
                 particle_circumscribing_radii=circumscribing_radii,
                 radial_lut=lut,
@@ -408,7 +420,7 @@ def prepare_matvec(
                     CouplingOperator,
                     CuPyPairwiseCouplingOperator(
                         lmax=int(lmax),
-                        k=k_f,
+                        k=k_value,
                         positions=positions,
                         ab5=ab5,
                         radial_lut=lut,
@@ -423,7 +435,7 @@ def prepare_matvec(
 
     return PreparedOperator(
         lmax=int(lmax),
-        k=k_f,
+        k=k_value,
         positions=positions,
         particle_t=particle_t,
         coupling=coupling,
@@ -434,7 +446,7 @@ def prepare_matvec(
 def precompute_T_diagonal(
     *,
     lmax: int,
-    k: float,
+    k: complex,
     particles: Sequence[Particle],
     n_medium: complex = 1.0 + 0j,
     dtype: npt.DTypeLike = np.complex128,

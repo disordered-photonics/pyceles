@@ -60,6 +60,9 @@ def assemble_dense_A_numpy(
         pair_iter = tqdm(pair_iter, total=ns * (ns - 1), desc="Assemble A (blockwise)")
 
     pairwise = require_pairwise_coupling(prepared.coupling)
+    if ns < 2:
+        return A
+    assert pairwise.ab5 is not None
     cache = pairwise._W_cache if use_cache and pairwise.cache_translation_blocks else None
     for i, j in pair_iter:
         key = (i, j)

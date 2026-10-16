@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 from pyceles.core.indexing import n_modes
+from pyceles.core.lattice import RectangularLattice2D
 from pyceles.core.operators import (
     CompositeParticleTOperator,
     DenseTGroup,
@@ -37,6 +38,7 @@ from pyceles.core.particles import (
     pec_spheres_from_arrays,
     spheres_from_arrays,
 )
+from pyceles.core.periodic import PeriodicSpec
 from pyceles.core.tmatrix import particle_T_diagonal, sphere_T_diagonal
 from pyceles.core.translation import RadialLUT, translation_ab5_table
 
@@ -1235,3 +1237,57 @@ def test_dense_local_block_result_does_not_alias_input_or_storage():
     result.fill(0)
     np.testing.assert_array_equal(block, np.eye(6))
     np.testing.assert_array_equal(storage, 2.0 * np.eye(6)[None, :, :])
+
+
+@pytest.mark.parametrize("count", [0, 1])
+@pytest.mark.parametrize("dtype", [np.complex64, np.complex128])
+def test_pairwise_without_particle_pairs_needs_no_radial_table(count, dtype):
+    operator = prepare_matvec(
+        lmax=8,
+        k=1,
+        particles=spheres_from_arrays(
+            positions=np.zeros((count, 3)),
+            radii=np.full(count, 0.1),
+            refractive_indices=1.5,
+        ),
+        radial_lut_dr=0.01,
+        operator_dtype=dtype,
+        cache_translation_blocks=True,
+    )
+    pairwise = require_pairwise_coupling(operator.coupling)
+    assert pairwise.radial_lut is None and pairwise.ab5 is None
+    x = np.arange(count * n_modes(8), dtype=float).astype(dtype)
+    np.testing.assert_array_equal(operator.apply_W(x), np.zeros_like(x))
+    np.testing.assert_array_equal(operator.apply_A(x), x)
+    np.testing.assert_array_equal(operator.apply_adjoint(x), x)
+    np.testing.assert_array_equal(assemble_dense_A_numpy(operator), np.eye(len(x), dtype=dtype))
+    operator.populate_coupling()
+
+
+def test_pairwise_preparation_rejects_physical_queries_in_singular_padding():
+    with pytest.raises(ValueError, match="padding"):
+        prepare_matvec(
+            lmax=1,
+            k=1,
+            particles=spheres_from_arrays(
+                positions=np.array([[0, 0, 0], [0.01, 0, 0]]),
+                radii=np.full(2, 0.001),
+                refractive_indices=1.5,
+            ),
+            radial_lut_dr=0.1,
+        )
+
+
+@pytest.mark.parametrize("periodic", [None, PeriodicSpec(lattice=RectangularLattice2D(600, 600))])
+def test_complex_preparation_rejects_unsupported_coupling_methods(periodic):
+    with pytest.raises(NotImplementedError, match="finite pairwise"):
+        prepare_matvec(
+            lmax=1,
+            k=1 + 0.1j,
+            particles=spheres_from_arrays(
+                positions=np.zeros((1, 3)), radii=np.ones(1), refractive_indices=1.5
+            ),
+            radial_lut_dr=0.01,
+            periodic=periodic,
+            coupling_backend="mlfmm" if periodic is None else "pairwise",
+        )

@@ -13,6 +13,7 @@ from pyceles.core.operators import (
     AdjointCouplingOperator,
     CuPyMLFMMCouplingOperator,
     CuPyMLFMMHostCachePolicy,
+    CuPyPairwiseCouplingOperator,
     MLFMMCouplingOperator,
     MLFMMOptions,
     build_mlfmm_cupy_host_cache,
@@ -133,18 +134,19 @@ def test_cupy_pairwise_scalar_mode_blocks_match_numpy(
 
 
 @pytest.mark.parametrize("compute_dtype", (np.complex64, np.complex128))
-def test_cupy_pairwise_single_particle_has_zero_coupling(compute_dtype) -> None:
+@pytest.mark.parametrize("count", [0, 1])
+def test_cupy_pairwise_without_particle_pairs_has_zero_coupling(compute_dtype, count) -> None:
     particles = spheres_from_arrays(
-        positions=np.zeros((1, 3), dtype=float),
-        radii=np.asarray([20.0]),
-        refractive_indices=np.asarray([1.59 + 0.0j]),
+        positions=np.zeros((count, 3), dtype=float),
+        radii=np.full(count, 0.1),
+        refractive_indices=1.59,
     )
     prepared = prepare_matvec(
-        lmax=2,
-        k=2.0 * np.pi / 550.0,
+        lmax=8,
+        k=1,
         particles=particles,
         n_medium=1.0 + 0j,
-        radial_lut_dr=0.5,
+        radial_lut_dr=0.01,
         cache_translation_blocks=False,
         operator_dtype=compute_dtype,
         coupling_backend="pairwise",
@@ -152,12 +154,16 @@ def test_cupy_pairwise_single_particle_has_zero_coupling(compute_dtype) -> None:
     )
     rng = np.random.default_rng(20261007)
     x = np.asarray(
-        rng.standard_normal(n_modes(2)) + 1j * rng.standard_normal(n_modes(2)),
+        rng.standard_normal(count * n_modes(8)) + 1j * rng.standard_normal(count * n_modes(8)),
         dtype=compute_dtype,
     )
     np.testing.assert_array_equal(asnumpy(prepared.apply_W(x)), np.zeros_like(x))
-    coupling = cast(AdjointCouplingOperator, prepared.coupling)
+    coupling = cast(CuPyPairwiseCouplingOperator, prepared.coupling)
     np.testing.assert_array_equal(asnumpy(coupling.apply_adjoint(x)), np.zeros_like(x))
+    assert coupling.radial_lut is None
+    assert coupling._positions_gpu is None
+    np.testing.assert_array_equal(asnumpy(prepared.apply_A(x)), x)
+    np.testing.assert_array_equal(asnumpy(prepared.apply_adjoint(x)), x)
 
 
 @pytest.mark.parametrize(

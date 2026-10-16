@@ -8,10 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Finite pairwise prepared operators retain passive complex host wavenumbers
+  on NumPy and CuPy, including exact Hermitian-adjoint actions.
 - Translation and near-field radial tables support passive complex wavenumbers,
   retain double-precision sample generation and expose physical outgoing intervals.
 
 ### Fixed
+- Validate physical pairwise LUT queries before iteration, excluding singular
+  padding, and skip unused translation tables when no particle pair exists.
 - Preserve the final stored sample at the upper translation-table endpoint.
 - Avoid cancellation in outgoing spherical functions for absorbing arguments,
   including strongly absorbing layers in a nonabsorbing host.

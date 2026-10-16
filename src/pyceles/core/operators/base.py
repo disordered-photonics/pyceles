@@ -90,7 +90,7 @@ class PreparedOperator:
     """Prepared linear operator `A = I - T W` with explicit `T`/`W` boundaries."""
 
     lmax: int
-    k: float
+    k: complex
     positions: Array
     particle_t: ParticleTOperator
     coupling: CouplingOperator
