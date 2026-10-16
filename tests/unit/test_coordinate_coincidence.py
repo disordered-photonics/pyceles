@@ -54,9 +54,9 @@ def test_initial_local_field_masks_only_true_centers_and_reuses_owned_results(mo
     magnetic = np.full((2, 3), 2, dtype=np.complex128)
 
     def evaluate(_points, _positions, _coeffs, **kwargs):
-        # Keep the evaluator on its direct path: active_mask can allocate
-        # additional point/output copies on the reference backend.
-        assert kwargs.get("active_mask") is None
+        # Exclude physical singularities before radial evaluation, while
+        # retaining the evaluator's owned output arrays for the final mask.
+        np.testing.assert_array_equal(kwargs["active_mask"], [False, True])
         return electric, magnetic
 
     monkeypatch.setattr(initial, "compute_scattered_field", evaluate)
@@ -74,6 +74,23 @@ def test_initial_local_field_masks_only_true_centers_and_reuses_owned_results(mo
     assert np.all(np.isnan(e[0])) and np.all(np.isnan(h[0]))
     np.testing.assert_array_equal(e[1], 1)
     np.testing.assert_array_equal(h[1], 2)
+
+
+@pytest.mark.parametrize("dtype", [np.complex64, np.complex128])
+def test_zero_dipole_field_has_no_singularity_at_its_center(dtype):
+    source = DipoleSource(wavelength=550, amplitude=0)
+    e, h = initial.compute_initial_field(
+        np.array([[0, 0, 0], [1, 2, 3]]),
+        k=2 * np.pi / 550,
+        n_medium=1,
+        beam=source,
+        polar_angles=np.empty(0),
+        azimuthal_angles=np.empty(0),
+        compute_dtype=dtype,
+        show_progress=False,
+    )
+    np.testing.assert_array_equal(e, 0)
+    np.testing.assert_array_equal(h, 0)
 
 
 @pytest.mark.parametrize("offset", ((0, 0, 128), (1, 0, 0), (0, 1, 0), (0, 0, 0)))

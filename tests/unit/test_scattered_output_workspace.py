@@ -19,7 +19,7 @@ def _arguments() -> dict[str, Any]:
         "lmax": 1,
         "n_medium": 1.0,
         "particle_distance_resolution": 0.1,
-        "lut": object(),
+        "lut": scattered.NearFieldRadialLUT(lmax=1, k=2, r_max=30, dr=0.1),
         "active_mask": None,
         "batch_size": 64,
         "compute_dtype": np.complex64,
@@ -95,6 +95,7 @@ def test_empty_work_returns_distinct_zero_fields_without_evaluation(
     kwargs = _arguments()
     if empty_case == "source":
         kwargs["positions"] = np.empty((0, 3))
+        kwargs["coeffs"] = np.empty((0, 6), dtype=np.complex64)
     elif empty_case == "points":
         kwargs["field_points"] = np.empty((0, 3))
         kwargs["active_mask"] = np.empty(0, dtype=bool)

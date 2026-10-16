@@ -100,8 +100,9 @@ def _angular_recurrence_source(lmax: int) -> str:
     return "\n                ".join(lines)
 
 
-def _mode_accumulation_source(lmax: int, *, compute_magnetic: bool) -> str:
+def _mode_accumulation_source(lmax: int, *, compute_magnetic: bool, complex_k: bool) -> str:
     stride = int(lmax) + 1
+    denominator = "kr" if complex_k else "(ACC_REAL)kr"
     lines: list[str] = []
     for l in range(1, int(lmax) + 1):
         pref = 1.0 / np.sqrt(2.0 * l * (l + 1.0))
@@ -122,8 +123,8 @@ def _mode_accumulation_source(lmax: int, *, compute_magnetic: bool) -> str:
                 "    (ACC_REAL)(((REAL)1 - radial_frac) * d_im[lut_base + lut_i0] "
                 "+ radial_frac * d_im[lut_base + lut_i0 + 1])",
                 ");",
-                "const ACC_COMPLEX h_over_kr = h_l / (ACC_REAL)kr;",
-                "const ACC_COMPLEX d_over_kr = d_l / (ACC_REAL)kr;",
+                f"const ACC_COMPLEX h_over_kr = h_l / {denominator};",
+                f"const ACC_COMPLEX d_over_kr = d_l / {denominator};",
             ]
         )
         for m in range(-l, l + 1):
@@ -194,6 +195,7 @@ def _scattered_field_raw_kernel(
     compute_dtype_name: str,
     accum_dtype_name: str,
     compute_magnetic: bool,
+    complex_k: bool,
 ):
     cupy, _ = import_cupy()
     compute_dtype = np.dtype(compute_dtype_name)
@@ -219,6 +221,12 @@ def _scattered_field_raw_kernel(
     kernel_name = (
         f"nearfield_scattered_l{int(lmax)}_{compute_dtype.name}_{accum_dtype.name}_{suffix}"
     )
+    # Retain real division for nonabsorbing hosts in the repeated mode work.
+    if complex_k:
+        kernel_name += "_complexk"
+    k_argument = ", const REAL k_im" if complex_k else ""
+    kr_type = "ACC_COMPLEX" if complex_k else "REAL"
+    kr_expression = "ACC_COMPLEX((ACC_REAL)k * r, (ACC_REAL)k_im * r)" if complex_k else "k * r"
     magnetic_decl = (
         f"__shared__ ACC_COMPLEX shx[{_BLOCK_SIZE}], shy[{_BLOCK_SIZE}], shz[{_BLOCK_SIZE}];"
         if compute_magnetic
@@ -259,7 +267,7 @@ def _scattered_field_raw_kernel(
     extern "C" __global__ void {kernel_name}(
         const int n_points,
         const int n_sources,
-        const REAL k,
+        const REAL k{k_argument},
         const REAL inv_dr,
         const int n_r,
         const ACC_REAL medium_re,
@@ -292,8 +300,7 @@ def _scattered_field_raw_kernel(
             const REAL dx = px - positions[source_idx];
             const REAL dy = py - positions[n_sources + source_idx];
             const REAL dz = pz - positions[2 * n_sources + source_idx];
-            REAL r = {math["sqrt"]}(dx * dx + dy * dy + dz * dz);
-            if (r <= (REAL)0) r = (REAL)1e-30;
+            const REAL r = {math["sqrt"]}(dx * dx + dy * dy + dz * dz);
             const REAL inv_r = (REAL)1 / r;
             const REAL erx = dx * inv_r;
             const REAL ery = dy * inv_r;
@@ -315,7 +322,7 @@ def _scattered_field_raw_kernel(
             REAL radial_frac = radial_t_unclamped - (REAL)radial_i0;
             if (radial_i0 < 0) {{ radial_i0 = 0; radial_frac = (REAL)0; }}
             if (radial_i0 >= n_r - 1) {{ radial_i0 = n_r - 2; radial_frac = (REAL)1; }}
-            const REAL kr = k * r;
+            const {kr_type} kr = {kr_expression};
 
             {_angular_recurrence_source(int(lmax))}
 
@@ -326,7 +333,7 @@ def _scattered_field_raw_kernel(
             for (int m = 1; m <= {int(lmax)}; ++m) {{
                 phase_pos[m] = phase_pos[m - 1] * phase_unit;
             }}
-            {_mode_accumulation_source(int(lmax), compute_magnetic=compute_magnetic)}
+            {_mode_accumulation_source(int(lmax), compute_magnetic=compute_magnetic, complex_k=complex_k)}
         }}
 
         sex[tid] = ex; sey[tid] = ey; sez[tid] = ez;
@@ -368,7 +375,7 @@ def compute_scattered_field_cupy_fused(
     field_points: np.ndarray,
     positions: np.ndarray,
     coeffs: np.ndarray,
-    k: float,
+    k: complex,
     lmax: int,
     n_medium: complex,
     lut: Any,
@@ -408,10 +415,13 @@ def compute_scattered_field_cupy_fused(
     medium_factor = -1j * complex(n_medium)
     scalar_real = np.float32 if real_dtype == np.dtype(np.float32) else np.float64
     scalar_acc = np.float32 if accum_real_dtype == np.dtype(np.float32) else np.float64
+    k = complex(k)
+    complex_k = k.imag != 0
     args: list[Any] = [
         np.int32(pts.shape[0]),
         np.int32(pos.shape[0]),
-        scalar_real(k),
+        scalar_real(k.real),
+        *([scalar_real(k.imag)] if complex_k else []),
         scalar_real(1.0 / float(lut.dr)),
         np.int32(lut.ri.size),
         scalar_acc(np.real(medium_factor)),
@@ -428,7 +438,7 @@ def compute_scattered_field_cupy_fused(
     if out_h_cp is not None:
         args.append(out_h_cp)
     kernel = _scattered_field_raw_kernel(
-        int(lmax), compute_dtype.name, accum_dtype.name, bool(compute_magnetic)
+        int(lmax), compute_dtype.name, accum_dtype.name, bool(compute_magnetic), complex_k
     )
     kernel((int(pts.shape[0]),), (_BLOCK_SIZE,), tuple(args))
     e = asnumpy(out_e_cp).astype(accum_dtype, copy=False)

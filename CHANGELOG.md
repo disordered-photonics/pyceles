@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Exterior scattered E/H evaluation retains passive complex wavenumbers on
+  NumPy and CuPy, including the electric-only GPU evaluator.
 - Plane-wave projection and incident E/H evaluation support passive complex
   hosts and complex amplitudes specified at a finite reference point. Shared
   homogeneous-spectrum validation preserves complex wavevectors and is
@@ -19,6 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retain double-precision sample generation and expose physical outgoing intervals.
 
 ### Fixed
+- Validate scattered-field LUT coverage and exclude singular masked points
+  before radial evaluation. Zero outgoing expansions no longer create
+  singular fields or enlarge radial tables.
 - Form mixed-polarization plane-wave coefficients before the output cast and
   apply the spectral magnetic material factor after angular accumulation.
 - Validate physical pairwise LUT queries before iteration, excluding singular

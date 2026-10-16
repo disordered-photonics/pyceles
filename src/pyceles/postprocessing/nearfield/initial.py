@@ -439,17 +439,18 @@ def _compute_initial_field_general(
     n_medium_c = complex(n_medium)
 
     if isinstance(beam, LocalExpansionSource):
-        if k.imag != 0:
-            raise ValueError("Local outgoing-source field evaluation requires a real wavenumber")
         src_pos = np.asarray(beam.source_positions(), dtype=float).reshape(-1, 3)
         src_coeffs = np.asarray(beam.outgoing_coeffs(1, dtype=compute_dtype), dtype=compute_dtype)
+        active = np.any(src_coeffs != 0, axis=1)
+        src_pos, src_coeffs = src_pos[active], src_coeffs[active]
         hit = coincident_point_mask(pts, src_pos)
         has_hits = bool(np.any(hit))
         e, h = compute_scattered_field(
             pts,
             src_pos,
             src_coeffs,
-            k=k.real,
+            active_mask=~hit if has_hits else None,
+            k=k,
             lmax=1,
             n_medium=n_medium_c,
             particle_distance_resolution=float(getattr(beam, "radial_lut_dr", 0.0)),
@@ -521,8 +522,6 @@ def _compute_initial_field_general(
 
     n_points = pts.shape[0]
     n_alpha = alpha.shape[0]
-    if alpha_weights.shape[0] != n_alpha:
-        raise ValueError("azimuthal angle grid mismatch in alpha integration.")
     if beta.size == 0:
         return e, h
 

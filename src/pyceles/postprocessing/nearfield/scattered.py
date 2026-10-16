@@ -6,6 +6,7 @@ from typing import Any
 
 import numpy as np
 import numpy.typing as npt
+from scipy.spatial import cKDTree
 from tqdm.auto import tqdm
 
 from pyceles._optional import asnumpy, import_cupy
@@ -157,12 +158,59 @@ class NearFieldRadialLUT:
         return z, d
 
 
+def _active_expansions(
+    positions: np.ndarray, coeffs: np.ndarray, lmax: int, dtype: npt.DTypeLike
+) -> tuple[np.ndarray, np.ndarray]:
+    """Normalize and retain nonzero outgoing expansions before sizing tables."""
+    pos = np.asarray(positions, np.float64)
+    c = np.asarray(coeffs, dtype=dtype).reshape(len(pos), n_modes(lmax))
+    active = np.any(c != 0, axis=1)
+    # A zero expansion has no singularity, field contribution or LUT query.
+    return (pos, c) if np.all(active) else (pos[active], c[active])
+
+
+def _field_radial_lut(
+    positions: np.ndarray,
+    points: np.ndarray,
+    *,
+    k: complex,
+    lmax: int,
+    resolution: float,
+    dtype: npt.DTypeLike,
+    lut: NearFieldRadialLUT | None,
+) -> NearFieldRadialLUT:
+    """Prepare or validate the table against active physical field queries."""
+    if not np.isfinite(resolution) or resolution < 0:
+        raise ValueError("particle_distance_resolution must be finite and >= 0")
+    upper = conservative_cross_set_max_distance(positions, points)
+    if lut is None:
+        lut = NearFieldRadialLUT(
+            lmax=lmax,
+            k=k,
+            r_max=upper,
+            dr=1e-2 / abs(k) if resolution == 0 else resolution,
+            dtype=dtype,
+        )
+    elif lut.k != k or lut.lmax != lmax:
+        raise ValueError("Field LUT must match k and lmax")
+    distances, _ = cKDTree(positions).query(points, k=1)
+    if upper > lut.ri[-1]:
+        # A supplied table can cover every actual distance even when the AABB
+        # bound is larger. Resolve that case without an all-pairs allocation.
+        centers, targets = (
+            (positions, points) if len(positions) <= len(points) else (points, positions)
+        )
+        upper = max(float(np.linalg.norm(targets - center, axis=1).max()) for center in centers)
+    lut.validate_interval(float(distances.min()), upper)
+    return lut
+
+
 def compute_scattered_field(
     field_points: np.ndarray,
     positions: np.ndarray,
     coeffs: np.ndarray,
     *,
-    k: float,
+    k: complex,
     lmax: int,
     n_medium: complex = 1.0 + 0j,
     particle_distance_resolution: float = 0.0,
@@ -175,6 +223,11 @@ def compute_scattered_field(
     accum_dtype: npt.DTypeLike = np.complex128,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Evaluate the exterior scattered field from outgoing SVWF coefficients.
+
+    Return E and Z0*H for a passive, possibly complex host wavenumber. Callers
+    own exterior-domain masks; active radii must lie in the LUT's physical
+    interval. Zero expansions neither constrain that interval nor have a
+    singularity at their centre.
 
     Both returned field arrays are owned by the caller, not borrowed scratch.
     CuPy work uses the fused point-owned RawKernel; the CPU path remains the
@@ -202,19 +255,17 @@ def compute_scattered_field(
             raise RuntimeError("Magnetic-field evaluation unexpectedly returned no data.")
         return e, h
     pts = np.asarray(field_points, np.float64)
-    pos = np.asarray(positions, np.float64)
     lmax = int(lmax)
-    k = float(k)
+    k = passive_wavenumber(k)
     n_medium_c = complex(n_medium)
     compute_dtype = np.dtype(compute_dtype)
     accum_dtype = np.dtype(accum_dtype)
 
-    n_spheres = pos.shape[0]
-    n_modes_total = n_modes(lmax)
-    c = np.asarray(coeffs, compute_dtype).reshape(n_spheres, n_modes_total)
+    pos, c = _active_expansions(positions, coeffs, lmax, compute_dtype)
+    n_spheres = len(pos)
     e = np.zeros((pts.shape[0], 3), dtype=accum_dtype)
     h = np.zeros_like(e)
-    if n_spheres == 0:
+    if n_spheres == 0 or len(pts) == 0:
         return e, h
 
     idx_eval: np.ndarray | None = None
@@ -233,25 +284,15 @@ def compute_scattered_field(
         e_eval = np.zeros((pts_eval.shape[0], 3), dtype=accum_dtype)
         h_eval = np.zeros_like(e_eval)
 
-    dr = float(particle_distance_resolution)
-    if dr < 0.0:
-        raise ValueError(
-            f"`particle_distance_resolution` must be >= 0. Got {particle_distance_resolution!r}."
-        )
-    k_abs = float(abs(k))
-    if k_abs <= 0.0:
-        raise ValueError(f"`k` must be non-zero for near-field radial LUT setup. Got {k!r}.")
-    dr = (1.0e-2 / k_abs) if dr == 0.0 else dr
-
-    if lut is None:
-        rmax = conservative_cross_set_max_distance(pos, pts_eval)
-        lut = NearFieldRadialLUT(
-            lmax=lmax,
-            k=k,
-            r_max=rmax,
-            dr=dr,
-            dtype=compute_dtype,
-        )
+    lut = _field_radial_lut(
+        pos,
+        pts_eval,
+        k=k,
+        lmax=lmax,
+        resolution=float(particle_distance_resolution),
+        dtype=compute_dtype,
+        lut=lut,
+    )
 
     mode_by_l = mode_indices_by_l(lmax)
     sphere_iter = tqdm(
@@ -267,15 +308,14 @@ def compute_scattered_field(
             rvec = p - pos[j_sphere]
 
             r = np.linalg.norm(rvec, axis=1)
-            r_safe = np.where(r == 0, 1e-30, r)
-            e_r = rvec / r_safe[:, None]
+            e_r = rvec / r[:, None]
             ct = np.clip(e_r[:, 2], -1.0, 1.0)
             st = np.sqrt(np.maximum(0.0, 1.0 - ct**2))
             phi = np.arctan2(rvec[:, 1], rvec[:, 0])
 
             e_theta = np.stack([ct * np.cos(phi), ct * np.sin(phi), -st], axis=1)
             e_phi = np.stack([-np.sin(phi), np.cos(phi), np.zeros_like(phi)], axis=1)
-            kr = k * r_safe
+            kr = k * r
             pi_all, tau_all, p_all = spherical_functions_trigon(
                 ct, st, lmax, xp=np, return_plm=True
             )
@@ -333,7 +373,7 @@ def _compute_scattered_field_cupy(
     field_points: np.ndarray,
     positions: np.ndarray,
     coeffs: np.ndarray,
-    k: float,
+    k: complex,
     lmax: int,
     n_medium: complex,
     particle_distance_resolution: float,
@@ -346,9 +386,10 @@ def _compute_scattered_field_cupy(
 ) -> tuple[np.ndarray, np.ndarray | None]:
     """Run the fused evaluator and restore the caller's active-point layout."""
     pts = np.asarray(field_points, np.float64)
-    pos = np.asarray(positions, np.float64)
+    k = passive_wavenumber(k)
     compute_dtype_np = np.dtype(compute_dtype)
     accum_dtype_np = np.dtype(accum_dtype)
+    pos, coeffs = _active_expansions(positions, coeffs, int(lmax), compute_dtype_np)
     if pts.shape[0] == 0 or pos.shape[0] == 0:
         empty = np.zeros((pts.shape[0], 3), dtype=accum_dtype_np)
         return empty, empty.copy() if compute_magnetic else None
@@ -368,24 +409,15 @@ def _compute_scattered_field_cupy(
                 return empty, empty.copy() if compute_magnetic else None
             pts_eval = pts[idx_eval]
 
-    dr = float(particle_distance_resolution)
-    if dr < 0.0:
-        raise ValueError(
-            f"`particle_distance_resolution` must be >= 0. Got {particle_distance_resolution!r}."
-        )
-    k_abs = float(abs(k))
-    if k_abs <= 0.0:
-        raise ValueError(f"`k` must be non-zero for near-field radial LUT setup. Got {k!r}.")
-    dr = (1.0e-2 / k_abs) if dr == 0.0 else dr
-    if lut is None:
-        rmax = conservative_cross_set_max_distance(pos, pts_eval)
-        lut = NearFieldRadialLUT(
-            lmax=int(lmax),
-            k=float(k),
-            r_max=rmax,
-            dr=dr,
-            dtype=compute_dtype_np,
-        )
+    lut = _field_radial_lut(
+        pos,
+        pts_eval,
+        k=k,
+        lmax=int(lmax),
+        resolution=float(particle_distance_resolution),
+        dtype=compute_dtype_np,
+        lut=lut,
+    )
 
     from .scattered_cupy import compute_scattered_field_cupy_fused
 
@@ -397,7 +429,7 @@ def _compute_scattered_field_cupy(
         field_points=pts_eval,
         positions=pos,
         coeffs=coeffs,
-        k=float(k),
+        k=k,
         lmax=int(lmax),
         n_medium=complex(n_medium),
         lut=lut,
@@ -425,7 +457,7 @@ def compute_scattered_electric_field(
     positions: np.ndarray,
     coeffs: np.ndarray,
     *,
-    k: float,
+    k: complex,
     lmax: int,
     n_medium: complex = 1.0 + 0j,
     particle_distance_resolution: float = 0.0,
@@ -485,7 +517,7 @@ def _compute_scattered_field_cupy_vectorized(
     field_points: np.ndarray,
     positions: np.ndarray,
     coeffs: np.ndarray,
-    k: float,
+    k: complex,
     lmax: int,
     n_medium: complex,
     particle_distance_resolution: float,
@@ -507,9 +539,8 @@ def _compute_scattered_field_cupy_vectorized(
     cupy, _ = import_cupy()
 
     pts = np.asarray(field_points, np.float64)
-    pos = np.asarray(positions, np.float64)
     lmax = int(lmax)
-    k = float(k)
+    k = passive_wavenumber(k)
     n_medium_c = complex(n_medium)
     compute_dtype_np = np.dtype(compute_dtype)
     accum_dtype_np = np.dtype(accum_dtype)
@@ -519,12 +550,11 @@ def _compute_scattered_field_cupy_vectorized(
     accum_dtype_cp = cupy.complex64 if accum_dtype_np == np.dtype(np.complex64) else cupy.complex128
     real_dtype_cp = cupy.float32 if compute_dtype_np == np.dtype(np.complex64) else cupy.float64
 
-    n_spheres = pos.shape[0]
-    n_modes_total = n_modes(lmax)
-    c = np.asarray(coeffs, compute_dtype_np).reshape(n_spheres, n_modes_total)
+    pos, c = _active_expansions(positions, coeffs, lmax, compute_dtype_np)
+    n_spheres = len(pos)
     e = np.zeros((pts.shape[0], 3), dtype=accum_dtype_np)
     h = np.zeros_like(e)
-    if n_spheres == 0:
+    if n_spheres == 0 or len(pts) == 0:
         return e, h
 
     idx_eval: np.ndarray | None = None
@@ -543,25 +573,15 @@ def _compute_scattered_field_cupy_vectorized(
         e_eval = np.zeros((pts_eval.shape[0], 3), dtype=accum_dtype_np)
         h_eval = np.zeros_like(e_eval)
 
-    dr = float(particle_distance_resolution)
-    if dr < 0.0:
-        raise ValueError(
-            f"`particle_distance_resolution` must be >= 0. Got {particle_distance_resolution!r}."
-        )
-    k_abs = float(abs(k))
-    if k_abs <= 0.0:
-        raise ValueError(f"`k` must be non-zero for near-field radial LUT setup. Got {k!r}.")
-    dr = (1.0e-2 / k_abs) if dr == 0.0 else dr
-
-    if lut is None:
-        rmax = conservative_cross_set_max_distance(pos, pts_eval)
-        lut = NearFieldRadialLUT(
-            lmax=lmax,
-            k=k,
-            r_max=rmax,
-            dr=dr,
-            dtype=compute_dtype_np,
-        )
+    lut = _field_radial_lut(
+        pos,
+        pts_eval,
+        k=k,
+        lmax=lmax,
+        resolution=float(particle_distance_resolution),
+        dtype=compute_dtype_np,
+        lut=lut,
+    )
 
     pos_gpu = cupy.asarray(pos, dtype=real_dtype_cp)
     coeffs_gpu = cupy.asarray(c, dtype=compute_dtype_cp)
@@ -593,15 +613,14 @@ def _compute_scattered_field_cupy_vectorized(
             rvec = p[None, :, :] - pos_chunk[:, None, :]
 
             r = cupy.linalg.norm(rvec, axis=2)
-            r_safe = cupy.where(r == 0, real_dtype_cp(1e-30), r)
-            e_r = rvec / r_safe[:, :, None]
+            e_r = rvec / r[:, :, None]
             ct = cupy.clip(e_r[:, :, 2], -1.0, 1.0)
             st = cupy.sqrt(cupy.maximum(0.0, 1.0 - ct**2))
             phi = cupy.arctan2(rvec[:, :, 1], rvec[:, :, 0])
 
             e_theta = cupy.stack([ct * cupy.cos(phi), ct * cupy.sin(phi), -st], axis=2)
             e_phi = cupy.stack([-cupy.sin(phi), cupy.cos(phi), cupy.zeros_like(phi)], axis=2)
-            kr = real_dtype_cp(k) * r_safe
+            kr = compute_dtype_cp(k) * r
             pi_all, tau_all, p_all = spherical_functions_trigon(
                 ct, st, lmax, xp=cupy, return_plm=True
             )
