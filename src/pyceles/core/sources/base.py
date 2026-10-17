@@ -80,52 +80,6 @@ class AngularSpectrumSource(Protocol):
 
 
 @runtime_checkable
-class LocalExpansionSource(Protocol):
-    """Source interface exposing homogeneous-host local outgoing SVWF emitters.
-
-    This capability is intentionally narrow: it is for sources whose emitted
-    field can be represented in the host medium by one or more centered
-    outgoing SVWF coefficient blocks plus explicit emitter positions.
-
-    It should not be treated as a universal abstraction for every future local
-    emitter workflow. For example, embedded dipoles inside particles may need a
-    richer capability if their physically relevant representation involves
-    interior regular expansions, shell-dependent coefficients, or reaction-field
-    evaluations rather than a plain host-medium outgoing expansion.
-    """
-
-    @property
-    def wavelength(self) -> float: ...
-
-    @property
-    def medium_n(self) -> complex: ...
-
-    @property
-    def amplitude(self) -> float: ...
-
-    def has_finite_incident_power(self) -> bool: ...
-
-    def incident_coeffs(
-        self,
-        positions: np.ndarray,
-        lmax: int,
-        *,
-        polar_angles: np.ndarray | None = None,
-        azimuthal_angles: np.ndarray | None = None,
-        dtype: npt.DTypeLike = np.complex128,
-    ) -> np.ndarray: ...
-
-    def source_positions(self) -> np.ndarray: ...
-
-    def outgoing_coeffs(
-        self,
-        lmax: int,
-        *,
-        dtype: npt.DTypeLike = np.complex128,
-    ) -> np.ndarray: ...
-
-
-@runtime_checkable
 class Source(Protocol):
     """Unified incident-source protocol."""
 
@@ -147,6 +101,29 @@ class Source(Protocol):
         *,
         polar_angles: np.ndarray | None = None,
         azimuthal_angles: np.ndarray | None = None,
+        dtype: npt.DTypeLike = np.complex128,
+    ) -> np.ndarray: ...
+
+
+@runtime_checkable
+class LocalExpansionSource(Source, Protocol):
+    """Source interface exposing homogeneous-host local outgoing SVWF emitters.
+
+    Each emitter has one coefficient row at the source's own outgoing degree.
+    These are exterior host-medium expansions; sources embedded in particles
+    need a separate interior or reaction-field representation.
+    """
+
+    def source_positions(self) -> np.ndarray: ...
+
+    @property
+    def outgoing_lmax(self) -> int:
+        """Emitted SVWF degree, independent of the receiving particle order."""
+        ...
+
+    def outgoing_coeffs(
+        self,
+        *,
         dtype: npt.DTypeLike = np.complex128,
     ) -> np.ndarray: ...
 

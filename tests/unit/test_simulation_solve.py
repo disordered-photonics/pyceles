@@ -47,6 +47,7 @@ class _ToyLocalExpansionSource:
     wavelength: float = 550.0
     medium_n: complex = 1.0 + 0.0j
     amplitude: float = 1.0
+    outgoing_lmax: int = 1
 
     def has_finite_incident_power(self) -> bool:
         return False
@@ -67,8 +68,8 @@ class _ToyLocalExpansionSource:
     def source_positions(self) -> np.ndarray:
         return np.array([[0.0, 0.0, 0.0]], dtype=float)
 
-    def outgoing_coeffs(self, lmax: int, *, dtype=np.complex128) -> np.ndarray:
-        return np.zeros((1, n_modes(int(lmax))), dtype=np.dtype(dtype))
+    def outgoing_coeffs(self, *, dtype=np.complex128) -> np.ndarray:
+        return np.zeros((1, n_modes(self.outgoing_lmax)), dtype=np.dtype(dtype))
 
 
 def test_normalize_sources_argument_validates_mapping_duplicates_and_source_mismatch():

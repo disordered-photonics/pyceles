@@ -208,7 +208,7 @@ def test_local_expansion_signature_is_uniform_for_local_sources() -> None:
         coeff_sig = inspect.signature(source.outgoing_coeffs)
         params = coeff_sig.parameters
         names = list(params)
-        assert names == ["lmax", "dtype"], (
+        assert names == ["dtype"], (
             f"{type(source).__name__}: unexpected outgoing_coeffs parameters {names}"
         )
         assert params["dtype"].kind is inspect.Parameter.KEYWORD_ONLY

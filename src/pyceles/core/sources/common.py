@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import numpy as np
+from scipy.spatial import cKDTree
 from scipy.special import eval_genlaguerre
 
 from ..geometry_bounds import coincident_point_mask, conservative_cross_set_max_distance
 from ..indexing import index_vswf, n_modes
-from ..translation import RadialLUT, translation_ab5_table, translation_block
+from ..translation import RadialLUT, translation_ab5_table, translation_block_rect
 
 
 def _as_complex_triplet(
@@ -73,28 +74,23 @@ def _normalize_dipole_collection_inputs(
     return pos, mom
 
 
-def _dipole_outgoing_coeff_vector(
+def _dipole_outgoing_coeffs(
     *,
-    lmax: int,
     k0: float,
-    k_medium: float,
-    dipole_moment: np.ndarray,
+    k_medium: complex,
+    dipole_moments: np.ndarray,
     dtype: np.dtype,
 ) -> np.ndarray:
-    """Outgoing SVWF coefficients for one electric point dipole."""
-    nm = n_modes(int(lmax))
-    out = np.zeros((nm,), dtype=dtype)
-    if int(lmax) < 1:
-        return out
-
-    mx, my, mz = dipole_moment
+    """Degree-one outgoing SVWF coefficients for electric point dipoles."""
+    out = np.zeros((len(dipole_moments), n_modes(1)), dtype=dtype)
+    mx, my, mz = dipole_moments.T
     c_xy = 1.0 / (2.0 * np.sqrt(3.0))
     c_z = 1.0 / np.sqrt(6.0)
-    pref = (1j * float(k_medium) * (float(k0) ** 2)) / np.pi
+    pref = (1j * k_medium * (float(k0) ** 2)) / np.pi
 
-    out[index_vswf(1, -1, 2, int(lmax))] = pref * c_xy * (mx + 1j * my)
-    out[index_vswf(1, 0, 2, int(lmax))] = pref * c_z * mz
-    out[index_vswf(1, 1, 2, int(lmax))] = pref * c_xy * (mx - 1j * my)
+    out[:, index_vswf(1, -1, 2, 1)] = pref * c_xy * (mx + 1j * my)
+    out[:, index_vswf(1, 0, 2, 1)] = pref * c_z * mz
+    out[:, index_vswf(1, 1, 2, 1)] = pref * c_xy * (mx - 1j * my)
     return out
 
 
@@ -103,8 +99,9 @@ def _incident_coeffs_from_outgoing_expansion(
     receiver_positions: np.ndarray,
     source_positions: np.ndarray,
     outgoing_coeffs: np.ndarray,
+    outgoing_lmax: int,
     lmax: int,
-    k_medium: float,
+    k_medium: complex,
     radial_lut_dr: float,
     dtype: np.dtype,
 ) -> np.ndarray:
@@ -112,6 +109,9 @@ def _incident_coeffs_from_outgoing_expansion(
     pos_rcv = np.asarray(receiver_positions, dtype=float)
     pos_src = np.asarray(source_positions, dtype=float)
     coeffs_src = np.asarray(outgoing_coeffs, dtype=dtype)
+    # Zero emitters have no singularity and do not set the radial table extent.
+    active = np.any(coeffs_src != 0, axis=1)
+    pos_src, coeffs_src = pos_src[active], coeffs_src[active]
     dr_user = float(radial_lut_dr)
     if dr_user < 0.0:
         raise ValueError(f"`radial_lut_dr` must be >= 0. Got {radial_lut_dr!r}.")
@@ -130,23 +130,27 @@ def _incident_coeffs_from_outgoing_expansion(
             "Outgoing-to-regular translation is singular at zero separation."
         )
 
-    ab5 = translation_ab5_table(int(lmax), dtype=dtype)
+    full_order = max(int(lmax), int(outgoing_lmax))
+    ab5 = translation_ab5_table(full_order, dtype=dtype)
     r_max = conservative_cross_set_max_distance(pos_rcv, pos_src)
     radial_lut = RadialLUT(
-        lmax=int(lmax),
-        k=float(k_medium),
+        lmax=full_order,
+        k=k_medium,
         r_max=float(r_max),
         dr=(1.0e-2 / k_abs) if dr_user == 0.0 else dr_user,
         dtype=dtype,
     )
+    distances, _ = cKDTree(pos_src).query(pos_rcv, k=1)
+    radial_lut.validate_interval(float(distances.min()), r_max)
 
     for j in range(pos_src.shape[0]):
         c_out = coeffs_src[j]
         for i in range(ns):
             rvec = pos_rcv[i] - pos_src[j]
-            wij = translation_block(
+            wij = translation_block_rect(
                 int(lmax),
-                float(k_medium),
+                int(outgoing_lmax),
+                k_medium,
                 rvec,
                 ab5=ab5,
                 radial_lut=radial_lut,

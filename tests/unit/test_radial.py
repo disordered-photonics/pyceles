@@ -59,6 +59,18 @@ def test_rectangular_translation_preserves_complex_k_when_expanding_table():
     np.testing.assert_allclose(actual, expected, rtol=5e-5, atol=1e-10)
 
 
+@pytest.mark.parametrize("dtype", [np.complex64, np.complex128])
+def test_rectangular_translation_preserves_explicit_coefficient_precision(dtype):
+    actual = translation_block_rect(
+        2,
+        1,
+        1.3 + 0.5j,
+        np.array([0.4, -0.3, 0.7]),
+        ab5=translation_ab5_table(2, dtype=dtype),
+    )
+    assert actual.dtype == dtype
+
+
 @pytest.mark.parametrize("k", [1.3, 1.3 + 0.5j])
 @pytest.mark.parametrize("backend", ["numpy", pytest.param("cupy", marks=pytest.mark.gpu)])
 def test_scattered_field_uses_only_active_physical_lut_queries(k, backend, request):

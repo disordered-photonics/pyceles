@@ -262,12 +262,12 @@ def compute_far_field_patterns(
     initial = None
     if isinstance(source, LocalExpansionSource):
         src_pos = np.asarray(source.source_positions(), dtype=float).reshape(-1, 3)
-        src_coeffs = np.asarray(source.outgoing_coeffs(1, dtype=ctype), dtype=ctype)
+        src_coeffs = np.asarray(source.outgoing_coeffs(dtype=ctype), dtype=ctype)
         initial = scattered_field_plane_wave_pattern(
             positions=src_pos,
             coeffs=src_coeffs,
             k=k,
-            lmax=1,
+            lmax=source.outgoing_lmax,
             polar_angles=polar_angles,
             azimuthal_angles=azimuthal_angles,
             backend=backend,

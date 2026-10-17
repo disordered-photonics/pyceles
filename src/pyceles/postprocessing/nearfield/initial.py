@@ -440,7 +440,7 @@ def _compute_initial_field_general(
 
     if isinstance(beam, LocalExpansionSource):
         src_pos = np.asarray(beam.source_positions(), dtype=float).reshape(-1, 3)
-        src_coeffs = np.asarray(beam.outgoing_coeffs(1, dtype=compute_dtype), dtype=compute_dtype)
+        src_coeffs = np.asarray(beam.outgoing_coeffs(dtype=compute_dtype), dtype=compute_dtype)
         active = np.any(src_coeffs != 0, axis=1)
         src_pos, src_coeffs = src_pos[active], src_coeffs[active]
         hit = coincident_point_mask(pts, src_pos)
@@ -451,7 +451,7 @@ def _compute_initial_field_general(
             src_coeffs,
             active_mask=~hit if has_hits else None,
             k=k,
-            lmax=1,
+            lmax=beam.outgoing_lmax,
             n_medium=n_medium_c,
             particle_distance_resolution=float(getattr(beam, "radial_lut_dr", 0.0)),
             batch_size=int(batch_size),

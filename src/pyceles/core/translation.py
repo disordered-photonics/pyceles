@@ -535,7 +535,7 @@ def translation_block_rect(
         k,
         np.asarray(rvec, dtype=float),
         ab5=(
-            np.asarray(ab5, dtype=np.complex128)
+            np.asarray(ab5)
             if ab5 is not None
             else translation_ab5_table(full_order, dtype=np.complex128)
         ),

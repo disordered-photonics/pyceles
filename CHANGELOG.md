@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Electric dipole sources and collections support passive complex hosts and
+  complex amplitudes for finite E/H fields and regular incident projections.
+  Absorbing-host point-emitter self-power requires a microscopic model and is
+  explicitly rejected.
 - Native sphere, layered-sphere, and spheroid interior E/H evaluation supports
   passive complex host wavenumbers, including CPU/GPU radial particle paths.
 - Exterior scattered E/H evaluation retains passive complex wavenumbers on
@@ -23,10 +27,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retain double-precision sample generation and expose physical outgoing intervals.
 
 ### Changed
+- Breaking: local outgoing sources expose `outgoing_lmax` and return their own
+  coefficient blocks through `outgoing_coeffs(*, dtype=...)`. Field evaluation
+  uses the source degree independently of the particle truncation order.
 - Breaking: removed `center_pixel_policy` from finite/periodic slice helpers
   and near-field showcase plotting. Particle-centre fields use analytic limits.
 
 ### Fixed
+- Exclude zero local emitters before translation singularity checks and LUT
+  sizing, and validate physical source-to-particle LUT queries.
 - Planar slices preserve evaluated field values and accumulation dtype,
   including singular or unavailable samples represented by NaNs.
 - Evaluate regular SVWF radial factors at their analytic origin limits,

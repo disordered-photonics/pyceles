@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from pyceles.core.indexing import n_modes
 from pyceles.core.sources import (
     AngularSpectrumSource,
     JonesPolarizedSource,
@@ -57,6 +58,6 @@ def assert_source_compliance(
         if not isinstance(source, LocalExpansionSource):
             raise AssertionError("Expected source to satisfy LocalExpansionSource protocol.")
         positions = np.asarray(source.source_positions(), dtype=float).reshape(-1, 3)
-        coeffs = np.asarray(source.outgoing_coeffs(1), dtype=np.complex128)
+        coeffs = np.asarray(source.outgoing_coeffs(), dtype=np.complex128)
         assert positions.ndim == 2 and positions.shape[1] == 3
-        assert coeffs.ndim == 2 and coeffs.shape[0] == positions.shape[0]
+        assert coeffs.shape == (positions.shape[0], n_modes(source.outgoing_lmax))

@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from pyceles.core.geometry_bounds import coincident_point_mask
-from pyceles.core.sources import DipoleSource
+from pyceles.core.sources import DipoleCollection, DipoleSource
 from pyceles.postprocessing.nearfield import initial
 
 
@@ -89,3 +89,27 @@ def test_zero_dipole_field_has_no_singularity_at_its_center(dtype):
     )
     np.testing.assert_array_equal(e, 0)
     np.testing.assert_array_equal(h, 0)
+    np.testing.assert_array_equal(source.incident_coeffs(np.array([[0, 0, 0]]), lmax=2), 0)
+
+
+def test_dipole_translation_rejects_queries_in_lut_padding():
+    source = DipoleSource(wavelength=550, medium_n=1.33 + 0.5j, radial_lut_dr=1)
+    with pytest.raises(ValueError, match="padding"):
+        source.incident_coeffs(np.array([[0.25, 0, 0]]), 2)
+
+
+@pytest.mark.parametrize("factory", [DipoleSource, DipoleCollection])
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"wavelength": 0},
+        {"wavelength": np.inf},
+        {"medium_n": 1 - 0.1j},
+        {"medium_n": complex(1, np.nan)},
+        {"amplitude": complex(1, np.inf)},
+        {"radial_lut_dr": np.nan},
+    ],
+)
+def test_dipoles_validate_physical_parameters(factory, kwargs):
+    with pytest.raises(ValueError):
+        factory(**({"wavelength": 550} | kwargs))
