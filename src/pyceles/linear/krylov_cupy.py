@@ -1077,7 +1077,9 @@ def gmres_cupy_native(
     while iterations < maxiter_total and info != 0:
         z0 = _apply_minv(r_true)
         beta = _norm(z0, cupy=cupy, accum_dtype=acc_dtype)
-        if beta <= breakdown_tol_f:
+        # This residual carries source amplitude; only zero has no direction.
+        # Arnoldi breakdown tests below operate on normalized basis vectors.
+        if beta == 0:
             info = iterations if iterations > 0 else maxiter_total
             converged_reason = "breakdown"
             break
@@ -1379,7 +1381,7 @@ def fgmres_cupy_native(
 
     while iterations < maxiter_total and info != 0:
         beta = _norm(r_true, cupy=cupy, accum_dtype=acc_dtype)
-        if beta <= breakdown_tol_f:
+        if beta == 0:
             info = iterations if iterations > 0 else maxiter_total
             converged_reason = "breakdown"
             break
@@ -1664,7 +1666,7 @@ def lgmres_cupy_native(
     while iterations < maxiter_total and info != 0:
         z0 = _apply_minv(r_true)
         beta = _norm(z0, cupy=cupy, accum_dtype=acc_dtype)
-        if beta <= breakdown_tol_f:
+        if beta == 0:
             info = iterations if iterations > 0 else maxiter_total
             converged_reason = "breakdown"
             break
@@ -1781,7 +1783,7 @@ def lgmres_cupy_native(
 
         if outer_keep > 0 and iterations < maxiter_total:
             dx_norm = _norm(dx, cupy=cupy, accum_dtype=acc_dtype)
-            if dx_norm > breakdown_tol_f:
+            if dx_norm > 0:
                 dx_unit = cupy.asarray(dx / dx_norm, dtype=op_dtype)
                 ax_unit = _apply(A_mv, dx_unit) if bool(store_outer_av) else None
                 outer_v.append((dx_unit, ax_unit))
@@ -1940,6 +1942,9 @@ def bicgstab_cupy_native(
     b_norm = _norm(b_vec, cupy=cupy, accum_dtype=acc_dtype)
     target_abs = _absolute_residual_target(b_norm, rtol=rtol, atol=atol)
     breakdown_tol_f = float(max(0.0, breakdown_tol))
+    # rho, r_hat.H*v and t.H*t scale quadratically with source amplitude;
+    # omega is independent of it and retains the dimensionless floor.
+    breakdown_dot_tol = breakdown_tol_f * b_norm * b_norm
     residual_hist: list[float] = []
     true_hist: list[float] = []
 
@@ -1993,7 +1998,7 @@ def bicgstab_cupy_native(
 
     for k in range(maxiter_total):
         rho = _dot(r_hat, r_vec, cupy=cupy, accum_dtype=acc_dtype)
-        if float(cupy.abs(rho)) <= breakdown_tol_f:
+        if float(cupy.abs(rho)) <= breakdown_dot_tol:
             iterations = k + 1
             info = k + 1
             converged_reason = "breakdown_rho"
@@ -2022,7 +2027,7 @@ def bicgstab_cupy_native(
         phat = _apply_minv(p_vec)
         v_vec = _apply(phat)
         d1 = _dot(r_hat, v_vec, cupy=cupy, accum_dtype=acc_dtype)
-        if float(cupy.abs(d1)) <= breakdown_tol_f:
+        if float(cupy.abs(d1)) <= breakdown_dot_tol:
             iterations = k + 1
             info = k + 1
             converged_reason = "breakdown_alpha"
@@ -2071,7 +2076,7 @@ def bicgstab_cupy_native(
         shat = _apply_minv(s_vec)
         t_vec = _apply(shat)
         tt = _dot(t_vec, t_vec, cupy=cupy, accum_dtype=acc_dtype)
-        if float(cupy.abs(tt)) <= breakdown_tol_f:
+        if float(cupy.abs(tt)) <= breakdown_dot_tol:
             iterations = k + 1
             info = k + 1
             converged_reason = "breakdown_tt"
@@ -2283,7 +2288,9 @@ def block_gmres_cupy_native(
         q0, r0 = cupy.linalg.qr(cupy.asarray(z0, dtype=acc_dtype), mode="reduced")
         q0 = cupy.asarray(q0, dtype=op_dtype)
         r0 = cupy.asarray(r0, dtype=acc_dtype)
-        if float(cupy.linalg.norm(r0)) <= max(breakdown_tol_f, eps):
+        # The QR residual block also carries source amplitude; an absolute
+        # epsilon floor rejects nonzero blocks that can be normalized.
+        if not bool(cupy.any(r0)):
             info = iterations if iterations > 0 else maxiter_total
             converged_reason = "breakdown"
             break

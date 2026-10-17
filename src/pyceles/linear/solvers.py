@@ -1012,13 +1012,16 @@ def gmres_scipy(
         if callback is not None:
             callback(float(res_norm))
 
+    # Keep SciPy's residual arithmetic at unit source amplitude, including
+    # warm starts and absolute tolerances. Restore physical units afterwards.
+    rhs_scale = float(np.linalg.norm(np.asarray(b, dtype=np.complex128))) or 1.0
     x, info = gmres(
         Aop,
-        b,
-        x0=x0,
+        b / rhs_scale,
+        x0=None if x0 is None else np.asarray(x0) / rhs_scale,
         M=Mop,
         rtol=rtol,
-        atol=atol,
+        atol=atol / rhs_scale,
         restart=restart,
         maxiter=maxiter,
         callback=_cb,
@@ -1026,6 +1029,7 @@ def gmres_scipy(
         # inner Arnoldi steps, matching the native CuPy solver.
         callback_type="legacy",
     )
+    x *= rhs_scale
 
     result = _finalize_result(
         A_mv,
@@ -1457,9 +1461,12 @@ def lsqr_scipy(
             },
         )
 
+    # LSQR also has absolute roundoff tests. Normalize its correction and
+    # restore dimensional diagnostics; the physical residual target is unchanged.
+    rhs_scale = correction_rhs_norm or 1.0
     result = lsqr(
         operator,
-        rhs,
+        rhs / rhs_scale,
         # ``btol`` is relative to the correction RHS.  Scale it to pyceles'
         # original-RHS stopping target so continuation solves do not silently
         # accept a residual that is large in the physical system.  ``atol=0``
@@ -1470,9 +1477,9 @@ def lsqr_scipy(
         conlim=1.0e8 if condition_limit is None else float(condition_limit),
         iter_lim=iter_lim,
         show=bool(show_progress),
-        x0=None if correction else base,
+        x0=None if correction or base is None else base / rhs_scale,
     )
-    x = np.asarray(result[0], dtype=op_dtype)
+    x = np.asarray(result[0] * rhs_scale, dtype=op_dtype)
     if base is not None and correction:
         x = np.asarray(base + x, dtype=op_dtype)
     iterations = int(result[2])
@@ -1480,7 +1487,7 @@ def lsqr_scipy(
     # A least-squares stationary point need not solve the scattering system.
     # SciPy's r1norm is already available, even when a terminal physical
     # residual evaluation is disabled. Do not equate istop=0/2 with Ax=b.
-    estimated_residual = float(result[3])
+    estimated_residual = float(result[3]) * rhs_scale
     meets_target = bool(np.isfinite(estimated_residual) and estimated_residual <= target_abs)
     info = 0 if meets_target else max(1, iterations)
     converged_reason = (
@@ -1538,8 +1545,8 @@ def lsqr_scipy(
         "adjoint_applications": int(adjoint_applications),
         "anorm": float(result[5]),
         "acond": float(result[6]),
-        "arnorm": float(result[7]),
-        "correction_norm": float(result[8]),
+        "arnorm": float(result[7]) * rhs_scale,
+        "correction_norm": float(result[8]) * rhs_scale,
         # ``rhs`` is the correction right-hand side on a continuation.  The
         # public result reports the original system norm, matching the native
         # continuation contract and the denominator used by the final
@@ -1892,7 +1899,20 @@ def bicgstab_scipy(
         iterations += 1
         progress_update(None)
 
-    x, info = bicgstab(Aop, b, x0=x0, M=Mop, rtol=rtol, atol=atol, maxiter=maxiter, callback=_cb)
+    # SciPy's absolute breakdown floors otherwise reject valid small dipole
+    # RHSs. Normalize the equation, preserving x0 and atol in the same units.
+    rhs_scale = float(np.linalg.norm(np.asarray(b, dtype=np.complex128))) or 1.0
+    x, info = bicgstab(
+        Aop,
+        b / rhs_scale,
+        x0=None if x0 is None else np.asarray(x0) / rhs_scale,
+        M=Mop,
+        rtol=rtol,
+        atol=atol / rhs_scale,
+        maxiter=maxiter,
+        callback=_cb,
+    )
+    x *= rhs_scale
     result = _finalize_result(
         A_mv,
         b,

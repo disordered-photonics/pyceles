@@ -420,7 +420,7 @@ def gcro_cupy_native(
                     break
 
         beta = _norm(residual, cupy=cupy, accum_dtype=acc_dtype)
-        if beta <= breakdown or not np.isfinite(beta):
+        if beta == 0 or not np.isfinite(beta):
             info = iterations if iterations > 0 else maxiter_total
             converged_reason = "breakdown"
             break

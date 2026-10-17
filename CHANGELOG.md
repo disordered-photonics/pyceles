@@ -40,6 +40,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and near-field showcase plotting. Particle-centre fields use analytic limits.
 
 ### Fixed
+- Preserve small-amplitude solves across SciPy and native CuPy Krylov methods,
+  including warm starts, absolute tolerances, block right-hand sides, and
+  dimensional LSQR diagnostics. Residual directions no longer use an absolute
+  amplitude cutoff; BiCGSTAB dot-product floors follow the source scale.
 - Bessel cones exactly on a usable polar node no longer fail because an unused
   neighbouring pole has zero quadrature weight. Normal and tilted rings share
   the same moment-preserving deposition.

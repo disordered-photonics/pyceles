@@ -112,6 +112,8 @@ def _numpy_krylov_reduction_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _fake_cupy_numpy_backend():
     class _FakeCuPy:
+        any = staticmethod(np.any)
+
         @staticmethod
         def asarray(x, dtype=None, order=None):
             del order
@@ -993,10 +995,11 @@ def test_gmres_cupy_native_zero_initial_guess_skips_extra_initial_matvec(monkeyp
     assert matvec_calls == 2
 
 
-def test_lsqr_scipy_uses_original_rhs_norm_for_continuation_accounting() -> None:
+@pytest.mark.parametrize("scale", [1.0, 1e-36])
+def test_lsqr_scipy_uses_original_rhs_norm_for_continuation_accounting(scale) -> None:
     matrix = np.asarray([[2.0 + 0.1j, 0.2 - 0.1j], [0.1 + 0.3j, 1.5 - 0.2j]], dtype=np.complex128)
-    rhs = np.asarray([1.0 + 0.5j, -0.4 + 0.2j], dtype=np.complex128)
-    x0 = np.asarray([0.1 - 0.2j, 0.3 + 0.1j], dtype=np.complex128)
+    rhs = scale * np.asarray([1.0 + 0.5j, -0.4 + 0.2j], dtype=np.complex128)
+    x0 = scale * np.asarray([0.1 - 0.2j, 0.3 + 0.1j], dtype=np.complex128)
     residual = rhs - matrix @ x0
     original_norm = float(np.linalg.norm(rhs))
     result = lsqr_scipy(
@@ -1018,7 +1021,8 @@ def test_lsqr_scipy_uses_original_rhs_norm_for_continuation_accounting() -> None
     assert result.true_residual_history is not None
     assert result.true_residual_history.shape == (2,)
     assert result.block_metadata is not None
-    assert result.block_metadata["rhs_norm"] == pytest.approx(original_norm)
+    assert result.block_metadata["rhs_norm"] == pytest.approx(original_norm, abs=0)
+    np.testing.assert_allclose(matrix @ result.x, rhs, rtol=1e-10, atol=0)
 
 
 def test_lsqr_scipy_marks_physical_tolerance_failure_after_scipy_stop() -> None:
