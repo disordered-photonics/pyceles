@@ -8,6 +8,7 @@ import numpy as np
 from pyceles._arrays import owned_read_only_view
 from pyceles._optional import import_cupy, is_cupy_array
 from pyceles.core.plane_wave_spectrum import PlaneWaveSpectrum
+from pyceles.core.radial import passive_wavenumber
 from pyceles.core.sources import Source, ensure_finite_power_diagnostics_supported
 
 from .common import integrate_periodic_alpha
@@ -368,10 +369,18 @@ def pwp_power_flux(
     spectrum: PlaneWaveSpectrum,
     *,
     k0: float,
-    k_medium: float,
+    k_medium: complex,
     direction: Literal["forward", "backward"],
 ) -> float:
-    """Power flux through one hemisphere from a TE/TM spectrum."""
+    """Lossless-host power flux through one hemisphere of a TE/TM spectrum."""
+    value = passive_wavenumber(k_medium)
+    if value.imag != 0 or any(
+        np.any(np.imag(grid) != 0) for grid in (spectrum.kx, spectrum.ky, spectrum.kz)
+    ):
+        raise ValueError(
+            "Power flux normalization requires a nonabsorbing host and real wavevectors."
+        )
+    k_medium = value.real
     alpha = spectrum.alpha
     beta = spectrum.beta
 

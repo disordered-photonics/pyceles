@@ -63,7 +63,7 @@ class AngularSpectrumSource(Protocol):
     def angular_spectrum(
         self,
         *,
-        k: float,
+        k: complex,
         polar_angles: np.ndarray,
         azimuthal_angles: np.ndarray,
     ) -> PlaneWaveSpectrum: ...

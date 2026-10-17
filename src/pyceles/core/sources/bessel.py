@@ -10,7 +10,7 @@ from ..plane_wave_spectrum import PlaneWaveSpectrum
 from ..polarization import normalize_global_polarization_vector
 from .base import PolarizationInput, _canonicalize_polarization_input, polarization_to_jones
 from .beam_kernels import _bessel_angular_spectrum_coeffs, _bessel_cartesian_angular_spectrum_coeffs
-from .common import _float_triplet_tuple, _validated_int
+from .common import _float_triplet_tuple, _real_beam_wavenumber, _validated_int
 
 
 @dataclass(frozen=True)
@@ -30,14 +30,7 @@ class BesselBeam:
     forward_only: bool = True
 
     def __post_init__(self) -> None:
-        n = complex(self.medium_n)
-        if abs(n.imag) > 0:
-            raise ValueError(
-                "Embedding medium refractive index must be real for an incident field coming from infinity. "
-                f"Got medium_n={n!r}"
-            )
-        if not (n.real > 0):
-            raise ValueError(f"medium_n must be positive. Got {n!r}")
+        _real_beam_wavenumber(self.medium_n)
         object.__setattr__(
             self, "polarization", _canonicalize_polarization_input(self.polarization)
         )
@@ -74,13 +67,13 @@ class BesselBeam:
     def angular_spectrum(
         self,
         *,
-        k: float,
+        k: complex,
         polar_angles: np.ndarray,
         azimuthal_angles: np.ndarray,
     ) -> PlaneWaveSpectrum:
         return _bessel_angular_spectrum_coeffs(
             beam=self,
-            k=float(k),
+            k=_real_beam_wavenumber(k),
             polar_angles=np.asarray(polar_angles, dtype=float),
             azimuthal_angles=np.asarray(azimuthal_angles, dtype=float),
             polarization_override=None,
@@ -128,14 +121,7 @@ class CartesianPolarizedBesselBeam:
     forward_only: bool = True
 
     def __post_init__(self) -> None:
-        n = complex(self.medium_n)
-        if abs(n.imag) > 0:
-            raise ValueError(
-                "Embedding medium refractive index must be real for an incident field coming from infinity. "
-                f"Got medium_n={n!r}"
-            )
-        if not (n.real > 0):
-            raise ValueError(f"medium_n must be positive. Got {n!r}")
+        _real_beam_wavenumber(self.medium_n)
         polarization = normalize_global_polarization_vector(self.global_polarization)
         object.__setattr__(
             self,
@@ -169,13 +155,13 @@ class CartesianPolarizedBesselBeam:
     def angular_spectrum(
         self,
         *,
-        k: float,
+        k: complex,
         polar_angles: np.ndarray,
         azimuthal_angles: np.ndarray,
     ) -> PlaneWaveSpectrum:
         return _bessel_cartesian_angular_spectrum_coeffs(
             beam=self,
-            k=float(k),
+            k=_real_beam_wavenumber(k),
             polar_angles=np.asarray(polar_angles, dtype=float),
             azimuthal_angles=np.asarray(azimuthal_angles, dtype=float),
         )

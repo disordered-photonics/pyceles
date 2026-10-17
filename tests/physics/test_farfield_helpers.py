@@ -77,16 +77,17 @@ def test_compute_far_field_patterns_for_gaussian_beam_includes_total():
 
 
 @pytest.mark.parametrize("backend", ["numpy", pytest.param("cupy", marks=pytest.mark.gpu)])
-def test_local_expansion_degree_is_independent_of_particle_degree(backend, request):
+@pytest.mark.parametrize("host", [1.33, 1.33 + 0.5j])
+def test_local_expansion_degree_is_independent_of_particle_degree(backend, host, request):
     if backend == "cupy":
         request.getfixturevalue("cupy_runtime")
     positions = np.array([[0.0, 0.0, 0.0]], dtype=float)
     coeffs = np.zeros((1, 6), dtype=np.complex128)
-    source = _ToyLocalExpansionSource()
+    source = _ToyLocalExpansionSource(medium_n=host)
 
     assert isinstance(source, LocalExpansionSource)
 
-    k = 2.0 * np.pi / source.wavelength
+    k = 2.0 * np.pi / source.wavelength * host
     angles = dict(polar_angles=np.linspace(0, np.pi, 9), azimuthal_angles=np.arange(8) * np.pi / 4)
 
     out = compute_far_field_patterns(
@@ -132,6 +133,7 @@ def test_local_expansion_degree_is_independent_of_particle_degree(backend, reque
         source.outgoing_coeffs(),
         k=k,
         lmax=source.outgoing_lmax,
+        n_medium=host,
         show_progress=False,
     )
     for value, reference in zip(initial, expected_fields, strict=True):

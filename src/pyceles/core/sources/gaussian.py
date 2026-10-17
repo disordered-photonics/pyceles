@@ -21,7 +21,7 @@ from .beam_kernels import (
     _gaussian_angular_spectrum_coeffs,
     _laguerre_gaussian_angular_spectrum_coeffs,
 )
-from .common import _float_triplet_tuple, _validated_int
+from .common import _float_triplet_tuple, _real_beam_wavenumber, _validated_int
 
 
 @dataclass(frozen=True)
@@ -38,14 +38,7 @@ class GaussianBeam:
     amplitude: float = 1.0
 
     def __post_init__(self) -> None:
-        n = complex(self.medium_n)
-        if abs(n.imag) > 0:
-            raise ValueError(
-                "Embedding medium refractive index must be real for an incident field coming from infinity. "
-                f"Got medium_n={n!r}"
-            )
-        if not (n.real > 0):
-            raise ValueError(f"medium_n must be positive. Got {n!r}")
+        _real_beam_wavenumber(self.medium_n)
         object.__setattr__(
             self, "polarization", _canonicalize_polarization_input(self.polarization)
         )
@@ -66,13 +59,13 @@ class GaussianBeam:
     def angular_spectrum(
         self,
         *,
-        k: float,
+        k: complex,
         polar_angles: np.ndarray,
         azimuthal_angles: np.ndarray,
     ) -> PlaneWaveSpectrum:
         return _gaussian_angular_spectrum_coeffs(
             beam=self,
-            k=float(k),
+            k=_real_beam_wavenumber(k),
             polar_angles=np.asarray(polar_angles, dtype=float),
             azimuthal_angles=np.asarray(azimuthal_angles, dtype=float),
             polarization_override=None,
@@ -130,14 +123,7 @@ class LaguerreGaussianBeam:
     azimuthal_phase: float = 0.0
 
     def __post_init__(self) -> None:
-        n = complex(self.medium_n)
-        if abs(n.imag) > 0:
-            raise ValueError(
-                "Embedding medium refractive index must be real for an incident field coming "
-                f"from infinity. Got medium_n={n!r}"
-            )
-        if not (n.real > 0):
-            raise ValueError(f"medium_n must be positive. Got {n!r}")
+        _real_beam_wavenumber(self.medium_n)
         object.__setattr__(
             self, "polarization", _canonicalize_polarization_input(self.polarization)
         )
@@ -172,13 +158,13 @@ class LaguerreGaussianBeam:
     def angular_spectrum(
         self,
         *,
-        k: float,
+        k: complex,
         polar_angles: np.ndarray,
         azimuthal_angles: np.ndarray,
     ) -> PlaneWaveSpectrum:
         return _laguerre_gaussian_angular_spectrum_coeffs(
             beam=self,
-            k=float(k),
+            k=_real_beam_wavenumber(k),
             polar_angles=np.asarray(polar_angles, dtype=float),
             azimuthal_angles=np.asarray(azimuthal_angles, dtype=float),
             polarization_override=None,
@@ -230,14 +216,7 @@ class FocusedLaguerreGaussianBeam:
     sine_condition_apodization: bool = True
 
     def __post_init__(self) -> None:
-        n = complex(self.medium_n)
-        if abs(n.imag) > 0:
-            raise ValueError(
-                "Embedding medium refractive index must be real for an incident field coming "
-                f"from infinity. Got medium_n={n!r}"
-            )
-        if not (n.real > 0):
-            raise ValueError(f"medium_n must be positive. Got {n!r}")
+        _real_beam_wavenumber(self.medium_n)
         object.__setattr__(
             self, "polarization", _canonicalize_polarization_input(self.polarization)
         )
@@ -267,10 +246,10 @@ class FocusedLaguerreGaussianBeam:
             raise ValueError(
                 f"`numerical_aperture` must be finite and > 0. Got {self.numerical_aperture!r}."
             )
-        if na >= float(n.real):
+        if na >= self.medium_n.real:
             raise ValueError(
                 "`numerical_aperture` must be smaller than medium refractive index "
-                f"({float(n.real)!r}). Got {self.numerical_aperture!r}."
+                f"({self.medium_n.real!r}). Got {self.numerical_aperture!r}."
             )
 
     def jones_coefficients(self) -> tuple[complex, complex]:
@@ -285,13 +264,13 @@ class FocusedLaguerreGaussianBeam:
     def angular_spectrum(
         self,
         *,
-        k: float,
+        k: complex,
         polar_angles: np.ndarray,
         azimuthal_angles: np.ndarray,
     ) -> PlaneWaveSpectrum:
         return _focused_laguerre_gaussian_angular_spectrum_coeffs(
             beam=self,
-            k=float(k),
+            k=_real_beam_wavenumber(k),
             polar_angles=np.asarray(polar_angles, dtype=float),
             azimuthal_angles=np.asarray(azimuthal_angles, dtype=float),
             polarization_override=None,
@@ -347,14 +326,7 @@ class CartesianPolarizedFocusedLaguerreGaussianBeam:
     sine_condition_apodization: bool = True
 
     def __post_init__(self) -> None:
-        n = complex(self.medium_n)
-        if abs(n.imag) > 0:
-            raise ValueError(
-                "Embedding medium refractive index must be real for an incident field coming "
-                f"from infinity. Got medium_n={n!r}"
-            )
-        if not (n.real > 0):
-            raise ValueError(f"medium_n must be positive. Got {n!r}")
+        _real_beam_wavenumber(self.medium_n)
         _validated_int("radial_order_p", self.radial_order_p, minimum=0)
         _validated_int("azimuthal_order_l", self.azimuthal_order_l)
         if not np.isfinite(float(self.polar_angle)):
@@ -387,10 +359,10 @@ class CartesianPolarizedFocusedLaguerreGaussianBeam:
             raise ValueError(
                 f"`numerical_aperture` must be finite and > 0. Got {self.numerical_aperture!r}."
             )
-        if na >= float(n.real):
+        if na >= self.medium_n.real:
             raise ValueError(
                 "`numerical_aperture` must be smaller than medium refractive index "
-                f"({float(n.real)!r}). Got {self.numerical_aperture!r}."
+                f"({self.medium_n.real!r}). Got {self.numerical_aperture!r}."
             )
 
     def has_finite_incident_power(self) -> bool:
@@ -399,13 +371,13 @@ class CartesianPolarizedFocusedLaguerreGaussianBeam:
     def angular_spectrum(
         self,
         *,
-        k: float,
+        k: complex,
         polar_angles: np.ndarray,
         azimuthal_angles: np.ndarray,
     ) -> PlaneWaveSpectrum:
         return _focused_laguerre_cartesian_angular_spectrum_coeffs(
             beam=self,
-            k=float(k),
+            k=_real_beam_wavenumber(k),
             polar_angles=np.asarray(polar_angles, dtype=float),
             azimuthal_angles=np.asarray(azimuthal_angles, dtype=float),
         )

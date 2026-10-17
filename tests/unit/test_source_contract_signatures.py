@@ -174,6 +174,17 @@ def test_angular_spectrum_signature_is_uniform_for_angular_sources() -> None:
         assert params["azimuthal_angles"].kind is inspect.Parameter.KEYWORD_ONLY
 
 
+def test_builtin_real_angle_beams_reject_absorbing_spectrum_requests() -> None:
+    for source in _all_builtin_sources():
+        if isinstance(source, AngularSpectrumSource):
+            with pytest.raises(ValueError, match="nonabsorbing host"):
+                source.angular_spectrum(
+                    k=0.01 + 0.001j,
+                    polar_angles=np.linspace(0, np.pi, 5),
+                    azimuthal_angles=np.linspace(0, 2 * np.pi, 8, endpoint=False),
+                )
+
+
 def test_jones_methods_exist_only_on_jones_sources() -> None:
     """Jones-capable protocol is reflected explicitly in callable method surface."""
     for source in _all_builtin_sources():

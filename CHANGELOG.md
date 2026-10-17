@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Outgoing angular amplitudes preserve passive complex wavenumbers on NumPy
+  and CuPy, with an explicit asymptotic field and reference-origin convention.
 - Electric dipole sources and collections support passive complex hosts and
   complex amplitudes for finite E/H fields and regular incident projections.
   Absorbing-host point-emitter self-power requires a microscopic model and is
@@ -34,6 +36,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and near-field showcase plotting. Particle-centre fields use analytic limits.
 
 ### Fixed
+- Reject lossless hemispheric power normalization for absorbing spectra or
+  complex host wavenumbers.
 - Exclude zero local emitters before translation singularity checks and LUT
   sizing, and validate physical source-to-particle LUT queries.
 - Planar slices preserve evaluated field values and accumulation dtype,

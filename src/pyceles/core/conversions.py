@@ -13,6 +13,7 @@ from tqdm.auto import tqdm
 from .angular import periodic_azimuthal_weights, trapezoidal_weights
 from .indexing import iter_modes, n_modes, n_scalar, scalar_index
 from .plane_wave_spectrum import PlaneWaveSpectrum
+from .radial import passive_wavenumber
 from .spherical import spherical_functions_trigon
 
 if TYPE_CHECKING:
@@ -183,21 +184,21 @@ def angular_spectrum_to_svwf_regular(
     lmax: int,
     source: AngularSpectrumSource,
     *,
-    k: float,
+    k: complex,
     polar_angles: np.ndarray,
     azimuthal_angles: np.ndarray,
     dtype: npt.DTypeLike = np.complex128,
 ) -> np.ndarray:
     """Project any angular-spectrum source to regular SVWF coefficients."""
     spectrum = source.angular_spectrum(
-        k=float(k),
+        k=k,
         polar_angles=np.asarray(polar_angles, dtype=float),
         azimuthal_angles=np.asarray(azimuthal_angles, dtype=float),
     )
     return pwp_to_svwf_regular(
         positions,
         lmax,
-        k=float(k),
+        k=k,
         spectrum=spectrum,
         dtype=dtype,
     )
@@ -207,7 +208,7 @@ def _svwf_to_pwp_common(
     positions: np.ndarray,
     coeffs: np.ndarray,
     *,
-    k: float,
+    k: complex,
     lmax: int,
     polar_angles: np.ndarray,
     azimuthal_angles: np.ndarray,
@@ -216,6 +217,8 @@ def _svwf_to_pwp_common(
     show_progress: bool = False,
 ) -> PlaneWaveSpectrum:
     """Shared SVWF->PWP kernel used by regular/outgoing conversion helpers."""
+    value = passive_wavenumber(k)
+    k = value.real if value.imag == 0 else value
     ctype = np.dtype(dtype)
     positions = np.asarray(positions, dtype=float)
     coeffs = np.asarray(coeffs, dtype=ctype)
@@ -225,6 +228,9 @@ def _svwf_to_pwp_common(
     Ns = positions.shape[0]
     if coeffs.shape[0] != Ns:
         raise ValueError("coeffs must have shape (Ns, Nm)")
+    active = np.any(coeffs != 0, axis=1)
+    positions, coeffs = positions[active], coeffs[active]
+    Ns = len(positions)
 
     Nb = beta.size
     Na = alpha.size
@@ -232,9 +238,9 @@ def _svwf_to_pwp_common(
     agrid = alpha[:, None]
     bgrid = beta[None, :]
 
-    kx = (k * np.sin(bgrid) * np.cos(agrid)).astype(float)
-    ky = (k * np.sin(bgrid) * np.sin(agrid)).astype(float)
-    kz = np.broadcast_to(k * np.cos(beta), kx.shape).astype(float)
+    kx = k * np.sin(bgrid) * np.cos(agrid)
+    ky = k * np.sin(bgrid) * np.sin(agrid)
+    kz = np.broadcast_to(k * np.cos(beta), kx.shape)
 
     _wa, _wb, _Bdag_pol1, _Bdag_pol2, B_te, B_tm, _m_of_mode, eima, _mode_weight = (
         _cached_pwp_conversion_tables(
@@ -267,14 +273,23 @@ def svwf_outgoing_to_pwp(
     positions: np.ndarray,
     coeffs: np.ndarray,
     *,
-    k: float,
+    k: complex,
     lmax: int,
     polar_angles: np.ndarray,
     azimuthal_angles: np.ndarray,
     dtype: npt.DTypeLike = np.complex128,
     show_progress: bool = False,
 ) -> PlaneWaveSpectrum:
-    """Convert outgoing SVWF coefficients to TE/TM plane-wave spectrum."""
+    """Convert outgoing SVWFs to real-angle TE/TM angular amplitudes.
+
+    Positions are relative to the reference origin. At origin + R*d,
+    E_s ~ exp(i*k*R)/(k*R) * F(d), where
+    F = -2*pi*i*(coeff_te*e_phi + coeff_tm*e_theta) in CELES conventions.
+    Moving the reference origin by delta multiplies F by exp(i*k*d.delta).
+
+    The amplitude is defined for passive complex k, but lossless power and
+    cross-section normalization do not apply in an absorbing host.
+    """
     return _svwf_to_pwp_common(
         positions,
         coeffs,
@@ -292,7 +307,7 @@ def svwf_regular_to_pwp(
     positions: np.ndarray,
     coeffs: np.ndarray,
     *,
-    k: float,
+    k: complex,
     lmax: int,
     polar_angles: np.ndarray,
     azimuthal_angles: np.ndarray,

@@ -6,7 +6,16 @@ from scipy.special import eval_genlaguerre
 
 from ..geometry_bounds import coincident_point_mask, conservative_cross_set_max_distance
 from ..indexing import index_vswf, n_modes
+from ..radial import passive_wavenumber
 from ..translation import RadialLUT, translation_ab5_table, translation_block_rect
+
+
+def _real_beam_wavenumber(k: complex) -> float:
+    """Require a positive lossless beam wavenumber or refractive index."""
+    value = passive_wavenumber(k)
+    if value.imag != 0:
+        raise ValueError("This real-angle beam requires a nonabsorbing host.")
+    return value.real
 
 
 def _as_complex_triplet(

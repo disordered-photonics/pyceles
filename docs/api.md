@@ -122,6 +122,16 @@ Common source descriptors include:
 - `pyceles.DipoleSource`
 - `pyceles.DipoleCollection`
 
+`PlaneWave` specifies its amplitude at `focal_point`. Dipole moments are
+specified at their finite emitter positions. Both support finite E/H evaluation
+in passive absorbing hosts; point-dipole self-power there requires a microscopic
+emitter model. Gaussian, focused, and Bessel beam models use real-angle spectra
+in a nonabsorbing host. `Simulation` currently requires a nonabsorbing host.
+
+Custom `LocalExpansionSource` implementations expose `outgoing_lmax` and
+`outgoing_coeffs(*, dtype=...)` with one row per emitter returned by
+`source_positions()`. The source degree is independent of particle truncation.
+
 ## Postprocessing
 
 Near-field helpers:
@@ -132,6 +142,14 @@ Near-field helpers:
 - `pyceles.compute_periodic_near_field_slice`
 - `pyceles.mix_near_field_components`
 - `pyceles.mix_near_field_slices`
+
+Outgoing angular spectra use the coordinate origin as their reference. For a
+unit observation direction `d`, their TE/TM coefficients define
+`F = -2*pi*i*(coeff_te*e_phi + coeff_tm*e_theta)` and the asymptotic field
+`E(origin + R*d) ~ exp(i*k*R)/(k*R) * F(d)`. Changing the reference origin
+by `delta` multiplies `F` by `exp(i*k*d.delta)`. These amplitudes remain defined
+in absorbing hosts, while lossless far-field power and cross-section formulas
+are unavailable there.
 
 Dipole diagnostics:
 

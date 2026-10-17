@@ -9,13 +9,19 @@ from pyceles._optional import asnumpy, import_cupy
 from pyceles.core.conversions import svwf_outgoing_to_pwp, transformation_coefficients
 from pyceles.core.indexing import iter_modes, n_modes
 from pyceles.core.plane_wave_spectrum import PlaneWaveSpectrum
+from pyceles.core.radial import passive_wavenumber
 from pyceles.core.sources import AngularSpectrumSource, LocalExpansionSource, Source
 from pyceles.core.spherical import spherical_functions_trigon
 
 
 @dataclass(frozen=True, slots=True)
 class FarFieldPatterns:
-    """Independent plane-wave spectra for one finite-scattering channel."""
+    """Plane-wave spectra for one finite-scattering channel.
+
+    Outgoing angular amplitudes refer to the global coordinate origin. In an
+    absorbing host these amplitudes are defined after factoring out exp(i*k*R)/R;
+    lossless power and cross-section normalization are unavailable.
+    """
 
     initial: PlaneWaveSpectrum | None
     scattered: PlaneWaveSpectrum
@@ -31,7 +37,7 @@ class FarFieldPatterns:
 def scattered_field_plane_wave_pattern(
     positions: np.ndarray,
     coeffs: np.ndarray,
-    k: float,
+    k: complex,
     lmax: int,
     polar_angles: np.ndarray,
     azimuthal_angles: np.ndarray,
@@ -40,20 +46,12 @@ def scattered_field_plane_wave_pattern(
     dtype: npt.DTypeLike = np.complex128,
     show_progress: bool = False,
 ) -> PlaneWaveSpectrum:
-    """Compute far-field plane-wave patterns of the scattered field.
+    """Compute outgoing angular amplitudes relative to the coordinate origin.
 
-    The shipped CuPy path accelerates only the outgoing SVWF-to-PWP assembly
-    and still returns the canonical NumPy spectrum type. This keeps all
-    downstream far-field diagnostics on the reference code path while moving
-    the dominant particle/angle contraction off CPU.
-
-    Precision policy note:
-    this helper currently follows the historical far-field API and exposes a
-    single `dtype` knob, so both device-side spectrum accumulation and returned
-    PWP coefficients use the same complex dtype. This matches the existing CPU
-    helper contract, but it is narrower than the solve path's explicit
-    `compute_dtype` / `accum_dtype` split and can be revisited if far-field
-    accuracy or stability requires it.
+    See ``svwf_outgoing_to_pwp`` for the asymptotic field normalization.
+    Both backends return a NumPy spectrum. ``dtype`` controls coefficient
+    computation, accumulation and storage; wavevector metadata stays in double
+    precision.
     """
     backend_name = str(backend).lower()
     if backend_name == "cupy":
@@ -68,14 +66,14 @@ def scattered_field_plane_wave_pattern(
             show_progress=show_progress,
         )
     return svwf_outgoing_to_pwp(
-        positions=np.asarray(positions, dtype=float),
-        coeffs=np.asarray(coeffs, dtype=np.dtype(dtype)),
-        k=float(k),
-        lmax=int(lmax),
-        polar_angles=np.asarray(polar_angles, dtype=float),
-        azimuthal_angles=np.asarray(azimuthal_angles, dtype=float),
-        dtype=np.dtype(dtype),
-        show_progress=bool(show_progress),
+        positions=positions,
+        coeffs=coeffs,
+        k=k,
+        lmax=lmax,
+        polar_angles=polar_angles,
+        azimuthal_angles=azimuthal_angles,
+        dtype=dtype,
+        show_progress=show_progress,
     )
 
 
@@ -83,29 +81,14 @@ def _scattered_field_plane_wave_pattern_cupy(
     *,
     positions: np.ndarray,
     coeffs: np.ndarray,
-    k: float,
+    k: complex,
     lmax: int,
     polar_angles: np.ndarray,
     azimuthal_angles: np.ndarray,
     dtype: npt.DTypeLike,
     show_progress: bool,
 ) -> PlaneWaveSpectrum:
-    """CuPy-accelerated outgoing SVWF-to-PWP assembly.
-
-    The CPU reference path loops over spheres. For realistic CuPy solves that
-    loop dominates far-field postprocessing, so this backend batches small
-    groups of spheres on device and accumulates their angular spectra there.
-
-    We still build the spherical-function coefficient tables on CPU. They are
-    small, setup-only data and the hot cost is the repeated particle/angle
-    contraction, not the table construction.
-
-    The implementation stays in this shared owner module for now because there
-    is only one accelerated branch and it shares the public far-field contract
-    with the NumPy reference path. If near-field/far-field GPU postprocessing
-    grows into a larger family of backend-specific kernels, splitting into
-    dedicated `*_cupy.py` modules will become more attractive.
-    """
+    """Batch outgoing SVWF contractions on device with small CPU angular tables."""
     cupy, _ = import_cupy()
 
     ctype = np.dtype(dtype)
@@ -116,10 +99,15 @@ def _scattered_field_plane_wave_pattern_cupy(
     Ns = positions_np.shape[0]
     if coeffs_np.shape[0] != Ns:
         raise ValueError("coeffs must have shape (Ns, Nm)")
+    active = np.any(coeffs_np != 0, axis=1)
+    positions_np, coeffs_np = positions_np[active], coeffs_np[active]
+    Ns = len(positions_np)
 
     real_dtype = cupy.float32 if ctype == np.dtype(np.complex64) else cupy.float64
     complex_dtype = cupy.complex64 if ctype == np.dtype(np.complex64) else cupy.complex128
-    k_real = real_dtype(float(k))
+    value = passive_wavenumber(k)
+    k = value.real if value.imag == 0 else value
+    k_phase = real_dtype(value.real) if value.imag == 0 else complex_dtype(value)
 
     beta = cupy.asarray(beta_np, dtype=real_dtype)
     alpha = cupy.asarray(alpha_np, dtype=real_dtype)
@@ -130,9 +118,9 @@ def _scattered_field_plane_wave_pattern_cupy(
     bgrid = beta[None, :]
     sb = cupy.sin(beta)
     cb = cupy.cos(beta)
-    kx = k_real * cupy.sin(bgrid) * cupy.cos(agrid)
-    ky = k_real * cupy.sin(bgrid) * cupy.sin(agrid)
-    kz = cupy.broadcast_to(k_real * cupy.cos(beta), kx.shape)
+    kx = k_phase * cupy.sin(bgrid) * cupy.cos(agrid)
+    ky = k_phase * cupy.sin(bgrid) * cupy.sin(agrid)
+    kz = cupy.broadcast_to(k_phase * cupy.cos(beta), kx.shape)
 
     PI, TAU = spherical_functions_trigon(asnumpy(cb), asnumpy(sb), int(lmax), xp=np)
     Nm = n_modes(int(lmax))
@@ -235,7 +223,7 @@ def compute_far_field_patterns(
     positions: np.ndarray,
     coeffs: np.ndarray,
     *,
-    k: float,
+    k: complex,
     lmax: int,
     polar_angles: np.ndarray,
     azimuthal_angles: np.ndarray,
@@ -276,7 +264,7 @@ def compute_far_field_patterns(
         )
     elif isinstance(source, AngularSpectrumSource):
         initial = source.angular_spectrum(
-            k=float(k),
+            k=k,
             polar_angles=np.asarray(polar_angles, dtype=float),
             azimuthal_angles=np.asarray(azimuthal_angles, dtype=float),
         )

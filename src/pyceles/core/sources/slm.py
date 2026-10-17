@@ -82,7 +82,7 @@ class AngularSpectrumSLMSource:
     def angular_spectrum(
         self,
         *,
-        k: float,
+        k: complex,
         polar_angles: np.ndarray,
         azimuthal_angles: np.ndarray,
     ) -> PlaneWaveSpectrum:
@@ -90,7 +90,7 @@ class AngularSpectrumSLMSource:
         if not isinstance(base, AngularSpectrumSource):
             raise TypeError("AngularSpectrumSLMSource requires an angular-spectrum base source.")
         spectrum = base.angular_spectrum(
-            k=float(k),
+            k=k,
             polar_angles=np.asarray(polar_angles, dtype=float),
             azimuthal_angles=np.asarray(azimuthal_angles, dtype=float),
         )
