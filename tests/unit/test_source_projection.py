@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from pyceles.core.angular import trapezoidal_weights
 from pyceles.core.conversions import pwp_to_svwf_regular
 from pyceles.core.fields import (
     BesselBeam,
@@ -19,6 +20,8 @@ from pyceles.core.fields import (
     project_source_to_svwf,
 )
 from pyceles.core.plane_wave_spectrum import PlaneWaveSpectrum
+from pyceles.core.sources.beam_kernels import _bessel_add_beta_spike, _bessel_ring_beta_kernel
+from pyceles.postprocessing.nearfield.initial import compute_initial_field
 
 
 def test_project_source_to_svwf_matches_planewave_formula():
@@ -275,6 +278,41 @@ def test_slm_source_phase_ramp_matches_focal_shift_in_angular_spectrum():
     np.testing.assert_allclose(
         spectrum_slm.coeff_tm, spectrum_shift.coeff_tm, rtol=1e-11, atol=1e-11
     )
+
+
+@pytest.mark.parametrize("node", [0.2, 0.4, 0.5, 0.9, 1.2])
+def test_bessel_spike_preserves_polar_quadrature_moments(node):
+    beta = np.array([0, 0.2, 0.4, 0.8, 1.2])
+    weights = trapezoidal_weights(beta) * np.sin(beta)
+    kernel = _bessel_ring_beta_kernel(beta, node)
+    np.testing.assert_allclose(np.sum(kernel * weights), 1, rtol=2e-16)
+    np.testing.assert_allclose(np.sum(beta * kernel * weights), node, rtol=2e-16)
+    tilted_row = np.zeros_like(beta)
+    _bessel_add_beta_spike(kernel=tilted_row, beta=beta, wb=weights, beta_star=node, scale=2.5)
+    np.testing.assert_allclose(np.sum(tilted_row * weights), 2.5, rtol=2e-16)
+    with pytest.raises(ValueError, match="zero quadrature weight"):
+        _bessel_ring_beta_kernel(beta, 0.1)
+
+
+@pytest.mark.parametrize("source_type", [BesselBeam, CartesianPolarizedBesselBeam])
+def test_bessel_first_usable_polar_node_supports_projection_and_fields(source_type):
+    beta = np.array([0, 0.2, 0.4, 0.8, 1.2])
+    alpha = np.arange(8) * np.pi / 4
+    source = source_type(wavelength=550, cone_angle=beta[1])
+    positions = np.array([[0, 0, 0], [20, 40, 60]])
+    coefficients = source.incident_coeffs(positions, 2, polar_angles=beta, azimuthal_angles=alpha)
+    assert np.isfinite(coefficients).all() and np.linalg.norm(coefficients) > 0
+    fields = compute_initial_field(
+        positions,
+        k=2 * np.pi / 550,
+        n_medium=1,
+        beam=source,
+        polar_angles=beta,
+        azimuthal_angles=alpha,
+        show_progress=False,
+    )
+    for field in fields:
+        assert np.isfinite(field).all() and np.linalg.norm(field) > 0
 
 
 def test_bessel_beam_angular_spectrum_support_concentrates_on_cone():

@@ -40,6 +40,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and near-field showcase plotting. Particle-centre fields use analytic limits.
 
 ### Fixed
+- Bessel cones exactly on a usable polar node no longer fail because an unused
+  neighbouring pole has zero quadrature weight. Normal and tilted rings share
+  the same moment-preserving deposition.
 - Reject lossless hemispheric power normalization for absorbing spectra or
   complex host wavenumbers.
 - Exclude zero local emitters before translation singularity checks and LUT

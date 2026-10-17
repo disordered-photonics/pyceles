@@ -440,50 +440,12 @@ def _focused_laguerre_cartesian_angular_spectrum_coeffs(
 
 
 def _bessel_ring_beta_kernel(beta: np.ndarray, beta0: float) -> np.ndarray:
-    """Return a narrow beta-kernel approximating delta(beta-beta0)."""
+    """Return a beta spike with unit weight in the polar quadrature."""
     b = np.asarray(beta, dtype=float).reshape(-1)
-    if b.size < 2:
-        raise ValueError("`polar_angles` must contain at least two samples for BesselBeam.")
-    if float(beta0) < float(b[0]) or float(beta0) > float(b[-1]):
-        raise ValueError(
-            f"`cone_angle`={beta0!r} must lie within supplied polar grid range "
-            f"[{float(b[0])!r}, {float(b[-1])!r}]."
-        )
     wb = trapezoidal_weights(b) * np.sin(b)
-    ker = np.zeros_like(b, dtype=float)
-    atol = 1e-14
-    if np.isclose(beta0, b[0], atol=atol, rtol=0.0):
-        if wb[0] <= 0.0:
-            raise ValueError(
-                "BesselBeam cone intersects beta endpoint with zero quadrature weight."
-            )
-        ker[0] = 1.0 / wb[0]
-        return ker
-    if np.isclose(beta0, b[-1], atol=atol, rtol=0.0):
-        if wb[-1] <= 0.0:
-            raise ValueError(
-                "BesselBeam cone intersects beta endpoint with zero quadrature weight."
-            )
-        ker[-1] = 1.0 / wb[-1]
-        return ker
-    j1 = int(np.searchsorted(b, beta0, side="left"))
-    j1 = min(max(1, j1), b.size - 1)
-    j0 = j1 - 1
-    b0 = float(b[j0])
-    b1 = float(b[j1])
-    if not (b1 > b0):
-        raise ValueError("`polar_angles` must be strictly increasing for BesselBeam.")
-    t = (float(beta0) - b0) / (b1 - b0)
-    p0 = 1.0 - t
-    p1 = t
-    if wb[j0] <= 0.0 or wb[j1] <= 0.0:
-        raise ValueError(
-            "BesselBeam cone too close to beta endpoints for current polar grid; "
-            "use a denser grid away from 0/pi."
-        )
-    ker[j0] = p0 / wb[j0]
-    ker[j1] = p1 / wb[j1]
-    return ker
+    kernel = np.zeros_like(b)
+    _bessel_add_beta_spike(kernel=kernel, beta=b, wb=wb, beta_star=beta0, scale=1.0)
+    return kernel
 
 
 def _bessel_add_beta_spike(
@@ -494,42 +456,30 @@ def _bessel_add_beta_spike(
     beta_star: float,
     scale: float,
 ) -> None:
-    """Deposit one weighted beta spike onto the discrete beta quadrature grid."""
+    """Deposit a weighted beta spike preserving its zeroth and first moments."""
     if scale == 0.0:
         return
     b = np.asarray(beta, dtype=float).reshape(-1)
-    atol = 1e-14
-    if np.isclose(beta_star, b[0], atol=atol, rtol=0.0):
-        if wb[0] <= 0.0:
-            raise ValueError(
-                "Tilted Bessel ring intersects beta endpoint with zero quadrature weight."
-            )
-        kernel[0] += scale / wb[0]
-        return
-    if np.isclose(beta_star, b[-1], atol=atol, rtol=0.0):
-        if wb[-1] <= 0.0:
-            raise ValueError(
-                "Tilted Bessel ring intersects beta endpoint with zero quadrature weight."
-            )
-        kernel[-1] += scale / wb[-1]
-        return
-    j1 = int(np.searchsorted(b, beta_star, side="left"))
-    j1 = min(max(1, j1), b.size - 1)
+    if b.size < 2:
+        raise ValueError("`polar_angles` must contain at least two samples for BesselBeam.")
+    if beta_star < b[0] or beta_star > b[-1]:
+        raise ValueError("Bessel cone must lie within the supplied polar grid range.")
+    j1 = min(max(1, int(np.searchsorted(b, beta_star, side="left"))), b.size - 1)
     j0 = j1 - 1
-    b0 = float(b[j0])
-    b1 = float(b[j1])
-    if not (b1 > b0):
+    b0, b1 = float(b[j0]), float(b[j1])
+    if not b1 > b0:
         raise ValueError("`polar_angles` must be strictly increasing for BesselBeam.")
-    if wb[j0] <= 0.0 or wb[j1] <= 0.0:
-        raise ValueError(
-            "Tilted Bessel ring intersects beta samples with zero quadrature weight; "
-            "use a denser polar grid away from 0/pi."
-        )
-    t = (float(beta_star) - b0) / (b1 - b0)
-    p0 = 1.0 - t
-    p1 = t
-    kernel[j0] += scale * p0 / wb[j0]
-    kernel[j1] += scale * p1 / wb[j1]
+    t = (beta_star - b0) / (b1 - b0)
+    for index, weight in ((j0, 1.0 - t), (j1, t)):
+        # A cone on a node does not use its neighbour, even if that node is a pole.
+        if weight == 0.0:
+            continue
+        if wb[index] <= 0.0:
+            raise ValueError(
+                "Bessel ring intersects beta samples with zero quadrature weight; "
+                "use a denser polar grid away from 0/pi."
+            )
+        kernel[index] += scale * weight / wb[index]
 
 
 def _bessel_beta_roots_for_alpha(
