@@ -11,10 +11,12 @@ import numpy.typing as npt
 from tqdm.auto import tqdm
 
 from .angular import periodic_azimuthal_weights, trapezoidal_weights
+from .fourier_plane import FourierPlaneSpectrum
 from .indexing import iter_modes, n_modes, n_scalar, scalar_index
 from .plane_wave_spectrum import PlaneWaveSpectrum
 from .radial import passive_wavenumber
 from .spherical import spherical_functions_trigon
+from .svwf_rotation import svwf_rotation_matrix
 
 if TYPE_CHECKING:
     from .sources import AngularSpectrumSource
@@ -177,6 +179,47 @@ def pwp_to_svwf_regular(
         aI += contrib * weight_row[None, :]
 
     return np.asarray(4.0 * aI, dtype=ctype)
+
+
+def fourier_plane_to_svwf_regular(
+    positions: np.ndarray,
+    lmax: int,
+    *,
+    spectrum: FourierPlaneSpectrum,
+    polar_angle: float = 0.0,
+    azimuthal_angle: float = 0.0,
+    dtype: npt.DTypeLike = np.complex128,
+) -> np.ndarray:
+    """Project a finite-plane boundary at plane-frame receiver positions.
+
+    Complex direction cosines enter the analytic SVWF transformation without
+    conjugation. Tangential TM density becomes e_theta density through k/kz.
+    Rotate the coefficients from the plane frame into lab CELES ordering and
+    cast only after this setup calculation in double precision.
+    """
+    pos = np.asarray(positions, dtype=np.float64).reshape(-1, 3)
+    ct, st = spectrum.kz / spectrum.k, spectrum.q / spectrum.k
+    pi, tau = spherical_functions_trigon(ct, st, int(lmax), xp=np)
+    bte = np.empty((n_modes(lmax), len(st)), dtype=np.complex128)
+    btm = np.empty_like(bte)
+    orders = np.empty(len(bte), dtype=int)
+    for mode, degree, order, index in iter_modes(lmax):
+        orders[index] = order
+        bte[index] = transformation_coefficients(pi, tau, mode, degree, order, 1, dagger=True)
+        btm[index] = transformation_coefficients(pi, tau, mode, degree, order, 2, dagger=True)
+    vectors, weights = spectrum.wavevectors(), spectrum.weights
+    gtm = spectrum.coeff_tm * spectrum.k / spectrum.kz
+    out = np.zeros((len(pos), len(bte)), dtype=np.complex128)
+    for ia, alpha in enumerate(spectrum.alpha):
+        active = (weights[ia] != 0) & ((spectrum.coeff_te[ia] != 0) | (gtm[ia] != 0))
+        phase = np.exp(1j * (pos @ vectors[ia, active].T))
+        coefficients = (
+            bte[:, active] * spectrum.coeff_te[ia, active] + btm[:, active] * gtm[ia, active]
+        ) * weights[ia, active]
+        out += (phase @ coefficients.T) * np.exp(-1j * orders * alpha)
+    if (polar_angle, azimuthal_angle) != (0.0, 0.0):
+        out = out @ svwf_rotation_matrix(lmax, 0.0, -polar_angle, -azimuthal_angle)
+    return np.asarray(4 * out, dtype=np.dtype(dtype))
 
 
 def angular_spectrum_to_svwf_regular(

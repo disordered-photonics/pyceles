@@ -121,6 +121,7 @@ Common source descriptors include:
 - `pyceles.SLMSource`
 - `pyceles.DipoleSource`
 - `pyceles.DipoleCollection`
+- `pyceles.FinitePlaneSource`
 
 `PlaneWave` specifies its amplitude at `focal_point`. Dipole moments are
 specified at their finite emitter positions. Both support finite E/H evaluation
@@ -131,6 +132,23 @@ in a nonabsorbing host. `Simulation` currently requires a nonabsorbing host.
 Custom `LocalExpansionSource` implementations expose `outgoing_lmax` and
 `outgoing_coeffs(*, dtype=...)` with one row per emitter returned by
 `source_positions()`. The source degree is independent of particle truncation.
+
+`FinitePlaneSource` prescribes tangential electric Fourier densities on a
+plane through `reference_point`, oriented by `polar_angle` and
+`azimuthal_angle`. Its own real transverse radial grid `transverse_wavenumbers`
+and periodic `spectrum_azimuths` are independent of far-field output bins.
+`coeff_te` and `coeff_tm` specify the tangential E_phi and E_rho densities,
+with measure `q*dq*dalpha`; `amplitude` multiplies both. The longitudinal
+wavenumber uses the passive root `sqrt(k**2 - q**2)`, including evanescent
+waves. The exactly grazing `kz=0` mode is excluded because tangential data do
+not determine it. Finite upstream evaluation is analytic continuation and
+may grow; the plane does not model a material sheet or its reflection.
+
+The boundary and its finite E/H fields and regular projections support
+passive absorbing hosts. Its incident far-angle spectrum and power at infinity
+are not inferred, so `farfield.initial`, `farfield.total`, and flux diagnostics
+are unavailable. The scattered angular spectrum and finite total fields remain
+available. The current `Simulation` host restriction still applies.
 
 ## Postprocessing
 

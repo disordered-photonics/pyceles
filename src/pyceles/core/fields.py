@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from .conversions import (
     angular_spectrum_to_svwf_regular,
+    fourier_plane_to_svwf_regular,
     pwp_to_svwf_regular,
     svwf_outgoing_to_pwp,
     svwf_regular_to_pwp,
@@ -29,6 +30,8 @@ from .sources import (
     CartesianPolarizedFocusedLaguerreGaussianBeam,
     DipoleCollection,
     DipoleSource,
+    FinitePlaneSource,
+    FinitePlaneSpectrumSource,
     FocusedLaguerreGaussianBeam,
     GaussianBeam,
     JonesPolarizedSource,
@@ -51,6 +54,8 @@ __all__ = [
     "CartesianPolarizedFocusedLaguerreGaussianBeam",
     "DipoleCollection",
     "DipoleSource",
+    "FinitePlaneSource",
+    "FinitePlaneSpectrumSource",
     "FocusedLaguerreGaussianBeam",
     "GaussianBeam",
     "JonesPolarizedSource",
@@ -62,6 +67,7 @@ __all__ = [
     "SLMSource",
     "Source",
     "angular_spectrum_to_svwf_regular",
+    "fourier_plane_to_svwf_regular",
     "incident_coeffs_planewave",
     "incident_coeffs_wavebundle_normal_incidence",
     "is_normal_incidence",

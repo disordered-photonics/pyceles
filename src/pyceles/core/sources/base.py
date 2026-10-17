@@ -5,6 +5,7 @@ from typing import Literal, Protocol, cast, runtime_checkable
 import numpy as np
 import numpy.typing as npt
 
+from ..fourier_plane import FourierPlaneSpectrum
 from ..plane_wave_spectrum import PlaneWaveSpectrum
 
 Polarization = Literal["TE", "TM"]
@@ -126,6 +127,18 @@ class LocalExpansionSource(Source, Protocol):
         *,
         dtype: npt.DTypeLike = np.complex128,
     ) -> np.ndarray: ...
+
+
+@runtime_checkable
+class FinitePlaneSpectrumSource(Source, Protocol):
+    """Source with a tangential Fourier boundary in an explicit plane frame."""
+
+    @property
+    def reference_point(self) -> tuple[float, float, float]: ...
+
+    def plane_spectrum(self) -> FourierPlaneSpectrum: ...
+
+    def plane_frame(self) -> np.ndarray: ...
 
 
 @runtime_checkable

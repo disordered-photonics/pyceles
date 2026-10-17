@@ -9,6 +9,8 @@ from .fields import (
     CartesianPolarizedFocusedLaguerreGaussianBeam,
     DipoleCollection,
     DipoleSource,
+    FinitePlaneSource,
+    FinitePlaneSpectrumSource,
     FocusedLaguerreGaussianBeam,
     GaussianBeam,
     JonesPolarizedSource,
@@ -18,6 +20,7 @@ from .fields import (
     SLMSource,
     Source,
     angular_spectrum_to_svwf_regular,
+    fourier_plane_to_svwf_regular,
     polarization_to_jones,
     project_source_basis_to_svwf,
     project_source_to_svwf,
@@ -25,6 +28,7 @@ from .fields import (
     svwf_outgoing_to_pwp,
     svwf_regular_to_pwp,
 )
+from .fourier_plane import FourierPlaneSpectrum
 from .lattice import DiffractionOrder2D, RectangularLattice2D
 from .operators import (
     CompositeParticleTOperator,
@@ -109,7 +113,10 @@ __all__ = [
     "DiffractionOrder2D",
     "DipoleCollection",
     "DipoleSource",
+    "FinitePlaneSource",
+    "FinitePlaneSpectrumSource",
     "FocusedLaguerreGaussianBeam",
+    "FourierPlaneSpectrum",
     "GaussianBeam",
     "JonesPolarizedSource",
     "LaguerreGaussianBeam",
@@ -138,6 +145,7 @@ __all__ = [
     "assemble_dense_A_numpy",
     "clear_caches",
     "estimate_translation_cache_bytes",
+    "fourier_plane_to_svwf_regular",
     "layered_internal_ab_ratios",
     "layered_mie_ab",
     "layered_sphere_T_diagonal",

@@ -19,6 +19,7 @@ from pyceles.core.angular import (
 from pyceles.core.geometry_bounds import coincident_point_mask
 from pyceles.core.radial import passive_wavenumber
 from pyceles.core.sources import (
+    FinitePlaneSpectrumSource,
     GaussianBeam,
     LocalExpansionSource,
     PlaneWave,
@@ -491,6 +492,30 @@ def _compute_initial_field_general(
         h = amp * phase[:, None] * (n_medium_c * hhat)[None, :]
         return e.astype(accum_dtype, copy=False), h.astype(accum_dtype, copy=False)
 
+    if isinstance(beam, FinitePlaneSpectrumSource):
+        spectrum_plane = beam.plane_spectrum()
+        if spectrum_plane.k != k:
+            raise ValueError("Plane boundary spectrum must match the field wavenumber")
+        frame = beam.plane_frame()
+        vectors = spectrum_plane.wavevectors() @ frame.T
+        electric = spectrum_plane.electric_vectors() @ frame.T
+        magnetic = np.cross(vectors / k, electric)
+        weighted_fields = (
+            np.concatenate((electric, magnetic), axis=-1) * spectrum_plane.weights[..., None]
+        )
+        e, h = _plane_wave_field(
+            pts - beam.reference_point,
+            wavevectors=tuple(vectors[..., axis] for axis in range(3)),
+            weighted_fields=weighted_fields,
+            batch_size=batch_size,
+            show_progress=show_progress,
+            backend=backend,
+            compute_dtype=compute_dtype,
+            accum_dtype=accum_dtype,
+        )
+        h *= n_medium_c
+        return e, h
+
     if hasattr(beam, "angular_spectrum"):
         spectrum = beam.angular_spectrum(
             k=k,
@@ -501,11 +526,9 @@ def _compute_initial_field_general(
         raise TypeError(
             "Initial-field evaluation is unavailable for source type "
             f"{type(beam).__name__}. Supported initial-field sources are PlaneWave, "
-            "local outgoing-expansion sources, and angular-spectrum sources."
+            "local outgoing-expansion sources, finite-plane sources, and angular-spectrum sources."
         )
 
-    e = np.zeros((pts.shape[0], 3), dtype=accum_dtype)
-    h = np.zeros_like(e)
     spectrum.require_homogeneous_wavevectors(k)
     alpha_weights = periodic_azimuthal_weights(spectrum.alpha)
 
@@ -518,19 +541,7 @@ def _compute_initial_field_general(
     cosb = np.cos(beta).astype(np.float64)
     beta_weights = trapezoidal_weights(beta).astype(np.float64)
 
-    kx_all, ky_all, kz_all = spectrum.kx, spectrum.ky, spectrum.kz
-
-    n_points = pts.shape[0]
     n_alpha = alpha.shape[0]
-    if beta.size == 0:
-        return e, h
-
-    batch_size_eff = int(batch_size)
-    target_phase_bytes = 128 * 1024**2
-    max_by_memory = max(
-        1, target_phase_bytes // (int(beta.size) * int(np.dtype(compute_dtype).itemsize))
-    )
-    batch_size_eff = max(batch_size_eff, int(max_by_memory))
 
     sin_a = np.sin(alpha)[:, None]
     cos_a = np.cos(alpha)[:, None]
@@ -556,6 +567,45 @@ def _compute_initial_field_general(
     v_all[:, :, 3] = -w_te_all * ex_tm + w_tm_all * ex_te
     v_all[:, :, 4] = -w_te_all * ey_tm + w_tm_all * ey_te
     v_all[:, :, 5] = -w_te_all * ez_tm + w_tm_all * ez_te
+    v_all *= alpha_weights[:, None, None]
+    e, h = _plane_wave_field(
+        pts,
+        wavevectors=(spectrum.kx, spectrum.ky, spectrum.kz),
+        weighted_fields=v_all,
+        batch_size=batch_size,
+        show_progress=show_progress,
+        backend=backend,
+        compute_dtype=compute_dtype,
+        accum_dtype=accum_dtype,
+    )
+    h *= n_medium_c
+    return e, h
+
+
+def _plane_wave_field(
+    field_points: np.ndarray,
+    *,
+    wavevectors: tuple[np.ndarray, ...],
+    weighted_fields: np.ndarray,
+    batch_size: int,
+    show_progress: bool,
+    backend: str,
+    compute_dtype: np.dtype,
+    accum_dtype: np.dtype,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Contract vector densities and phases for either spectral measure."""
+    pts = np.asarray(field_points, dtype=np.float64)
+    v_all = np.asarray(weighted_fields, dtype=compute_dtype)
+    kx_all, ky_all, kz_all = wavevectors
+    n_alpha, n_radial = v_all.shape[:2]
+    n_points = len(pts)
+    e = np.zeros((n_points, 3), dtype=accum_dtype)
+    h = np.zeros_like(e)
+    if not n_radial:
+        return e, h
+    target_phase_bytes = 128 * 1024**2
+    max_by_memory = max(1, target_phase_bytes // (n_radial * compute_dtype.itemsize))
+    batch_size_eff = max(int(batch_size), max_by_memory)
 
     if str(backend).lower() == "cupy":
         cupy, _ = import_cupy()
@@ -576,10 +626,7 @@ def _compute_initial_field_general(
                 total=n_alpha,
             )
         for ja in alpha_iter:
-            alpha_w = alpha_weights[ja]
-            if alpha_w == 0.0:
-                continue
-            active_beta = np.flatnonzero((w_te_all[ja, :] != 0) | (w_tm_all[ja, :] != 0))
+            active_beta = np.flatnonzero(np.any(v_all[ja] != 0, axis=-1))
             if active_beta.size == 0:
                 continue
             kx = cupy.asarray(kx_all[ja, active_beta])
@@ -596,12 +643,11 @@ def _compute_initial_field_general(
                 )
                 phase = cupy.exp(1j * phase_arg).astype(compute_dtype_cp, copy=False)
                 weighted = phase @ v
-                weighted_acc = (alpha_w * weighted).astype(accum_dtype_cp, copy=False)
+                weighted_acc = weighted.astype(accum_dtype_cp, copy=False)
                 e_gpu[s:e_idx, 0] += weighted_acc[:, 0]
                 e_gpu[s:e_idx, 1] += weighted_acc[:, 1]
                 e_gpu[s:e_idx, 2] += weighted_acc[:, 2]
                 h_gpu[s:e_idx] += weighted_acc[:, 3:]
-        h_gpu *= n_medium_c
         return asnumpy(e_gpu).astype(accum_dtype, copy=False), asnumpy(h_gpu).astype(
             accum_dtype, copy=False
         )
@@ -609,10 +655,7 @@ def _compute_initial_field_general(
     for ja in tqdm(
         range(n_alpha), desc="Initial field (alpha)", total=n_alpha, disable=not show_progress
     ):
-        alpha_w = alpha_weights[ja]
-        if alpha_w == 0.0:
-            continue
-        active_beta = np.flatnonzero((w_te_all[ja, :] != 0) | (w_tm_all[ja, :] != 0))
+        active_beta = np.flatnonzero(np.any(v_all[ja] != 0, axis=-1))
         if active_beta.size == 0:
             continue
         kx = kx_all[ja, active_beta]
@@ -629,13 +672,12 @@ def _compute_initial_field_general(
             )
             phase = np.exp(1j * phase_arg).astype(compute_dtype, copy=False)
             weighted = phase @ v
-            weighted_acc = (alpha_w * weighted).astype(accum_dtype, copy=False)
+            weighted_acc = weighted.astype(accum_dtype, copy=False)
             e[s:e_idx, 0] += weighted_acc[:, 0]
             e[s:e_idx, 1] += weighted_acc[:, 1]
             e[s:e_idx, 2] += weighted_acc[:, 2]
             h[s:e_idx] += weighted_acc[:, 3:]
 
-    h *= n_medium_c
     return e, h
 
 

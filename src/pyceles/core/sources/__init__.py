@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from .base import (
     AngularSpectrumSource,
+    FinitePlaneSpectrumSource,
     JonesPolarizedSource,
     LocalExpansionSource,
     Polarization,
@@ -16,6 +17,7 @@ from .base import (
 )
 from .bessel import BesselBeam, CartesianPolarizedBesselBeam
 from .dipole import DipoleCollection, DipoleSource
+from .finite_plane import FinitePlaneSource
 from .gaussian import (
     CartesianPolarizedFocusedLaguerreGaussianBeam,
     FocusedLaguerreGaussianBeam,
@@ -33,6 +35,8 @@ __all__ = [
     "CartesianPolarizedFocusedLaguerreGaussianBeam",
     "DipoleCollection",
     "DipoleSource",
+    "FinitePlaneSource",
+    "FinitePlaneSpectrumSource",
     "FocusedLaguerreGaussianBeam",
     "GaussianBeam",
     "JonesPolarizedSource",

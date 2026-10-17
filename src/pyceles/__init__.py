@@ -8,6 +8,7 @@ from pyceles.core.fields import (
     CartesianPolarizedFocusedLaguerreGaussianBeam,
     DipoleCollection,
     DipoleSource,
+    FinitePlaneSource,
     FocusedLaguerreGaussianBeam,
     GaussianBeam,
     LaguerreGaussianBeam,
@@ -16,6 +17,7 @@ from pyceles.core.fields import (
     project_source_basis_to_svwf,
     project_source_to_svwf,
 )
+from pyceles.core.fourier_plane import FourierPlaneSpectrum
 from pyceles.core.lattice import RectangularLattice2D
 from pyceles.core.particles import (
     LayeredSphere,
@@ -79,7 +81,9 @@ __all__ = [
     "DipolePowerLDOSResult",
     "DipoleSource",
     "ElectricFieldComponents",
+    "FinitePlaneSource",
     "FocusedLaguerreGaussianBeam",
+    "FourierPlaneSpectrum",
     "GaussianBeam",
     "LaguerreGaussianBeam",
     "LayeredSphere",

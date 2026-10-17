@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `FinitePlaneSource` prescribes tangential Fourier data on an oriented finite
+  plane, including evanescent waves, passive complex hosts, CPU/GPU finite E/H,
+  and regular SVWF projection. Its sampling is independent of output angles;
+  incident far-angle spectra and power at infinity are not inferred.
 - Outgoing angular amplitudes preserve passive complex wavenumbers on NumPy
   and CuPy, with an explicit asymptotic field and reference-origin convention.
 - Electric dipole sources and collections support passive complex hosts and

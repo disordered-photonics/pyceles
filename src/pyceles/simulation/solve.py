@@ -21,7 +21,7 @@ from pyceles.core.operators import (
 )
 from pyceles.core.periodic import plane_wave_k_parallel
 from pyceles.core.projection import project_source_to_svwf
-from pyceles.core.sources import LocalExpansionSource, PlaneWave, Source
+from pyceles.core.sources import FinitePlaneSpectrumSource, LocalExpansionSource, PlaneWave, Source
 from pyceles.linear.solvers import (
     DenseLUFactorization,
     _capture_backend_solution,
@@ -40,7 +40,7 @@ from .results import MultiSourceSolveResult
 
 def _source_projection_uses_angular_grid(source: Source) -> bool:
     """Return whether RHS projection uses the configured angular quadrature grid."""
-    return not isinstance(source, (LocalExpansionSource, PlaneWave))
+    return not isinstance(source, (LocalExpansionSource, FinitePlaneSpectrumSource, PlaneWave))
 
 
 def _record_elapsed(timings: dict[str, float] | None, key: str, start: float) -> None:

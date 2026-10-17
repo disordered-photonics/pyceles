@@ -12,6 +12,7 @@ from pyceles.core.sources import (
     CartesianPolarizedFocusedLaguerreGaussianBeam,
     DipoleCollection,
     DipoleSource,
+    FinitePlaneSource,
     FocusedLaguerreGaussianBeam,
     GaussianBeam,
     JonesPolarizedSource,
@@ -50,6 +51,13 @@ def _all_builtin_sources() -> list[Source]:
             amplitude=1.0,
         ),
         _gaussian_base(),
+        FinitePlaneSource(
+            550,
+            np.array([0, 0.01]),
+            np.array([0, np.pi]),
+            np.ones((2, 2)),
+            np.zeros((2, 2)),
+        ),
         LaguerreGaussianBeam(
             wavelength=550.0,
             medium_n=1.0 + 0j,
