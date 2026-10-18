@@ -9,6 +9,7 @@ from ..polarization import (
     project_global_cartesian_to_te_tm,
     pure_polarization_label,
 )
+from ..radial import passive_wavenumber
 from .base import Polarization, is_normal_incidence
 from .common import _as_float_triplet, _laguerre_profile_factor
 
@@ -564,11 +565,13 @@ def _bessel_tilted_ring_kernel(
 def _bessel_ring_geometry(
     *,
     beam,
-    k: float,
+    k: complex,
     polar_angles: np.ndarray,
     azimuthal_angles: np.ndarray,
 ) -> dict[str, np.ndarray]:
     """Build common ring-spectrum geometry for Bessel-like sources."""
+    value = passive_wavenumber(k)
+    k = value.real if value.imag == 0.0 else value
     beta = np.asarray(polar_angles, dtype=float).reshape(-1)
     alpha = np.asarray(azimuthal_angles, dtype=float).reshape(-1)
     agrid, bgrid = np.meshgrid(alpha, beta, indexing="ij")
@@ -608,7 +611,7 @@ def _bessel_ring_geometry(
     phase_mode = np.exp(1j * (m * alpha_l + az_phase))
     cx, cy, cz = _as_float_triplet("center", beam.center)
     phase_center = np.exp(-1j * (kx * cx + ky * cy + kz * cz))
-    envelope = float(beam.amplitude) * phase_mode * phase_center * ring
+    envelope = complex(beam.amplitude) * phase_mode * phase_center * ring
     ephi_g = np.stack([-sa, ca, np.zeros_like(agrid)], axis=2)
     etheta_g = np.stack([cb * ca, cb * sa, -sb], axis=2)
     return {
@@ -635,7 +638,7 @@ def _bessel_ring_geometry(
 def _bessel_angular_spectrum_coeffs(
     *,
     beam,
-    k: float,
+    k: complex,
     polar_angles: np.ndarray,
     azimuthal_angles: np.ndarray,
     polarization_override: Polarization | None = None,
@@ -670,15 +673,13 @@ def _bessel_angular_spectrum_coeffs(
         jones_weight = a_te if pure == "TE" else a_tm
     geom = _bessel_ring_geometry(
         beam=beam,
-        k=float(k),
+        k=k,
         polar_angles=np.asarray(polar_angles, dtype=float),
         azimuthal_angles=np.asarray(azimuthal_angles, dtype=float),
     )
     alpha = np.asarray(geom["alpha"], dtype=float)
     beta = np.asarray(geom["beta"], dtype=float)
-    kx = np.asarray(geom["kx"], dtype=float)
-    ky = np.asarray(geom["ky"], dtype=float)
-    kz = np.asarray(geom["kz"], dtype=float)
+    kx, ky, kz = geom["kx"], geom["ky"], geom["kz"]
     alpha_l = np.asarray(geom["alpha_l"], dtype=float)
     cos_beta_l = np.asarray(geom["cos_beta_l"], dtype=float)
     sin_beta_l = np.asarray(geom["sin_beta_l"], dtype=float)
@@ -720,22 +721,20 @@ def _bessel_angular_spectrum_coeffs(
 def _bessel_cartesian_angular_spectrum_coeffs(
     *,
     beam,
-    k: float,
+    k: complex,
     polar_angles: np.ndarray,
     azimuthal_angles: np.ndarray,
 ) -> PlaneWaveSpectrum:
     """Evaluate Bessel ring spectrum with global-Cartesian polarization transport."""
     geom = _bessel_ring_geometry(
         beam=beam,
-        k=float(k),
+        k=k,
         polar_angles=np.asarray(polar_angles, dtype=float),
         azimuthal_angles=np.asarray(azimuthal_angles, dtype=float),
     )
     alpha = np.asarray(geom["alpha"], dtype=float)
     beta = np.asarray(geom["beta"], dtype=float)
-    kx = np.asarray(geom["kx"], dtype=float)
-    ky = np.asarray(geom["ky"], dtype=float)
-    kz = np.asarray(geom["kz"], dtype=float)
+    kx, ky, kz = geom["kx"], geom["ky"], geom["kz"]
     sx = np.asarray(geom["sx"], dtype=float)
     sy = np.asarray(geom["sy"], dtype=float)
     sz = np.asarray(geom["sz"], dtype=float)

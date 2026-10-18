@@ -8,14 +8,20 @@ import numpy.typing as npt
 from ..conversions import angular_spectrum_to_svwf_regular
 from ..plane_wave_spectrum import PlaneWaveSpectrum
 from ..polarization import normalize_global_polarization_vector
+from ..radial import passive_wavenumber
 from .base import PolarizationInput, _canonicalize_polarization_input, polarization_to_jones
 from .beam_kernels import _bessel_angular_spectrum_coeffs, _bessel_cartesian_angular_spectrum_coeffs
-from .common import _float_triplet_tuple, _real_beam_wavenumber, _validated_int
+from .common import _float_triplet_tuple, _validated_int
 
 
 @dataclass(frozen=True)
 class BesselBeam:
-    """Exact non-paraxial ideal Bessel beam via ring angular spectrum."""
+    """Ideal Bessel ring of homogeneous waves referenced to finite ``center``.
+
+    Real cone and axis angles specify parallel phase/attenuation directions
+    in a passive host. ``amplitude`` sets the ring's spectral weight at center;
+    the ideal beam has no finite incident power.
+    """
 
     wavelength: float
     medium_n: complex = 1.0 + 0j
@@ -24,18 +30,20 @@ class BesselBeam:
     polar_angle: float = 0.0
     azimuthal_angle: float = 0.0
     polarization: PolarizationInput = "TE"
-    amplitude: float = 1.0
+    amplitude: complex = 1.0
     azimuthal_phase: float = 0.0
     center: tuple[float, float, float] = (0.0, 0.0, 0.0)
     forward_only: bool = True
 
     def __post_init__(self) -> None:
-        _real_beam_wavenumber(self.medium_n)
+        passive_wavenumber(self.medium_n)
+        if not np.isfinite(self.wavelength) or self.wavelength <= 0:
+            raise ValueError("wavelength must be finite and positive")
         object.__setattr__(
             self, "polarization", _canonicalize_polarization_input(self.polarization)
         )
         object.__setattr__(self, "center", _float_triplet_tuple("center", self.center))
-        if not np.isfinite(float(self.amplitude)):
+        if not np.isfinite(self.amplitude):
             raise ValueError(f"`amplitude` must be finite. Got {self.amplitude!r}.")
         if not np.isfinite(float(self.azimuthal_phase)):
             raise ValueError(f"`azimuthal_phase` must be finite. Got {self.azimuthal_phase!r}.")
@@ -73,7 +81,7 @@ class BesselBeam:
     ) -> PlaneWaveSpectrum:
         return _bessel_angular_spectrum_coeffs(
             beam=self,
-            k=_real_beam_wavenumber(k),
+            k=k,
             polar_angles=np.asarray(polar_angles, dtype=float),
             azimuthal_angles=np.asarray(azimuthal_angles, dtype=float),
             polarization_override=None,
@@ -92,7 +100,7 @@ class BesselBeam:
             raise ValueError(
                 "BesselBeam projection requires both `polar_angles` and `azimuthal_angles`."
             )
-        k = 2.0 * np.pi / float(self.wavelength) * float(np.real(complex(self.medium_n)))
+        k = 2.0 * np.pi / self.wavelength * self.medium_n
         return angular_spectrum_to_svwf_regular(
             positions,
             lmax,
@@ -106,7 +114,12 @@ class BesselBeam:
 
 @dataclass(frozen=True)
 class CartesianPolarizedBesselBeam:
-    """Ideal Bessel beam with one global polarization state across the cone."""
+    """Finite-centre ideal Bessel ring with Cartesian polarization transport.
+
+    The global vector is projected transverse to each real cone direction.
+    ``amplitude`` sets spectral weight at center, including in a passive
+    complex host; the ideal beam has no finite incident power.
+    """
 
     wavelength: float
     medium_n: complex = 1.0 + 0j
@@ -115,13 +128,15 @@ class CartesianPolarizedBesselBeam:
     polar_angle: float = 0.0
     azimuthal_angle: float = 0.0
     global_polarization: tuple[complex, complex, complex] = (1.0 + 0.0j, 0.0 + 0.0j, 0.0 + 0.0j)
-    amplitude: float = 1.0
+    amplitude: complex = 1.0
     azimuthal_phase: float = 0.0
     center: tuple[float, float, float] = (0.0, 0.0, 0.0)
     forward_only: bool = True
 
     def __post_init__(self) -> None:
-        _real_beam_wavenumber(self.medium_n)
+        passive_wavenumber(self.medium_n)
+        if not np.isfinite(self.wavelength) or self.wavelength <= 0:
+            raise ValueError("wavelength must be finite and positive")
         polarization = normalize_global_polarization_vector(self.global_polarization)
         object.__setattr__(
             self,
@@ -129,7 +144,7 @@ class CartesianPolarizedBesselBeam:
             tuple(complex(value) for value in polarization),
         )
         object.__setattr__(self, "center", _float_triplet_tuple("center", self.center))
-        if not np.isfinite(float(self.amplitude)):
+        if not np.isfinite(self.amplitude):
             raise ValueError(f"`amplitude` must be finite. Got {self.amplitude!r}.")
         if not np.isfinite(float(self.azimuthal_phase)):
             raise ValueError(f"`azimuthal_phase` must be finite. Got {self.azimuthal_phase!r}.")
@@ -161,7 +176,7 @@ class CartesianPolarizedBesselBeam:
     ) -> PlaneWaveSpectrum:
         return _bessel_cartesian_angular_spectrum_coeffs(
             beam=self,
-            k=_real_beam_wavenumber(k),
+            k=k,
             polar_angles=np.asarray(polar_angles, dtype=float),
             azimuthal_angles=np.asarray(azimuthal_angles, dtype=float),
         )
@@ -180,7 +195,7 @@ class CartesianPolarizedBesselBeam:
                 "CartesianPolarizedBesselBeam projection requires both "
                 "`polar_angles` and `azimuthal_angles`."
             )
-        k = 2.0 * np.pi / float(self.wavelength) * float(np.real(complex(self.medium_n)))
+        k = 2.0 * np.pi / self.wavelength * self.medium_n
         return angular_spectrum_to_svwf_regular(
             positions,
             lmax,

@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Ideal Bessel rings support passive complex hosts and complex spectral
+  amplitudes referenced to a finite centre, including SLM modulation.
 - `FinitePlaneSource` prescribes tangential Fourier data on an oriented finite
   plane, including evanescent waves, passive complex hosts, CPU/GPU finite E/H,
   and regular SVWF projection. Its sampling is independent of output angles;

@@ -119,7 +119,7 @@ class AngularSpectrumSLMSource:
                 "AngularSpectrumSLMSource projection requires both `polar_angles` and "
                 "`azimuthal_angles`."
             )
-        k = 2.0 * np.pi / float(self.wavelength) * float(np.real(complex(self.medium_n)))
+        k = 2.0 * np.pi / self.wavelength * self.medium_n
         return angular_spectrum_to_svwf_regular(
             positions,
             lmax,
@@ -133,7 +133,7 @@ class AngularSpectrumSLMSource:
 
 @dataclass(frozen=True)
 class SLMSource(AngularSpectrumSLMSource):
-    """Jones-polarized SLM wrapper retained for the existing API."""
+    """Angular-spectrum modulation that preserves a source's Jones state."""
 
     base_source: JonesPolarizedSource
 

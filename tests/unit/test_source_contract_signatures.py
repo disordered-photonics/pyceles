@@ -182,9 +182,9 @@ def test_angular_spectrum_signature_is_uniform_for_angular_sources() -> None:
         assert params["azimuthal_angles"].kind is inspect.Parameter.KEYWORD_ONLY
 
 
-def test_builtin_real_angle_beams_reject_absorbing_spectrum_requests() -> None:
+def test_builtin_finite_power_beams_reject_absorbing_spectrum_requests() -> None:
     for source in _all_builtin_sources():
-        if isinstance(source, AngularSpectrumSource):
+        if isinstance(source, AngularSpectrumSource) and source.has_finite_incident_power():
             with pytest.raises(ValueError, match="nonabsorbing host"):
                 source.angular_spectrum(
                     k=0.01 + 0.001j,
