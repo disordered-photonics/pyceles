@@ -4,7 +4,12 @@ This page records current limitations.
 
 ## Physical and geometrical scope
 
-- `Simulation` currently requires a real positive host refractive index `n_medium`.
+- Finite pairwise `Simulation` supports passive complex `n_medium` with positive
+  real part. MLFMM and periodic propagation currently require a real host.
+- Absorbing-host fields and outgoing angular amplitudes are available, while
+  automatic lossless power/cross-section diagnostics are absent. Gaussian and
+  focused profile/pupil sources require a nonabsorbing host; finite-plane
+  Fourier data provide an explicit boundary for absorbing hosts.
 - All particles in one simulation currently share the same `lmax`.
 - T-matrix superposition assumes disjoint particle circumscribing spheres. This is enforced by default through `Simulation` geometry checks.
 - At the moment, this restriction is especially limiting for close spheroids because their circumscribing spheres can in principle overlap even when physical spheroids do not.
@@ -46,7 +51,9 @@ This page records current limitations.
 ## Dipoles
 
 - Local dipole sources are supported in the homogeneous host medium.
-- Dipole-driven local absorbed-power diagnostics are available.
+- Dipole-driven local absorbed-power and self-power/LDOS diagnostics require a
+  nonabsorbing host. Point-emitter self-power in an absorbing continuum needs
+  a microscopic emitter model; finite fields away from the emitter are supported.
 - Embedded dipoles inside particles are not supported in the main solver path yet.
 - Dipole near-field initial fields mask exact dipole-center grid hits as `NaN`.
 

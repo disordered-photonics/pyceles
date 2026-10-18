@@ -11,13 +11,11 @@ import pytest
 
 from pyceles._optional import asnumpy
 from pyceles.core.indexing import index_vswf, n_modes
-from pyceles.core.operators import assemble_dense_A_numpy, prepare_matvec
+from pyceles.core.operators import prepare_matvec
 from pyceles.core.particles import spheres_from_arrays
 from pyceles.core.sources import PlaneWave
-from pyceles.postprocessing.nearfield.scattered import (
-    compute_scattered_electric_field,
-    compute_scattered_field,
-)
+from pyceles.postprocessing.nearfield import compute_electric_field, compute_near_field
+from pyceles.simulation import Simulation, SimulationConfig
 
 pytestmark = pytest.mark.reference
 
@@ -148,7 +146,6 @@ def test_pairwise_exterior_fields_against_treams(dtype, backend, request):
     if backend == "cupy":
         request.getfixturevalue("cupy_runtime")
     host = 1.33 + 0.5j
-    k = 2 * np.pi / 600 * host
     positions = np.array([[-312, -108, -132], [246, -186, -48], [-114, 288, 126], [198, 162, 264]])
     source = PlaneWave(
         wavelength=600,
@@ -158,33 +155,30 @@ def test_pairwise_exterior_fields_against_treams(dtype, backend, request):
         amplitude=0.3 + 0.9j,
         focal_point=(-25, 11, -18),
     )
-    operator = prepare_matvec(
-        lmax=3,
-        k=k,
-        n_medium=host,
+    simulation = Simulation(
+        SimulationConfig(
+            wavelength=600,
+            n_medium=host,
+            lmax=3,
+            radial_lut_dr=600 / 16384,
+            operator_backend=backend,
+            compute_dtype=dtype.__name__,
+            solver_method="direct",
+            polar_angles=np.linspace(0, np.pi, 9),
+            azimuthal_angles=np.arange(12) * np.pi / 6,
+            verbose=False,
+        ),
         particles=spheres_from_arrays(
             positions=positions,
             radii=np.array([45, 57, 39, 51]),
             refractive_indices=2 + 0.1j,
         ),
-        radial_lut_dr=600 / 16384,
-        operator_dtype=dtype,
     )
-    incident = source.incident_coeffs(positions, 3, dtype=dtype)
-    coefficients = np.linalg.solve(
-        assemble_dense_A_numpy(operator),
-        operator.rhs_Tb(incident.reshape(-1)),
-    ).reshape(4, -1)
+    run = simulation.run(source)
+    assert run.k == 2 * np.pi / 600 * host
+    assert run.cross_sections is None and run.power is None
+    assert np.any(run.farfield.scattered.kz.imag)
     points = np.array([[0, 0, -1050], [960, 240, 180]])
-    options = dict(
-        k=k,
-        lmax=3,
-        n_medium=host,
-        particle_distance_resolution=600 / 16384,
-        show_progress=False,
-        compute_dtype=dtype,
-        accum_dtype=np.complex128,
-    )
     expected_e = np.array(
         [
             [
@@ -213,11 +207,9 @@ def test_pairwise_exterior_fields_against_treams(dtype, backend, request):
             ],
         ]
     )
-    fields = compute_scattered_field(points, positions, coefficients, backend=backend, **options)
+    fields = compute_near_field(run, points=points, show_progress=False)
     tolerance = 2e-5 if dtype == np.complex64 else 3e-7
-    for actual, expected in zip(fields, (expected_e, expected_h), strict=True):
+    for actual, expected in ((fields.E_scattered, expected_e), (fields.H_scattered, expected_h)):
         np.testing.assert_allclose(actual, expected, rtol=tolerance, atol=1e-11)
-    electric = compute_scattered_electric_field(
-        points, positions, coefficients, backend=backend, **options
-    )
-    np.testing.assert_allclose(electric, expected_e, rtol=tolerance, atol=1e-11)
+    electric = compute_electric_field(run, points=points, show_progress=False)
+    np.testing.assert_allclose(electric.E_scattered, expected_e, rtol=tolerance, atol=1e-11)

@@ -95,12 +95,11 @@ def save_simulation_h5(run: ChannelResult, near_field: NearFieldSlice, out_h5: s
         ff = run.farfield
         source_beta, source_alpha = run.config.source_angular_grids()
         farfield_beta, farfield_alpha = run.config.farfield_angular_grids()
-        k_medium = 2.0 * np.pi / float(run.config.wavelength) * float(np.real(run.config.n_medium))
         save_far_field_h5(
             out_h5,
             farfield=ff,
             attrs={
-                "k_medium": float(k_medium),
+                "k_medium": run.k,
                 "source_beta_points": int(source_beta.size),
                 "source_alpha_points": int(source_alpha.size),
                 "farfield_beta_points": int(farfield_beta.size),

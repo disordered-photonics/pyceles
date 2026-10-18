@@ -51,6 +51,52 @@ def test_dipole_power_ldos_no_scatterers_single_dipole():
     )
 
 
+@pytest.mark.parametrize("method", ["direct", "gmres", "bicgstab"])
+def test_absorbing_host_dipole_fields_and_source_blocks_exclude_self_power(method):
+    host = 1.33 + 0.1j
+    source = pcl.DipoleSource(
+        600,
+        medium_n=host,
+        position=(0, 0, -170),
+        dipole_moment=(1, 0.2j, 0.3),
+        amplitude=0.8 + 0.1j,
+        radial_lut_dr=600 / 4096,
+    )
+    simulation = pcl.Simulation(
+        pcl.SimulationConfig(
+            wavelength=600,
+            n_medium=host,
+            lmax=2,
+            solver_method=method,
+            solver_rtol=1e-10,
+            radial_lut_dr=600 / 4096,
+            polar_angles=np.linspace(0, np.pi, 9),
+            azimuthal_angles=np.arange(12) * np.pi / 6,
+            verbose=False,
+        ),
+        particles=[
+            pcl.Sphere((0, 0, 0), 40, 1.7 + 0.03j),
+            pcl.Sphere((160, 20, 30), 35, 1.6 + 0.02j),
+        ],
+    )
+    run = simulation.run(source)
+    fields = pcl.compute_near_field(
+        run,
+        points=np.array([[0, 0, 0], [160, 20, 30], [100, 70, 20], source.position]),
+        show_progress=False,
+    )
+    assert np.isfinite(fields.E_total[:3]).all() and np.isfinite(fields.H_total[:3]).all()
+    assert np.isnan(fields.E_initial[-1]).all() and np.isnan(fields.H_initial[-1]).all()
+    assert run.power is None and run.cross_sections is None
+    assert run.farfield.initial is not None and run.farfield.total is not None
+    block = simulation.run_sources(source.cartesian_basis_sources())
+    mixed = block["px"].coeffs + 0.2j * block["py"].coeffs + 0.3 * block["pz"].coeffs
+    assert np.linalg.norm(run.coeffs - mixed) / np.linalg.norm(run.coeffs) < 1e-8
+    for diagnostic in (pcl.compute_dipole_power_ldos, pcl.compute_dipole_ldos_enhancement):
+        with pytest.raises(ValueError, match=r"self-power/LDOS.*nonabsorbing host"):
+            diagnostic(run)
+
+
 def test_dipole_power_ldos_no_scatterers_collection_matches_background_formula():
     source = pcl.DipoleCollection(
         wavelength=550.0,

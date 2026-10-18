@@ -24,7 +24,17 @@ Current source support includes:
 - Cartesian-polarized Bessel and focused Laguerre-Gaussian beams,
 - SLM-modulated angular-spectrum sources (`AngularSpectrumSLMSource` and
   `SLMSource`),
-- local electric dipoles and dipole collections.
+- local electric dipoles and dipole collections,
+- finite-plane tangential Fourier sources, including evanescent components.
+
+Finite pairwise workflows support passive absorbing hosts on NumPy and CuPy.
+Plane waves use a finite reference amplitude, Bessel rings use finite-centre
+spectral weights, and dipoles use finite moments. Finite-plane Fourier data
+provide an explicit boundary for a beam. Gaussian and focused profile/pupil
+models require a nonabsorbing host. Outgoing angular amplitudes and finite E/H
+fields remain available in absorbing hosts; automatic lossless power and
+cross-section diagnostics are absent. Periodic and MLFMM propagation require
+a real host.
 
 Gaussian wavebundle support includes optimized normal-incidence kernels ported
 from CELES, tilted-incidence source projection through angular spectra, and a

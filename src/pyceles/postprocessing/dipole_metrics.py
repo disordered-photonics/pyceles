@@ -87,6 +87,9 @@ def compute_dipole_power_ldos(
     -----
     - `enhancement` corresponds to projected electric-LDOS/Purcell-like ratio
       for the specified dipole orientation.
+    - The homogeneous self-power normalization requires a nonabsorbing host.
+      A point emitter in an absorbing continuum needs a microscopic model;
+      finite fields away from the emitter remain available.
     - Interior dipole placement (inside circumscribing particle spheres) is
       currently untested in pyceles; by default this raises unless
       `allow_inside_particle=True`.
@@ -97,6 +100,9 @@ def compute_dipole_power_ldos(
             "Dipole power/LDOS helpers require a run produced from DipoleSource "
             f"or DipoleCollection. Got {type(source).__name__}."
         )
+
+    if complex(run.config.n_medium).imag != 0.0:
+        raise ValueError("Dipole self-power/LDOS normalization requires a nonabsorbing host.")
 
     dip_pos, dip_mom = _dipole_arrays(source)
     if dip_pos.shape[0] == 0:
@@ -138,7 +144,7 @@ def compute_dipole_power_ldos(
         dip_pos,
         np.asarray(run.positions, dtype=float),
         np.asarray(run.coeffs),
-        k=float(run.k),
+        k=run.k,
         lmax=int(run.config.lmax),
         n_medium=complex(run.config.n_medium),
         particle_distance_resolution=float(run.config.radial_lut_dr),
@@ -152,7 +158,7 @@ def compute_dipole_power_ldos(
     p_dot_e = np.sum(np.conjugate(dip_mom) * E_scat, axis=1)
     delta_power = 0.5 * float(run.k0) * np.imag(p_dot_e)
     mu2 = np.sum(np.abs(dip_mom) ** 2, axis=1)
-    p0 = mu2 * float(run.k) * (float(run.k0) ** 3) / (12.0 * np.pi)
+    p0 = mu2 * run.k.real * (float(run.k0) ** 3) / (12.0 * np.pi)
     p_total = p0 + delta_power
     enhancement = np.divide(
         p_total,

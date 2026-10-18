@@ -269,6 +269,7 @@ def compute_periodic_near_field_interior(
         )
 
     coeffs, source = _resolve_periodic_channel_payload(run)
+    k = run.k.real  # Periodic configuration requires a real host.
 
     pts_flat, lead_shape = reshape_field_points(points)
     n_points = int(pts_flat.shape[0])
@@ -277,7 +278,7 @@ def compute_periodic_near_field_interior(
     e_initial, h_initial = _initial_plane_wave_field(
         pts_flat,
         source=source,
-        k=float(run.k),
+        k=k,
         n_medium=run.config.n_medium,
     )
     e_scat = np.zeros((n_points, 3), dtype=np.complex128)
@@ -304,7 +305,7 @@ def compute_periodic_near_field_interior(
             e_int_ref, h_int_ref, _ = compute_internal_field(
                 wrapped_points,
                 coeffs,
-                k=float(run.k),
+                k=k,
                 lmax=int(run.config.lmax),
                 particles=run.particles,
                 _point_classification=internal_classification,
@@ -329,7 +330,7 @@ def compute_periodic_near_field_interior(
                     positions=run.positions,
                     coeffs=coeffs,
                     lmax=int(run.config.lmax),
-                    k=float(run.k),
+                    k=k,
                     periodic=periodic,
                     k_parallel=k_parallel,
                     circumscribing_radii=run.circumscribing_radii,
@@ -343,7 +344,7 @@ def compute_periodic_near_field_interior(
                     positions=run.positions,
                     coeffs=coeffs,
                     lmax=int(run.config.lmax),
-                    k=float(run.k),
+                    k=k,
                     periodic=periodic,
                     k_parallel=k_parallel,
                     circumscribing_radii=run.circumscribing_radii,

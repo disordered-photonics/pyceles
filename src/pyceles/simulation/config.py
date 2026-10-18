@@ -158,7 +158,8 @@ class SimulationConfig:
       intermediate array use the wider dtype.
 
     Geometry / physics policy:
-    - the current homogeneous-medium solver path assumes real `n_medium`
+    - finite pairwise systems support passive complex `n_medium`; periodic
+      and MLFMM propagation require a real host
     - circumscribing-sphere overlap checks remain enabled by default because
       the multiple-scattering T-matrix formulation assumes disjoint
       circumscribing spheres
@@ -209,10 +210,12 @@ class SimulationConfig:
         n_medium = complex(self.n_medium)
         if not np.isfinite(n_medium):
             raise ValueError(f"`n_medium` must be finite. Got {n_medium!r}.")
-        if n_medium.imag != 0.0:
-            raise ValueError(f"`n_medium` must be real for this solver path. Got {n_medium!r}.")
         if not (float(n_medium.real) > 0.0):
-            raise ValueError(f"`n_medium` must be positive. Got {n_medium!r}.")
+            raise ValueError(f"`n_medium` must have a positive real part. Got {n_medium!r}.")
+        if n_medium.imag < 0.0:
+            raise ValueError(
+                f"`n_medium` must have a nonnegative imaginary part. Got {n_medium!r}."
+            )
         if not np.isfinite(float(self.radial_lut_dr)) or float(self.radial_lut_dr) < 0.0:
             raise ValueError(
                 f"`radial_lut_dr` must be finite and >= 0. Got {self.radial_lut_dr!r}."
@@ -310,6 +313,12 @@ class SimulationConfig:
                 f"Got {self.coupling_backend!r}."
             )
         object.__setattr__(self, "coupling_backend", coupling_backend)
+
+        if n_medium.imag != 0.0 and (self.periodic is not None or coupling_backend == "mlfmm"):
+            raise NotImplementedError(
+                "Complex hosts require finite pairwise coupling; periodic and MLFMM "
+                "propagation require a real host."
+            )
 
         if self.periodic is not None:
             if not isinstance(self.periodic, PeriodicSpec):

@@ -179,7 +179,7 @@ class ChannelResult:
 
     config: SimulationConfig
     source: Source
-    k: float
+    k: complex
     k0: float
     coeffs: np.ndarray
     rhs: np.ndarray | None
@@ -297,7 +297,7 @@ class MultiSourceSolveResult:
     initial_coeffs: Mapping[str, np.ndarray]
     rhs: Mapping[str, np.ndarray]
     coeffs: Mapping[str, np.ndarray]
-    k: float
+    k: complex
     k0: float
     compute_dtype: str
     accum_dtype: str

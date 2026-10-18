@@ -230,7 +230,7 @@ def test_simulation_config_accepts_mlfmm_complex64(backend: str) -> None:
     [
         ({"wavelength": 0.0}, "wavelength"),
         ({"lmax": 0}, "lmax"),
-        ({"n_medium": 1.0 + 0.1j}, "n_medium"),
+        ({"n_medium": 1.0 - 0.1j}, "n_medium"),
         ({"n_medium": 0.0 + 0j}, "n_medium"),
         ({"radial_lut_dr": -1.0}, "radial_lut_dr"),
         ({"circumscribing_sphere_overlap_atol": -1.0}, "circumscribing_sphere_overlap_atol"),
@@ -316,3 +316,16 @@ def test_simulation_config_uses_override_grids_and_warns_on_periodic_endpoint() 
 def test_simulation_config_rejects_nonfinite_physical_inputs(field: str, invalid: complex) -> None:
     with pytest.raises(ValueError, match=field):
         cast(Any, SimulationConfig)(**{field: invalid, "verbose": False})
+
+
+def test_passive_complex_host_requires_finite_pairwise_coupling() -> None:
+    host = 1.33 + 0.1j
+    assert SimulationConfig(n_medium=host, verbose=False).n_medium == host
+    with pytest.raises(NotImplementedError, match="finite pairwise"):
+        SimulationConfig(n_medium=host, coupling_backend="mlfmm", verbose=False)
+    with pytest.raises(NotImplementedError, match="finite pairwise"):
+        SimulationConfig(
+            n_medium=host,
+            periodic=PeriodicSpec(lattice=RectangularLattice2D(900, 950)),
+            verbose=False,
+        )

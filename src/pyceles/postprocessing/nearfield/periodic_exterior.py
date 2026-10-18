@@ -229,7 +229,7 @@ def compute_periodic_near_field_exterior(
             "points to the exterior half spaces."
         )
 
-    k = float(run.k)
+    k = run.k.real
     output_bmax = periodic.options.output_bmax if field_bmax is None else float(field_bmax)
     if output_bmax is None:
         raise ValueError(

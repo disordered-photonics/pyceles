@@ -51,8 +51,8 @@ in [`docs/api.md`](docs/api.md), and runnable usage starts with
 pyceles is pre-1.0. Important boundaries are still present:
 
 - one simulation currently uses one common `lmax` for all particles;
-- the homogeneous host path currently requires a real positive refractive
-  index;
+- finite pairwise workflows support passive absorbing hosts; MLFMM and periodic
+  propagation currently require a real positive host index;
 - T-matrix superposition requires disjoint circumscribing spheres by default;
 - opaque imported T matrices support exact operator adjoints, but cannot
   provide hidden internal fields or shape/material derivatives;

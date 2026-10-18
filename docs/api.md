@@ -126,8 +126,15 @@ Common source descriptors include:
 `PlaneWave` specifies its amplitude at `focal_point`. Dipole moments are
 specified at their finite emitter positions. Both support finite E/H evaluation
 in passive absorbing hosts; point-dipole self-power there requires a microscopic
-emitter model. Gaussian, focused, and Bessel beam models use real-angle spectra
-in a nonabsorbing host. `Simulation` currently requires a nonabsorbing host.
+emitter model. Bessel rings specify their spectral amplitude at finite `center`
+and also support passive complex hosts, including angular-spectrum modulation.
+Gaussian and focused profile/pupil models require a nonabsorbing host; use
+`FinitePlaneSource` to prescribe a boundary in an absorbing host.
+
+`Simulation` supports passive absorbing hosts with finite pairwise coupling on
+NumPy and CuPy, including source blocks and coherent polarization channels.
+The host index must be finite with positive real and nonnegative imaginary
+parts. MLFMM and periodic propagation currently require a real host.
 
 Custom `LocalExpansionSource` implementations expose `outgoing_lmax` and
 `outgoing_coeffs(*, dtype=...)` with one row per emitter returned by
@@ -148,7 +155,7 @@ The boundary and its finite E/H fields and regular projections support
 passive absorbing hosts. Its incident far-angle spectrum and power at infinity
 are not inferred, so `farfield.initial`, `farfield.total`, and flux diagnostics
 are unavailable. The scattered angular spectrum and finite total fields remain
-available. The current `Simulation` host restriction still applies.
+available.
 
 ## Postprocessing
 
@@ -166,13 +173,18 @@ unit observation direction `d`, their TE/TM coefficients define
 `F = -2*pi*i*(coeff_te*e_phi + coeff_tm*e_theta)` and the asymptotic field
 `E(origin + R*d) ~ exp(i*k*R)/(k*R) * F(d)`. Changing the reference origin
 by `delta` multiplies `F` by `exp(i*k*d.delta)`. These amplitudes remain defined
-in absorbing hosts, while lossless far-field power and cross-section formulas
-are unavailable there.
+in absorbing hosts. Automatic `power`, `cross_sections`, and hemispheric
+decompositions are `None` there; direct requests for lossless flux/cross-section
+normalizations raise. Finite-surface Poynting flux remains meaningful and
+includes host absorption between surfaces. It is not power at infinity.
 
 Dipole diagnostics:
 
 - `pyceles.compute_dipole_power_ldos`
 - `pyceles.compute_dipole_ldos_enhancement`
+
+These dipole self-power/LDOS normalizations require a nonabsorbing host.
+Finite dipole fields away from the emitter remain available in absorbing hosts.
 
 Power accounting is exposed uniformly through `ChannelResult.power`
 (including the directly solved `SimulationResult` subtype), as an immutable
@@ -249,6 +261,9 @@ the interior mask is unknown. For a known exterior-only slice, redundant totals
 may be omitted if the saved initial and scattered fields suffice to reconstruct
 them. Total Poynting vectors require E and H, including interference; separate
 initial and scattered intensities do not suffice.
+
+Finite-channel HDF5 output preserves the complex host index and wavenumber,
+including complex wavevector metadata in saved angular spectra.
 
 ## Implementation modules
 

@@ -958,7 +958,7 @@ def test_plane_wave_circumsphere_flux_matches_local_absorption_single_sphere(
 
     flux_diag = circumsphere_absorbed_power_quadrature(
         coeffs=run.coeffs,
-        k=run.k,
+        k=run.k.real,
         lmax=cfg.lmax,
         beam=source,
         polar_angles=cfg.polar_angles,

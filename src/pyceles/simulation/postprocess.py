@@ -265,7 +265,7 @@ def _build_channel_diagnostics(
     local_initial_coeffs: Any | None = None,
     local_coeffs: Any | None = None,
     farfield: FarFieldPatterns,
-    k: float,
+    k: complex,
     k0: float,
     accum_dtype: np.dtype,
 ) -> tuple[
@@ -281,6 +281,11 @@ def _build_channel_diagnostics(
     diagnostics in the future.
     """
     cfg = sim.config
+    # These optional diagnostics use lossless-host flux normalization; outgoing
+    # angular amplitudes and finite fields remain defined in absorbing hosts.
+    if complex(cfg.n_medium).imag != 0.0:
+        return None, None, None, None
+    k = k.real
     local_b = initial_coeffs if local_initial_coeffs is None else local_initial_coeffs
     local_x = coeffs if local_coeffs is None else local_coeffs
 
@@ -396,7 +401,7 @@ def _assemble_channel_result(
     initial_coeffs: np.ndarray,
     rhs: np.ndarray,
     coeffs: np.ndarray,
-    k: float,
+    k: complex,
     k0: float,
     compute_dtype: np.dtype,
     accum_dtype: np.dtype,
@@ -439,7 +444,7 @@ def build_single_channel_result(
     rhs_flat: np.ndarray,
     coeffs: np.ndarray,
     backend_coeffs: Any | None = None,
-    k: float,
+    k: complex,
     k0: float,
     compute_dtype: np.dtype,
     accum_dtype: np.dtype,
@@ -544,7 +549,7 @@ def postprocess_sources_impl(
                 sim,
                 source=solved.sources[label],
                 coeffs=np.asarray(x_col),
-                k=float(solved.k),
+                k=solved.k.real,
             )
             backend_coeffs = (
                 None if backend_coeffs_by_label is None else backend_coeffs_by_label[label]
@@ -584,7 +589,7 @@ def postprocess_sources_impl(
                 sim,
                 source=solved.sources[label],
                 retention=retained,
-                k=float(solved.k),
+                k=solved.k,
                 k0=float(solved.k0),
                 coeffs=np.asarray(x_col),
                 rhs=np.asarray(rhs_col, dtype=accum_dtype).reshape(Ns, Nm),
@@ -637,7 +642,7 @@ def postprocess_sources_impl(
             rhs_flat=np.asarray(rhs_col, dtype=accum_dtype).reshape(Ns * Nm),
             coeffs=x_col,
             backend_coeffs=backend_coeffs,
-            k=float(solved.k),
+            k=solved.k,
             k0=float(solved.k0),
             compute_dtype=compute_dtype,
             accum_dtype=accum_dtype,
@@ -764,7 +769,7 @@ def run_polarizations_impl(
             source=source,
             a_first=a_te,
             a_second=a_tm,
-            k=run_te.k,
+            k=run_te.k.real,
             n_medium=sim.config.n_medium,
         )
         if mixed_initial_coeffs is None or local_mixed_coeffs is None:

@@ -115,8 +115,9 @@ def test_prescribed_tangential_plane_profile_is_independent_of_host():
     )
 
 
-def test_plane_boundary_real_host_pairwise_fields_and_source_blocks():
-    source = _gaussian_plane(1.33, polar_angle=0.2, azimuthal_angle=0.4)
+@pytest.mark.parametrize("host", [1.33, 1.33 + 0.1j])
+def test_plane_boundary_pairwise_fields_and_source_blocks(host):
+    source = _gaussian_plane(host, polar_angle=0.2, azimuthal_angle=0.4)
     sim = pcl.Simulation(
         pcl.SimulationConfig(
             wavelength=600,

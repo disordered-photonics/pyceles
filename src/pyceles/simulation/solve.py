@@ -380,7 +380,7 @@ def _prepare_linear_system(
     *,
     labels: tuple[str, ...],
     initial_coeffs: Mapping[str, np.ndarray],
-    k: float,
+    k: complex,
     k_parallel: np.ndarray | None,
     compute_dtype: np.dtype,
     accum_dtype: np.dtype,
@@ -517,7 +517,8 @@ def _solve_sources_impl(
     Nm = n_modes(cfg.lmax)
     unknowns = Ns * Nm
     k0 = 2.0 * np.pi / float(cfg.wavelength)
-    k = k0 * float(np.real(cfg.n_medium))
+    medium = complex(cfg.n_medium)
+    k = k0 * (medium.real if medium.imag == 0.0 else medium)
 
     solver_method = cfg.solver_method
     solver_name = str(solver_method).lower()
@@ -576,7 +577,7 @@ def _solve_sources_impl(
         sim,
         labels=labels,
         initial_coeffs=initial_coeffs,
-        k=float(k),
+        k=k,
         k_parallel=k_parallel,
         compute_dtype=compute_dtype,
         accum_dtype=accum_dtype,
@@ -692,7 +693,7 @@ def _solve_sources_impl(
         initial_coeffs=initial_coeffs,
         rhs=rhs_out,
         coeffs=coeffs,
-        k=float(k),
+        k=k,
         k0=float(k0),
         compute_dtype=str(compute_dtype),
         accum_dtype=str(accum_dtype),

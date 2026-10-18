@@ -8,10 +8,10 @@ retain that precision. All refractive indices are absolute, nonmagnetic.
 import numpy as np
 import pytest
 
-from pyceles.core.operators import assemble_dense_A_numpy, prepare_matvec
 from pyceles.core.particles import spheres_from_arrays
 from pyceles.core.sources import PlaneWave
-from pyceles.postprocessing.nearfield import compute_near_field_components
+from pyceles.postprocessing.nearfield import compute_near_field
+from pyceles.simulation import Simulation, SimulationConfig
 
 pytestmark = pytest.mark.reference
 
@@ -22,43 +22,30 @@ def test_four_sphere_internal_fields_against_mstm(dtype, backend, request):
     if backend == "cupy":
         request.getfixturevalue("cupy_runtime")
     host = 1.33 + 0.5j
-    k = 2 * np.pi / 600 * host
     positions = np.array([[-312, -108, -132], [246, -186, -48], [-114, 288, 126], [198, 162, 264]])
     particles = spheres_from_arrays(
         positions=positions,
         radii=np.array([45, 57, 39, 51]),
         refractive_indices=2 + 0.1j,
     )
-    operator = prepare_matvec(
-        lmax=5,
-        k=k,
-        n_medium=host,
+    simulation = Simulation(
+        SimulationConfig(
+            wavelength=600,
+            n_medium=host,
+            lmax=5,
+            radial_lut_dr=600 / 4096,
+            operator_backend=backend,
+            compute_dtype=dtype.__name__,
+            solver_method="direct",
+            verbose=False,
+        ),
         particles=particles,
-        radial_lut_dr=600 / 4096,
-        operator_dtype=dtype,
     )
     source = PlaneWave(600, medium_n=host, polarization="TM")
-    incident = source.incident_coeffs(positions, 5, dtype=dtype)
-    coefficients = np.linalg.solve(
-        assemble_dense_A_numpy(operator),
-        operator.rhs_Tb(incident.reshape(-1)),
-    ).reshape(4, -1)
+    run = simulation.run(source, include_farfield=False)
     # Two samples on a line inside the first sphere, on either side of its centre.
     points = np.array([[-312, -108, -159], [-312, -108, -123]])
-    fields = compute_near_field_components(
-        points,
-        coeffs=coefficients,
-        k=k,
-        lmax=5,
-        particles=particles,
-        n_medium=host,
-        backend=backend,
-        compute_dtype=dtype,
-        beam=source,
-        polar_angles=np.empty(0),
-        azimuthal_angles=np.empty(0),
-        lut_dr=600 / 4096,
-    )
+    fields = compute_near_field(run, points=points, show_progress=False)
     assert fields.inside_mask.all()
     np.testing.assert_array_equal(fields.E_total, fields.E_internal)
     np.testing.assert_array_equal(fields.H_total, fields.H_internal)

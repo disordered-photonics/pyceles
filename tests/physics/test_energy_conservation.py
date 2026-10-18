@@ -1,12 +1,86 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 import pyceles as pcl
 from pyceles.core.particles import spheres_from_arrays
 from pyceles.core.tmatrix import pec_mie_cross_sections
 from pyceles.postprocessing.farfield.periodic import periodic_plane_wave_orders
 from pyceles.postprocessing.farfield.power import local_absorbed_power_from_exciting
+from pyceles.postprocessing.nearfield import poynting
+
+
+@pytest.mark.parametrize("host", [1.33, 1.33 + 0.2j])
+@pytest.mark.parametrize("kind", ["plane", "dipole"])
+@pytest.mark.parametrize("dtype", ["complex64", "complex128"])
+def test_host_shell_flux_loss_equals_volume_absorption(host, kind, dtype):
+    """Poynting's theorem in a source-free shell, with stored Z0*H and exp(-i*omega*t).
+
+    div Re(E cross conj(Z0*H))/2 = -k0*Im(n_host**2)*|E|**2/2.
+    Both particles and the dipole emitter lie inside the inner surface.
+    """
+    wavelength = 2 * np.pi  # k0=1 in the same arbitrary length unit as the geometry.
+    source = (
+        pcl.PlaneWave(wavelength, medium_n=host, polar_angle=0.4, amplitude=0.7 - 0.2j)
+        if kind == "plane"
+        else pcl.DipoleSource(
+            wavelength,
+            medium_n=host,
+            position=(0, -0.4, -0.1),
+            dipole_moment=(1, 0.3j, -0.2),
+            radial_lut_dr=wavelength / 32768,
+        )
+    )
+    run = pcl.Simulation(
+        pcl.SimulationConfig(
+            wavelength=wavelength,
+            n_medium=host,
+            lmax=2,
+            solver_method="direct",
+            compute_dtype=dtype,
+            radial_lut_dr=wavelength / 32768,
+            verbose=False,
+        ),
+        particles=[
+            pcl.Sphere((-0.22, 0, 0), 0.12, 1.7 + 0.05j),
+            pcl.Sphere((0.3, 0.1, 0), 0.1, 1.6 + 0.03j),
+        ],
+    ).run(source, include_farfield=False)
+    mu, w_mu = np.polynomial.legendre.leggauss(16)
+    phi = np.arange(32) * (2 * np.pi / 32)
+    normals = np.stack(
+        np.broadcast_arrays(
+            np.sqrt(1 - mu[:, None] ** 2) * np.cos(phi),
+            np.sqrt(1 - mu[:, None] ** 2) * np.sin(phi),
+            mu[:, None],
+        ),
+        axis=-1,
+    ).reshape(-1, 3)
+    angular_weights = np.repeat(w_mu, len(phi)) * (2 * np.pi / len(phi))
+    inner, outer = 0.9, 1.6
+    nodes, weights = np.polynomial.legendre.leggauss(16)
+    radii = np.r_[inner, outer, (inner + outer) / 2 + (outer - inner) / 2 * nodes]
+    fields = pcl.compute_near_field(
+        run, points=radii[:, None, None] * normals[None, :, :], show_progress=False
+    )
+    assert not np.any(fields.inside_mask)
+    radial_flux = np.sum(poynting(fields.E_total[:2], fields.H_total[:2]) * normals, axis=-1)
+    flux = radii[:2] ** 2 * (radial_flux @ angular_weights)
+    electric_integral = np.sum(np.abs(fields.E_total[2:]) ** 2, axis=-1) @ angular_weights
+    absorption = (
+        0.5
+        * run.k0
+        * (complex(host) ** 2).imag
+        * (outer - inner)
+        / 2
+        * np.dot(weights * radii[2:] ** 2, electric_integral)
+    )
+    scale = max(np.max(np.abs(flux)), abs(absorption))
+    tolerance = 1e-5 if dtype == "complex64" else 1e-7
+    assert abs(flux[0] - flux[1] - absorption) / scale < tolerance
+    if complex(host).imag:
+        assert absorption > 0 and flux[0] > flux[1]
 
 
 def test_lossless_cluster_plane_wave_has_negligible_absorption():
@@ -150,7 +224,7 @@ def test_periodic_raw_flux_defect_matches_local_power_defect_for_exact_ewald():
         positions=sim.positions,
         coeffs=perturbed.reshape(sim.positions.shape[0], -1),
         lmax=cfg.lmax,
-        k=float(solved.k),
+        k=solved.k.real,
         n_medium=cfg.n_medium,
     )
     assert payload.power.incident_power is not None

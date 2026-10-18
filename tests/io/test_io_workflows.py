@@ -127,17 +127,18 @@ def test_no_scatterer_run_roundtrip_io_workflow(tmp_path):
     assert "diagnostics" in loaded
 
 
-def test_save_simulation_h5_geometry_loads_particles(tmp_path):
+@pytest.mark.parametrize("host", [1.0, 1.33 + 0.1j])
+def test_save_simulation_h5_geometry_loads_particles(tmp_path, host):
     source = PlaneWave(
         wavelength=550.0,
-        medium_n=1.0 + 0j,
+        medium_n=host,
         polarization="TE",
         polar_angle=0.0,
         azimuthal_angle=0.0,
     )
     cfg = SimulationConfig(
         wavelength=550.0,
-        n_medium=1.0 + 0j,
+        n_medium=host,
         lmax=2,
         solver_method="direct",
         verbose=False,
@@ -167,12 +168,21 @@ def test_save_simulation_h5_geometry_loads_particles(tmp_path):
     assert isinstance(geometry_particles, ParticleCollection)
     assert len(geometry_particles) == 1
     assert geometry_particles[0] == particles[0]
+    assert geometry["attrs"]["n_medium"] == host
+    import h5py
+
+    with h5py.File(out, "r") as h5:
+        assert h5["far_field"].attrs["k_medium"] == run.k == 2 * np.pi / 550 * host
+    if complex(host).imag:
+        assert "power" not in loaded["diagnostics"]
+        assert "cross_sections" not in loaded["diagnostics"]
     saved = cast(dict[str, Any], loaded["near_field_components"])
     np.testing.assert_array_equal(saved["inside"], near.inside)
     assert np.any(near.inside) and not np.all(near.inside)
-    for key, values in zip(("E", "H"), near.field_maps["total"], strict=True):
+    for key, values, internal in zip(
+        ("E", "H"), near.field_maps["total"], near.field_maps["internal"], strict=True
+    ):
         np.testing.assert_array_equal(saved["fields"]["total"][key], values)
-        internal = near.field_maps["internal"][("E", "H").index(key)]
         np.testing.assert_array_equal(values[near.inside], internal[near.inside])
 
 

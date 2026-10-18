@@ -10,6 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Ideal Bessel rings support passive complex hosts and complex spectral
   amplitudes referenced to a finite centre, including SLM modulation.
+- Finite pairwise simulations support passive absorbing hosts on NumPy and
+  CuPy, with single-source, source-block and coherent polarization workflows,
+  finite E/H and native internal fields. Results and HDF5 metadata preserve
+  complex wavenumbers. Automatic lossless power/cross-section diagnostics are
+  absent; point-emitter self-power/LDOS normalization requires a nonabsorbing host.
 - `FinitePlaneSource` prescribes tangential Fourier data on an oriented finite
   plane, including evanescent waves, passive complex hosts, CPU/GPU finite E/H,
   and regular SVWF projection. Its sampling is independent of output angles;
@@ -27,8 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Plane-wave projection and incident E/H evaluation support passive complex
   hosts and complex amplitudes specified at a finite reference point. Shared
   homogeneous-spectrum validation preserves complex wavevectors and is
-  independent of the choice of length units; `Simulation` still requires a
-  nonabsorbing host.
+  independent of the choice of length units.
 - Finite pairwise prepared operators retain passive complex host wavenumbers
   on NumPy and CuPy, including exact Hermitian-adjoint actions.
 - Translation and near-field radial tables support passive complex wavenumbers,
