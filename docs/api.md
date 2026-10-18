@@ -244,6 +244,12 @@ Workflow-level HDF5 helpers:
 - `pyceles.save_simulation_h5`
 - `pyceles.load_simulation_h5`
 
+Saved near-field totals are retained when particle interiors are present or
+the interior mask is unknown. For a known exterior-only slice, redundant totals
+may be omitted if the saved initial and scattered fields suffice to reconstruct
+them. Total Poynting vectors require E and H, including interference; separate
+initial and scattered intensities do not suffice.
+
 ## Implementation modules
 
 Modules under `pyceles.core`, `pyceles.linear`, `pyceles.simulation`, and

@@ -411,7 +411,10 @@ def save_near_field_components_h5(
         "total": {"E": Et, "H": Ht, "S": St},
       }
     When `drop_redundant_total=True` and both `initial` and `scattered` are
-    present, a provided `total` family is omitted to avoid redundant storage.
+    present, `total` is omitted only when an all-exterior `inside` mask and
+    the supplied fields establish that it can be reconstructed. Inside
+    particles, the physical total is not generally initial+scattered. Total
+    Poynting vectors require E and H, including their interference terms.
     """
     fields_to_write = dict(fields)
     omitted_total = False
@@ -420,9 +423,18 @@ def save_near_field_components_h5(
         and "total" in fields_to_write
         and "initial" in fields_to_write
         and "scattered" in fields_to_write
+        and inside is not None
+        and not np.any(inside)
     ):
-        fields_to_write.pop("total")
-        omitted_total = True
+        total = fields_to_write["total"]
+        required = {"E", "H"} if "S" in total else total.keys()
+        if all(
+            key in fields_to_write[family]
+            for family in ("initial", "scattered")
+            for key in required
+        ):
+            fields_to_write.pop("total")
+            omitted_total = True
 
     with h5py.File(_pathlike(path), mode) as h5:
         root = _reset_group(h5, group)

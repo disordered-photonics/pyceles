@@ -49,6 +49,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stages without constraints on unused box expansions. Reject catastrophic
   sampled-translator dynamic range before preparing leaf maps, using native
   outgoing Hankel evaluation.
+- Preserve saved physical interior E/H totals and totals that cannot be
+  reconstructed from the supplied fields, including Poynting interference.
 - Preserve small-amplitude solves across SciPy and native CuPy Krylov methods,
   including warm starts, absolute tolerances, block right-hand sides, and
   dimensional LSQR diagnostics. Residual directions no longer use an absolute

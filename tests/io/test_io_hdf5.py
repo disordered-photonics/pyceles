@@ -263,6 +263,51 @@ def test_near_field_components_write(tmp_path):
     np.testing.assert_allclose(loaded["fields"]["initial"]["H"], H)
 
 
+@pytest.mark.parametrize("inside", [None, np.array([[True, False]])])
+def test_near_field_components_preserve_total_without_known_exterior_mask(tmp_path, inside):
+    import h5py
+
+    path = tmp_path / "interior_total.h5"
+    X = np.zeros((1, 2))
+    zero = np.zeros((1, 2, 3), dtype=np.complex128)
+    internal_total = zero.copy()
+    internal_total[0, 0, 0] = 2.0 + 1.0j
+    save_near_field_components_h5(
+        path,
+        X=X,
+        Z=X,
+        inside=inside,
+        fields={
+            "initial": {"E": zero},
+            "scattered": {"E": zero},
+            "total": {"E": internal_total},
+        },
+    )
+    with h5py.File(path, "r") as h5:
+        group = h5["near_field_components"]
+        assert "total" in group
+        assert not bool(group.attrs["total_omitted_as_redundant"])
+        np.testing.assert_array_equal(group["total/E"][...], internal_total)
+
+
+def test_near_field_poynting_total_is_not_reconstructed_from_intensities(tmp_path):
+    path = tmp_path / "interference.h5"
+    grid = np.zeros((1, 2))
+    one = np.ones((1, 2, 3))
+    # Equal coherent fields: the total flux includes interference, so it is
+    # four times one field's flux rather than the sum of the two intensities.
+    save_near_field_components_h5(
+        path,
+        X=grid,
+        Z=grid,
+        inside=np.zeros_like(grid, dtype=bool),
+        fields={"initial": {"S": one}, "scattered": {"S": one}, "total": {"S": 4 * one}},
+    )
+    loaded = load_near_field_components_h5(path)
+    np.testing.assert_array_equal(loaded["fields"]["total"]["S"], 4 * one)
+    assert not loaded["attrs"]["total_omitted_as_redundant"]
+
+
 def test_save_mapping_h5_nested(tmp_path):
     path = tmp_path / "diag.h5"
     save_mapping_h5(

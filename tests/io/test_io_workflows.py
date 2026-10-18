@@ -6,7 +6,7 @@ import pytest
 from pyceles.core.fields import PlaneWave
 from pyceles.core.particles import ParticleCollection, Sphere, spheres_from_arrays
 from pyceles.io.workflows import load_simulation_h5, save_simulation_h5
-from pyceles.postprocessing.nearfield import NearFieldSlice
+from pyceles.postprocessing.nearfield import NearFieldSlice, compute_near_field_slice
 from pyceles.simulation import (
     ResultRetention,
     Simulation,
@@ -150,17 +150,14 @@ def test_save_simulation_h5_geometry_loads_particles(tmp_path):
     sim = Simulation(cfg, particles=particles)
     run = sim.run(source, include_farfield=False)
 
-    X, Z = np.meshgrid(np.linspace(-1.0, 1.0, 3), np.linspace(-1.0, 1.0, 3), indexing="xy")
-    zero = np.zeros((*X.shape, 3), dtype=np.complex128)
-    near = NearFieldSlice(
-        axis_0=X,
-        axis_1=Z,
-        inside=np.zeros_like(X, dtype=bool),
-        field_maps={"initial": (zero, zero)},
-        plane="y",
-        plane_value=0.0,
-        axis_0_label="x",
-        axis_1_label="z",
+    near = compute_near_field_slice(
+        run,
+        axis_0_min=-150,
+        axis_0_max=150,
+        axis_1_min=-150,
+        axis_1_max=150,
+        dx=150,
+        show_progress=False,
     )
     out = save_simulation_h5(run, near, tmp_path / "particle_roundtrip.h5")
     loaded = cast(dict[str, Any], load_simulation_h5(out))
@@ -170,6 +167,13 @@ def test_save_simulation_h5_geometry_loads_particles(tmp_path):
     assert isinstance(geometry_particles, ParticleCollection)
     assert len(geometry_particles) == 1
     assert geometry_particles[0] == particles[0]
+    saved = cast(dict[str, Any], loaded["near_field_components"])
+    np.testing.assert_array_equal(saved["inside"], near.inside)
+    assert np.any(near.inside) and not np.all(near.inside)
+    for key, values in zip(("E", "H"), near.field_maps["total"], strict=True):
+        np.testing.assert_array_equal(saved["fields"]["total"][key], values)
+        internal = near.field_maps["internal"][("E", "H").index(key)]
+        np.testing.assert_array_equal(values[near.inside], internal[near.inside])
 
 
 def test_save_simulation_h5_accepts_minimal_result_retention(tmp_path):
