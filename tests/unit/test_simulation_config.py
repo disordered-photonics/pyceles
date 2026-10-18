@@ -318,12 +318,11 @@ def test_simulation_config_rejects_nonfinite_physical_inputs(field: str, invalid
         cast(Any, SimulationConfig)(**{field: invalid, "verbose": False})
 
 
-def test_passive_complex_host_requires_finite_pairwise_coupling() -> None:
+def test_passive_complex_host_requires_finite_coupling() -> None:
     host = 1.33 + 0.1j
     assert SimulationConfig(n_medium=host, verbose=False).n_medium == host
-    with pytest.raises(NotImplementedError, match="finite pairwise"):
-        SimulationConfig(n_medium=host, coupling_backend="mlfmm", verbose=False)
-    with pytest.raises(NotImplementedError, match="finite pairwise"):
+    assert SimulationConfig(n_medium=host, coupling_backend="mlfmm", verbose=False).n_medium == host
+    with pytest.raises(NotImplementedError, match="Periodic"):
         SimulationConfig(
             n_medium=host,
             periodic=PeriodicSpec(lattice=RectangularLattice2D(900, 950)),

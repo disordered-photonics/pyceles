@@ -131,10 +131,11 @@ and also support passive complex hosts, including angular-spectrum modulation.
 Gaussian and focused profile/pupil models require a nonabsorbing host; use
 `FinitePlaneSource` to prescribe a boundary in an absorbing host.
 
-`Simulation` supports passive absorbing hosts with finite pairwise coupling on
-NumPy and CuPy, including source blocks and coherent polarization channels.
+`Simulation` supports passive absorbing hosts with finite pairwise or MLFMM
+coupling on NumPy and CuPy, including source blocks and coherent polarization
+channels.
 The host index must be finite with positive real and nonnegative imaginary
-parts. MLFMM and periodic propagation currently require a real host.
+parts. Periodic propagation currently requires a real host.
 
 Custom `LocalExpansionSource` implementations expose `outgoing_lmax` and
 `outgoing_coeffs(*, dtype=...)` with one row per emitter returned by

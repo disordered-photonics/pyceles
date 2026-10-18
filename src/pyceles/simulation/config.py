@@ -158,8 +158,8 @@ class SimulationConfig:
       intermediate array use the wider dtype.
 
     Geometry / physics policy:
-    - finite pairwise systems support passive complex `n_medium`; periodic
-      and MLFMM propagation require a real host
+    - finite pairwise and MLFMM systems support passive complex `n_medium`;
+      periodic propagation requires a real host
     - circumscribing-sphere overlap checks remain enabled by default because
       the multiple-scattering T-matrix formulation assumes disjoint
       circumscribing spheres
@@ -314,11 +314,8 @@ class SimulationConfig:
             )
         object.__setattr__(self, "coupling_backend", coupling_backend)
 
-        if n_medium.imag != 0.0 and (self.periodic is not None or coupling_backend == "mlfmm"):
-            raise NotImplementedError(
-                "Complex hosts require finite pairwise coupling; periodic and MLFMM "
-                "propagation require a real host."
-            )
+        if n_medium.imag != 0.0 and self.periodic is not None:
+            raise NotImplementedError("Periodic propagation requires a real host.")
 
         if self.periodic is not None:
             if not isinstance(self.periodic, PeriodicSpec):

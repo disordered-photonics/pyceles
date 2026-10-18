@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Finite MLFMM supports passive absorbing hosts on NumPy and CuPy, including
+  physical regular reception, exact adjoints of the sampled hierarchy,
+  block GPU actions, and finite-field postprocessing.
 - Ideal Bessel rings support passive complex hosts and complex spectral
   amplitudes referenced to a finite centre, including SLM modulation.
 - Finite pairwise simulations support passive absorbing hosts on NumPy and
@@ -49,6 +52,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and near-field showcase plotting. Particle-centre fields use analytic limits.
 
 ### Fixed
+- Dense CuPy MLFMM uploads accept the grouped NumPy leaf maps as well as
+  per-leaf maps, reusing their existing storage during preparation.
 - Reject nonfinite simulation wavelength, host index, radial-table spacing,
   and circumscribing-sphere overlap tolerance.
 - Keep MLFMM partitions independent of length units and allow exact-direct

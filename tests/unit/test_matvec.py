@@ -1278,9 +1278,8 @@ def test_pairwise_preparation_rejects_physical_queries_in_singular_padding():
         )
 
 
-@pytest.mark.parametrize("periodic", [None, PeriodicSpec(lattice=RectangularLattice2D(600, 600))])
-def test_complex_preparation_rejects_unsupported_coupling_methods(periodic):
-    with pytest.raises(NotImplementedError, match="finite pairwise"):
+def test_complex_preparation_rejects_periodic_coupling():
+    with pytest.raises(NotImplementedError, match="Periodic"):
         prepare_matvec(
             lmax=1,
             k=1 + 0.1j,
@@ -1288,6 +1287,5 @@ def test_complex_preparation_rejects_unsupported_coupling_methods(periodic):
                 positions=np.zeros((1, 3)), radii=np.ones(1), refractive_indices=1.5
             ),
             radial_lut_dr=0.01,
-            periodic=periodic,
-            coupling_backend="mlfmm" if periodic is None else "pairwise",
+            periodic=PeriodicSpec(lattice=RectangularLattice2D(600, 600)),
         )

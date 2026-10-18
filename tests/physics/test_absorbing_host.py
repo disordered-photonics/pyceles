@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 import pyceles as pcl
+from pyceles.core.operators import MLFMMOptions
 from pyceles.core.sources import JonesPolarizedSource, Source
 from pyceles.postprocessing.farfield import scattering_cross_section
 
@@ -28,6 +29,50 @@ def _two_sphere_simulation(method="direct"):
             pcl.Sphere((160, 20, 30), 35, 1.6 + 0.02j),
         ],
     )
+
+
+@pytest.mark.parametrize("backend", ["numpy", pytest.param("cupy", marks=pytest.mark.gpu)])
+def test_absorbing_mlfmm_public_workflow_matches_pairwise(backend, request):
+    if backend == "cupy":
+        request.getfixturevalue("cupy_runtime")
+    positions = np.indices((3, 3, 3)).reshape(3, -1).T * 300.0 - 300.0
+    particles = pcl.spheres_from_arrays(
+        positions=positions, radii=np.full(len(positions), 35.0), refractive_indices=1.8 + 0.03j
+    )
+    config = pcl.SimulationConfig(
+        wavelength=600,
+        n_medium=1.33 + 0.1j,
+        lmax=2,
+        compute_dtype="complex64",
+        solver_rtol=2e-6,
+        radial_lut_dr=600 / 8192,
+        verbose=False,
+        polar_angles=np.linspace(0, np.pi, 9),
+        azimuthal_angles=np.arange(12) * np.pi / 6,
+    )
+    source = pcl.PlaneWave(600, medium_n=config.n_medium, polarization=(0.6, 0.8j), polar_angle=0.4)
+    expected = pcl.Simulation(config, particles=particles).run(source)
+    simulation = pcl.Simulation(
+        replace(
+            config,
+            coupling_backend="mlfmm",
+            operator_backend=backend,
+            mlfmm_options=MLFMMOptions(
+                max_leaf_particles=4, max_depth=2, accuracy_level=2, order_additive=2
+            ),
+        ),
+        particles=particles,
+    )
+    actual = simulation.run(source)
+    assert actual.k == expected.k and actual.k.imag > 0
+    assert actual.power is None and actual.cross_sections is None
+    assert np.linalg.norm(actual.coeffs - expected.coeffs) / np.linalg.norm(expected.coeffs) < 1e-4
+    points = np.array([[0, 0, 0], [-120, 150, 80]])
+    fields = pcl.compute_near_field(actual, points=points, show_progress=False)
+    reference = pcl.compute_near_field(expected, points=points, show_progress=False)
+    np.testing.assert_array_equal(fields.inside_mask, [True, False])
+    for value, target in ((fields.E_total, reference.E_total), (fields.H_total, reference.H_total)):
+        assert np.linalg.norm(value - target) / np.linalg.norm(target) < 1e-4
 
 
 @pytest.mark.parametrize("method", ["direct", "gmres", "bicgstab"])

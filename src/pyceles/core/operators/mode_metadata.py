@@ -33,6 +33,13 @@ def mode_m_table(lmax: int) -> np.ndarray:
     return mode_metadata_tables(int(lmax))[2]
 
 
+@cache
+def mode_reverse_m_indices(lmax: int) -> np.ndarray:
+    """Return the involution m -> -m within each complete SVWF (tau, l) block."""
+    indices = np.arange(n_modes(int(lmax)), dtype=np.int64)
+    return expose_read_only_view(indices - 2 * mode_m_table(int(lmax)))
+
+
 def mode_tau_l_tables(lmax: int) -> tuple[np.ndarray, np.ndarray]:
     """Return read-only `(tau, l)` arrays indexed by flattened SVWF mode id."""
     tau, ell, _m = mode_metadata_tables(int(lmax))
@@ -81,5 +88,6 @@ __all__ = [
     "mode_m_table",
     "mode_metadata_tables",
     "mode_pair_p_range_tables",
+    "mode_reverse_m_indices",
     "mode_tau_l_tables",
 ]

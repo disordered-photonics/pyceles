@@ -12,7 +12,7 @@ import scipy.sparse
 from tqdm.auto import tqdm
 
 from pyceles.core.indexing import n_modes
-from pyceles.core.radial import sph_hankel1
+from pyceles.core.radial import passive_wavenumber, sph_hankel1
 from pyceles.core.translation import (
     RadialLUT,
     translation_ab5_table,
@@ -43,6 +43,7 @@ from .mlfmm_partition import (
     uniform_box_coords,
     validate_leaf_size_floor,
 )
+from .mode_metadata import mode_reverse_m_indices
 
 MLFMMStage = Literal["direct", "single_level", "multilevel"]
 MLFMMLeafApplyMode = Literal["dense", "on_the_fly"]
@@ -204,7 +205,7 @@ class MLFMMCouplingOperator:
     """
 
     lmax: int
-    k: float
+    k: complex
     positions: np.ndarray
     radial_lut: RadialLUT
     resolved_plan: MLFMMResolvedPlan
@@ -240,7 +241,7 @@ class MLFMMCouplingOperator:
             far_dtype = np.dtype(self.far_dtype)
             y_near, y_far = apply_single_level_mlfmm(
                 lmax=int(self.lmax),
-                k=float(self.k),
+                k=self.k,
                 positions=self.positions,
                 x=x,
                 operators=self.single_level,
@@ -258,7 +259,7 @@ class MLFMMCouplingOperator:
             far_dtype = np.dtype(self.far_dtype)
             y_near, y_far = apply_multilevel_mlfmm(
                 lmax=int(self.lmax),
-                k=float(self.k),
+                k=self.k,
                 positions=self.positions,
                 x=x,
                 operators=self.multilevel,
@@ -281,7 +282,7 @@ class MLFMMCouplingOperator:
                 raise RuntimeError("Internal error: single-level operators are missing.")
             y_near, y_far = _apply_single_level_mlfmm_adjoint(
                 lmax=int(self.lmax),
-                k=float(self.k),
+                k=self.k,
                 positions=self.positions,
                 x=x,
                 operators=self.single_level,
@@ -295,7 +296,7 @@ class MLFMMCouplingOperator:
                 raise RuntimeError("Internal error: multilevel operators are missing.")
             y_near, y_far = _apply_multilevel_mlfmm_adjoint(
                 lmax=int(self.lmax),
-                k=float(self.k),
+                k=self.k,
                 positions=self.positions,
                 x=x,
                 operators=self.multilevel,
@@ -321,7 +322,7 @@ class MLFMMCouplingOperator:
             self._exact_block_cache = {}
         _populate_exact_leaf_near_cache(
             lmax=int(self.lmax),
-            k=float(self.k),
+            k=self.k,
             positions=self.positions,
             partition=self.resolved_plan.partition,
             radial_lut=self.radial_lut,
@@ -621,7 +622,7 @@ def estimate_rokhlin_order(ka: float, *, accuracy: int = 3) -> int:
 def box_order_rokhlin_like(
     *,
     particle_lmax: int,
-    k: float,
+    k: complex,
     box_half_size: float,
     accuracy: int = 3,
     additive: int = 2,
@@ -634,9 +635,7 @@ def box_order_rokhlin_like(
     """
 
     side_length = 2.0 * float(box_half_size)
-    base = estimate_rokhlin_order(abs(float(k)) * side_length, accuracy=int(accuracy)) + int(
-        additive
-    )
+    base = estimate_rokhlin_order(abs(k) * side_length, accuracy=int(accuracy)) + int(additive)
     return int(max(int(particle_lmax), base))
 
 
@@ -1096,14 +1095,14 @@ def _build_leaf_box_maps(
     *,
     lmax: int,
     box_order: int,
-    k: float,
+    k: complex,
     positions: np.ndarray,
     partition: MLFMMPartition,
     radial_lut: RadialLUT | None,
     dtype: np.dtype,
     leaf_map_backend: Literal["numpy", "cupy"] = "numpy",
 ) -> tuple[tuple[np.ndarray, ...], tuple[np.ndarray, ...]]:
-    """Build particle-to-box aggregation maps and adjoint box-to-particle receive maps."""
+    """Build aggregation and physical reception from opposite regular shifts."""
 
     backend = str(leaf_map_backend).strip().lower()
     if backend == "cupy":
@@ -1112,7 +1111,7 @@ def _build_leaf_box_maps(
         return build_leaf_box_maps_cupy(
             lmax=int(lmax),
             box_order=int(box_order),
-            k=float(k),
+            k=k,
             positions=np.asarray(positions, dtype=float),
             partition=partition,
             radial_lut=radial_lut,
@@ -1136,7 +1135,7 @@ def _build_leaf_box_maps(
             translation_block_rect(
                 int(box_order),
                 int(lmax),
-                float(k),
+                k,
                 np.asarray(leaf_center - positions[int(pidx)], dtype=float),
                 ab5=ab5,
                 radial_lut=radial_lut,
@@ -1150,8 +1149,26 @@ def _build_leaf_box_maps(
     aggregation = tuple(
         np.asarray(aggregation_by_id[leaf_id], dtype=dtype) for leaf_id in range(n_leaves)
     )
-    receive = [np.asarray(np.conjugate(agg).T, dtype=dtype) for agg in aggregation]
+    receive = [
+        _regular_leaf_receive_map(agg, lmax=lmax, box_order=box_order, k=k) for agg in aggregation
+    ]
     return tuple(aggregation), tuple(receive)
+
+
+def _regular_leaf_receive_map(
+    aggregation: np.ndarray, *, lmax: int, box_order: int, k: complex
+) -> np.ndarray:
+    """Build physical reception from particle-to-box aggregation.
+
+    In CELES ordering R=J_particle*G.T*J_box, where each J reverses m
+    within a (tau,l) block. Reception equals G.H only for real k.
+    """
+    if not complex(k).imag:
+        return np.conjugate(aggregation).T
+    part_modes = n_modes(lmax)
+    indices = np.arange(aggregation.shape[1]).reshape(-1, part_modes)
+    reverse_parts = indices[:, mode_reverse_m_indices(lmax)].reshape(-1)
+    return aggregation[np.ix_(mode_reverse_m_indices(box_order), reverse_parts)].T
 
 
 def _group_leaves_by_occupancy(partition: MLFMMPartition) -> tuple[tuple[MLFMMBox, ...], ...]:
@@ -1176,7 +1193,7 @@ def _build_numpy_leaf_apply_groups_dense(
     *,
     lmax: int,
     box_order: int,
-    k: float,
+    k: complex,
     positions: np.ndarray,
     partition: MLFMMPartition,
     radial_lut: RadialLUT | None,
@@ -1204,7 +1221,7 @@ def _build_numpy_leaf_apply_groups_dense(
                 translation_block_rect(
                     int(box_order),
                     int(lmax),
-                    float(k),
+                    k,
                     np.asarray(
                         np.asarray(leaf.center, dtype=float) - positions_arr[int(pidx)], dtype=float
                     ),
@@ -1268,7 +1285,7 @@ def _leaf_translation_blocks_from_pair_deltas(
     *,
     lmax_out: int,
     lmax_in: int,
-    k: float,
+    k: complex,
     pair_deltas: np.ndarray,
     radial_lut: RadialLUT | None,
     dtype: np.dtype,
@@ -1282,7 +1299,7 @@ def _leaf_translation_blocks_from_pair_deltas(
         translation_block_rect(
             int(lmax_out),
             int(lmax_in),
-            float(k),
+            k,
             np.asarray(delta, dtype=float),
             ab5=ab5,
             radial_lut=radial_lut,
@@ -1316,16 +1333,18 @@ def _leaf_box_states_from_dense_maps(
     partition: MLFMMPartition,
     aggregation: tuple[np.ndarray, ...],
     dtype: np.dtype,
+    adjoint: bool = False,
 ) -> np.ndarray:
     """Aggregate particle outgoing coefficients into one box state per occupied leaf."""
 
     nm = n_modes(int(lmax))
     arr = np.asarray(x, dtype=dtype).reshape(np.asarray(positions).shape[0], nm)
-    box_nm = aggregation[0].shape[0]
+    box_nm = aggregation[0].shape[1 if adjoint else 0]
     states = np.zeros((len(partition.leaves), box_nm), dtype=dtype)
     for leaf in partition.leaves:
         coeffs = arr[leaf.particle_indices].reshape(-1)
-        states[int(leaf.id)] = aggregation[int(leaf.id)] @ coeffs
+        matrix = aggregation[int(leaf.id)]
+        states[int(leaf.id)] = (matrix.conj().T if adjoint else matrix) @ coeffs
     return states
 
 
@@ -1333,18 +1352,22 @@ def _aggregate_leaf_box_states(
     *,
     lmax: int,
     box_order: int,
-    k: float,
+    k: complex,
     x: np.ndarray,
     leaf_groups: tuple[MLFMMLeafApplyGroup, ...],
     n_leaves: int,
     radial_lut: RadialLUT | None,
     dtype: np.dtype,
+    adjoint_receive: bool = False,
 ) -> np.ndarray:
     """Aggregate particle coefficients into grouped leaf box states."""
 
     nm = int(n_modes(int(lmax)))
     box_nm = int(n_modes(int(box_order)))
     arr = np.asarray(x, dtype=dtype).reshape(-1, nm)
+    reverse = adjoint_receive and k.imag != 0
+    if reverse:
+        arr = np.conjugate(arr[:, mode_reverse_m_indices(lmax)])
     states = np.zeros((int(n_leaves), box_nm), dtype=dtype)
     for group in leaf_groups:
         coeffs = arr[np.asarray(group.particle_indices, dtype=np.int64)]
@@ -1364,7 +1387,7 @@ def _aggregate_leaf_box_states(
         pair_blocks = _leaf_translation_blocks_from_pair_deltas(
             lmax_out=int(box_order),
             lmax_in=int(lmax),
-            k=float(k),
+            k=k,
             pair_deltas=group.pair_deltas,
             radial_lut=radial_lut,
             dtype=np.dtype(dtype),
@@ -1375,40 +1398,47 @@ def _aggregate_leaf_box_states(
             coeffs,
             optimize=True,
         )
-    return states
+    return np.conjugate(states[:, mode_reverse_m_indices(box_order)]) if reverse else states
 
 
 def _receive_leaf_boxes_to_particles(
     *,
     lmax: int,
     box_order: int,
-    k: float,
+    k: complex,
     n_particles: int,
     incoming_box: np.ndarray,
     leaf_groups: tuple[MLFMMLeafApplyGroup, ...],
     radial_lut: RadialLUT | None,
     dtype: np.dtype,
+    adjoint_aggregation: bool = False,
 ) -> np.ndarray:
-    """Apply grouped leaf receive maps or on-the-fly adjoints back to particles."""
+    """Apply regular reception or the true Hermitian adjoint of aggregation."""
 
     nm = int(n_modes(int(lmax)))
     box_nm = int(n_modes(int(box_order)))
     y_far = np.zeros((int(n_particles), nm), dtype=dtype)
     incoming = np.asarray(incoming_box, dtype=dtype).reshape(-1, box_nm)
+    use_adjoint = adjoint_aggregation or k.imag == 0
+    if not use_adjoint:
+        incoming = incoming[:, mode_reverse_m_indices(box_order)]
     for group in leaf_groups:
         leaf_ids = np.asarray(group.leaf_ids, dtype=np.int64)
         particle_indices = np.asarray(group.particle_indices, dtype=np.int64)
         if group.aggregation is not None:
-            # Reuse forward aggregation storage: A^H x = conj(A.T @ conj(x)).
-            # This avoids a full conjugated copy of the grouped leaf blocks.
+            # Reuse one aggregation tensor: real-k reception and true adjoints
+            # use G^H; complex-k reception uses J*G.T*J without a second tensor.
             contribution = np.einsum(
                 "gmb,gb->gm",
                 np.swapaxes(np.asarray(group.aggregation, dtype=dtype), 1, 2),
-                np.conjugate(incoming[leaf_ids]),
+                np.conjugate(incoming[leaf_ids]) if use_adjoint else incoming[leaf_ids],
                 optimize=True,
             )
-            np.conjugate(contribution, out=contribution)
+            if use_adjoint:
+                np.conjugate(contribution, out=contribution)
             contribution = contribution.reshape(particle_indices.shape[0], int(group.occupancy), nm)
+            if not use_adjoint:
+                contribution = contribution[..., mode_reverse_m_indices(lmax)]
             y_far[particle_indices] += contribution
             continue
         if group.pair_deltas is None:
@@ -1418,7 +1448,7 @@ def _receive_leaf_boxes_to_particles(
         pair_blocks = _leaf_translation_blocks_from_pair_deltas(
             lmax_out=int(box_order),
             lmax_in=int(lmax),
-            k=float(k),
+            k=k,
             pair_deltas=group.pair_deltas,
             radial_lut=radial_lut,
             dtype=np.dtype(dtype),
@@ -1426,10 +1456,13 @@ def _receive_leaf_boxes_to_particles(
         contribution = np.einsum(
             "gqmn,gm->gqn",
             pair_blocks,
-            np.conjugate(incoming[leaf_ids]),
+            np.conjugate(incoming[leaf_ids]) if use_adjoint else incoming[leaf_ids],
             optimize=True,
         )
-        np.conjugate(contribution, out=contribution)
+        if use_adjoint:
+            np.conjugate(contribution, out=contribution)
+        else:
+            contribution = contribution[..., mode_reverse_m_indices(lmax)]
         y_far[particle_indices] += contribution
     return y_far
 
@@ -1437,7 +1470,7 @@ def _receive_leaf_boxes_to_particles(
 def _exact_leaf_near_apply(
     *,
     lmax: int,
-    k: float,
+    k: complex,
     positions: np.ndarray,
     x: np.ndarray,
     partition: MLFMMPartition,
@@ -1464,7 +1497,7 @@ def _exact_leaf_near_apply(
                     if wij is None:
                         wij = translation_block(
                             int(lmax),
-                            float(k),
+                            k,
                             np.asarray(positions[int(i)] - positions[int(j)], dtype=float),
                             ab5=ab5,
                             radial_lut=radial_lut,
@@ -1480,7 +1513,7 @@ def _exact_leaf_near_apply(
                 if wij is None:
                     wij = translation_block(
                         int(lmax),
-                        float(k),
+                        k,
                         np.asarray(positions[int(i)] - positions[int(j)], dtype=float),
                         ab5=ab5,
                         radial_lut=radial_lut,
@@ -1492,7 +1525,7 @@ def _exact_leaf_near_apply(
                 if wji is None:
                     wji = translation_block(
                         int(lmax),
-                        float(k),
+                        k,
                         np.asarray(positions[int(j)] - positions[int(i)], dtype=float),
                         ab5=ab5,
                         radial_lut=radial_lut,
@@ -1507,7 +1540,7 @@ def _exact_leaf_near_apply(
 def _exact_leaf_near_adjoint_apply(
     *,
     lmax: int,
-    k: float,
+    k: complex,
     positions: np.ndarray,
     x: np.ndarray,
     partition: MLFMMPartition,
@@ -1530,7 +1563,7 @@ def _exact_leaf_near_adjoint_apply(
         if wij is None:
             wij = translation_block(
                 int(lmax),
-                float(k),
+                k,
                 np.asarray(positions_arr[int(i)] - positions_arr[int(j)], dtype=float),
                 ab5=ab5,
                 radial_lut=radial_lut,
@@ -1559,7 +1592,7 @@ def _exact_leaf_near_adjoint_apply(
 def _populate_exact_leaf_near_cache(
     *,
     lmax: int,
-    k: float,
+    k: complex,
     positions: np.ndarray,
     partition: MLFMMPartition,
     radial_lut: RadialLUT | None,
@@ -1583,7 +1616,7 @@ def _populate_exact_leaf_near_cache(
                     if key_ij not in block_cache:
                         block_cache[key_ij] = translation_block(
                             int(lmax),
-                            float(k),
+                            k,
                             np.asarray(positions_arr[int(i)] - positions_arr[int(j)], dtype=float),
                             ab5=ab5,
                             radial_lut=radial_lut,
@@ -1595,7 +1628,7 @@ def _populate_exact_leaf_near_cache(
                 if key_ij not in block_cache:
                     block_cache[key_ij] = translation_block(
                         int(lmax),
-                        float(k),
+                        k,
                         np.asarray(positions_arr[int(i)] - positions_arr[int(j)], dtype=float),
                         ab5=ab5,
                         radial_lut=radial_lut,
@@ -1604,7 +1637,7 @@ def _populate_exact_leaf_near_cache(
                 if key_ji not in block_cache:
                     block_cache[key_ji] = translation_block(
                         int(lmax),
-                        float(k),
+                        k,
                         np.asarray(positions_arr[int(j)] - positions_arr[int(i)], dtype=float),
                         ab5=ab5,
                         radial_lut=radial_lut,
@@ -1614,7 +1647,7 @@ def _populate_exact_leaf_near_cache(
 def build_single_level_mlfmm_operators(
     *,
     lmax: int,
-    k: float,
+    k: complex,
     positions: np.ndarray,
     partition: MLFMMPartition,
     radial_lut: RadialLUT | None = None,
@@ -1640,7 +1673,7 @@ def build_single_level_mlfmm_operators(
     shared_box_order = (
         box_order_rokhlin_like(
             particle_lmax=int(lmax),
-            k=float(k),
+            k=k,
             box_half_size=leaf_half_size,
             accuracy=int(accuracy_level),
             additive=int(order_additive),
@@ -1677,7 +1710,7 @@ def build_single_level_mlfmm_operators(
             leaf_groups = _build_numpy_leaf_apply_groups_dense(
                 lmax=int(lmax),
                 box_order=int(shared_box_order),
-                k=float(k),
+                k=k,
                 positions=np.asarray(positions, dtype=float),
                 partition=partition,
                 radial_lut=radial_lut,
@@ -1697,7 +1730,7 @@ def build_single_level_mlfmm_operators(
         aggregation, receive = _build_leaf_box_maps(
             lmax=int(lmax),
             box_order=int(shared_box_order),
-            k=float(k),
+            k=k,
             positions=np.asarray(positions, dtype=float),
             partition=partition,
             radial_lut=radial_lut,
@@ -1730,7 +1763,7 @@ def build_single_level_mlfmm_operators(
 def apply_single_level_mlfmm(
     *,
     lmax: int,
-    k: float,
+    k: complex,
     positions: np.ndarray,
     x: np.ndarray,
     operators: MLFMMSingleLevelOperators,
@@ -1759,7 +1792,7 @@ def apply_single_level_mlfmm(
     far_out_dtype = np.dtype(out_dtype if far_dtype is None else far_dtype)
     y_near = _exact_leaf_near_apply(
         lmax=int(lmax),
-        k=float(k),
+        k=k,
         positions=np.asarray(positions, dtype=float),
         x=np.asarray(x, dtype=near_out_dtype),
         partition=operators.partition,
@@ -1771,7 +1804,7 @@ def apply_single_level_mlfmm(
         leaf_states = _aggregate_leaf_box_states(
             lmax=int(lmax),
             box_order=int(operators.box_order),
-            k=float(k),
+            k=k,
             x=np.asarray(x, dtype=far_out_dtype),
             leaf_groups=operators.leaf_groups,
             n_leaves=len(operators.partition.leaves),
@@ -1815,7 +1848,7 @@ def apply_single_level_mlfmm(
         y_far = _receive_leaf_boxes_to_particles(
             lmax=int(lmax),
             box_order=int(operators.box_order),
-            k=float(k),
+            k=k,
             n_particles=np.asarray(positions).shape[0],
             incoming_box=incoming_box,
             leaf_groups=operators.leaf_groups,
@@ -1835,7 +1868,7 @@ def apply_single_level_mlfmm(
 def build_multilevel_mlfmm_operators(
     *,
     lmax: int,
-    k: float,
+    k: complex,
     positions: np.ndarray,
     partition: MLFMMPartition,
     radial_lut: RadialLUT | None = None,
@@ -1936,7 +1969,7 @@ def build_multilevel_mlfmm_operators(
         level_box_order = (
             box_order_rokhlin_like(
                 particle_lmax=int(lmax),
-                k=float(k),
+                k=k,
                 box_half_size=half_size,
                 accuracy=int(accuracy_level),
                 additive=int(order_additive),
@@ -2067,7 +2100,7 @@ def build_multilevel_mlfmm_operators(
             leaf_groups = _build_numpy_leaf_apply_groups_dense(
                 lmax=int(lmax),
                 box_order=int(levels[leaf_level].box_order),
-                k=float(k),
+                k=k,
                 positions=np.asarray(positions, dtype=float),
                 partition=partition,
                 radial_lut=radial_lut,
@@ -2087,7 +2120,7 @@ def build_multilevel_mlfmm_operators(
         aggregation, receive = _build_leaf_box_maps(
             lmax=int(lmax),
             box_order=int(levels[leaf_level].box_order),
-            k=float(k),
+            k=k,
             positions=np.asarray(positions, dtype=float),
             partition=partition,
             radial_lut=radial_lut,
@@ -2152,7 +2185,7 @@ def _apply_linear_map_adjoint_to_channel_batches(
 def _apply_single_level_mlfmm_adjoint(
     *,
     lmax: int,
-    k: float,
+    k: complex,
     positions: np.ndarray,
     x: np.ndarray,
     operators: MLFMMSingleLevelOperators,
@@ -2167,7 +2200,7 @@ def _apply_single_level_mlfmm_adjoint(
     x_arr = np.asarray(x)
     y_near = _exact_leaf_near_adjoint_apply(
         lmax=int(lmax),
-        k=float(k),
+        k=k,
         positions=positions_arr,
         x=np.asarray(x_arr, dtype=near_dtype),
         partition=operators.partition,
@@ -2179,10 +2212,11 @@ def _apply_single_level_mlfmm_adjoint(
         leaf_box = _aggregate_leaf_box_states(
             lmax=int(lmax),
             box_order=int(operators.box_order),
-            k=float(k),
+            k=k,
             x=np.asarray(x_arr, dtype=far_dtype),
             leaf_groups=operators.leaf_groups,
             n_leaves=len(operators.partition.leaves),
+            adjoint_receive=True,
             radial_lut=radial_lut,
             dtype=far_dtype,
         )
@@ -2192,7 +2226,8 @@ def _apply_single_level_mlfmm_adjoint(
             positions=positions_arr,
             x=np.asarray(x_arr, dtype=far_dtype),
             partition=operators.partition,
-            aggregation=operators.aggregation,
+            aggregation=operators.receive,
+            adjoint=True,
             dtype=far_dtype,
         )
     ndir = int(operators.directional.grid.directions.shape[0])
@@ -2224,9 +2259,10 @@ def _apply_single_level_mlfmm_adjoint(
         y_far = _receive_leaf_boxes_to_particles(
             lmax=int(lmax),
             box_order=int(operators.box_order),
-            k=float(k),
+            k=k,
             n_particles=positions_arr.shape[0],
             incoming_box=outgoing_box,
+            adjoint_aggregation=True,
             leaf_groups=operators.leaf_groups,
             radial_lut=radial_lut,
             dtype=far_dtype,
@@ -2235,7 +2271,7 @@ def _apply_single_level_mlfmm_adjoint(
         nm = n_modes(int(lmax))
         y_far = np.zeros((positions_arr.shape[0], nm), dtype=far_dtype)
         for leaf in operators.partition.leaves:
-            contribution = operators.receive[int(leaf.id)] @ outgoing_box[int(leaf.id)]
+            contribution = operators.aggregation[int(leaf.id)].conj().T @ outgoing_box[int(leaf.id)]
             y_far[leaf.particle_indices] += contribution.reshape(leaf.particle_indices.size, nm)
     return y_near.reshape(-1), y_far.reshape(-1)
 
@@ -2243,7 +2279,7 @@ def _apply_single_level_mlfmm_adjoint(
 def _apply_multilevel_mlfmm_adjoint(
     *,
     lmax: int,
-    k: float,
+    k: complex,
     positions: np.ndarray,
     x: np.ndarray,
     operators: MLFMMMultilevelOperators,
@@ -2258,7 +2294,7 @@ def _apply_multilevel_mlfmm_adjoint(
     x_arr = np.asarray(x)
     y_near = _exact_leaf_near_adjoint_apply(
         lmax=int(lmax),
-        k=float(k),
+        k=k,
         positions=positions_arr,
         x=np.asarray(x_arr, dtype=near_dtype),
         partition=operators.partition,
@@ -2271,10 +2307,11 @@ def _apply_multilevel_mlfmm_adjoint(
         leaf_box = _aggregate_leaf_box_states(
             lmax=int(lmax),
             box_order=int(operators.levels[leaf_level].box_order),
-            k=float(k),
+            k=k,
             x=np.asarray(x_arr, dtype=far_dtype),
             leaf_groups=operators.leaf_groups,
             n_leaves=len(operators.partition.leaves),
+            adjoint_receive=True,
             radial_lut=radial_lut,
             dtype=far_dtype,
         )
@@ -2284,7 +2321,8 @@ def _apply_multilevel_mlfmm_adjoint(
             positions=positions_arr,
             x=np.asarray(x_arr, dtype=far_dtype),
             partition=operators.partition,
-            aggregation=operators.aggregation,
+            aggregation=operators.receive,
+            adjoint=True,
             dtype=far_dtype,
         )
     incoming_adj = [
@@ -2375,9 +2413,10 @@ def _apply_multilevel_mlfmm_adjoint(
         y_far = _receive_leaf_boxes_to_particles(
             lmax=int(lmax),
             box_order=int(operators.levels[leaf_level].box_order),
-            k=float(k),
+            k=k,
             n_particles=positions_arr.shape[0],
             incoming_box=outgoing_box,
+            adjoint_aggregation=True,
             leaf_groups=operators.leaf_groups,
             radial_lut=radial_lut,
             dtype=far_dtype,
@@ -2386,7 +2425,7 @@ def _apply_multilevel_mlfmm_adjoint(
         nm = n_modes(int(lmax))
         y_far = np.zeros((positions_arr.shape[0], nm), dtype=far_dtype)
         for leaf in operators.partition.leaves:
-            contribution = operators.receive[int(leaf.id)] @ outgoing_box[int(leaf.id)]
+            contribution = operators.aggregation[int(leaf.id)].conj().T @ outgoing_box[int(leaf.id)]
             y_far[leaf.particle_indices] += contribution.reshape(leaf.particle_indices.size, nm)
     return y_near.reshape(-1), y_far.reshape(-1)
 
@@ -2394,7 +2433,7 @@ def _apply_multilevel_mlfmm_adjoint(
 def apply_multilevel_mlfmm(
     *,
     lmax: int,
-    k: float,
+    k: complex,
     positions: np.ndarray,
     x: np.ndarray,
     operators: MLFMMMultilevelOperators,
@@ -2423,7 +2462,7 @@ def apply_multilevel_mlfmm(
     far_out_dtype = np.dtype(out_dtype if far_dtype is None else far_dtype)
     y_near = _exact_leaf_near_apply(
         lmax=int(lmax),
-        k=float(k),
+        k=k,
         positions=np.asarray(positions, dtype=float),
         x=np.asarray(x, dtype=near_out_dtype),
         partition=operators.partition,
@@ -2449,7 +2488,7 @@ def apply_multilevel_mlfmm(
         leaf_states = _aggregate_leaf_box_states(
             lmax=int(lmax),
             box_order=int(operators.levels[leaf_level].box_order),
-            k=float(k),
+            k=k,
             x=np.asarray(x, dtype=far_out_dtype),
             leaf_groups=operators.leaf_groups,
             n_leaves=len(operators.partition.leaves),
@@ -2554,7 +2593,7 @@ def apply_multilevel_mlfmm(
         y_far = _receive_leaf_boxes_to_particles(
             lmax=int(lmax),
             box_order=int(operators.levels[leaf_level].box_order),
-            k=float(k),
+            k=k,
             n_particles=np.asarray(positions).shape[0],
             incoming_box=incoming_box,
             leaf_groups=operators.leaf_groups,
@@ -2574,7 +2613,7 @@ def apply_multilevel_mlfmm(
 def prepare_mlfmm_coupling(
     *,
     lmax: int,
-    k: float,
+    k: complex,
     positions: np.ndarray,
     particle_circumscribing_radii: np.ndarray,
     radial_lut: RadialLUT,
@@ -2598,6 +2637,7 @@ def prepare_mlfmm_coupling(
     """
 
     t_prepare_start = perf_counter()
+    k = passive_wavenumber(k)
     out_dtype = np.dtype(dtype)
     leaf_backend = str(leaf_map_backend).strip().lower()
     if leaf_backend not in {"numpy", "cupy"}:
@@ -2620,7 +2660,7 @@ def prepare_mlfmm_coupling(
     if resolved.stage != "direct" and np.dtype(radial_lut.dtype) != np.dtype(np.complex128):
         radial_lut_hf = RadialLUT(
             lmax=int(lmax),
-            k=float(k),
+            k=k,
             r_max=float(radial_lut.r_grid[-1]),
             dr=float(radial_lut.dr),
             dtype=np.complex128,
@@ -2650,7 +2690,7 @@ def prepare_mlfmm_coupling(
         )
         out = PairwiseCouplingOperator(
             lmax=int(lmax),
-            k=float(k),
+            k=k,
             positions=pts,
             ab5=ab5_table,
             radial_lut=radial_lut,
@@ -2667,7 +2707,7 @@ def prepare_mlfmm_coupling(
         t_stage_start = perf_counter()
         single_level = build_single_level_mlfmm_operators(
             lmax=int(lmax),
-            k=float(k),
+            k=k,
             positions=pts,
             partition=resolved.partition,
             radial_lut=radial_lut_hf,
@@ -2679,7 +2719,7 @@ def prepare_mlfmm_coupling(
         )
         out = MLFMMCouplingOperator(
             lmax=int(lmax),
-            k=float(k),
+            k=k,
             positions=pts,
             radial_lut=radial_lut_hf,
             resolved_plan=resolved,
@@ -2698,7 +2738,7 @@ def prepare_mlfmm_coupling(
     t_stage_start = perf_counter()
     multilevel = build_multilevel_mlfmm_operators(
         lmax=int(lmax),
-        k=float(k),
+        k=k,
         positions=pts,
         partition=resolved.partition,
         radial_lut=radial_lut_hf,
@@ -2711,7 +2751,7 @@ def prepare_mlfmm_coupling(
     )
     out = MLFMMCouplingOperator(
         lmax=int(lmax),
-        k=float(k),
+        k=k,
         positions=pts,
         radial_lut=radial_lut_hf,
         resolved_plan=resolved,

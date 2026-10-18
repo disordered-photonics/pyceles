@@ -228,8 +228,8 @@ def prepare_matvec(
         accum_dtype=op_dtype if accum_dtype is None else accum_dtype,
     )
     k_value = passive_wavenumber(k)
-    if k_value.imag and (periodic is not None or coupling_name == "mlfmm"):
-        raise NotImplementedError("Complex wavenumbers require finite pairwise coupling.")
+    if k_value.imag and periodic is not None:
+        raise NotImplementedError("Periodic coupling requires a real wavenumber.")
     periodic_spec = periodic
     k_parallel_arr: np.ndarray | None = None
     if periodic_spec is not None:
@@ -317,7 +317,7 @@ def prepare_matvec(
             lut = make_radial_lut()
             coupling = prepare_mlfmm_coupling(
                 lmax=int(lmax),
-                k=k_value.real,
+                k=k_value,
                 positions=positions,
                 particle_circumscribing_radii=circumscribing_radii,
                 radial_lut=lut,
@@ -399,7 +399,7 @@ def prepare_matvec(
             lut = make_radial_lut()
             cpu_mlfmm = prepare_mlfmm_coupling(
                 lmax=int(lmax),
-                k=k_value.real,
+                k=k_value,
                 positions=positions,
                 particle_circumscribing_radii=circumscribing_radii,
                 radial_lut=lut,

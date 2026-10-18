@@ -100,7 +100,7 @@ For a plane wave, `amplitude` may be complex and specifies the electric field
 at `focal_point`, multiplied by the TE/TM Jones weights. Plane-wave projection
 and incident-field evaluation also accept passive complex host indices: real
 angles then specify parallel phase and attenuation directions. This defines
-local illumination with a finite reference amplitude. Finite pairwise
+local illumination with a finite reference amplitude. Finite pairwise and MLFMM
 simulations support this definition on NumPy and CuPy, as well as local dipoles,
 finite-centre Bessel spectra and explicit finite-plane Fourier boundaries.
 In absorbing hosts, outgoing angular amplitudes and finite E/H fields remain

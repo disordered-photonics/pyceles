@@ -4,8 +4,8 @@ This page records current limitations.
 
 ## Physical and geometrical scope
 
-- Finite pairwise `Simulation` supports passive complex `n_medium` with positive
-  real part. MLFMM and periodic propagation currently require a real host.
+- Finite pairwise and MLFMM `Simulation` support passive complex `n_medium` with
+  positive real part. Periodic propagation currently requires a real host.
 - Absorbing-host fields and outgoing angular amplitudes are available, while
   automatic lossless power/cross-section diagnostics are absent. Gaussian and
   focused profile/pupil sources require a nonabsorbing host; finite-plane

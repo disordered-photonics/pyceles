@@ -74,6 +74,16 @@ translation operators. The current hierarchy is uniform-depth rather than
 adaptive. NumPy and CuPy share the validated hierarchy construction; repeated
 CuPy applies run on device.
 
+Passive complex hosts use physical regular reception at the leaves. If `G(k)`
+aggregates particle coefficients into a box, reception is
+`R(k) = J_particle G(k).T J_box = G(conj(k)).H`, where each `J` reverses `m`
+within an SVWF `(tau, l)` block. Only for real `k` does reception equal `G(k).H`.
+The algebraic adjoint of the prepared far action `R L G` is `G.H L.H R.H`;
+it uses the conjugates of the actual transfer phases, rather than substituting
+physical reverse propagation. CuPy reuses leaf contractions and regular radial
+tables for both actions. Exact-near and sampled-far precision policies are
+unchanged in absorbing hosts.
+
 Occupancy, maximum depth, and the particle-radius leaf-size factor determine
 the partition. All levels that own far interactions participate in sampled
 transport; shallower hierarchies must be selected through the depth or

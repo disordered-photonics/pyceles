@@ -9,6 +9,7 @@ factor payloads, upload policy, and boundary/map actions live in
 
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field, fields, is_dataclass, replace
@@ -39,6 +40,7 @@ from .mlfmm import (
     MLFMMMultilevelOperators,
     MLFMMSingleLevelOperators,
     MLFMMTransferOperators,
+    _regular_leaf_receive_map,
 )
 from .mlfmm_directional import _SAMPLED_DIRECTIONAL_CHANNELS
 from .mlfmm_directional_cupy import (
@@ -58,6 +60,7 @@ from .mlfmm_partition import MLFMMPartition
 from .mode_metadata import (
     mode_m_table,
     mode_pair_p_range_tables,
+    mode_reverse_m_indices,
     mode_tau_l_tables,
 )
 
@@ -249,7 +252,7 @@ class CuPyMLFMMHostCacheData:
     """
 
     lmax: int
-    k: float
+    k: complex
     stage: str
     dtype: np.dtype
     near_dtype: np.dtype
@@ -424,6 +427,7 @@ class CuPyMLFMMPreparedData:
     """Top-level CuPy representation of a CPU-built MLFMM plan."""
 
     lmax: int
+    k: complex
     stage: str
     near_pairs: CuPyMLFMMNearPairData
     single_level: CuPyMLFMMSingleLevelData | None = None
@@ -764,7 +768,8 @@ def _leaf_translation_blocks_rect_raw_kernel(full_order: int, dtype_name: str) -
         const int* pair_offset,
         const int* pair_pmin,
         const int* pair_pcount,
-        {complex_t}* out_blocks
+        {complex_t}* out_blocks,
+        const int conjugate_radial
     ) {{
         const int pair_idx = blockIdx.x;
         if (pair_idx >= n_pairs) {{
@@ -833,7 +838,7 @@ def _leaf_translation_blocks_rect_raw_kernel(full_order: int, dtype_name: str) -
         for (int p = tid; p < {n_orders}; p += n_threads) {{
             const {complex_t} radial = bessel_lookup_linear(p, r_shared, re_j, im_j, inv_dr, last_index);
             re_j_shared[p] = radial.real();
-            im_j_shared[p] = radial.imag();
+            im_j_shared[p] = (conjugate_radial ? -radial.imag() : radial.imag());
             for (int absdm = 0; absdm <= p; ++absdm) {{
                 p_pdm_shared[p * (p + 1) / 2 + absdm] =
                     assoc_legendre_function(
@@ -891,7 +896,7 @@ def build_leaf_box_maps_cupy(
     *,
     lmax: int,
     box_order: int,
-    k: float,
+    k: complex,
     positions: np.ndarray,
     partition: MLFMMPartition,
     radial_lut: RadialLUT | None,
@@ -932,7 +937,7 @@ def build_leaf_box_maps_cupy(
     if int(radial_lut.lmax) < full_order:
         radial_lut_full = RadialLUT(
             lmax=full_order,
-            k=float(k),
+            k=complex(k),
             r_max=float(radial_lut.r_grid[-1]),
             dr=float(radial_lut.dr),
             dtype=out_dtype,
@@ -1090,6 +1095,7 @@ def build_leaf_box_maps_cupy(
                 pair_pmin_dev,
                 pair_pcount_dev,
                 blocks_dev.reshape(-1),
+                np.int32(0),
             ),
         )
         blocks_host = np.asarray(cupy.asnumpy(blocks_dev), dtype=out_dtype)
@@ -1112,7 +1118,9 @@ def build_leaf_box_maps_cupy(
     aggregation = tuple(
         np.asarray(aggregation_by_id[leaf_id], dtype=out_dtype) for leaf_id in range(n_leaves)
     )
-    receive = tuple(np.asarray(np.conjugate(agg).T, dtype=out_dtype) for agg in aggregation)
+    receive = tuple(
+        _regular_leaf_receive_map(agg, lmax=lmax, box_order=box_order, k=k) for agg in aggregation
+    )
     return aggregation, receive
 
 
@@ -1185,7 +1193,7 @@ def _build_host_leaf_otf_payload(
     *,
     lmax: int,
     box_order: int,
-    k: float,
+    k: complex,
     positions: np.ndarray,
     partition: MLFMMPartition,
     radial_lut: RadialLUT,
@@ -1298,7 +1306,7 @@ def _build_host_leaf_otf_payload(
     if int(radial_lut.lmax) < full_order or int(radial_lut.j.shape[1]) < required_grid_size:
         radial_lut_full = RadialLUT(
             lmax=full_order,
-            k=float(k),
+            k=complex(k),
             r_max=float(max_pair_radius),
             dr=float(radial_lut.dr),
             dtype=out_dtype,
@@ -1335,11 +1343,30 @@ def _build_host_leaf_otf_payload(
     return tuple(groups), tables
 
 
+def _dense_leaf_aggregation_payload(
+    operators: MLFMMSingleLevelOperators | MLFMMMultilevelOperators,
+) -> tuple[np.ndarray, ...]:
+    """Expose per-leaf maps from either dense preparation layout without copying them."""
+    if operators.aggregation:
+        return tuple(
+            np.ascontiguousarray(block, dtype=np.complex128) for block in operators.aggregation
+        )
+    by_leaf: dict[int, np.ndarray] = {}
+    for group in operators.leaf_groups:
+        if group.aggregation is None:
+            raise ValueError("Dense leaf upload requires prepared aggregation maps.")
+        by_leaf.update(
+            (int(leaf_id), np.ascontiguousarray(group.aggregation[row], dtype=np.complex128))
+            for row, leaf_id in enumerate(group.leaf_ids)
+        )
+    return tuple(by_leaf[int(leaf.id)] for leaf in operators.partition.leaves)
+
+
 def _build_host_single_level(
     single: MLFMMSingleLevelOperators,
     *,
     lmax: int,
-    k: float,
+    k: complex,
     positions: np.ndarray,
     partition: MLFMMPartition,
     radial_lut: RadialLUT,
@@ -1356,7 +1383,7 @@ def _build_host_single_level(
         leaf_groups_otf, leaf_tables = _build_host_leaf_otf_payload(
             lmax=int(lmax),
             box_order=int(single.box_order),
-            k=float(k),
+            k=k,
             positions=np.asarray(positions, dtype=float),
             partition=partition,
             radial_lut=radial_lut,
@@ -1366,10 +1393,7 @@ def _build_host_single_level(
     else:
         leaf_groups_otf = None
         leaf_tables = None
-        aggregation_payload = tuple(
-            np.ascontiguousarray(np.asarray(block, dtype=np.complex128))
-            for block in single.aggregation
-        )
+        aggregation_payload = _dense_leaf_aggregation_payload(single)
     return CuPyHostSingleLevelData(
         box_order=int(single.box_order),
         translator_order=int(single.translator_order),
@@ -1391,7 +1415,7 @@ def _build_host_multilevel(
     multilevel: MLFMMMultilevelOperators,
     *,
     lmax: int,
-    k: float,
+    k: complex,
     positions: np.ndarray,
     partition: MLFMMPartition,
     radial_lut: RadialLUT,
@@ -1441,7 +1465,7 @@ def _build_host_multilevel(
         leaf_groups_otf, leaf_tables = _build_host_leaf_otf_payload(
             lmax=int(lmax),
             box_order=int(levels[int(multilevel.leaf_level)].box_order),
-            k=float(k),
+            k=complex(k),
             positions=np.asarray(positions, dtype=float),
             partition=partition,
             radial_lut=radial_lut,
@@ -1451,10 +1475,7 @@ def _build_host_multilevel(
     else:
         leaf_groups_otf = None
         leaf_tables = None
-        aggregation_payload = tuple(
-            np.ascontiguousarray(np.asarray(block, dtype=np.complex128))
-            for block in multilevel.aggregation
-        )
+        aggregation_payload = _dense_leaf_aggregation_payload(multilevel)
     return CuPyHostMultilevelData(
         levels=levels,
         transfers=transfers,
@@ -1628,7 +1649,7 @@ def _build_mlfmm_cupy_host_cache(
     }
     return CuPyMLFMMHostCacheData(
         lmax=int(coupling.lmax),
-        k=float(coupling.k),
+        k=complex(coupling.k),
         stage=str(coupling.resolved_plan.stage),
         dtype=np.dtype(coupling.dtype),
         near_dtype=np.dtype(coupling.near_dtype),
@@ -1680,7 +1701,7 @@ def _build_mlfmm_cupy_host_cache(
             _build_host_single_level(
                 coupling.single_level,
                 lmax=int(coupling.lmax),
-                k=float(coupling.k),
+                k=complex(coupling.k),
                 positions=np.asarray(coupling.positions, dtype=float),
                 partition=partition,
                 radial_lut=coupling.radial_lut,
@@ -1694,7 +1715,7 @@ def _build_mlfmm_cupy_host_cache(
             _build_host_multilevel(
                 coupling.multilevel,
                 lmax=int(coupling.lmax),
-                k=float(coupling.k),
+                k=complex(coupling.k),
                 positions=np.asarray(coupling.positions, dtype=float),
                 partition=partition,
                 radial_lut=coupling.radial_lut,
@@ -3538,6 +3559,7 @@ def _leaf_translation_blocks_from_pair_deltas(
     tables: CuPyLeafTranslationTablesData,
     pair_blocks_scratch: dict[str, Any] | None,
     cupy: Any,
+    conjugate_radial: bool = False,
 ) -> Any:
     """Build on-the-fly leaf translation blocks for one grouped pair schedule.
 
@@ -3561,8 +3583,11 @@ def _leaf_translation_blocks_from_pair_deltas(
     else:
         blocks = cupy.empty((n_pairs, nmodes_out, nmodes_in), dtype=cupy.complex128)
 
+    # R(k)=G(conj(k))^H: conjugate only the regular radial samples. The flag
+    # is uniform per launch, so reception and true adjoints share one kernel.
     kernel = _leaf_translation_blocks_rect_raw_kernel(
-        int(tables.full_order), np.dtype(np.complex128).str
+        int(tables.full_order),
+        np.dtype(np.complex128).str,
     )
     props = cupy.cuda.runtime.getDeviceProperties(cupy.cuda.runtime.getDevice())
     max_grid_pairs = int(props["maxGridSize"][0])
@@ -3600,6 +3625,7 @@ def _leaf_translation_blocks_from_pair_deltas(
                 tables.pair_pmin,
                 tables.pair_pcount,
                 blocks[start:end].reshape(-1),
+                np.int32(conjugate_radial),
             ),
         )
     return blocks
@@ -3710,7 +3736,8 @@ def _leaf_otf_aggregate_fused_raw_kernel(full_order: int, coeff_dtype_name: str)
         const int* pair_offset,
         const int* pair_pmin,
         const int* pair_pcount,
-        complex<double>* out
+        complex<double>* out,
+        const int conjugate_radial
     ) {{
         for (int pair_idx = blockIdx.x; pair_idx < n_pairs; pair_idx += gridDim.x) {{
             const int tid = threadIdx.x;
@@ -3767,7 +3794,7 @@ def _leaf_otf_aggregate_fused_raw_kernel(full_order: int, coeff_dtype_name: str)
                     const complex<double> radial =
                         bessel_lookup_linear_fused(p, r_shared, re_j, im_j, inv_dr, last_index);
                     re_j_shared[p] = radial.real();
-                    im_j_shared[p] = radial.imag();
+                    im_j_shared[p] = (conjugate_radial ? -radial.imag() : radial.imag());
                     for (int absdm = 0; absdm <= p; ++absdm) {{
                         p_pdm_shared[p * (p + 1) / 2 + absdm] =
                             assoc_legendre_function_fused(
@@ -3859,6 +3886,7 @@ def _launch_leaf_otf_aggregate_fused(
     nmodes: int,
     nrhs: int,
     cupy: Any,
+    conjugate_radial: bool = False,
 ) -> None:
     """Build on-the-fly leaf translations and aggregate without pair-block tensors."""
 
@@ -3867,7 +3895,8 @@ def _launch_leaf_otf_aggregate_fused(
         return
     n_pairs = int(count * int(occupancy))
     kernel = _leaf_otf_aggregate_fused_raw_kernel(
-        int(tables.full_order), np.dtype(x_states.dtype).str
+        int(tables.full_order),
+        np.dtype(x_states.dtype).str,
     )
     props = cupy.cuda.runtime.getDeviceProperties(cupy.cuda.runtime.getDevice())
     max_grid_pairs = int(props["maxGridSize"][0])
@@ -3903,6 +3932,7 @@ def _launch_leaf_otf_aggregate_fused(
             tables.pair_pmin,
             tables.pair_pcount,
             out.reshape(-1),
+            np.int32(conjugate_radial),
         ),
     )
 
@@ -4127,7 +4157,8 @@ def _leaf_otf_receive_fused_raw_kernel(full_order: int, threads: int) -> Any:
         const int* pair_offset,
         const int* pair_pmin,
         const int* pair_pcount,
-        complex<double>* out
+        complex<double>* out,
+        const int conjugate_radial
     ) {{
         const int lane = threadIdx.x & 31;
         const int warp = threadIdx.x >> 5;
@@ -4180,7 +4211,7 @@ def _leaf_otf_receive_fused_raw_kernel(full_order: int, threads: int) -> Any:
                     const complex<double> radial =
                         bessel_lookup_linear_receive(p, r_shared, re_j, im_j, inv_dr, last_index);
                     re_j_shared[p] = radial.real();
-                    im_j_shared[p] = radial.imag();
+                    im_j_shared[p] = (conjugate_radial ? -radial.imag() : radial.imag());
                     for (int absdm = 0; absdm <= p; ++absdm) {{
                         p_pdm_shared[p * (p + 1) / 2 + absdm] =
                             assoc_legendre_function_receive(
@@ -4293,6 +4324,7 @@ def _launch_leaf_otf_receive_fused(
     nmodes: int,
     nrhs: int,
     cupy: Any,
+    conjugate_radial: bool = False,
 ) -> None:
     """Receive leaf box states without materializing the pair-block tensor."""
 
@@ -4342,6 +4374,7 @@ def _launch_leaf_otf_receive_fused(
             tables.pair_pmin,
             tables.pair_pcount,
             out.reshape(-1),
+            np.int32(conjugate_radial),
         ),
     )
 
@@ -4443,6 +4476,37 @@ def _matched_sorted_rows(
     return selected_rows, positions[selected_rows].astype(cupy.int32, copy=False)
 
 
+def _conjugate_reverse_svwf_blocks(values: Any, nmodes: int, cupy: Any) -> Any:
+    """Apply J*conj(.) to complete SVWF blocks without conjugating a dense map."""
+    # n_modes(l)=2*l*(l+2); these dimensions come from prepared SVWF blocks.
+    order = math.isqrt(int(nmodes) // 2 + 1) - 1
+    reverse = cupy.asarray(mode_reverse_m_indices(order), dtype=cupy.int32)
+    groups, _, nrhs = values.shape
+    return values.reshape(groups, -1, nmodes, nrhs)[:, :, reverse].conj().reshape(values.shape)
+
+
+def _dense_leaf_translation(
+    matrix: Any,
+    values: Any,
+    *,
+    input_modes: int,
+    output_modes: int,
+    conjugate_radial: bool,
+    cupy: Any,
+) -> Any:
+    """Contract G or G^H, using J*conj(.) on both sides for conjugated radial data.
+
+    Physical reception is G(conj(k))^H, whereas the algebraic aggregation
+    adjoint is G(k)^H. Both reuse the same dense aggregation/adjoint storage.
+    """
+    if conjugate_radial:
+        values = _conjugate_reverse_svwf_blocks(values, input_modes, cupy)
+    result = cupy.matmul(matrix, values)
+    if conjugate_radial:
+        result = _conjugate_reverse_svwf_blocks(result, output_modes, cupy)
+    return result
+
+
 def _aggregate_selected_leaf_box_states(
     x_states: Any,
     *,
@@ -4454,6 +4518,7 @@ def _aggregate_selected_leaf_box_states(
     box_nm: int,
     nrhs: int,
     cupy: Any,
+    conjugate_radial: bool = False,
 ) -> Any:
     """Aggregate one selected leaf subset into regular box states."""
 
@@ -4499,6 +4564,7 @@ def _aggregate_selected_leaf_box_states(
                     nmodes=nmodes,
                     nrhs=int(nrhs),
                     cupy=cupy,
+                    conjugate_radial=conjugate_radial,
                 )
         else:
             if group.aggregation is None:
@@ -4510,7 +4576,14 @@ def _aggregate_selected_leaf_box_states(
                 occupancy * nmodes,
                 int(nrhs),
             )
-            out[selected_rows] = cupy.matmul(group.aggregation[group_rows], coeffs)
+            out[selected_rows] = _dense_leaf_translation(
+                group.aggregation[group_rows],
+                coeffs,
+                input_modes=nmodes,
+                output_modes=int(box_nm),
+                conjugate_radial=conjugate_radial,
+                cupy=cupy,
+            )
     return out
 
 
@@ -4522,12 +4595,13 @@ def _receive_selected_leaf_boxes_to_particles(
     leaf_apply_mode: CuPyMLFMMLeafApplyMode,
     leaf_translation_tables: CuPyLeafTranslationTablesData | None,
     leaf_otf_chunk_leaves: int | None,
-    receive_adjoint_cache: dict[int, Any] | None,
+    aggregation_adjoint_cache: dict[int, Any] | None,
     nm: int,
     out: Any,
     cupy: Any,
     level_idx: int | None = None,
     stream_stats: dict[str, object] | None = None,
+    conjugate_radial: bool = False,
 ) -> None:
     """Accumulate one selected leaf subset from regular box states to particles."""
 
@@ -4586,6 +4660,7 @@ def _receive_selected_leaf_boxes_to_particles(
                     nmodes=int(nm),
                     nrhs=int(incoming.shape[2]),
                     cupy=cupy,
+                    conjugate_radial=conjugate_radial,
                 )
                 _accumulate_stream_seconds(
                     stream_stats,
@@ -4598,23 +4673,27 @@ def _receive_selected_leaf_boxes_to_particles(
                 raise RuntimeError(
                     "Internal CuPy MLFMM error: dense leaf receive mode requires aggregation tensors."
                 )
-            if receive_adjoint_cache is not None:
+            if aggregation_adjoint_cache is not None:
                 # Key the cache by the persistent group tensor, not by the
                 # advanced-indexing temporary below.  Temporary device
                 # pointers are allocator-owned and may be reused, so using
                 # them as persistent identities can both grow the cache and
                 # return a stale transform for a different selected subset.
                 cache_key = int(group.aggregation.data.ptr)
-                receive_adj_all = receive_adjoint_cache.get(cache_key)
-                if receive_adj_all is None:
-                    receive_adj_all = cupy.swapaxes(group.aggregation, 1, 2).conj()
-                    receive_adjoint_cache[cache_key] = receive_adj_all
-                receive_adj = receive_adj_all[group_rows]
+                aggregation_adj_all = aggregation_adjoint_cache.get(cache_key)
+                if aggregation_adj_all is None:
+                    aggregation_adj_all = cupy.swapaxes(group.aggregation, 1, 2).conj()
+                    aggregation_adjoint_cache[cache_key] = aggregation_adj_all
+                aggregation_adj = aggregation_adj_all[group_rows]
             else:
-                receive_adj = cupy.swapaxes(group.aggregation[group_rows], 1, 2).conj()
-            contribution = cupy.matmul(
-                receive_adj,
+                aggregation_adj = cupy.swapaxes(group.aggregation[group_rows], 1, 2).conj()
+            contribution = _dense_leaf_translation(
+                aggregation_adj,
                 incoming[selected_rows],
+                input_modes=int(incoming_box.shape[1]),
+                output_modes=int(nm),
+                conjugate_radial=conjugate_radial,
+                cupy=cupy,
             ).reshape(n_group_rows, occupancy, int(nm), int(incoming.shape[2]))
             # Fused receive uses the original schedule and group_rows directly;
             # only this dense fallback needs a gathered particle-index table.
@@ -4642,6 +4721,7 @@ def _aggregate_leaf_box_states(
     nrhs: int,
     out: Any | None = None,
     cupy: Any,
+    conjugate_radial: bool = False,
 ) -> Any:
     """Aggregate particle coefficients into one outgoing box state per leaf."""
 
@@ -4682,6 +4762,7 @@ def _aggregate_leaf_box_states(
                     nmodes=nmodes,
                     nrhs=int(nrhs),
                     cupy=cupy,
+                    conjugate_radial=conjugate_radial,
                 )
         else:
             if group.aggregation is None:
@@ -4689,7 +4770,14 @@ def _aggregate_leaf_box_states(
                     "Internal CuPy MLFMM error: dense leaf aggregation mode requires aggregation tensors."
                 )
             coeffs = x_states[idx].reshape(n_group, occupancy * nmodes, int(nrhs))
-            box_states[group.leaf_ids] = cupy.matmul(group.aggregation, coeffs)
+            box_states[group.leaf_ids] = _dense_leaf_translation(
+                group.aggregation,
+                coeffs,
+                input_modes=nmodes,
+                output_modes=int(box_nm),
+                conjugate_radial=conjugate_radial,
+                cupy=cupy,
+            )
     return box_states
 
 
@@ -4702,16 +4790,17 @@ def _receive_leaf_boxes_to_particles(
     pair_blocks_scratch: dict[str, Any] | None,
     leaf_otf_chunk_leaves: int | None,
     leaf_otf_bytes_budget: int | None,
-    receive_adjoint_cache: dict[int, Any] | None,
+    aggregation_adjoint_cache: dict[int, Any] | None,
     nm: int,
     n_particles: int,
     nrhs: int,
     out: Any | None = None,
     cupy: Any,
+    conjugate_radial: bool = False,
 ) -> Any:
     """Scatter leaf-local incoming box states back to particle coefficients.
 
-    When provided, `receive_adjoint_cache` stores one conjugate-transposed
+    When provided, `aggregation_adjoint_cache` stores one conjugate-transposed
     grouped aggregation tensor per leaf group so repeated applies do not
     recompute `swapaxes(...).conj()` in the hot loop.
     """
@@ -4752,6 +4841,7 @@ def _receive_leaf_boxes_to_particles(
                     tables=leaf_translation_tables,
                     pair_blocks_scratch=pair_blocks_scratch,
                     cupy=cupy,
+                    conjugate_radial=conjugate_radial,
                 ).reshape(count, occupancy, int(leaf_translation_tables.nmodes_out), int(nm))
                 _launch_leaf_otf_receive_contract(
                     pair_blocks,
@@ -4770,17 +4860,22 @@ def _receive_leaf_boxes_to_particles(
                 raise RuntimeError(
                     "Internal CuPy MLFMM error: dense leaf receive mode requires aggregation tensors."
                 )
-            if receive_adjoint_cache is not None:
+            if aggregation_adjoint_cache is not None:
                 cache_key = int(group.aggregation.data.ptr)
-                receive_adj = receive_adjoint_cache.get(cache_key)
-                if receive_adj is None:
-                    receive_adj = cupy.swapaxes(group.aggregation, 1, 2).conj()
-                    receive_adjoint_cache[cache_key] = receive_adj
+                aggregation_adj = aggregation_adjoint_cache.get(cache_key)
+                if aggregation_adj is None:
+                    aggregation_adj = cupy.swapaxes(group.aggregation, 1, 2).conj()
+                    aggregation_adjoint_cache[cache_key] = aggregation_adj
             else:
-                receive_adj = cupy.swapaxes(group.aggregation, 1, 2).conj()
-            contribution = cupy.matmul(receive_adj, incoming_box[leaf_ids]).reshape(
-                n_group, occupancy, int(nm), int(nrhs)
-            )
+                aggregation_adj = cupy.swapaxes(group.aggregation, 1, 2).conj()
+            contribution = _dense_leaf_translation(
+                aggregation_adj,
+                incoming_box[leaf_ids],
+                input_modes=int(incoming_box.shape[1]),
+                output_modes=int(nm),
+                conjugate_radial=conjugate_radial,
+                cupy=cupy,
+            ).reshape(n_group, occupancy, int(nm), int(nrhs))
             y[idx] += contribution
     return y
 
@@ -5092,7 +5187,7 @@ def _apply_single_level_far(
     prepared: CuPyMLFMMPreparedData,
     x_states: Any,
     *,
-    receive_adjoint_cache: dict[int, Any] | None,
+    aggregation_adjoint_cache: dict[int, Any] | None,
     pair_blocks_scratch: dict[str, Any] | None,
     leaf_otf_chunk_leaves: int | None,
     leaf_otf_bytes_budget: int | None,
@@ -5156,12 +5251,13 @@ def _apply_single_level_far(
         pair_blocks_scratch=pair_blocks_scratch,
         leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
         leaf_otf_bytes_budget=leaf_otf_bytes_budget,
-        receive_adjoint_cache=receive_adjoint_cache,
+        aggregation_adjoint_cache=aggregation_adjoint_cache,
         nm=nm,
         n_particles=n_particles,
         nrhs=nrhs,
         out=(ws.y_states if ws is not None else None),
         cupy=cupy,
+        conjugate_radial=bool(prepared.k.imag),
     )
 
 
@@ -5169,7 +5265,7 @@ def _apply_single_level_far_adjoint(
     prepared: CuPyMLFMMPreparedData,
     x_states: Any,
     *,
-    receive_adjoint_cache: dict[int, Any] | None,
+    aggregation_adjoint_cache: dict[int, Any] | None,
     pair_blocks_scratch: dict[str, Any] | None,
     leaf_otf_chunk_leaves: int | None,
     leaf_otf_bytes_budget: int | None,
@@ -5193,6 +5289,7 @@ def _apply_single_level_far_adjoint(
         box_nm=int(single.box_nm),
         nrhs=nrhs,
         cupy=cupy,
+        conjugate_radial=bool(prepared.k.imag),
     )
     incoming = _directional_to_box_regular_adjoint_cupy(single.directional, box_states, cupy=cupy)
     outgoing = cupy.zeros_like(incoming, dtype=cupy.complex128)
@@ -5216,7 +5313,7 @@ def _apply_single_level_far_adjoint(
         pair_blocks_scratch=pair_blocks_scratch,
         leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
         leaf_otf_bytes_budget=leaf_otf_bytes_budget,
-        receive_adjoint_cache=receive_adjoint_cache,
+        aggregation_adjoint_cache=aggregation_adjoint_cache,
         nm=nm,
         n_particles=n_particles,
         nrhs=nrhs,
@@ -5228,7 +5325,7 @@ def _apply_multilevel_far_adjoint(
     prepared: CuPyMLFMMPreparedData,
     x_states: Any,
     *,
-    receive_adjoint_cache: dict[int, Any] | None,
+    aggregation_adjoint_cache: dict[int, Any] | None,
     pair_blocks_scratch: dict[str, Any] | None,
     leaf_otf_chunk_leaves: int | None,
     leaf_otf_bytes_budget: int | None,
@@ -5253,6 +5350,7 @@ def _apply_multilevel_far_adjoint(
         box_nm=int(multilevel.box_nm),
         nrhs=nrhs,
         cupy=cupy,
+        conjugate_radial=bool(prepared.k.imag),
     )
     levels = multilevel.levels
     incoming = [
@@ -5329,7 +5427,7 @@ def _apply_multilevel_far_adjoint(
         pair_blocks_scratch=pair_blocks_scratch,
         leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
         leaf_otf_bytes_budget=leaf_otf_bytes_budget,
-        receive_adjoint_cache=receive_adjoint_cache,
+        aggregation_adjoint_cache=aggregation_adjoint_cache,
         nm=nm,
         n_particles=n_particles,
         nrhs=nrhs,
@@ -6550,6 +6648,7 @@ def _build_incoming_adjoint_subset_streamed(
     leaf_groups: tuple[CuPyLeafApplyGroupData, ...],
     leaf_apply_mode: CuPyMLFMMLeafApplyMode,
     leaf_translation_tables: CuPyLeafTranslationTablesData | None,
+    conjugate_radial: bool,
     leaf_otf_chunk_leaves: int | None,
     streamed_far_chunk_bytes_budget: int,
     incoming_bytes_in_flight: int,
@@ -6594,6 +6693,7 @@ def _build_incoming_adjoint_subset_streamed(
             box_nm=int(box_nm_leaf),
             nrhs=int(nrhs),
             cupy=cupy,
+            conjugate_radial=conjugate_radial,
         )
         incoming_adjoint = _directional_to_box_regular_adjoint_cupy(
             level.directional,
@@ -6671,6 +6771,7 @@ def _build_incoming_adjoint_subset_streamed(
                 f"{int(next_child_level)} vs {int(child_level)}."
             )
         child_adjoint = _build_incoming_adjoint_subset_streamed(
+            conjugate_radial=conjugate_radial,
             levels=levels,
             transfer_by_parent=transfer_by_parent,
             leaf_groups=leaf_groups,
@@ -6709,7 +6810,7 @@ def _scatter_outgoing_adjoint_subset_streamed(
     leaf_groups: tuple[CuPyLeafApplyGroupData, ...],
     leaf_apply_mode: CuPyMLFMMLeafApplyMode,
     leaf_translation_tables: CuPyLeafTranslationTablesData | None,
-    receive_adjoint_cache: dict[int, Any] | None,
+    aggregation_adjoint_cache: dict[int, Any] | None,
     leaf_otf_chunk_leaves: int | None,
     streamed_far_chunk_bytes_budget: int,
     outgoing_bytes_in_flight: int,
@@ -6748,7 +6849,7 @@ def _scatter_outgoing_adjoint_subset_streamed(
             leaf_apply_mode=leaf_apply_mode,
             leaf_translation_tables=leaf_translation_tables,
             leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
-            receive_adjoint_cache=receive_adjoint_cache,
+            aggregation_adjoint_cache=aggregation_adjoint_cache,
             nm=int(nm),
             out=y_out,
             cupy=cupy,
@@ -6821,7 +6922,7 @@ def _scatter_outgoing_adjoint_subset_streamed(
             leaf_groups=leaf_groups,
             leaf_apply_mode=leaf_apply_mode,
             leaf_translation_tables=leaf_translation_tables,
-            receive_adjoint_cache=receive_adjoint_cache,
+            aggregation_adjoint_cache=aggregation_adjoint_cache,
             leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
             streamed_far_chunk_bytes_budget=int(streamed_far_chunk_bytes_budget),
             outgoing_bytes_in_flight=int(current_bytes_in_flight),
@@ -6845,6 +6946,7 @@ def _apply_same_level_far_adjoint_streamed_chunk_group(
     leaf_groups: tuple[CuPyLeafApplyGroupData, ...],
     leaf_apply_mode: CuPyMLFMMLeafApplyMode,
     leaf_translation_tables: CuPyLeafTranslationTablesData | None,
+    conjugate_radial: bool,
     leaf_otf_chunk_leaves: int | None,
     streamed_far_chunk_bytes_budget: int,
     level_idx: int,
@@ -6913,6 +7015,7 @@ def _apply_same_level_far_adjoint_streamed_chunk_group(
         _iter_id_chunks(destination_ids_unique, chunk_size=int(destination_box_cap))
     ):
         incoming_adjoint = _build_incoming_adjoint_subset_streamed(
+            conjugate_radial=conjugate_radial,
             levels=levels,
             transfer_by_parent=transfer_by_parent,
             leaf_groups=leaf_groups,
@@ -6954,7 +7057,7 @@ def _apply_multilevel_far_adjoint_streamed(
     prepared: CuPyMLFMMPreparedData,
     x_states: Any,
     *,
-    receive_adjoint_cache: dict[int, Any] | None,
+    aggregation_adjoint_cache: dict[int, Any] | None,
     leaf_otf_chunk_leaves: int | None,
     streamed_far_chunk_bytes_budget: int,
     streamed_far_frontier_bytes_budget: int,
@@ -7045,6 +7148,7 @@ def _apply_multilevel_far_adjoint_streamed(
                     max(int(ids.shape[0]) for ids, _values in source_frontier),
                 )
             _apply_same_level_far_adjoint_streamed_chunk_group(
+                conjugate_radial=bool(prepared.k.imag),
                 levels=levels,
                 transfer_by_parent=transfer_by_parent,
                 leaf_groups=multilevel.leaf_groups,
@@ -7068,7 +7172,7 @@ def _apply_multilevel_far_adjoint_streamed(
                     leaf_groups=multilevel.leaf_groups,
                     leaf_apply_mode=multilevel.leaf_apply_mode,
                     leaf_translation_tables=multilevel.leaf_translation_tables,
-                    receive_adjoint_cache=receive_adjoint_cache,
+                    aggregation_adjoint_cache=aggregation_adjoint_cache,
                     leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
                     streamed_far_chunk_bytes_budget=int(streamed_far_chunk_bytes_budget),
                     outgoing_bytes_in_flight=0,
@@ -7094,7 +7198,8 @@ def _apply_multilevel_frontier_streamed(
     leaf_groups: tuple[CuPyLeafApplyGroupData, ...],
     leaf_apply_mode: CuPyMLFMMLeafApplyMode,
     leaf_translation_tables: CuPyLeafTranslationTablesData | None,
-    receive_adjoint_cache: dict[int, Any] | None,
+    conjugate_radial: bool,
+    aggregation_adjoint_cache: dict[int, Any] | None,
     leaf_otf_chunk_leaves: int | None,
     streamed_far_chunk_bytes_budget: int,
     streamed_far_frontier_bytes_budget: int,
@@ -7173,12 +7278,13 @@ def _apply_multilevel_frontier_streamed(
                 leaf_apply_mode=leaf_apply_mode,
                 leaf_translation_tables=leaf_translation_tables,
                 leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
-                receive_adjoint_cache=receive_adjoint_cache,
+                aggregation_adjoint_cache=aggregation_adjoint_cache,
                 nm=int(nm),
                 out=y_out,
                 cupy=cupy,
                 level_idx=int(leaf_level),
                 stream_stats=stream_stats,
+                conjugate_radial=conjugate_radial,
             )
             # Do not retain the previous projection while the next chunk's
             # boundary transform allocates its output and beta intermediates.
@@ -7238,12 +7344,13 @@ def _apply_multilevel_frontier_streamed(
                 and child_frontier_boxes + child_boxes > int(child_frontier_box_cap)
             ):
                 _apply_multilevel_frontier_streamed(
+                    conjugate_radial=conjugate_radial,
                     levels=levels,
                     transfer_by_parent=transfer_by_parent,
                     leaf_groups=leaf_groups,
                     leaf_apply_mode=leaf_apply_mode,
                     leaf_translation_tables=leaf_translation_tables,
-                    receive_adjoint_cache=receive_adjoint_cache,
+                    aggregation_adjoint_cache=aggregation_adjoint_cache,
                     leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
                     streamed_far_chunk_bytes_budget=int(streamed_far_chunk_bytes_budget),
                     streamed_far_frontier_bytes_budget=int(streamed_far_frontier_bytes_budget),
@@ -7279,12 +7386,13 @@ def _apply_multilevel_frontier_streamed(
     if child_level is None or not child_frontier:
         return
     _apply_multilevel_frontier_streamed(
+        conjugate_radial=conjugate_radial,
         levels=levels,
         transfer_by_parent=transfer_by_parent,
         leaf_groups=leaf_groups,
         leaf_apply_mode=leaf_apply_mode,
         leaf_translation_tables=leaf_translation_tables,
-        receive_adjoint_cache=receive_adjoint_cache,
+        aggregation_adjoint_cache=aggregation_adjoint_cache,
         leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
         streamed_far_chunk_bytes_budget=int(streamed_far_chunk_bytes_budget),
         streamed_far_frontier_bytes_budget=int(streamed_far_frontier_bytes_budget),
@@ -7306,7 +7414,7 @@ def _apply_multilevel_far_streamed(
     prepared: CuPyMLFMMPreparedData,
     x_states: Any,
     *,
-    receive_adjoint_cache: dict[int, Any] | None,
+    aggregation_adjoint_cache: dict[int, Any] | None,
     leaf_otf_chunk_leaves: int | None,
     streamed_far_chunk_bytes_budget: int,
     streamed_far_frontier_bytes_budget: int,
@@ -7368,12 +7476,13 @@ def _apply_multilevel_far_streamed(
         top_chunks, box_cap=int(top_frontier_box_cap)
     ):
         _apply_multilevel_frontier_streamed(
+            conjugate_radial=bool(prepared.k.imag),
             levels=levels,
             transfer_by_parent=transfer_by_parent,
             leaf_groups=multilevel.leaf_groups,
             leaf_apply_mode=multilevel.leaf_apply_mode,
             leaf_translation_tables=multilevel.leaf_translation_tables,
-            receive_adjoint_cache=receive_adjoint_cache,
+            aggregation_adjoint_cache=aggregation_adjoint_cache,
             leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
             streamed_far_chunk_bytes_budget=int(streamed_far_chunk_bytes_budget),
             streamed_far_frontier_bytes_budget=int(streamed_far_frontier_bytes_budget),
@@ -7397,7 +7506,7 @@ def _apply_multilevel_far(
     prepared: CuPyMLFMMPreparedData,
     x_states: Any,
     *,
-    receive_adjoint_cache: dict[int, Any] | None,
+    aggregation_adjoint_cache: dict[int, Any] | None,
     pair_blocks_scratch: dict[str, Any] | None,
     leaf_otf_chunk_leaves: int | None,
     leaf_otf_bytes_budget: int | None,
@@ -7421,7 +7530,7 @@ def _apply_multilevel_far(
         return _apply_multilevel_far_streamed(
             prepared,
             x_states,
-            receive_adjoint_cache=receive_adjoint_cache,
+            aggregation_adjoint_cache=aggregation_adjoint_cache,
             leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
             streamed_far_chunk_bytes_budget=int(streamed_far_chunk_bytes_budget),
             streamed_far_frontier_bytes_budget=int(streamed_far_frontier_bytes_budget),
@@ -7571,12 +7680,13 @@ def _apply_multilevel_far(
         pair_blocks_scratch=pair_blocks_scratch,
         leaf_otf_chunk_leaves=leaf_otf_chunk_leaves,
         leaf_otf_bytes_budget=leaf_otf_bytes_budget,
-        receive_adjoint_cache=receive_adjoint_cache,
+        aggregation_adjoint_cache=aggregation_adjoint_cache,
         nm=nm,
         n_particles=n_particles,
         nrhs=nrhs,
         out=(ws.y_states if ws is not None else None),
         cupy=cupy,
+        conjugate_radial=bool(prepared.k.imag),
     )
 
 
@@ -8073,7 +8183,7 @@ class CuPyMLFMMCouplingOperator:
 
     lmax: int
     n_particles: int
-    k: float
+    k: complex
     prepared_data: CuPyMLFMMPreparedData
     host_cache: CuPyMLFMMHostCacheData | None = field(default=None, repr=False)
     host_cache_summary: dict[str, object] | None = field(default=None, repr=False)
@@ -8081,7 +8191,7 @@ class CuPyMLFMMCouplingOperator:
     dtype: np.dtype = COMPLEX128_DTYPE
     near_dtype: np.dtype = COMPLEX128_DTYPE
     far_dtype: np.dtype = COMPLEX128_DTYPE
-    _receive_adjoint_cache: dict[int, Any] = field(default_factory=dict, init=False, repr=False)
+    _aggregation_adjoint_cache: dict[int, Any] = field(default_factory=dict, init=False, repr=False)
     _leaf_otf_pair_blocks_scratch: dict[str, Any] = field(
         default_factory=dict, init=False, repr=False
     )
@@ -8236,7 +8346,7 @@ class CuPyMLFMMCouplingOperator:
             self._leaf_otf_pair_blocks_scratch.get("buffer")
         )
         leaf_receive_cache_bytes = int(
-            sum(_device_array_nbytes(value) for value in self._receive_adjoint_cache.values())
+            sum(_device_array_nbytes(value) for value in self._aggregation_adjoint_cache.values())
         )
         multilevel = self.prepared_data.multilevel
         rolling_diag: dict[str, object] | None = None
@@ -8525,7 +8635,7 @@ class CuPyMLFMMCouplingOperator:
                 "near": len(self._near_workspace_cache),
                 "single_level": len(self._single_level_workspace_cache),
                 "multilevel": len(self._multilevel_workspace_cache),
-                "leaf_receive": len(self._receive_adjoint_cache),
+                "leaf_receive": len(self._aggregation_adjoint_cache),
             },
             "workspace_bytes": {
                 "near_total_bytes": int(near_ws_total),
@@ -8643,7 +8753,7 @@ class CuPyMLFMMCouplingOperator:
             y_far = _apply_single_level_far(
                 self.prepared_data,
                 x_states,
-                receive_adjoint_cache=self._receive_adjoint_cache,
+                aggregation_adjoint_cache=self._aggregation_adjoint_cache,
                 pair_blocks_scratch=self._leaf_otf_pair_blocks_scratch,
                 leaf_otf_chunk_leaves=self.host_cache_policy.leaf_otf_chunk_leaves,
                 leaf_otf_bytes_budget=resolved_leaf_otf_bytes_budget,
@@ -8690,7 +8800,7 @@ class CuPyMLFMMCouplingOperator:
             y_far = _apply_multilevel_far(
                 self.prepared_data,
                 x_states,
-                receive_adjoint_cache=self._receive_adjoint_cache,
+                aggregation_adjoint_cache=self._aggregation_adjoint_cache,
                 pair_blocks_scratch=self._leaf_otf_pair_blocks_scratch,
                 leaf_otf_chunk_leaves=self.host_cache_policy.leaf_otf_chunk_leaves,
                 leaf_otf_bytes_budget=resolved_leaf_otf_bytes_budget,
@@ -8748,7 +8858,7 @@ class CuPyMLFMMCouplingOperator:
     def apply_adjoint(self, x: Any) -> Any:
         """Apply the Hermitian adjoint of the finite MLFMM coupling on device.
 
-        On-the-fly multilevel plans use the same bounded streamed
+        Production on-the-fly multilevel plans use the same bounded streamed
         residency policy as the forward action. Dense/debug leaf plans retain
         the resident reverse hierarchy as a simple algebraic reference path.
         """
@@ -8834,7 +8944,7 @@ class CuPyMLFMMCouplingOperator:
             y_far = _apply_single_level_far_adjoint(
                 self.prepared_data,
                 x_states,
-                receive_adjoint_cache=self._receive_adjoint_cache,
+                aggregation_adjoint_cache=self._aggregation_adjoint_cache,
                 pair_blocks_scratch=self._leaf_otf_pair_blocks_scratch,
                 leaf_otf_chunk_leaves=self.host_cache_policy.leaf_otf_chunk_leaves,
                 leaf_otf_bytes_budget=resolved_leaf_otf_bytes_budget,
@@ -8880,7 +8990,7 @@ class CuPyMLFMMCouplingOperator:
                 y_far = _apply_multilevel_far_adjoint_streamed(
                     self.prepared_data,
                     x_states,
-                    receive_adjoint_cache=self._receive_adjoint_cache,
+                    aggregation_adjoint_cache=self._aggregation_adjoint_cache,
                     leaf_otf_chunk_leaves=self.host_cache_policy.leaf_otf_chunk_leaves,
                     streamed_far_chunk_bytes_budget=int(resolved_streamed_far_chunk_bytes_budget),
                     streamed_far_frontier_bytes_budget=int(
@@ -8897,7 +9007,7 @@ class CuPyMLFMMCouplingOperator:
                 y_far = _apply_multilevel_far_adjoint(
                     self.prepared_data,
                     x_states,
-                    receive_adjoint_cache=self._receive_adjoint_cache,
+                    aggregation_adjoint_cache=self._aggregation_adjoint_cache,
                     pair_blocks_scratch=self._leaf_otf_pair_blocks_scratch,
                     leaf_otf_chunk_leaves=self.host_cache_policy.leaf_otf_chunk_leaves,
                     leaf_otf_bytes_budget=self.host_cache_policy.leaf_otf_bytes_budget,
@@ -8967,7 +9077,7 @@ def prepare_mlfmm_cupy_coupling(
         lmax=int(coupling.lmax),
         n_particles=int(np.asarray(coupling.positions).shape[0]),
         prepared_data=prepared,
-        k=float(coupling.k),
+        k=complex(coupling.k),
         host_cache=(host_cache if retention == "full" else None),
         host_cache_summary=host_cache_summary,
         host_cache_policy=policy,
@@ -9052,6 +9162,7 @@ def prepare_mlfmm_cupy_data(
 
     return CuPyMLFMMPreparedData(
         lmax=int(host_cache.lmax),
+        k=complex(host_cache.k),
         stage=stage,
         near_pairs=near_pairs,
         single_level=single_level_data,
