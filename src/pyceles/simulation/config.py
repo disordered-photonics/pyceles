@@ -202,20 +202,27 @@ class SimulationConfig:
     verbose: bool = True
 
     def __post_init__(self) -> None:
-        if not (float(self.wavelength) > 0.0):
-            raise ValueError(f"`wavelength` must be > 0. Got {self.wavelength!r}.")
+        if not np.isfinite(float(self.wavelength)) or float(self.wavelength) <= 0.0:
+            raise ValueError(f"`wavelength` must be finite and > 0. Got {self.wavelength!r}.")
         if int(self.lmax) < 1:
             raise ValueError(f"`lmax` must be >= 1. Got {self.lmax!r}.")
         n_medium = complex(self.n_medium)
-        if abs(n_medium.imag) > 0.0:
+        if not np.isfinite(n_medium):
+            raise ValueError(f"`n_medium` must be finite. Got {n_medium!r}.")
+        if n_medium.imag != 0.0:
             raise ValueError(f"`n_medium` must be real for this solver path. Got {n_medium!r}.")
         if not (float(n_medium.real) > 0.0):
             raise ValueError(f"`n_medium` must be positive. Got {n_medium!r}.")
-        if float(self.radial_lut_dr) < 0.0:
-            raise ValueError(f"`radial_lut_dr` must be >= 0. Got {self.radial_lut_dr!r}.")
-        if float(self.circumscribing_sphere_overlap_atol) < 0.0:
+        if not np.isfinite(float(self.radial_lut_dr)) or float(self.radial_lut_dr) < 0.0:
             raise ValueError(
-                "`circumscribing_sphere_overlap_atol` must be >= 0. "
+                f"`radial_lut_dr` must be finite and >= 0. Got {self.radial_lut_dr!r}."
+            )
+        if (
+            not np.isfinite(float(self.circumscribing_sphere_overlap_atol))
+            or float(self.circumscribing_sphere_overlap_atol) < 0.0
+        ):
+            raise ValueError(
+                "`circumscribing_sphere_overlap_atol` must be finite and >= 0. "
                 f"Got {self.circumscribing_sphere_overlap_atol!r}."
             )
         if not isinstance(self.check_circumscribing_sphere_overlap, (bool, np.bool_)):

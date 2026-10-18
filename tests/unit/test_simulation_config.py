@@ -297,3 +297,22 @@ def test_simulation_config_uses_override_grids_and_warns_on_periodic_endpoint() 
     np.testing.assert_allclose(src_alpha, azimuth)
     np.testing.assert_allclose(ff_beta, polar)
     np.testing.assert_allclose(ff_alpha, azimuth)
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid"),
+    [
+        ("wavelength", np.inf),
+        ("wavelength", np.nan),
+        ("n_medium", np.inf),
+        ("n_medium", np.nan + 0j),
+        ("n_medium", complex(1, np.inf)),
+        ("radial_lut_dr", np.inf),
+        ("radial_lut_dr", np.nan),
+        ("circumscribing_sphere_overlap_atol", np.inf),
+        ("circumscribing_sphere_overlap_atol", np.nan),
+    ],
+)
+def test_simulation_config_rejects_nonfinite_physical_inputs(field: str, invalid: complex) -> None:
+    with pytest.raises(ValueError, match=field):
+        cast(Any, SimulationConfig)(**{field: invalid, "verbose": False})
