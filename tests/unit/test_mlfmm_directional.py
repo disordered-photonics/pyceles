@@ -321,3 +321,56 @@ def test_compact_host_directional_payload_preserves_nondefault_sampling() -> Non
         np.testing.assert_array_equal(theta, structured.fth_beta)
         np.testing.assert_array_equal(phi, structured.fph_beta)
         np.testing.assert_array_equal(modes, structured.m_of_scalar)
+
+
+@pytest.mark.parametrize("distance, order", [(0.5, 13), (1e-10, 64)])
+def test_sampled_translator_rejects_cancellation_beyond_machine_dynamic_range(
+    distance, order
+) -> None:
+    from pyceles.core.operators.mlfmm import _sampled_rokhlin_translator
+
+    grid = directional_transforms(1, grid_order=3).grid
+    with pytest.raises(ValueError, match="dynamic range"):
+        _sampled_rokhlin_translator(
+            np.array([distance, 0.0, 0.0]),
+            k=1.1,
+            truncation_order=order,
+            directions=grid.directions,
+            weights=grid.weights,
+            dtype=np.dtype(np.complex128),
+        )
+
+
+def test_sampled_translator_retains_an_ordinary_finite_translation() -> None:
+    from pyceles.core.operators.mlfmm import _sampled_rokhlin_translator
+
+    grid = directional_transforms(1, grid_order=5).grid
+    actual = _sampled_rokhlin_translator(
+        np.array([5.0, 3.0, 2.0]),
+        k=1.1,
+        truncation_order=5,
+        directions=grid.directions,
+        weights=grid.weights,
+        dtype=np.dtype(np.complex128),
+    )
+    assert np.all(np.isfinite(actual))
+
+
+def test_absorbing_sampled_translator_matches_low_order_outgoing_formula() -> None:
+    from pyceles.core.operators.mlfmm import _sampled_rokhlin_translator
+
+    grid = directional_transforms(1, grid_order=3).grid
+    k = 1.33 + 40j
+    # Closed-form h_0 and h_1 avoid cancellation between j_l and i*y_l.
+    h0 = -1j * np.exp(1j * k) / k
+    h1 = -np.exp(1j * k) / k * (1 + 1j / k)
+    expected = (h0 + 3j * h1 * grid.directions[:, 0]) * grid.weights
+    actual = _sampled_rokhlin_translator(
+        np.array([1, 0, 0]),
+        k=k,
+        truncation_order=1,
+        directions=grid.directions,
+        weights=grid.weights,
+        dtype=np.dtype(np.complex128),
+    )
+    np.testing.assert_allclose(actual, expected, rtol=2e-14, atol=0)

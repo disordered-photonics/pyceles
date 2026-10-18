@@ -33,6 +33,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retain double-precision sample generation and expose physical outgoing intervals.
 
 ### Changed
+- Breaking: removed `MLFMMOptions.hf_start_level` and `hf_wavelength_divisor`,
+  their builder arguments, and their scaling-script flags. All far-ownership
+  levels participate; hierarchy depth and occupancy control coarsening.
 - Breaking: local outgoing sources expose `outgoing_lmax` and return their own
   coefficient blocks through `outgoing_coeffs(*, dtype=...)`. Field evaluation
   uses the source degree independently of the particle truncation order.
@@ -42,6 +45,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Reject nonfinite simulation wavelength, host index, radial-table spacing,
   and circumscribing-sphere overlap tolerance.
+- Keep MLFMM partitions independent of length units and allow exact-direct
+  stages without constraints on unused box expansions. Reject catastrophic
+  sampled-translator dynamic range before preparing leaf maps, using native
+  outgoing Hankel evaluation.
 - Preserve small-amplitude solves across SciPy and native CuPy Krylov methods,
   including warm starts, absolute tolerances, block right-hand sides, and
   dimensional LSQR diagnostics. Residual directions no longer use an absolute

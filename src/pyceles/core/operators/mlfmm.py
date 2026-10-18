@@ -9,10 +9,10 @@ from typing import Literal
 
 import numpy as np
 import scipy.sparse
-from scipy.special import spherical_jn, spherical_yn
 from tqdm.auto import tqdm
 
 from pyceles.core.indexing import n_modes
+from pyceles.core.radial import sph_hankel1
 from pyceles.core.translation import (
     RadialLUT,
     translation_ab5_table,
@@ -48,12 +48,11 @@ MLFMMStage = Literal["direct", "single_level", "multilevel"]
 MLFMMLeafApplyMode = Literal["dense", "on_the_fly"]
 COMPLEX128_DTYPE = np.dtype(np.complex128)
 _ROKHLIN_MINIMUM_ORDERS = (3, 7, 11, 17, 24, 30)
-"""Conservative minimum truncation orders for discrete accuracy levels,
-inspired from the heuristic values used in FasTMM.
+"""Empirical minimum orders supplementing the asymptotic box-order estimate.
 
-These floors stabilize the small-ka regime where the asymptotic Rokhlin-style
-estimate underpredicts the required order. The values are inherited from the
-validated reference implementation used during pyceles MLFMM development.
+The discrete accuracy levels reduce order underestimation at small ka. These
+floors remain heuristic and do not guarantee low-frequency stability of
+sampled translations.
 """
 
 
@@ -61,11 +60,10 @@ validated reference implementation used during pyceles MLFMM development.
 class MLFMMOptions:
     """Expert tuning knobs for pyceles MLFMM partition resolution.
 
-    These options cover the current public MLFMM policy surface: how many
-    particles are allowed in one leaf, how deep the occupied tree may grow,
-    how large a leaf box must remain relative to the largest circumscribing
-    radius it contains, how aggressively the Rokhlin-style box-order estimate
-    is padded, and where sampled high-frequency multilevel staging starts.
+    Occupancy and depth determine the hierarchy. The leaf-size factor bounds
+    the particle-to-box geometry, while accuracy and additive order control
+    sampled expansion size. Sampled transport includes every far-ownership
+    level from 2 through the leaves.
     """
 
     max_leaf_particles: int = 8
@@ -73,8 +71,6 @@ class MLFMMOptions:
     leaf_size_radius_factor: float = 4.0
     accuracy_level: int = 3
     order_additive: int = 2
-    hf_start_level: int | None = None
-    hf_wavelength_divisor: float = 5.0
     collect_stream_stats: bool = False
 
 
@@ -537,8 +533,11 @@ def resolve_mlfmm_plan(
         raise ValueError("MLFMMOptions.max_leaf_particles must be >= 1.")
     if int(resolved_options.max_depth) < 0:
         raise ValueError("MLFMMOptions.max_depth must be >= 0.")
-    if float(resolved_options.leaf_size_radius_factor) <= 0.0:
-        raise ValueError("MLFMMOptions.leaf_size_radius_factor must be > 0.")
+    if (
+        not np.isfinite(float(resolved_options.leaf_size_radius_factor))
+        or float(resolved_options.leaf_size_radius_factor) <= 0.0
+    ):
+        raise ValueError("MLFMMOptions.leaf_size_radius_factor must be finite and > 0.")
     if int(resolved_options.accuracy_level) < 1:
         raise ValueError("MLFMMOptions.accuracy_level must be >= 1.")
 
@@ -569,10 +568,13 @@ def resolve_mlfmm_plan(
         particle_circumscribing_radii=radii,
         depth=selected_depth,
     )
-    validate_leaf_size_floor(
-        partition,
-        leaf_size_radius_factor=float(resolved_options.leaf_size_radius_factor),
-    )
+    # Direct stages use particle-to-particle translations, not box expansions.
+    # Enforce the leaf-size constraint only when a sampled stage is selected.
+    if select_mlfmm_stage(selected_depth) != "direct":
+        validate_leaf_size_floor(
+            partition,
+            leaf_size_radius_factor=float(resolved_options.leaf_size_radius_factor),
+        )
 
     occupancies = np.asarray(
         [leaf.particle_indices.size for leaf in partition.leaves],
@@ -818,79 +820,10 @@ def _build_multilevel_far_offset_batches(
     }
 
 
-def _resolve_multilevel_hf_start_level(
-    *,
-    partition: MLFMMPartition,
-    k: float,
-    leaf_level: int,
-    hf_start_level: int | None,
-    hf_wavelength_divisor: float,
-) -> int:
-    """Resolve the first sampled HF ownership level.
-
-    Policy:
-    - explicit `hf_start_level` wins when provided;
-    - otherwise include level 2, the first level that can own same-level far
-      interactions in the current hierarchy.
-
-    Starting later than level 2 without remapping ownership omits far
-    interactions whose parents are already far at the skipped levels. Such
-    coarse-level skipping is therefore an explicit expert/diagnostic choice, not
-    the default policy.
-    """
-
-    leaf = int(leaf_level)
-    if leaf <= 1:
-        return leaf
-    min_level = 2
-    if hf_start_level is not None:
-        explicit = int(hf_start_level)
-        if explicit < min_level or explicit > leaf:
-            raise ValueError(
-                "mlfmm_options.hf_start_level must satisfy "
-                f"{min_level} <= hf_start_level <= {leaf} for this partition depth. "
-                f"Got {explicit}."
-            )
-        return explicit
-
-    divisor = float(hf_wavelength_divisor)
-    if not np.isfinite(divisor) or divisor <= 0.0:
-        raise ValueError(
-            "mlfmm_options.hf_wavelength_divisor must be finite and > 0. "
-            f"Got {hf_wavelength_divisor!r}."
-        )
-    return int(min_level)
-
-
 def _offset_delta_from_half_size(half_size: float, offset: tuple[int, int, int]) -> np.ndarray:
     """Return the physical center shift for one relative box offset."""
 
     return 2.0 * float(half_size) * np.asarray(offset, dtype=float)
-
-
-def _spherical_hankel_all(nmax: int, z: complex) -> np.ndarray:
-    """Return spherical Hankel values `h_n^(1)(z)` for `n=0..nmax`."""
-
-    orders = np.arange(int(nmax) + 1, dtype=int)
-    return np.asarray(spherical_jn(orders, z) + 1j * spherical_yn(orders, z), dtype=np.complex128)
-
-
-def _rokhlin_transfer_values(
-    cosines: np.ndarray,
-    *,
-    k: complex,
-    radius: float,
-    truncation_order: int,
-) -> np.ndarray:
-    """Return the unweighted sampled Rokhlin transfer values for one offset."""
-
-    hankel = _spherical_hankel_all(int(truncation_order), complex(k) * float(radius))
-    legendre = np.polynomial.legendre.legvander(
-        np.asarray(cosines, dtype=float), int(truncation_order)
-    )
-    orders = np.arange(int(truncation_order) + 1, dtype=int)
-    coeffs = (2.0 * orders + 1.0) * (1j**orders) * hankel
-    return np.asarray(legendre @ coeffs, dtype=np.complex128)
 
 
 def _sampled_rokhlin_translator(
@@ -909,12 +842,22 @@ def _sampled_rokhlin_translator(
     if radius == 0.0:
         return np.asarray(weights, dtype=dtype)
     cosines = np.asarray(directions, dtype=float) @ (tr / radius)
-    transfer = _rokhlin_transfer_values(
-        cosines,
-        k=complex(k),
-        radius=radius,
-        truncation_order=int(truncation_order),
-    )
+    orders = np.arange(int(truncation_order) + 1, dtype=int)
+    hankel = sph_hankel1(orders, complex(k) * radius)
+    legendre = np.polynomial.legendre.legvander(cosines, int(truncation_order))
+    coeffs = (2.0 * orders + 1.0) * (1j**orders) * hankel
+    transfer = np.asarray(legendre @ coeffs, dtype=np.complex128)
+    peak = float(np.max(np.abs(transfer), initial=0.0))
+    # Minimal dynamic-range screen, not a requested-accuracy certificate.
+    # The high-order terms must not bury even the lowest outgoing harmonic.
+    if not np.isfinite(peak) or (
+        abs(hankel[0]) > 0 and np.finfo(dtype).eps * peak >= abs(hankel[0])
+    ):
+        raise ValueError(
+            "Sampled MLFMM Hankel dynamic range exceeds sampled-far precision "
+            f"(order={int(truncation_order)}, |k*r|={abs(complex(k) * radius):.6g}). "
+            "Use pairwise coupling or larger leaf boxes."
+        )
     return np.asarray(transfer * np.asarray(weights, dtype=float), dtype=dtype)
 
 
@@ -1716,6 +1659,19 @@ def build_single_level_mlfmm_operators(
     directional = structured_directional_transforms(
         int(shared_box_order), grid_order=int(shared_grid_order)
     )
+    leaf_cell_coords = _leaf_cell_coords(partition)
+    far_offset_batches = _leaf_offset_batches(partition, leaf_cell_coords)
+    offset_diagonals: dict[tuple[int, int, int], np.ndarray] = {}
+    for offset in far_offset_batches:
+        delta = _offset_delta_from_half_size(leaf_half_size, offset)
+        offset_diagonals[offset] = _sampled_rokhlin_translator(
+            delta,
+            k=complex(k),
+            truncation_order=int(shared_translator_order),
+            directions=directional.grid.directions,
+            weights=directional.grid.weights,
+            dtype=out_dtype,
+        )
     if backend == "numpy":
         if bool(build_leaf_maps):
             leaf_groups = _build_numpy_leaf_apply_groups_dense(
@@ -1755,19 +1711,6 @@ def build_single_level_mlfmm_operators(
         receive = tuple()
         leaf_groups = tuple()
         leaf_apply_mode = "on_the_fly"
-    leaf_cell_coords = _leaf_cell_coords(partition)
-    far_offset_batches = _leaf_offset_batches(partition, leaf_cell_coords)
-    offset_diagonals: dict[tuple[int, int, int], np.ndarray] = {}
-    for offset in far_offset_batches:
-        delta = _offset_delta_from_half_size(leaf_half_size, offset)
-        offset_diagonals[offset] = _sampled_rokhlin_translator(
-            delta,
-            k=complex(k),
-            truncation_order=int(shared_translator_order),
-            directions=directional.grid.directions,
-            weights=directional.grid.weights,
-            dtype=out_dtype,
-        )
     return MLFMMSingleLevelOperators(
         partition=partition,
         box_order=int(shared_box_order),
@@ -1903,17 +1846,13 @@ def build_multilevel_mlfmm_operators(
     leaf_map_backend: Literal["numpy", "cupy"] = "numpy",
     build_leaf_maps: bool = True,
     show_progress: bool = False,
-    hf_start_level: int | None = None,
-    hf_wavelength_divisor: float = 5.0,
 ) -> MLFMMMultilevelOperators:
     """Build multilevel sampled HF operators over occupied boxes only.
 
     The hierarchy stores only occupied boxes, together with same-level far
     batches and parent/child transfer operators for the upward and downward
-    sampled passes. Sampled start level is either explicitly forced via
-    `hf_start_level` or chosen as the first same-level far ownership level. The
-    automatic path does not skip coarse owned levels, because doing so would
-    drop interactions instead of approximating them elsewhere.
+    sampled passes. Every far ownership level from level 2 through the leaves
+    is included. Depth is controlled by the partition, never by skipping work.
     """
 
     if not partition.leaves:
@@ -1921,13 +1860,8 @@ def build_multilevel_mlfmm_operators(
     out_dtype = np.dtype(dtype)
     leaf_level = int(partition.depth)
     hf_end_level = int(leaf_level)
-    hf_start_level = _resolve_multilevel_hf_start_level(
-        partition=partition,
-        k=float(k),
-        leaf_level=leaf_level,
-        hf_start_level=hf_start_level,
-        hf_wavelength_divisor=float(hf_wavelength_divisor),
-    )
+    # Root children cannot be far from one another; ownership starts at level 2.
+    hf_start_level = min(2, leaf_level)
     leaf_coords = _leaf_cell_coords(partition)
     coords_by_level: list[np.ndarray] = [
         np.zeros((0, 3), dtype=np.int64) for _ in range(leaf_level + 1)
@@ -2774,8 +2708,6 @@ def prepare_mlfmm_coupling(
         leaf_map_backend=leaf_backend_lit,
         build_leaf_maps=bool(build_leaf_maps),
         show_progress=bool(show_progress),
-        hf_start_level=resolved_options.hf_start_level,
-        hf_wavelength_divisor=float(resolved_options.hf_wavelength_divisor),
     )
     out = MLFMMCouplingOperator(
         lmax=int(lmax),

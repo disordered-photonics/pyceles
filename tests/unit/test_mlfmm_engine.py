@@ -11,7 +11,6 @@ from pyceles.core.operators.mlfmm import (
     MLFMMLevelOperators,
     MLFMMOptions,
     MLFMMTransferOperators,
-    _resolve_multilevel_hf_start_level,
     apply_multilevel_mlfmm,
     apply_single_level_mlfmm,
     box_order_rokhlin_like,
@@ -179,7 +178,6 @@ def test_mlfmm_staging_uses_structured_directional_transforms(
         box_order=64,
         leaf_map_backend="cupy",
         build_leaf_maps=False,
-        hf_start_level=2,
     )
     assert all(
         isinstance(level.directional, MLFMMDirectionalStructuredTransforms)
@@ -544,26 +542,7 @@ def test_multilevel_build_produces_sensible_levels_and_offset_batches() -> None:
     assert any(len(level.far_offset_batches) > 0 for level in operators.levels[2:])
 
 
-def test_multilevel_auto_hf_start_preserves_first_far_ownership_level() -> None:
-    positions, radii, _lmax, k = _multilevel_fixture()
-    partition = build_uniform_mlfmm_partition(
-        positions,
-        particle_circumscribing_radii=radii,
-        depth=3,
-    )
-
-    hf_start_level = _resolve_multilevel_hf_start_level(
-        partition=partition,
-        k=k,
-        leaf_level=3,
-        hf_start_level=None,
-        hf_wavelength_divisor=2.0,
-    )
-
-    assert hf_start_level == 2
-
-
-def test_multilevel_auto_hf_start_does_not_skip_coarse_owned_level() -> None:
+def test_multilevel_retains_coarse_far_ownership_for_short_wavelength() -> None:
     positions, radii, lmax, _k = _multilevel_fixture()
     k_small_wavelength = 2.0 * np.pi / 150.0
     partition = build_uniform_mlfmm_partition(
@@ -585,23 +564,69 @@ def test_multilevel_auto_hf_start_does_not_skip_coarse_owned_level() -> None:
     assert any(len(level.far_offset_batches) > 0 for level in operators.levels[2:])
 
 
-def test_multilevel_explicit_hf_start_overrides_auto_policy() -> None:
-    positions, radii, _lmax, k = _multilevel_fixture()
+@pytest.mark.parametrize("depth", [2, 3, 4])
+@pytest.mark.parametrize("geometry", ["line", "cloud"])
+def test_multilevel_owns_each_directed_particle_pair_exactly_once(
+    depth: int, geometry: str
+) -> None:
+    # The test checks ownership, independently of approximation and Krylov error.
+    positions = np.zeros((17, 3))
+    positions[:, 0] = np.linspace(-300.0, 300.0, len(positions))
+    if geometry == "cloud":
+        positions = np.random.default_rng(20261017).uniform(-300, 300, (41, 3))
     partition = build_uniform_mlfmm_partition(
-        positions,
-        particle_circumscribing_radii=radii,
-        depth=3,
+        positions, particle_circumscribing_radii=np.ones(len(positions)), depth=depth
     )
-
-    hf_start_level = _resolve_multilevel_hf_start_level(
+    operators = build_multilevel_mlfmm_operators(
+        lmax=1,
+        k=2.0 * np.pi / 550.0,
+        positions=positions,
         partition=partition,
-        k=k,
-        leaf_level=3,
-        hf_start_level=2,
-        hf_wavelength_divisor=2.0,
+        box_order=4,
+        build_leaf_maps=False,
+    )
+    assert operators.hf_start_level == 2
+    assert operators.hf_end_level == depth
+
+    counts = np.zeros((len(positions), len(positions)), dtype=int)
+    for left, right in partition.leaf_near_pairs:
+        particles_left = partition.leaves[left].particle_indices
+        particles_right = partition.leaves[right].particle_indices
+        counts[np.ix_(particles_right, particles_left)] += 1
+        if left != right:
+            counts[np.ix_(particles_left, particles_right)] += 1
+    for level in operators.levels[2:]:
+        assert level.far_offset_batches
+        particles_by_cell = {
+            box.grid_index: box.particle_indices for box in partition.occupied_levels[level.level]
+        }
+        for source_boxes, target_boxes in level.far_offset_batches.values():
+            for source_box, target_box in zip(source_boxes, target_boxes, strict=True):
+                particles_source = particles_by_cell[tuple(level.coords[source_box])]
+                particles_target = particles_by_cell[tuple(level.coords[target_box])]
+                counts[np.ix_(particles_target, particles_source)] += 1
+    # Self pairs belong to one near block; its action excludes the singular
+    # self interaction. Checking them also catches spurious far self pairs.
+    np.testing.assert_array_equal(counts, 1)
+
+
+@pytest.mark.parametrize("depth", [2, 3])
+def test_unrepresentable_sampled_translator_is_rejected_before_leaf_maps(monkeypatch, depth):
+    from pyceles.core.operators import mlfmm
+
+    positions = np.zeros((17, 3))
+    positions[:, 0] = np.linspace(-0.5, 0.5, len(positions))
+    partition = build_uniform_mlfmm_partition(
+        positions, particle_circumscribing_radii=np.zeros(len(positions)), depth=depth
     )
 
-    assert hf_start_level == 2
+    def unexpected_leaf_maps(**kwargs):
+        pytest.fail("Catastrophic translators must be rejected before preparing leaf maps")
+
+    monkeypatch.setattr(mlfmm, "_build_numpy_leaf_apply_groups_dense", unexpected_leaf_maps)
+    builder = build_single_level_mlfmm_operators if depth == 2 else build_multilevel_mlfmm_operators
+    with pytest.raises(ValueError, match="dynamic range"):
+        builder(lmax=1, k=1.1, positions=positions, partition=partition, box_order=13)
 
 
 def test_single_level_full_apply_stays_in_expected_small_fixture_ballpark() -> None:

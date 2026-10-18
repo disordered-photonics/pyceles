@@ -74,6 +74,18 @@ translation operators. The current hierarchy is uniform-depth rather than
 adaptive. NumPy and CuPy share the validated hierarchy construction; repeated
 CuPy applies run on device.
 
+Occupancy, maximum depth, and the particle-radius leaf-size factor determine
+the partition. All levels that own far interactions participate in sampled
+transport; shallower hierarchies must be selected through the depth or
+occupancy settings. Exact-direct stages do not require box expansions.
+
+Preparation rejects sampled translators whose dynamic range buries the lowest
+outgoing harmonic below floating-point resolution. This check runs before leaf
+maps are built. It is a representability limit, not an accuracy estimate tied
+to the requested solver tolerance. For difficult subwavelength clusters, try
+larger leaves, a shallower depth, or pairwise coupling. Depth changes and retries
+remain explicit choices; low-frequency stabilization is not implemented.
+
 The sampled-far boundary uses a unitary two-channel polarization basis on both
 backends. This is internal: particle coefficients and the public operator
 interface retain their canonical layout. CuPy prepares the circular boundary

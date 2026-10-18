@@ -75,9 +75,10 @@ def root_cube(positions: Array) -> tuple[Array, float]:
     maxs = np.max(pts, axis=0)
     center = 0.5 * (mins + maxs)
     half_size = 0.5 * float(np.max(maxs - mins))
-    # Keep a positive cube size so depth arithmetic remains well-defined for
-    # degenerate or single-particle fixtures.
-    return np.asarray(center, dtype=float), max(float(half_size) * (1.0 + 1e-12), 0.5)
+    # A dimensional floor would alter the tree when the same geometry is
+    # expressed in different length units. Only degenerate extents need one.
+    half_size = half_size * (1.0 + 1e-12) if half_size > 0 else 0.5
+    return np.asarray(center, dtype=float), half_size
 
 
 def uniform_box_coords(
@@ -210,12 +211,14 @@ def validate_leaf_size_floor(
     """Reject occupied leaves that are too small for local circumscribing radii."""
 
     factor = float(leaf_size_radius_factor)
-    if factor <= 0.0:
-        raise ValueError(f"leaf_size_radius_factor must be > 0. Got {leaf_size_radius_factor!r}.")
+    if not np.isfinite(factor) or factor <= 0.0:
+        raise ValueError(
+            f"leaf_size_radius_factor must be finite and > 0. Got {leaf_size_radius_factor!r}."
+        )
 
     for leaf in partition.leaves:
         min_side = factor * float(leaf.max_radius)
-        if leaf.side_length + 1e-12 < min_side:
+        if leaf.side_length < min_side:
             raise ValueError(
                 "Uniform MLFMM leaf size floor violated for occupied leaf "
                 f"{leaf.grid_index} at depth {leaf.level}: "
