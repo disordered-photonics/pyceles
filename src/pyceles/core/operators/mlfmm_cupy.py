@@ -674,7 +674,9 @@ def _leaf_rect_pair_tables_and_ab(
 
 
 @cache
-def _leaf_translation_blocks_rect_raw_kernel(full_order: int, dtype_name: str) -> Any:
+def _leaf_translation_blocks_rect_raw_kernel(
+    full_order: int, dtype_name: str, conjugate_radial: bool = False
+) -> Any:
     """Return a cached RawKernel for batched interior rectangular translation blocks.
 
     Launch policy is one CUDA block per particle-to-leaf pair. This keeps the
@@ -768,8 +770,7 @@ def _leaf_translation_blocks_rect_raw_kernel(full_order: int, dtype_name: str) -
         const int* pair_offset,
         const int* pair_pmin,
         const int* pair_pcount,
-        {complex_t}* out_blocks,
-        const int conjugate_radial
+        {complex_t}* out_blocks
     ) {{
         const int pair_idx = blockIdx.x;
         if (pair_idx >= n_pairs) {{
@@ -838,7 +839,7 @@ def _leaf_translation_blocks_rect_raw_kernel(full_order: int, dtype_name: str) -
         for (int p = tid; p < {n_orders}; p += n_threads) {{
             const {complex_t} radial = bessel_lookup_linear(p, r_shared, re_j, im_j, inv_dr, last_index);
             re_j_shared[p] = radial.real();
-            im_j_shared[p] = (conjugate_radial ? -radial.imag() : radial.imag());
+            im_j_shared[p] = {"-" if conjugate_radial else ""}radial.imag();
             for (int absdm = 0; absdm <= p; ++absdm) {{
                 p_pdm_shared[p * (p + 1) / 2 + absdm] =
                     assoc_legendre_function(
@@ -1095,7 +1096,6 @@ def build_leaf_box_maps_cupy(
                 pair_pmin_dev,
                 pair_pcount_dev,
                 blocks_dev.reshape(-1),
-                np.int32(0),
             ),
         )
         blocks_host = np.asarray(cupy.asnumpy(blocks_dev), dtype=out_dtype)
@@ -3583,11 +3583,12 @@ def _leaf_translation_blocks_from_pair_deltas(
     else:
         blocks = cupy.empty((n_pairs, nmodes_out, nmodes_in), dtype=cupy.complex128)
 
-    # R(k)=G(conj(k))^H: conjugate only the regular radial samples. The flag
-    # is uniform per launch, so reception and true adjoints share one kernel.
+    # R(k)=G(conj(k))^H: cache the radial sign per host type and leaf order,
+    # keeping its selection out of the per-pair CUDA loop.
     kernel = _leaf_translation_blocks_rect_raw_kernel(
         int(tables.full_order),
         np.dtype(np.complex128).str,
+        conjugate_radial=conjugate_radial,
     )
     props = cupy.cuda.runtime.getDeviceProperties(cupy.cuda.runtime.getDevice())
     max_grid_pairs = int(props["maxGridSize"][0])
@@ -3625,14 +3626,15 @@ def _leaf_translation_blocks_from_pair_deltas(
                 tables.pair_pmin,
                 tables.pair_pcount,
                 blocks[start:end].reshape(-1),
-                np.int32(conjugate_radial),
             ),
         )
     return blocks
 
 
 @cache
-def _leaf_otf_aggregate_fused_raw_kernel(full_order: int, coeff_dtype_name: str) -> Any:
+def _leaf_otf_aggregate_fused_raw_kernel(
+    full_order: int, coeff_dtype_name: str, conjugate_radial: bool = False
+) -> Any:
     """Return a RawKernel that builds leaf translations and aggregates directly."""
 
     cupy, _ = import_cupy()
@@ -3736,8 +3738,7 @@ def _leaf_otf_aggregate_fused_raw_kernel(full_order: int, coeff_dtype_name: str)
         const int* pair_offset,
         const int* pair_pmin,
         const int* pair_pcount,
-        complex<double>* out,
-        const int conjugate_radial
+        complex<double>* out
     ) {{
         for (int pair_idx = blockIdx.x; pair_idx < n_pairs; pair_idx += gridDim.x) {{
             const int tid = threadIdx.x;
@@ -3794,7 +3795,7 @@ def _leaf_otf_aggregate_fused_raw_kernel(full_order: int, coeff_dtype_name: str)
                     const complex<double> radial =
                         bessel_lookup_linear_fused(p, r_shared, re_j, im_j, inv_dr, last_index);
                     re_j_shared[p] = radial.real();
-                    im_j_shared[p] = (conjugate_radial ? -radial.imag() : radial.imag());
+                    im_j_shared[p] = {"-" if conjugate_radial else ""}radial.imag();
                     for (int absdm = 0; absdm <= p; ++absdm) {{
                         p_pdm_shared[p * (p + 1) / 2 + absdm] =
                             assoc_legendre_function_fused(
@@ -3897,6 +3898,7 @@ def _launch_leaf_otf_aggregate_fused(
     kernel = _leaf_otf_aggregate_fused_raw_kernel(
         int(tables.full_order),
         np.dtype(x_states.dtype).str,
+        conjugate_radial=conjugate_radial,
     )
     props = cupy.cuda.runtime.getDeviceProperties(cupy.cuda.runtime.getDevice())
     max_grid_pairs = int(props["maxGridSize"][0])
@@ -3932,7 +3934,6 @@ def _launch_leaf_otf_aggregate_fused(
             tables.pair_pmin,
             tables.pair_pcount,
             out.reshape(-1),
-            np.int32(conjugate_radial),
         ),
     )
 
@@ -4071,7 +4072,9 @@ def _leaf_otf_receive_threads(
 
 
 @cache
-def _leaf_otf_receive_fused_raw_kernel(full_order: int, threads: int) -> Any:
+def _leaf_otf_receive_fused_raw_kernel(
+    full_order: int, threads: int, conjugate_radial: bool = False
+) -> Any:
     """Return a RawKernel for receive-side leaf translations without pair-block scratch."""
 
     cupy, _ = import_cupy()
@@ -4157,8 +4160,7 @@ def _leaf_otf_receive_fused_raw_kernel(full_order: int, threads: int) -> Any:
         const int* pair_offset,
         const int* pair_pmin,
         const int* pair_pcount,
-        complex<double>* out,
-        const int conjugate_radial
+        complex<double>* out
     ) {{
         const int lane = threadIdx.x & 31;
         const int warp = threadIdx.x >> 5;
@@ -4211,7 +4213,7 @@ def _leaf_otf_receive_fused_raw_kernel(full_order: int, threads: int) -> Any:
                     const complex<double> radial =
                         bessel_lookup_linear_receive(p, r_shared, re_j, im_j, inv_dr, last_index);
                     re_j_shared[p] = radial.real();
-                    im_j_shared[p] = (conjugate_radial ? -radial.imag() : radial.imag());
+                    im_j_shared[p] = {"-" if conjugate_radial else ""}radial.imag();
                     for (int absdm = 0; absdm <= p; ++absdm) {{
                         p_pdm_shared[p * (p + 1) / 2 + absdm] =
                             assoc_legendre_function_receive(
@@ -4343,7 +4345,9 @@ def _launch_leaf_otf_receive_fused(
         max_threads_per_block=max_threads,
         shared_mem_per_block=shared_limit,
     )
-    kernel = _leaf_otf_receive_fused_raw_kernel(int(tables.full_order), int(threads))
+    kernel = _leaf_otf_receive_fused_raw_kernel(
+        int(tables.full_order), int(threads), conjugate_radial=conjugate_radial
+    )
     blocks_x = max(1, min(max_grid_pairs, n_pairs))
     kernel(
         (blocks_x, n_tiles),
@@ -4374,7 +4378,6 @@ def _launch_leaf_otf_receive_fused(
             tables.pair_pmin,
             tables.pair_pcount,
             out.reshape(-1),
-            np.int32(conjugate_radial),
         ),
     )
 
