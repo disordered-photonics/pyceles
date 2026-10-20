@@ -19,6 +19,7 @@ from pyceles.core.angular import (
 from pyceles.core.geometry_bounds import coincident_point_mask
 from pyceles.core.radial import passive_wavenumber
 from pyceles.core.sources import (
+    BlochPlaneWave,
     FinitePlaneSpectrumSource,
     GaussianBeam,
     LocalExpansionSource,
@@ -27,6 +28,7 @@ from pyceles.core.sources import (
     is_normal_incidence,
     polarization_to_jones,
 )
+from pyceles.core.sources.plane_wave import _plane_wave_geometry
 
 from .scattered import compute_scattered_field
 
@@ -468,21 +470,19 @@ def _compute_initial_field_general(
             h[hit] = np.nan + 0j
         return np.asarray(e, dtype=accum_dtype), np.asarray(h, dtype=accum_dtype)
 
-    if isinstance(beam, PlaneWave):
-        alpha_pw = float(beam.azimuthal_angle)
-        beta_pw = float(beam.polar_angle)
+    if isinstance(beam, (PlaneWave, BlochPlaneWave)):
         amp = complex(beam.amplitude)
-        fp = np.asarray(beam.focal_point, dtype=np.float64).reshape(3)
-
+        geometry = _plane_wave_geometry(beam, k=k)
+        cb, sb = geometry.cos_beta, geometry.sin_beta
+        alpha_pw = geometry.azimuth
+        kvec = geometry.wavevector
+        khat = kvec / complex(k)
+        fp = np.asarray(geometry.reference_point, dtype=np.float64)
         ca = np.cos(alpha_pw)
         sa = np.sin(alpha_pw)
-        cb = np.cos(beta_pw)
-        sb = np.sin(beta_pw)
-        khat = np.array([sb * ca, sb * sa, cb], dtype=np.float64)
-        kvec = k * khat
-
-        ehat_te = np.array([-sa, ca, 0.0], dtype=np.float64)
-        ehat_tm = np.array([cb * ca, cb * sa, -sb], dtype=np.float64)
+        vector_dtype = np.result_type(cb, sb, np.float64)
+        ehat_te = np.array([-sa, ca, 0.0], dtype=vector_dtype)
+        ehat_tm = np.array([cb * ca, cb * sa, -sb], dtype=np.result_type(vector_dtype, cb, sb))
         a_te, a_tm = beam.jones_coefficients()
         ehat = a_te * ehat_te + a_tm * ehat_tm
         hhat = np.cross(khat, ehat)

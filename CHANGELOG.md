@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `BlochPlaneWave` prescribes a real transverse wavevector, a vertical
+  propagation direction, and a finite-reference amplitude in passive hosts.
+  Plane-wave SVWF projection and incident E/H share the same analytic geometry.
 - Finite MLFMM supports passive absorbing hosts on NumPy and CuPy, including
   physical regular reception, exact adjoints of the sampled hierarchy,
   block GPU actions, and finite-field postprocessing.

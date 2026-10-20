@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING
 
 import numpy as np
 import numpy.typing as npt
 
-from ..projection import incident_coeffs_planewave
 from .base import PolarizationInput, _canonicalize_polarization_input, polarization_to_jones
 from .common import _float_triplet_tuple
+
+if TYPE_CHECKING:
+    from .bloch import BlochPlaneWave
 
 
 @dataclass(frozen=True)
@@ -70,4 +73,47 @@ class PlaneWave:
         dtype: npt.DTypeLike = np.complex128,
     ) -> np.ndarray:
         """Project plane-wave source to incident SVWF coefficients."""
+        from ..projection import incident_coeffs_planewave
+
         return incident_coeffs_planewave(positions, lmax, self, dtype=dtype)
+
+
+@dataclass(frozen=True)
+class _PlaneWaveGeometry:
+    """Analytic direction and reference frame shared by projections and fields."""
+
+    wavevector: np.ndarray
+    cos_beta: complex | float
+    sin_beta: complex | float
+    azimuth: float
+    reference_point: tuple[float, float, float]
+    direction_sign: float
+
+
+def _plane_wave_geometry(
+    source: PlaneWave | BlochPlaneWave, *, k: complex | None = None
+) -> _PlaneWaveGeometry:
+    wave_number = 2 * np.pi / source.wavelength * source.medium_n if k is None else k
+    if isinstance(source, PlaneWave):
+        beta = float(source.polar_angle)
+        alpha = float(source.azimuthal_angle)
+        # Exact poles have exactly zero transverse wavevector; the source's
+        # azimuth still defines its TE/TM axes there.
+        cb = (1.0 if beta == 0.0 else -1.0) if beta in (0.0, np.pi) else np.cos(beta)
+        sb = 0.0 if beta in (0.0, np.pi) else np.sin(beta)
+        vector = wave_number * np.asarray([sb * np.cos(alpha), sb * np.sin(alpha), cb])
+        return _PlaneWaveGeometry(
+            vector, cb, sb, alpha, source.focal_point, 1.0 if cb >= 0 else -1.0
+        )
+
+    qx, qy = source.k_parallel
+    rho = float(np.hypot(qx, qy))
+    kz = source.direction_sign * np.sqrt(complex(wave_number) ** 2 - rho**2 + 0j)
+    return _PlaneWaveGeometry(
+        np.asarray([qx, qy, kz], dtype=np.complex128),
+        kz / wave_number,
+        rho / wave_number,
+        float(np.arctan2(qy, qx)) if rho != 0 else 0.0,
+        source.reference_point,
+        source.direction_sign,
+    )

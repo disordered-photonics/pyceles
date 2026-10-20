@@ -576,6 +576,96 @@ def test_compute_periodic_near_field_interior_accepts_rayleigh_method():
     np.testing.assert_allclose(hybrid.H_total, exact.H_total, rtol=2e-8, atol=2e-9)
 
 
+@pytest.mark.reference
+@pytest.mark.parametrize("polar_angle", (0.0, np.pi))
+def test_complex_host_rayleigh_solve_and_finite_fields_match_ewald(polar_angle: float):
+    host = 1.33 + 0.15j
+    wavelength = 550.0
+    lattice = pcl.RectangularLattice2D(1100.0, 1050.0)
+    particles = [
+        Sphere(position=(0.0, 0.0, -300.0), radius=25.0, refractive_index=1.5 + 0.01j),
+        Sphere(position=(90.0, -60.0, 300.0), radius=25.0, refractive_index=1.4 + 0.02j),
+    ]
+    source = PlaneWave(
+        wavelength=wavelength,
+        medium_n=host,
+        polarization="TE",
+        polar_angle=polar_angle,
+        amplitude=1.0,
+    )
+    configs = {
+        "ewald": pcl.PeriodicOptions(
+            method="ewald",
+            eta=np.sqrt(np.pi / lattice.area),
+            real_shells=8,
+            reciprocal_shells=8,
+            output_bmax=0.14,
+            shell_tolerance=1.0e-10,
+            max_shells=32,
+        ),
+        "rayleigh": pcl.PeriodicOptions(
+            method="rayleigh",
+            eta=np.sqrt(np.pi / lattice.area),
+            real_shells=8,
+            reciprocal_shells=8,
+            rayleigh_z_cut=300.0,
+            output_bmax=0.14,
+            shell_tolerance=1.0e-10,
+            max_shells=32,
+        ),
+    }
+    runs = {}
+    for method, options in configs.items():
+        config = pcl.SimulationConfig(
+            wavelength=wavelength,
+            n_medium=host,
+            lmax=1,
+            periodic=pcl.PeriodicSpec(lattice, options),
+            solver_method="direct",
+            verbose=False,
+        )
+        runs[method] = pcl.Simulation(config, particles=particles).run(
+            source,
+            include_farfield=False,
+        )
+
+    np.testing.assert_allclose(
+        runs["rayleigh"].coeffs,
+        runs["ewald"].coeffs,
+        rtol=2.0e-8,
+        atol=2.0e-11,
+    )
+    points = np.asarray([[20.0, 30.0, 50.0], [25.0, 15.0, 520.0], [-30.0, 20.0, -520.0]])
+    ewald = pcl.compute_periodic_near_field(runs["ewald"], points=points, field_bmax=0.14)
+    rayleigh = pcl.compute_periodic_near_field(runs["rayleigh"], points=points, field_bmax=0.14)
+    np.testing.assert_allclose(rayleigh.E_total, ewald.E_total, rtol=3.0e-7, atol=2.0e-9)
+    np.testing.assert_allclose(rayleigh.H_total, ewald.H_total, rtol=3.0e-7, atol=2.0e-9)
+    assert runs["rayleigh"].periodic is None
+    assert runs["rayleigh"].power is None
+
+    mixed = pcl.Simulation(
+        pcl.SimulationConfig(
+            wavelength=wavelength,
+            n_medium=host,
+            lmax=1,
+            periodic=pcl.PeriodicSpec(lattice, configs["rayleigh"]),
+            solver_method="direct",
+            verbose=False,
+        ),
+        particles=particles,
+    ).run_polarizations(source)
+    assert mixed.mixed.periodic is None
+    assert mixed.mixed.power is None
+    np.testing.assert_allclose(mixed.mixed.coeffs, runs["rayleigh"].coeffs, rtol=2e-12, atol=2e-12)
+    mixed_fields = pcl.compute_periodic_near_field(
+        mixed.mixed,
+        points=points,
+        field_bmax=0.14,
+    )
+    np.testing.assert_allclose(mixed_fields.E_total, rayleigh.E_total, rtol=2e-12, atol=2e-12)
+    np.testing.assert_allclose(mixed_fields.H_total, rayleigh.H_total, rtol=2e-12, atol=2e-12)
+
+
 def test_periodic_supercell_replication_matches_fundamental_cell_observables():
     wavelength = 550.0
     n_medium = 1.0 + 0j

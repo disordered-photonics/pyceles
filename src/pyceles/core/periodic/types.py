@@ -8,7 +8,7 @@ from typing import Literal
 import numpy as np
 
 from pyceles.core.lattice import RectangularLattice2D
-from pyceles.core.sources import PlaneWave
+from pyceles.core.sources import BlochPlaneWave, PlaneWave
 
 
 @dataclass(frozen=True)
@@ -34,21 +34,31 @@ class PeriodicOptions:
     translationally invariant periodic self block and all non-self pairs with
     ``|z_destination-z_source| <= rayleigh_z_cut`` use exact Ewald sums, while
     vertically separated pairs use reciprocal Rayleigh orders and linear-time
-    upward/downward scans. The default half-band is one medium wavelength and
-    is enlarged to twice the largest circumscribing radius when necessary.
+    upward/downward scans. The default half-band is one phase wavelength,
+    ``2*pi/Re(k)``, and is enlarged to twice the largest circumscribing radius
+    when necessary.
     ``rayleigh_reciprocal_shells`` fixes the reciprocal square half-width; when
     it is ``None``, an evanescent-envelope estimate uses the normalized
     associated-Legendre growth at the complex evanescent angle, together with
     the structural prefactor and the same ``shell_tolerance`` and
     ``max_shells`` controls as Ewald accumulation. Reciprocal work is chunked
     automatically from a bounded temporary-memory budget rather than exposed
-    as a user-facing tuning knob. In-slab periodic near-field evaluation
-    reuses this exact-near/Rayleigh-far policy for source-point coupling.
+    as a user-facing tuning knob. ``method="directsum"`` evaluates exactly
+    the finite image window set by ``directsum_window``; convergence of that
+    truncation is the caller's responsibility. In-slab periodic near-field
+    evaluation reuses this exact-near/Rayleigh-far policy for source-point
+    coupling.
 
     ``output_bmax`` controls optional evanescent diffraction orders in periodic
     output bases. ``None`` means propagating orders only for far-field power
     balances; near-field exterior evaluation still requires an explicit output
-    basis because evanescent content is an expert convergence knob.
+    basis because evanescent content is an expert convergence knob. CPU
+    directsum and CPU/CuPy Ewald and Rayleigh coupling accept passive complex
+    hosts with real Bloch vectors. Angle-based ``PlaneWave`` sources remain
+    limited to exact normal incidence in an absorbing host; use
+    ``BlochPlaneWave`` to set a nonzero real transverse wavevector explicitly.
+    Finite-position fields are available without absorbing-host power
+    diagnostics.
     """
 
     method: Literal["ewald", "directsum", "rayleigh"] = "ewald"
@@ -143,11 +153,21 @@ class PeriodicSpec:
             )
 
 
-def plane_wave_k_parallel(source: PlaneWave) -> np.ndarray:
-    """Return the incident in-plane Bloch wavevector for a plane wave."""
+def plane_wave_k_parallel(source: PlaneWave | BlochPlaneWave) -> np.ndarray:
+    """Return the real incident in-plane Bloch wavevector for a plane wave."""
+    if isinstance(source, BlochPlaneWave):
+        return np.asarray(source.k_parallel, dtype=float)
     k = 2.0 * np.pi / float(source.wavelength) * float(np.real(source.medium_n))
     beta = float(source.polar_angle)
     alpha = float(source.azimuthal_angle)
+    if beta == 0.0 or beta == np.pi:
+        return np.zeros((2,), dtype=float)
+    if complex(source.medium_n).imag != 0.0:
+        raise NotImplementedError(
+            "Complex-host periodic PlaneWave excitation currently requires exact "
+            "normal incidence. Oblique illumination needs an explicit transverse "
+            "Bloch-wavevector source instead of a real-angle conversion."
+        )
     return np.array(
         [
             k * np.sin(beta) * np.cos(alpha),

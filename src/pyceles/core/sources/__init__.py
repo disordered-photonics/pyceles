@@ -16,6 +16,7 @@ from .base import (
     polarization_to_jones,
 )
 from .bessel import BesselBeam, CartesianPolarizedBesselBeam
+from .bloch import BlochPlaneWave
 from .dipole import DipoleCollection, DipoleSource
 from .finite_plane import FinitePlaneSource
 from .gaussian import (
@@ -31,6 +32,7 @@ __all__ = [
     "AngularSpectrumSLMSource",
     "AngularSpectrumSource",
     "BesselBeam",
+    "BlochPlaneWave",
     "CartesianPolarizedBesselBeam",
     "CartesianPolarizedFocusedLaguerreGaussianBeam",
     "DipoleCollection",

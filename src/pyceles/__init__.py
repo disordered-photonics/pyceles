@@ -4,6 +4,7 @@ from pyceles._version import __version__
 from pyceles.core.fields import (
     AngularSpectrumSLMSource,
     BesselBeam,
+    BlochPlaneWave,
     CartesianPolarizedBesselBeam,
     CartesianPolarizedFocusedLaguerreGaussianBeam,
     DipoleCollection,
@@ -73,6 +74,7 @@ from pyceles.simulation import (
 __all__ = [
     "AngularSpectrumSLMSource",
     "BesselBeam",
+    "BlochPlaneWave",
     "CartesianPolarizedBesselBeam",
     "CartesianPolarizedFocusedLaguerreGaussianBeam",
     "ChannelResult",

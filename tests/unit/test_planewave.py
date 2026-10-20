@@ -68,6 +68,46 @@ def test_incident_coeffs_planewave_matches_celes_formula():
     np.testing.assert_allclose(got, ref, rtol=1e-13, atol=1e-13)
 
 
+@pytest.mark.parametrize("direction", ["up", "down"])
+@pytest.mark.parametrize("polarization", ["TE", "TM"])
+def test_bloch_plane_wave_projection_matches_real_angle_plane_wave(direction, polarization):
+    import pyceles as pcl
+
+    wavelength = 550.0
+    beta = 0.43
+    alpha = -0.28
+    k = 2.0 * np.pi / wavelength
+    q = (k * np.sin(beta) * np.cos(alpha), k * np.sin(beta) * np.sin(alpha))
+    reference_point = (11.0, -7.0, 25.0)
+    angle = beta if direction == "up" else np.pi - beta
+    plane_wave = PlaneWave(
+        wavelength=wavelength,
+        medium_n=1.0,
+        polarization=polarization,
+        polar_angle=angle,
+        azimuthal_angle=alpha,
+        focal_point=reference_point,
+        amplitude=0.7 + 0.2j,
+    )
+    bloch_wave = pcl.BlochPlaneWave(
+        wavelength=wavelength,
+        medium_n=1.0,
+        polarization=polarization,
+        k_parallel=q,
+        direction=direction,
+        reference_point=reference_point,
+        amplitude=0.7 + 0.2j,
+    )
+    positions = np.asarray([[0.0, 20.0, 80.0], [-25.0, 15.0, -40.0]])
+
+    np.testing.assert_allclose(
+        bloch_wave.incident_coeffs(positions, 3),
+        plane_wave.incident_coeffs(positions, 3),
+        rtol=2e-13,
+        atol=2e-13,
+    )
+
+
 def test_compute_initial_field_plane_wave_direct_branch():
     source = PlaneWave(
         wavelength=632.8,

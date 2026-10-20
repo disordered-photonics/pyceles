@@ -14,7 +14,7 @@ from .polarization import pure_polarization_label
 from .spherical import spherical_functions_trigon
 
 if TYPE_CHECKING:
-    from .sources import GaussianBeam, JonesPolarizedSource, PlaneWave, Source
+    from .sources import BlochPlaneWave, GaussianBeam, JonesPolarizedSource, PlaneWave, Source
 
 
 Polarization = Literal["TE", "TM"]
@@ -103,7 +103,7 @@ def project_source_basis_to_svwf(
 def incident_coeffs_planewave(
     positions: np.ndarray,
     lmax: int,
-    source: PlaneWave,
+    source: PlaneWave | BlochPlaneWave,
     *,
     dtype: npt.DTypeLike = np.complex128,
     polarization_override: Polarization | None = None,
@@ -115,6 +115,8 @@ def incident_coeffs_planewave(
     np.ndarray
         Shape `(Ns, n_modes(lmax))`.
     """
+    from .sources.plane_wave import _plane_wave_geometry
+
     lmax = int(lmax)
     pos = np.asarray(positions, dtype=float)
     Ns = pos.shape[0]
@@ -122,12 +124,10 @@ def incident_coeffs_planewave(
     Nscl = n_scalar(lmax)
     ctype = np.dtype(dtype)
 
-    k = 2 * np.pi / source.wavelength * complex(source.medium_n)
     E0 = complex(source.amplitude)
-    beta = float(source.polar_angle)
-    alpha = float(source.azimuthal_angle)
-    cb = np.cos(beta)
-    sb = np.sin(beta)
+    geometry = _plane_wave_geometry(source)
+    alpha = geometry.azimuth
+    cb, sb = geometry.cos_beta, geometry.sin_beta
 
     if polarization_override is None:
         a_te, a_tm = source.jones_coefficients()
@@ -136,10 +136,9 @@ def incident_coeffs_planewave(
 
     PI, TAU = spherical_functions_trigon(np.asarray(cb), np.asarray(sb), lmax, xp=np)
 
-    fp = np.asarray(source.focal_point, dtype=float).reshape(3)
+    fp = np.asarray(geometry.reference_point, dtype=float).reshape(3)
     rel = pos - fp
-    kvec = k * np.array([sb * np.cos(alpha), sb * np.sin(alpha), cb], dtype=float)
-    eikr = np.exp(1j * (rel @ kvec))
+    eikr = np.exp(1j * (rel @ geometry.wavevector))
 
     aI = np.zeros((Ns, Nm), dtype=ctype)
     for m in range(-lmax, lmax + 1):
