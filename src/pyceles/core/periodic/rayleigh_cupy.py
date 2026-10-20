@@ -68,8 +68,9 @@ __device__ inline {accum_complex} pyceles_rayleigh_phase_{kernel_suffix}(
     const double distance)
 {{
     const {accum_scalar} scaled_distance = ({accum_scalar})distance;
+    const {accum_scalar} gamma_real = ({accum_scalar})gamma.real();
     const {accum_scalar} gamma_imag = ({accum_scalar})gamma.imag();
-    if (gamma_imag != ({accum_scalar})0) {{
+    if (gamma_real == ({accum_scalar})0 && gamma_imag != ({accum_scalar})0) {{
         return {accum_complex}(
             {exponential}(-gamma_imag * scaled_distance),
             ({accum_scalar})0
@@ -77,8 +78,12 @@ __device__ inline {accum_complex} pyceles_rayleigh_phase_{kernel_suffix}(
     }}
     {accum_scalar} sine;
     {accum_scalar} cosine;
-    {sincos}(({accum_scalar})gamma.real() * scaled_distance, &sine, &cosine);
-    return {accum_complex}(cosine, sine);
+    {sincos}(gamma_real * scaled_distance, &sine, &cosine);
+    if (gamma_imag == ({accum_scalar})0) {{
+        return {accum_complex}(cosine, sine);
+    }}
+    const {accum_scalar} decay = {exponential}(-gamma_imag * scaled_distance);
+    return {accum_complex}(decay * cosine, decay * sine);
 }}
 
 extern "C" __global__
@@ -211,8 +216,9 @@ __device__ inline {complex_type} pyceles_rayleigh_point_phase_{suffix}(
     const double distance)
 {{
     const {scalar} scaled_distance = ({scalar})distance;
+    const {scalar} gamma_real = ({scalar})gamma.real();
     const {scalar} gamma_imag = ({scalar})gamma.imag();
-    if (gamma_imag != ({scalar})0) {{
+    if (gamma_real == ({scalar})0 && gamma_imag != ({scalar})0) {{
         return {complex_type}(
             {exponential}(-gamma_imag * scaled_distance),
             ({scalar})0
@@ -220,8 +226,12 @@ __device__ inline {complex_type} pyceles_rayleigh_point_phase_{suffix}(
     }}
     {scalar} sine;
     {scalar} cosine;
-    {sincos}(({scalar})gamma.real() * scaled_distance, &sine, &cosine);
-    return {complex_type}(cosine, sine);
+    {sincos}(gamma_real * scaled_distance, &sine, &cosine);
+    if (gamma_imag == ({scalar})0) {{
+        return {complex_type}(cosine, sine);
+    }}
+    const {scalar} decay = {exponential}(-gamma_imag * scaled_distance);
+    return {complex_type}(decay * cosine, decay * sine);
 }}
 
 extern "C" __global__

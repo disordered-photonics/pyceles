@@ -16,6 +16,7 @@ from typing import Any
 
 import numpy as np
 
+from pyceles._cupy_memory import cupy_allocator_snapshot
 from pyceles._optional import import_cupy
 from pyceles.core.lattice import RectangularLattice2D
 from pyceles.core.periodic.scalar import (
@@ -26,6 +27,8 @@ from pyceles.core.periodic.scalar import (
     structural_sum_m_normalization,
 )
 from pyceles.core.periodic.special import (
+    _SHIFTED_DELTA_COMPLEX_SERIES_ETA_Z_LIMIT,
+    _SHIFTED_DELTA_COMPLEX_SERIES_SCALED_LIMIT,
     _SHIFTED_DELTA_SERIES_ETA_Z_LIMIT,
     _SHIFTED_DELTA_SERIES_SCALED_LIMIT,
     _SHIFTED_DELTA_SERIES_TERMS,
@@ -35,6 +38,7 @@ from pyceles.core.periodic.special_cupy import (
     _DEFAULT_WOFZ_TERMS,
     _WTRAP_DEVICE_CUDA_SOURCE,
     _wtrap_quadrature_table_cupy,
+    scaled_real_integral_sequences_cupy,
 )
 
 
@@ -85,7 +89,7 @@ class CupyEwaldShellWorkspace:
 
     cupy: Any
     lattice: RectangularLattice2D
-    k: float
+    k: complex
     k_parallel: np.ndarray
     eta: float
     reciprocal_terms_cache: dict[int, CupyReciprocalTerms] = field(default_factory=dict)
@@ -114,7 +118,8 @@ class CupyEwaldShellWorkspace:
         kgt_np = np.asarray(self.k_parallel, dtype=np.float64).reshape(2)[None, :] + reciprocal
         rho_np = np.linalg.norm(kgt_np, axis=1)
         phi_np = np.arctan2(kgt_np[:, 1], kgt_np[:, 0])
-        gamma_np, rayleigh_zero_np = reciprocal_gamma_with_zero_mask(float(self.k), rho_np)
+        wave_number = complex(self.k)
+        gamma_np, rayleigh_zero_np = reciprocal_gamma_with_zero_mask(wave_number, rho_np)
         xarg_np = -(gamma_np * gamma_np) / (4.0 * float(self.eta) * float(self.eta))
         out = CupyReciprocalTerms(
             kgt=cp.asarray(kgt_np, dtype=cp.float64),
@@ -162,9 +167,15 @@ class CupyEwaldShellWorkspace:
         m_values = cp.arange(-order_i, order_i + 1, dtype=cp.float64)
         azimuth = cp.exp(1j * terms.phi[:, None] * m_values[None, :]).astype(cp.complex128)
 
-        rho_base = terms.rho / float(self.k)
-        gamma_base = terms.gamma / float(self.k)
-        rho_powers = cp.empty((n_terms, order_i + 1), dtype=cp.float64)
+        wave_number = complex(self.k)
+        rho_base = (
+            terms.rho / wave_number.real if wave_number.imag == 0.0 else terms.rho / wave_number
+        )
+        gamma_base = (
+            terms.gamma / wave_number.real if wave_number.imag == 0.0 else terms.gamma / wave_number
+        )
+        rho_dtype = cp.float64 if wave_number.imag == 0.0 else cp.complex128
+        rho_powers = cp.empty((n_terms, order_i + 1), dtype=rho_dtype)
         gamma_powers = cp.empty((n_terms, order_i + 1), dtype=cp.complex128)
         rho_powers[:, 0] = 1.0
         gamma_powers[:, 0] = 1.0 / gamma_base
@@ -172,8 +183,9 @@ class CupyEwaldShellWorkspace:
         for exponent in range(1, order_i + 1):
             rho_powers[:, exponent] = rho_powers[:, exponent - 1] * rho_base
             gamma_powers[:, exponent] = gamma_powers[:, exponent - 1] * gamma_step
+        negative_real_x = (terms.xarg.imag == 0.0) & (terms.xarg.real < 0.0)
         root_x = cp.where(
-            terms.xarg.real < 0.0,
+            negative_real_x,
             -1j * cp.sqrt(cp.abs(terms.xarg)),
             cp.sqrt(terms.xarg),
         ).astype(cp.complex128)
@@ -194,7 +206,7 @@ class CupyEwaldShellWorkspace:
                     m_norm
                     * (-1j) ** m
                     * root
-                    / ((-2.0) ** degree * self.lattice.area * float(self.k) ** 2)
+                    / ((-2.0) ** degree * self.lattice.area * wave_number**2)
                 )
                 n_max = degree - abs(m)
                 for n in range(n_max + 1):
@@ -257,7 +269,7 @@ _EWALD_DEVICE_CONSTANTS = r"""
 """
 
 
-_REAL_SPACE_STRUCTURAL_CUDA_SOURCE = r"""
+_LEGENDRE_DEVICE_CUDA_SOURCE = r"""
 
 __device__ void _pyceles_legendre_table(
     const double ct,
@@ -304,6 +316,10 @@ __device__ void _pyceles_legendre_table(
     }
 }
 
+"""
+
+
+_REAL_SPACE_STRUCTURAL_CUDA_SOURCE = r"""
 __device__ void _pyceles_real_integrals(
     const double r,
     const int order,
@@ -448,9 +464,169 @@ def _real_space_structural_raw_kernel(max_order: int) -> Any:
         _WTRAP_DEVICE_CUDA_SOURCE
         + _EWALD_DEVICE_CONSTANTS
         + f"\n#define PYCELES_REAL_MAX_ORDER {order}\n"
+        + _LEGENDRE_DEVICE_CUDA_SOURCE
         + _REAL_SPACE_STRUCTURAL_CUDA_SOURCE
     )
     return cp.RawKernel(source, "pyceles_ewald_real_space_structural_c128")
+
+
+_COMPLEX_REAL_SPACE_STRUCTURAL_CUDA_SOURCE = r"""
+extern "C" __global__ void pyceles_ewald_complex_real_space_structural_c128(
+    const long long n_pairs,
+    const int order,
+    const long long n_shifts,
+    const double* c,
+    const unsigned char* same_plane,
+    const double* shifts,
+    const complex<double>* phase_xy,
+    const complex<double>* radial_integrals,
+    complex<double>* sums
+) {
+    const long long pair = (long long)blockIdx.x;
+    if (pair >= n_pairs || order < 0 || order > PYCELES_REAL_MAX_ORDER) {
+        return;
+    }
+    const int tid = (int)threadIdx.x;
+    const int width = 2 * order + 1;
+    const int n_entries = (order + 1) * width;
+    extern __shared__ double shared[];
+    for (int idx = tid; idx < 2 * n_entries; idx += (int)blockDim.x) {
+        shared[idx] = 0.0;
+    }
+    __syncthreads();
+
+    const double cx = c[3 * pair + 0];
+    const double cy = c[3 * pair + 1];
+    const double cz = c[3 * pair + 2];
+    const bool is_same_plane = same_plane[pair] != 0;
+    for (long long shift_idx = tid; shift_idx < n_shifts; shift_idx += (long long)blockDim.x) {
+        const double x = -(shifts[3 * shift_idx + 0] + cx);
+        const double y = -(shifts[3 * shift_idx + 1] + cy);
+        const double z = -(shifts[3 * shift_idx + 2] + cz);
+        const double r2 = x * x + y * y + z * z;
+        if (r2 <= 0.0) {
+            continue;
+        }
+        const double r = sqrt(r2);
+        const double ct = z / r;
+        const double st = sqrt(fmax(0.0, 1.0 - ct * ct));
+        const double phi = atan2(y, x);
+        double plm[(PYCELES_REAL_MAX_ORDER + 1) * (PYCELES_REAL_MAX_ORDER + 1)];
+        _pyceles_legendre_table(ct, st, order, plm);
+
+        const complex<double> phase = phase_xy[shift_idx];
+        const int table_width = PYCELES_REAL_MAX_ORDER + 1;
+        const long long integral_base = (pair * n_shifts + shift_idx) * (order + 1);
+        for (int l = 0; l <= order; ++l) {
+            const complex<double> radial = phase * radial_integrals[integral_base + l];
+            const complex<double> base = complex<double>(0.0, -sqrt(2.0 / PYCELES_PI)) * radial;
+            for (int m = -l; m <= l; ++m) {
+                const int abs_m = m < 0 ? -m : m;
+                if (is_same_plane && (((l - abs_m) & 1) != 0)) {
+                    continue;
+                }
+                const double angle = (double)m * phi;
+                double sin_angle;
+                double cos_angle;
+                sincos(angle, &sin_angle, &cos_angle);
+                const complex<double> azimuth(cos_angle, sin_angle);
+                const complex<double> contrib =
+                    base * plm[l * table_width + abs_m] * azimuth;
+                const int entry = l * width + (m + order);
+                atomicAdd(&shared[2 * entry], contrib.real());
+                atomicAdd(&shared[2 * entry + 1], contrib.imag());
+            }
+        }
+    }
+    __syncthreads();
+    for (int entry = tid; entry < n_entries; entry += (int)blockDim.x) {
+        const double re = shared[2 * entry];
+        const double im = shared[2 * entry + 1];
+        if (re != 0.0 || im != 0.0) {
+            sums[pair * n_entries + entry] += complex<double>(re, im);
+        }
+    }
+}
+"""
+
+
+@cache
+def _complex_real_space_structural_raw_kernel(max_order: int) -> Any:
+    cp, _ = import_cupy()
+    order = int(max_order)
+    source = (
+        "#include <cupy/complex.cuh>\n"
+        + _EWALD_DEVICE_CONSTANTS
+        + f"\n#define PYCELES_REAL_MAX_ORDER {order}\n"
+        + _LEGENDRE_DEVICE_CUDA_SOURCE
+        + _COMPLEX_REAL_SPACE_STRUCTURAL_CUDA_SOURCE
+    )
+    return cp.RawKernel(source, "pyceles_ewald_complex_real_space_structural_c128")
+
+
+def _add_complex_real_space_structural_sums_cupy(
+    *,
+    c: Any,
+    same_plane: Any,
+    sums: Any,
+    workspace: CupyEwaldShellWorkspace,
+    real_shell_count: int,
+    order: int,
+) -> None:
+    """Add complex-wavenumber real-space terms with bounded device workspace."""
+    cp = workspace.cupy
+    real_terms = workspace.real_terms(int(real_shell_count))
+    n_pairs = int(c.shape[0])
+    n_shifts = int(real_terms.shifts.shape[0])
+    if n_pairs == 0 or n_shifts == 0:
+        return
+
+    # Account for relative vectors, both radius arrays, the normalized integral
+    # output, and the complex arrays retained by the two Faddeeva evaluations
+    # and even-order recurrence. The latter dominate beyond the returned table.
+    bytes_per_shift = (
+        5 * np.dtype(np.float64).itemsize + (int(order) + 18) * np.dtype(np.complex128).itemsize
+    )
+    bytes_per_pair = n_shifts * bytes_per_shift
+    snapshot = cupy_allocator_snapshot(cp, apply_pool_limit=False)
+    workspace_bytes = max(1, int(snapshot.active_headroom_bytes) // 4)
+    pair_chunk_size = max(1, min(n_pairs, workspace_bytes // max(1, bytes_per_pair)))
+    kernel = _complex_real_space_structural_raw_kernel(int(order))
+    n_entries = (int(order) + 1) * (2 * int(order) + 1)
+    shared_bytes = 2 * n_entries * np.dtype(np.float64).itemsize
+
+    for start in range(0, n_pairs, pair_chunk_size):
+        stop = min(n_pairs, start + pair_chunk_size)
+        c_chunk = cp.ascontiguousarray(c[start:stop], dtype=cp.float64)
+        relative = -(real_terms.shifts[None, :, :] + c_chunk[:, None, :])
+        radii = cp.linalg.norm(relative, axis=2)
+        safe_radii = cp.where(radii > 0.0, radii, 1.0)
+        scaled_integrals = scaled_real_integral_sequences_cupy(
+            int(order),
+            float(workspace.eta),
+            complex(workspace.k),
+            safe_radii,
+            cupy=cp,
+        )
+        radial_integrals = scaled_integrals / (
+            math.sqrt(2.0) * complex(workspace.k) * safe_radii[..., None]
+        )
+        kernel(
+            (stop - start,),
+            (128,),
+            (
+                np.int64(stop - start),
+                np.int32(int(order)),
+                np.int64(n_shifts),
+                c_chunk,
+                cp.ascontiguousarray(same_plane[start:stop].astype(cp.uint8, copy=False)),
+                real_terms.shifts,
+                real_terms.phase_xy,
+                cp.ascontiguousarray(radial_integrals),
+                sums[start:stop],
+            ),
+            shared_mem=shared_bytes,
+        )
 
 
 def _add_real_space_structural_sums_cupy(
@@ -462,12 +638,23 @@ def _add_real_space_structural_sums_cupy(
     real_shell_count: int,
     order: int,
     eta: float,
-    k: float,
+    k: complex,
 ) -> None:
-    """Add the real-space Ewald contribution with one fused device kernel."""
+    """Add real-space Ewald terms, preserving the real-k fused fast path."""
     cp = workspace.cupy
     n_pairs = int(c.shape[0])
     if n_pairs == 0:
+        return
+    wave_number = complex(k)
+    if wave_number.imag != 0.0:
+        _add_complex_real_space_structural_sums_cupy(
+            c=c,
+            same_plane=same_plane,
+            sums=sums,
+            workspace=workspace,
+            real_shell_count=int(real_shell_count),
+            order=int(order),
+        )
         return
     real_terms = workspace.real_terms(int(real_shell_count))
     n_shifts = int(real_terms.shifts.shape[0])
@@ -492,7 +679,7 @@ def _add_real_space_structural_sums_cupy(
             real_terms.phase_xy,
             sums,
             np.float64(float(eta)),
-            np.float64(float(k)),
+            np.float64(wave_number.real),
             quadrature,
             np.int32(terms),
             np.float64(h),
@@ -503,6 +690,13 @@ def _add_real_space_structural_sums_cupy(
 
 
 _SHIFTED_RECIPROCAL_STRUCTURAL_CUDA_SOURCE = r"""
+#if PYCELES_COMPLEX_HOST
+typedef complex<double> pyceles_ewald_wavenumber_t;
+typedef complex<double> pyceles_ewald_power_t;
+#else
+typedef double pyceles_ewald_wavenumber_t;
+typedef double pyceles_ewald_power_t;
+#endif
 
 __device__ double _pyceles_warp_sum(const double value) {
     double out = value;
@@ -510,6 +704,33 @@ __device__ double _pyceles_warp_sum(const double value) {
         out += __shfl_down_sync(0xffffffffu, out, offset);
     }
     return out;
+}
+
+__device__ complex<double> _pyceles_scaled_erfcx_product(
+    const complex<double> argument,
+    const complex<double> exponential,
+    const complex<double> phase,
+    const double* quadrature,
+    const int terms,
+    const double h,
+    const double H
+) {
+    if (argument.real() >= 0.0) {
+        return exponential * _wtrap_wofz_one(
+            complex<double>(-argument.imag(), argument.real()),
+            quadrature,
+            terms,
+            h,
+            H
+        );
+    }
+    return 2.0 * phase - exponential * _wtrap_wofz_one(
+        complex<double>(argument.imag(), -argument.real()),
+        quadrature,
+        terms,
+        h,
+        H
+    );
 }
 
 __device__ void _pyceles_shifted_delta_sequence(
@@ -531,11 +752,14 @@ __device__ void _pyceles_shifted_delta_sequence(
     const complex<double> z_sq = scaled * scaled;
     const double scaled_abs_sq =
         scaled.real() * scaled.real() + scaled.imag() * scaled.imag();
+    const bool complex_root = x.imag() != 0.0;
+    const double scaled_limit = complex_root
+        ? PYCELES_SHIFTED_COMPLEX_SERIES_SCALED_LIMIT
+        : PYCELES_SHIFTED_SERIES_SCALED_LIMIT;
     const bool use_series =
         series_height_eligible
         && !rayleigh_zero
-        && scaled_abs_sq <= (PYCELES_SHIFTED_SERIES_SCALED_LIMIT
-            * PYCELES_SHIFTED_SERIES_SCALED_LIMIT);
+        && scaled_abs_sq <= scaled_limit * scaled_limit;
 
     if (use_series) {
         // Exact generalized-incomplete-gamma expansion:
@@ -553,10 +777,36 @@ __device__ void _pyceles_shifted_delta_sequence(
         return;
     }
 
-    const complex<double> z_arg =
-        x.real() < 0.0 ? scaled : complex<double>(0.0, abs(scaled));
     const complex<double> exp_term = exp(-x + z_sq / (4.0 * x));
-    if (x.real() < 0.0) {
+    if (complex_root) {
+        const complex<double> argument_plus = root_x + complex<double>(0.0, 1.0)
+            * scaled / (2.0 * root_x);
+        const complex<double> argument_minus = root_x - complex<double>(0.0, 1.0)
+            * scaled / (2.0 * root_x);
+        const complex<double> plus = _pyceles_scaled_erfcx_product(
+            argument_plus,
+            exp_term,
+            exp(complex<double>(0.0, 1.0) * scaled),
+            quadrature,
+            terms,
+            h,
+            H
+        );
+        const complex<double> minus = _pyceles_scaled_erfcx_product(
+            argument_minus,
+            exp_term,
+            exp(complex<double>(0.0, -1.0) * scaled),
+            quadrature,
+            terms,
+            h,
+            H
+        );
+        delta[0] = 0.5 * sqrt(PYCELES_PI) * (plus + minus);
+        if (order >= 1) {
+            delta[1] = complex<double>(0.0, sqrt(PYCELES_PI)) / scaled * (plus - minus);
+        }
+    } else if (x.real() < 0.0) {
+        const complex<double> z_arg = scaled;
         // The two Faddeeva arguments are conjugates.  Reflect the lower
         // half-plane value analytically before multiplying by exp_term; the
         // direct product otherwise becomes 0*inf for tall cells.
@@ -577,6 +827,7 @@ __device__ void _pyceles_shifted_delta_sequence(
             );
         }
     } else if (x.real() > 0.0) {
+        const complex<double> z_arg(0.0, abs(scaled));
         // For evanescent orders z_arg is imaginary.  Once its lower argument
         // crosses the real axis, use the same Faddeeva reflection identity;
         // the physical Ewald product is exponentially decaying.
@@ -609,6 +860,7 @@ __device__ void _pyceles_shifted_delta_sequence(
             delta[1] = sqrt(PYCELES_PI) / scaled_abs * product_diff;
         }
     } else {
+        const complex<double> z_arg = scaled;
         const complex<double> w_minus = _wtrap_wofz_one(
             -z_arg / (2.0 * root_x) + complex<double>(0.0, 1.0) * root_x,
             quadrature,
@@ -654,14 +906,14 @@ extern "C" __global__ void pyceles_ewald_shifted_reciprocal_structural_c128(
     const complex<double>* xarg,
     const unsigned char* rayleigh_zero,
     const complex<double>* root_x,
-    const double* rho_powers,
+    const pyceles_ewald_power_t* rho_powers,
     const complex<double>* gamma_powers,
     const complex<double>* prefactor,
     const double* inverse_denominator,
     const complex<double>* upper_gamma,
     const int upper_gamma_stride,
     complex<double>* sums,
-    const double k,
+    const pyceles_ewald_wavenumber_t k,
     const double eta,
     const double* quadrature,
     const int terms,
@@ -681,10 +933,11 @@ extern "C" __global__ void pyceles_ewald_shifted_reciprocal_structural_c128(
     for (int idx = tid; idx < 2 * n_entries; idx += (int)blockDim.x) {
         shared[idx] = 0.0;
     }
-    double* cz_powers = shared + 2 * n_entries;
+    pyceles_ewald_power_t* cz_powers =
+        reinterpret_cast<pyceles_ewald_power_t*>(shared + 2 * n_entries);
     if (tid == 0) {
-        cz_powers[0] = 1.0;
-        const double cz_base = -k * c[3 * pair + 2];
+        cz_powers[0] = pyceles_ewald_power_t(1.0);
+        const pyceles_ewald_power_t cz_base = -k * c[3 * pair + 2];
         for (int exponent = 1; exponent <= order; ++exponent) {
             cz_powers[exponent] = cz_powers[exponent - 1] * cz_base;
         }
@@ -694,8 +947,11 @@ extern "C" __global__ void pyceles_ewald_shifted_reciprocal_structural_c128(
     const double cx = c[3 * pair + 0];
     const double cy = c[3 * pair + 1];
     const double cz = c[3 * pair + 2];
-    const bool series_height_eligible =
-        fabs(eta * cz) <= PYCELES_SHIFTED_SERIES_ETA_Z_LIMIT;
+    const bool series_height_eligible = fabs(eta * cz) <= (
+        PYCELES_COMPLEX_HOST
+            ? PYCELES_SHIFTED_COMPLEX_SERIES_ETA_Z_LIMIT
+            : PYCELES_SHIFTED_SERIES_ETA_Z_LIMIT
+    );
     const int lane = tid & 31;
 
     // The 128-thread launch consists of complete warps.  Each lane retains one
@@ -742,7 +998,7 @@ extern "C" __global__ void pyceles_ewald_shifted_reciprocal_structural_c128(
                     complex<double> acc(0.0, 0.0);
                     const int n_max = l - abs_m;
                     for (int n = 0; n <= n_max; ++n) {
-                        double terms_acc = 0.0;
+                        pyceles_ewald_power_t terms_acc = pyceles_ewald_power_t(0.0);
                         const int s_stop = min(n_max, 2 * n);
                         const int s_start = ((n - n_max) & 1) == 0 ? n : n + 1;
                         for (int s_val = s_start; s_val <= s_stop; s_val += 2) {
@@ -796,14 +1052,14 @@ extern "C" __global__ void pyceles_ewald_shifted_reciprocal_compact_terms_c128(
     const complex<double>* xarg,
     const unsigned char* rayleigh_zero,
     const complex<double>* root_x,
-    const double* rho_powers,
+    const pyceles_ewald_power_t* rho_powers,
     const complex<double>* gamma_powers,
     const complex<double>* prefactor,
     const double* inverse_denominator,
     const complex<double>* upper_gamma,
     const int upper_gamma_stride,
     complex<double>* compact_terms,
-    const double k,
+    const pyceles_ewald_wavenumber_t k,
     const double eta,
     const double* quadrature,
     const int terms,
@@ -817,11 +1073,13 @@ extern "C" __global__ void pyceles_ewald_shifted_reciprocal_compact_terms_c128(
     }
     const bool has_term = tid < n_terms;
 
-    extern __shared__ double cz_powers[];
+    extern __shared__ double shared[];
+    pyceles_ewald_power_t* cz_powers =
+        reinterpret_cast<pyceles_ewald_power_t*>(shared);
     const double cz = source_positions[3 * source + 2] - plane_z;
     if (tid == 0) {
-        cz_powers[0] = 1.0;
-        const double cz_base = -k * cz;
+        cz_powers[0] = pyceles_ewald_power_t(1.0);
+        const pyceles_ewald_power_t cz_base = -k * cz;
         for (int exponent = 1; exponent <= order; ++exponent) {
             cz_powers[exponent] = cz_powers[exponent - 1] * cz_base;
         }
@@ -841,8 +1099,11 @@ extern "C" __global__ void pyceles_ewald_shifted_reciprocal_compact_terms_c128(
     sincos(phase_angle, &sin_phase, &cos_phase);
     const complex<double> source_phase(cos_phase, sin_phase);
 
-    const bool series_height_eligible =
-        fabs(eta * cz) <= PYCELES_SHIFTED_SERIES_ETA_Z_LIMIT;
+    const bool series_height_eligible = fabs(eta * cz) <= (
+        PYCELES_COMPLEX_HOST
+            ? PYCELES_SHIFTED_COMPLEX_SERIES_ETA_Z_LIMIT
+            : PYCELES_SHIFTED_SERIES_ETA_Z_LIMIT
+    );
     complex<double> delta[PYCELES_SHIFTED_MAX_ORDER + 1];
     _pyceles_shifted_delta_sequence(
         order,
@@ -873,7 +1134,7 @@ extern "C" __global__ void pyceles_ewald_shifted_reciprocal_compact_terms_c128(
             const int n_max = l - abs_m;
             complex<double> acc(0.0, 0.0);
             for (int n = 0; n <= n_max; ++n) {
-                double terms_acc = 0.0;
+                pyceles_ewald_power_t terms_acc = pyceles_ewald_power_t(0.0);
                 const int s_stop = min(n_max, 2 * n);
                 const int s_start = ((n - n_max) & 1) == 0 ? n : n + 1;
                 for (int s_val = s_start; s_val <= s_stop; s_val += 2) {
@@ -898,12 +1159,16 @@ extern "C" __global__ void pyceles_ewald_shifted_reciprocal_compact_terms_c128(
 
 
 @cache
-def _shifted_reciprocal_compact_terms_raw_kernel(max_order: int) -> Any:
+def _shifted_reciprocal_raw_kernel(
+    max_order: int, complex_host: bool, *, compact: bool = False
+) -> Any:
+    """Specialize shared reciprocal algebra by host type and output layout."""
     cp, _ = import_cupy()
     order = int(max_order)
     source = (
         _WTRAP_DEVICE_CUDA_SOURCE
         + _EWALD_DEVICE_CONSTANTS
+        + f"#define PYCELES_COMPLEX_HOST {int(bool(complex_host))}\n"
         + f"\n#define PYCELES_SHIFTED_MAX_ORDER {order}\n"
         + f"#define PYCELES_SHIFTED_SERIES_TERMS {_SHIFTED_DELTA_SERIES_TERMS}\n"
         + (
@@ -911,29 +1176,24 @@ def _shifted_reciprocal_compact_terms_raw_kernel(max_order: int) -> Any:
             f"{_SHIFTED_DELTA_SERIES_SCALED_LIMIT:.17g}\n"
         )
         + (f"#define PYCELES_SHIFTED_SERIES_ETA_Z_LIMIT {_SHIFTED_DELTA_SERIES_ETA_Z_LIMIT:.17g}\n")
-        + _SHIFTED_RECIPROCAL_STRUCTURAL_CUDA_SOURCE
-        + _SHIFTED_RECIPROCAL_COMPACT_TERMS_CUDA_SOURCE
-    )
-    return cp.RawKernel(source, "pyceles_ewald_shifted_reciprocal_compact_terms_c128")
-
-
-@cache
-def _shifted_reciprocal_structural_raw_kernel(max_order: int) -> Any:
-    cp, _ = import_cupy()
-    order = int(max_order)
-    source = (
-        _WTRAP_DEVICE_CUDA_SOURCE
-        + _EWALD_DEVICE_CONSTANTS
-        + f"\n#define PYCELES_SHIFTED_MAX_ORDER {order}\n"
-        + f"#define PYCELES_SHIFTED_SERIES_TERMS {_SHIFTED_DELTA_SERIES_TERMS}\n"
         + (
-            "#define PYCELES_SHIFTED_SERIES_SCALED_LIMIT "
-            f"{_SHIFTED_DELTA_SERIES_SCALED_LIMIT:.17g}\n"
+            "#define PYCELES_SHIFTED_COMPLEX_SERIES_SCALED_LIMIT "
+            f"{_SHIFTED_DELTA_COMPLEX_SERIES_SCALED_LIMIT:.17g}\n"
         )
-        + (f"#define PYCELES_SHIFTED_SERIES_ETA_Z_LIMIT {_SHIFTED_DELTA_SERIES_ETA_Z_LIMIT:.17g}\n")
+        + (
+            "#define PYCELES_SHIFTED_COMPLEX_SERIES_ETA_Z_LIMIT "
+            f"{_SHIFTED_DELTA_COMPLEX_SERIES_ETA_Z_LIMIT:.17g}\n"
+        )
         + _SHIFTED_RECIPROCAL_STRUCTURAL_CUDA_SOURCE
     )
-    return cp.RawKernel(source, "pyceles_ewald_shifted_reciprocal_structural_c128")
+    if compact:
+        source += _SHIFTED_RECIPROCAL_COMPACT_TERMS_CUDA_SOURCE
+    name = (
+        "pyceles_ewald_shifted_reciprocal_compact_terms_c128"
+        if compact
+        else "pyceles_ewald_shifted_reciprocal_structural_c128"
+    )
+    return cp.RawKernel(source, name)
 
 
 def _shifted_reciprocal_compact_terms_cupy(
@@ -1012,7 +1272,10 @@ def _shifted_reciprocal_compact_terms_cupy(
     rho_powers = cp.ascontiguousarray(shifted_tables.rho_powers[start:stop])
     gamma_powers = cp.ascontiguousarray(shifted_tables.gamma_powers[start:stop])
     upper_gamma_chunk = cp.ascontiguousarray(upper_gamma[start:stop])
-    _shifted_reciprocal_compact_terms_raw_kernel(order_i)(
+    wave_number = complex(workspace.k)
+    complex_host = wave_number.imag != 0.0
+    kernel_k = np.complex128(wave_number) if complex_host else np.float64(wave_number.real)
+    _shifted_reciprocal_raw_kernel(order_i, complex_host, compact=True)(
         (n_sources,),
         (128,),
         (
@@ -1034,14 +1297,15 @@ def _shifted_reciprocal_compact_terms_cupy(
             upper_gamma_chunk,
             np.int32(upper_stride),
             out,
-            np.float64(float(workspace.k)),
+            kernel_k,
             np.float64(float(workspace.eta)),
             quadrature,
             np.int32(terms),
             np.float64(h),
             np.float64(math.pi / h),
         ),
-        shared_mem=(order_i + 1) * np.dtype(np.float64).itemsize,
+        shared_mem=(order_i + 1)
+        * (np.dtype(np.complex128 if complex_host else np.float64).itemsize),
     )
     return out
 
@@ -1054,7 +1318,7 @@ def _add_shifted_reciprocal_structural_sums_cupy(
     workspace: CupyEwaldShellWorkspace,
     reciprocal_shell_count: int,
     order: int,
-    k: float,
+    k: complex,
 ) -> None:
     """Add shifted-pair reciprocal Ewald terms with one fused device kernel."""
     cp = workspace.cupy
@@ -1075,13 +1339,17 @@ def _add_shifted_reciprocal_structural_sums_cupy(
     n_terms = int(reciprocal_terms.rho.shape[0])
     if n_terms == 0:
         return
+    wave_number = complex(k)
+    complex_host = wave_number.imag != 0.0
+    kernel_k = np.complex128(wave_number) if complex_host else np.float64(wave_number.real)
     threads = 128
     n_entries = (int(order) + 1) * (2 * int(order) + 1)
-    shared_bytes = (2 * n_entries + int(order) + 1) * np.dtype(np.float64).itemsize
+    power_bytes = np.dtype(np.complex128 if complex_host else np.float64).itemsize
+    shared_bytes = (2 * n_entries) * np.dtype(np.float64).itemsize + (int(order) + 1) * power_bytes
     terms = int(_DEFAULT_WOFZ_TERMS)
     h = math.sqrt(math.pi / float(terms + 1))
     quadrature = _wtrap_quadrature_table_cupy(int(cp.cuda.runtime.getDevice()), terms)
-    _shifted_reciprocal_structural_raw_kernel(int(order))(
+    _shifted_reciprocal_raw_kernel(int(order), complex_host)(
         (n_pairs,),
         (threads,),
         (
@@ -1101,9 +1369,12 @@ def _add_shifted_reciprocal_structural_sums_cupy(
             shifted_tables.prefactor,
             shifted_tables.inverse_denominator,
             upper_gamma,
-            np.int32(int(order) + _SHIFTED_DELTA_SERIES_TERMS + 1),
+            # A reused upper-gamma cache can have a wider leading dimension
+            # than this order requests. The resulting view is strided, so the
+            # RawKernel must use its row pitch rather than its logical width.
+            np.int32(upper_gamma.strides[0] // np.dtype(np.complex128).itemsize),
             sums,
-            np.float64(float(k)),
+            kernel_k,
             np.float64(float(workspace.eta)),
             quadrature,
             np.int32(terms),
@@ -1176,7 +1447,8 @@ def ewald_structural_sums_2d_fixed_cupy(
     source==destination self blocks; point-field evaluators must not add it.
     """
     cp = workspace.cupy
-    k = float(workspace.k)
+    k = complex(workspace.k)
+    k_factor = k.real if k.imag == 0.0 else k
     eta = float(workspace.eta)
     c, bloch_phase = _canonicalize_lateral_displacements_cupy(
         relative_source_minus_destination,
@@ -1198,7 +1470,7 @@ def ewald_structural_sums_2d_fixed_cupy(
         return sums
 
     cxy = c[:, :2]
-    same_plane_atol = same_plane_z_tolerance(float(k), coordinate_scale=float(coordinate_scale))
+    same_plane_atol = same_plane_z_tolerance(k, coordinate_scale=float(coordinate_scale))
     cz_raw = c[:, 2]
     same_plane = cp.abs(cz_raw) <= float(same_plane_atol)
     # Keep same-plane classification local to the structural evaluator.  The
@@ -1241,7 +1513,7 @@ def ewald_structural_sums_2d_fixed_cupy(
                     prefactor = (
                         (1j) ** m
                         * root
-                        / (workspace.lattice.area * float(k) * (2.0 * float(k)) ** degree)
+                        / (workspace.lattice.area * k_factor * (2.0 * k_factor) ** degree)
                     )
                     n_vals = np.arange((degree - abs(m)) // 2 + 1, dtype=np.int64)
                     inner = cp.zeros_like(gamma, dtype=cp.complex128)
@@ -1269,7 +1541,7 @@ def ewald_structural_sums_2d_fixed_cupy(
             workspace=workspace,
             reciprocal_shell_count=int(reciprocal_shell_count),
             order=int(order),
-            k=float(k),
+            k=k,
         )
 
     _add_real_space_structural_sums_cupy(
@@ -1280,7 +1552,7 @@ def ewald_structural_sums_2d_fixed_cupy(
         real_shell_count=int(real_shell_count),
         order=int(order),
         eta=float(eta),
-        k=float(k),
+        k=k,
     )
     if bloch_phase is not None:
         sums *= bloch_phase[:, None, None]

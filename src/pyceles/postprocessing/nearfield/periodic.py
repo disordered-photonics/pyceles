@@ -32,10 +32,11 @@ def compute_periodic_near_field(
 ) -> NearFieldComponents:
     """Evaluate periodic near fields inside and outside the particle slab.
 
-    Points above/below the particle slab use the exterior Rayleigh-order
-    evaluator, while points intersecting the slab use the local periodic
-    evaluator. The exterior order basis is explicit: callers must provide
-    `field_bmax`, or configure `run.config.periodic.options.output_bmax`.
+    Points above/below the particle slab use the exterior order evaluator,
+    while points intersecting the slab use the local periodic evaluator.
+    Complex-host Ewald and Rayleigh fields are evaluated at finite distances
+    from an explicit reciprocal-order basis; absorbing-host power diagnostics
+    are not defined by this interface.
     """
     pts_flat, lead_shape = reshape_field_points(points)
     n_points = int(pts_flat.shape[0])

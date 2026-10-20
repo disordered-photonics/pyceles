@@ -21,7 +21,13 @@ from pyceles.core.operators import (
 )
 from pyceles.core.periodic import plane_wave_k_parallel
 from pyceles.core.projection import project_source_to_svwf
-from pyceles.core.sources import FinitePlaneSpectrumSource, LocalExpansionSource, PlaneWave, Source
+from pyceles.core.sources import (
+    BlochPlaneWave,
+    FinitePlaneSpectrumSource,
+    LocalExpansionSource,
+    PlaneWave,
+    Source,
+)
 from pyceles.linear.solvers import (
     DenseLUFactorization,
     _capture_backend_solution,
@@ -259,9 +265,9 @@ def periodic_shared_k_parallel(
     ref_label: str | None = None
     ref_kp: np.ndarray | None = None
     for label, source in labeled_sources.items():
-        if not isinstance(source, PlaneWave):
+        if not isinstance(source, (PlaneWave, BlochPlaneWave)):
             raise NotImplementedError(
-                "Periodic workflows currently support PlaneWave excitation only. "
+                "Periodic workflows currently support PlaneWave and BlochPlaneWave excitation. "
                 f"Source '{label}' is {type(source).__name__}."
             )
         kp = plane_wave_k_parallel(source)
@@ -269,10 +275,10 @@ def periodic_shared_k_parallel(
             ref_label = str(label)
             ref_kp = kp
             continue
-        if not np.allclose(kp, ref_kp, rtol=1e-12, atol=1e-12):
+        if not np.array_equal(kp, ref_kp):
             raise NotImplementedError(
-                "Periodic multi-source solves require all PlaneWave sources to share "
-                f"one in-plane Bloch wavevector. Source '{label}' differs from "
+                "Periodic multi-source solves require all sources to share one "
+                f"in-plane Bloch wavevector exactly. Source '{label}' differs from "
                 f"source '{ref_label}'."
             )
     if ref_kp is None:

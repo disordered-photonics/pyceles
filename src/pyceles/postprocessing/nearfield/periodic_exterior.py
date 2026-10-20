@@ -4,11 +4,13 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from pyceles.core.periodic import PeriodicSpec
-from pyceles.core.sources import PlaneWave
+from pyceles.core.periodic import PeriodicSpec, plane_wave_k_parallel
+from pyceles.core.sources import BlochPlaneWave, PlaneWave
 from pyceles.postprocessing.farfield import periodic_order_amplitudes
 
 from .components import NearFieldComponents
+from .initial import compute_initial_field
+from .scattered import compute_scattered_field
 from .slice import reshape_field_points
 
 if TYPE_CHECKING:
@@ -17,12 +19,12 @@ if TYPE_CHECKING:
 
 def _resolve_periodic_channel_payload(
     run: ChannelResult,
-) -> tuple[np.ndarray, PlaneWave]:
+) -> tuple[np.ndarray, PlaneWave | BlochPlaneWave]:
     """Return the explicit coefficient/source pair for one periodic channel."""
     source = run.source
-    if not isinstance(source, PlaneWave):
+    if not isinstance(source, (PlaneWave, BlochPlaneWave)):
         raise NotImplementedError(
-            "Periodic near-field evaluation currently supports PlaneWave sources only."
+            "Periodic near-field evaluation supports PlaneWave and BlochPlaneWave sources."
         )
     return np.asarray(run.coeffs), source
 
@@ -63,7 +65,7 @@ def _slab_classification_tolerance(
 
 def _plane_wave_vectors(
     *,
-    k: float,
+    k: complex,
     k_parallel: np.ndarray,
     kz: complex,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -72,8 +74,8 @@ def _plane_wave_vectors(
     ky = float(k_parallel[1])
     alpha = float(np.arctan2(ky, kx))
     kp = float(np.hypot(kx, ky))
-    sb = kp / float(k)
-    cb = complex(kz) / float(k)
+    sb = kp / complex(k)
+    cb = complex(kz) / complex(k)
 
     e_te = np.asarray(
         [-np.sin(alpha), np.cos(alpha), 0.0],
@@ -95,49 +97,72 @@ def _plane_wave_vectors(
 def _initial_plane_wave_field(
     points: np.ndarray,
     *,
-    source: PlaneWave,
-    k: float,
+    source: PlaneWave | BlochPlaneWave,
+    k: complex,
     n_medium: complex,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Evaluate incident plane-wave `E/H` fields at arbitrary points."""
     pts = np.asarray(points, dtype=float).reshape(-1, 3)
-    k_parallel = np.asarray(
-        [
-            float(k)
-            * float(np.sin(float(source.polar_angle)))
-            * float(np.cos(float(source.azimuthal_angle))),
-            float(k)
-            * float(np.sin(float(source.polar_angle)))
-            * float(np.sin(float(source.azimuthal_angle))),
-        ],
-        dtype=float,
+    return compute_initial_field(
+        pts,
+        k=complex(k),
+        n_medium=complex(n_medium),
+        beam=source,
+        polar_angles=np.empty(0),
+        azimuthal_angles=np.empty(0),
+        show_progress=False,
+        backend="numpy",
+        compute_dtype=np.complex128,
+        accum_dtype=np.complex128,
     )
-    kz = complex(float(k) * float(np.cos(float(source.polar_angle))), 0.0)
-    e_te, e_tm, h_te, h_tm = _plane_wave_vectors(k=float(k), k_parallel=k_parallel, kz=kz)
-    a_te, a_tm = source.jones_coefficients()
-    amplitude = complex(source.amplitude)
 
-    e_vec = amplitude * (complex(a_te) * e_te + complex(a_tm) * e_tm)
-    h_vec = amplitude * complex(n_medium) * (complex(a_te) * h_te + complex(a_tm) * h_tm)
 
-    fp = np.asarray(getattr(source, "focal_point", (0.0, 0.0, 0.0)), dtype=float).reshape(3)
-    phase = np.exp(
-        1j
-        * (
-            float(k_parallel[0]) * (pts[:, 0] - float(fp[0]))
-            + float(k_parallel[1]) * (pts[:, 1] - float(fp[1]))
-            + float(np.real(kz)) * (pts[:, 2] - float(fp[2]))
-        )
+def _periodic_directsum_scattered_field(
+    run: ChannelResult,
+    *,
+    points: np.ndarray,
+    k_parallel: np.ndarray,
+    show_progress: bool,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Evaluate outgoing particle fields over the configured periodic image window."""
+    positions = np.asarray(run.positions, dtype=float).reshape(-1, 3)
+    if positions.shape[0] == 0:
+        empty = np.zeros((np.asarray(points).reshape(-1, 3).shape[0], 3), dtype=np.complex128)
+        return empty, empty.copy()
+
+    coeffs = np.asarray(run.coeffs, dtype=np.complex128).reshape(positions.shape[0], -1)
+    periodic = run.config.periodic
+    if periodic is None:
+        raise RuntimeError("Periodic direct-sum field evaluation requires periodic settings.")
+    window = int(periodic.options.directsum_window)
+    image_positions: list[np.ndarray] = []
+    image_coeffs: list[np.ndarray] = []
+    for p in range(-window, window + 1):
+        for q in range(-window, window + 1):
+            shift = periodic.lattice.lattice_vector(p, q)
+            bloch_phase = np.exp(1j * float(np.dot(k_parallel, shift[:2])))
+            image_positions.append(positions + shift[None, :])
+            image_coeffs.append(bloch_phase * coeffs)
+
+    return compute_scattered_field(
+        points,
+        np.concatenate(image_positions, axis=0),
+        np.concatenate(image_coeffs, axis=0),
+        k=complex(run.k),
+        lmax=int(run.config.lmax),
+        n_medium=run.config.n_medium,
+        particle_distance_resolution=float(run.config.radial_lut_dr),
+        show_progress=show_progress,
+        backend="numpy",
+        compute_dtype=np.dtype(run.compute_dtype),
+        accum_dtype=np.dtype(run.accum_dtype),
     )
-    e = phase[:, None] * e_vec[None, :]
-    h = phase[:, None] * h_vec[None, :]
-    return e, h
 
 
 def _accumulate_order_field(
     points: np.ndarray,
     *,
-    k: float,
+    k: complex,
     n_medium: complex,
     order_k_parallel: np.ndarray,
     order_kz: np.ndarray,
@@ -167,7 +192,7 @@ def _accumulate_order_field(
             if abs(a_te) <= 0.0 and abs(a_tm) <= 0.0:
                 continue
             e_te, e_tm, h_te, h_tm = _plane_wave_vectors(
-                k=float(k),
+                k=complex(k),
                 k_parallel=kpar[i],
                 kz=kz,
             )
@@ -190,7 +215,7 @@ def compute_periodic_near_field_exterior(
     slab_tolerance: float = 1e-12,
     show_progress: bool = False,
 ) -> NearFieldComponents:
-    """Evaluate periodic near fields for points strictly outside the particle slab."""
+    """Evaluate periodic fields outside the slab using orders or image sums."""
     periodic = run.config.periodic
     if periodic is None:
         raise ValueError(
@@ -229,68 +254,73 @@ def compute_periodic_near_field_exterior(
             "points to the exterior half spaces."
         )
 
-    k = run.k.real
-    output_bmax = periodic.options.output_bmax if field_bmax is None else float(field_bmax)
-    if output_bmax is None:
-        raise ValueError(
-            "Periodic near-field exterior evaluation requires an explicit reciprocal output basis. "
-            "Set `field_bmax` on the call or configure `periodic.options.output_bmax`."
-        )
-    order_payload = periodic_order_amplitudes(
-        source=source,
-        lattice=periodic.lattice,
-        positions=run.positions,
-        coeffs=np.asarray(coeffs),
-        lmax=int(run.config.lmax),
-        k=k,
-        output_bmax=output_bmax,
-    )
-
+    k = complex(run.k)
     e_initial, h_initial = _initial_plane_wave_field(
-        pts_flat,
-        source=source,
-        k=k,
-        n_medium=run.config.n_medium,
+        pts_flat, source=source, k=k, n_medium=run.config.n_medium
     )
-    e_scattered = np.zeros_like(e_initial)
-    h_scattered = np.zeros_like(h_initial)
-
-    progress = None
-    if show_progress:
-        hemisphere_count = int(np.any(above_mask)) + int(np.any(below_mask))
-        total = hemisphere_count * int(order_payload.order_mn.shape[0])
-        if total > 0:
-            from tqdm.auto import tqdm
-
-            progress = tqdm(total=total, desc="Periodic exterior field", unit="order")
-    try:
-        if np.any(above_mask):
-            e_up, h_up = _accumulate_order_field(
-                pts_flat[above_mask],
-                k=k,
-                n_medium=run.config.n_medium,
-                order_k_parallel=order_payload.order_k_parallel,
-                order_kz=order_payload.order_kz,
-                amplitudes=order_payload.scattered_up_amplitudes,
-                progress=progress,
+    if periodic.options.method == "directsum":
+        e_scattered, h_scattered = _periodic_directsum_scattered_field(
+            run,
+            points=pts_flat,
+            k_parallel=plane_wave_k_parallel(source),
+            show_progress=show_progress,
+        )
+    else:
+        output_bmax = periodic.options.output_bmax if field_bmax is None else float(field_bmax)
+        if output_bmax is None:
+            raise ValueError(
+                "Periodic near-field exterior evaluation requires an explicit reciprocal output basis. "
+                "Set `field_bmax` on the call or configure `periodic.options.output_bmax`."
             )
-            e_scattered[above_mask] = e_up
-            h_scattered[above_mask] = h_up
-        if np.any(below_mask):
-            e_down, h_down = _accumulate_order_field(
-                pts_flat[below_mask],
-                k=k,
-                n_medium=run.config.n_medium,
-                order_k_parallel=order_payload.order_k_parallel,
-                order_kz=-np.asarray(order_payload.order_kz, dtype=np.complex128),
-                amplitudes=order_payload.scattered_down_amplitudes,
-                progress=progress,
-            )
-            e_scattered[below_mask] = e_down
-            h_scattered[below_mask] = h_down
-    finally:
-        if progress is not None:
-            progress.close()
+        order_payload = periodic_order_amplitudes(
+            source=source,
+            lattice=periodic.lattice,
+            positions=run.positions,
+            coeffs=np.asarray(coeffs),
+            lmax=int(run.config.lmax),
+            k=k,
+            output_bmax=output_bmax,
+        )
+
+        e_scattered = np.zeros_like(e_initial)
+        h_scattered = np.zeros_like(h_initial)
+
+        progress = None
+        if show_progress:
+            hemisphere_count = int(np.any(above_mask)) + int(np.any(below_mask))
+            total = hemisphere_count * int(order_payload.order_mn.shape[0])
+            if total > 0:
+                from tqdm.auto import tqdm
+
+                progress = tqdm(total=total, desc="Periodic exterior field", unit="order")
+        try:
+            if np.any(above_mask):
+                e_up, h_up = _accumulate_order_field(
+                    pts_flat[above_mask],
+                    k=k,
+                    n_medium=run.config.n_medium,
+                    order_k_parallel=order_payload.order_k_parallel,
+                    order_kz=order_payload.order_kz,
+                    amplitudes=order_payload.scattered_up_amplitudes,
+                    progress=progress,
+                )
+                e_scattered[above_mask] = e_up
+                h_scattered[above_mask] = h_up
+            if np.any(below_mask):
+                e_down, h_down = _accumulate_order_field(
+                    pts_flat[below_mask],
+                    k=k,
+                    n_medium=run.config.n_medium,
+                    order_k_parallel=order_payload.order_k_parallel,
+                    order_kz=-np.asarray(order_payload.order_kz, dtype=np.complex128),
+                    amplitudes=order_payload.scattered_down_amplitudes,
+                    progress=progress,
+                )
+                e_scattered[below_mask] = e_down
+                h_scattered[below_mask] = h_down
+        finally:
+            if progress is not None:
+                progress.close()
 
     e_internal = np.zeros_like(e_initial)
     h_internal = np.zeros_like(h_initial)

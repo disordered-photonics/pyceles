@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from pyceles.core.lattice import RectangularLattice2D
+from pyceles.core.radial import passive_wavenumber
 
 
 @dataclass(frozen=True)
@@ -24,7 +25,7 @@ def enumerate_diffraction_orders_rectangular(
     *,
     lattice: RectangularLattice2D,
     k_parallel_incident: np.ndarray,
-    k: float,
+    k: complex,
     output_bmax: float | None = None,
     threshold: float = 1e-12,
 ) -> DiffractionOrders:
@@ -33,15 +34,19 @@ def enumerate_diffraction_orders_rectangular(
     When `output_bmax` is set, all orders satisfying
     `|k_parallel_incident + m*b1 + n*b2| <= output_bmax` are included.
 
-    When `output_bmax` is `None`, the returned table is propagating-only
-    (`|k_parallel_mn| <= k`), which is sufficient for `R/T/A`.
+    When `output_bmax` is `None`, the returned table is propagating-only for a
+    lossless host (`|k_parallel_mn| <= k`). Absorbing hosts require an explicit
+    reciprocal-radius cutoff because no order propagates without attenuation.
     """
-    k_f = float(k)
-    if not np.isfinite(k_f) or k_f <= 0.0:
-        raise ValueError(f"`k` must be finite and positive. Got {k!r}.")
+    k_c = passive_wavenumber(k)
+    if k_c.imag != 0.0 and output_bmax is None:
+        raise ValueError(
+            "`output_bmax` must be explicit for a complex wavenumber because an "
+            "absorbing host has no propagating-only order cutoff."
+        )
     kp0 = np.asarray(k_parallel_incident, dtype=float).reshape(2)
     tol = float(threshold)
-    bmax = float(k_f if output_bmax is None else output_bmax)
+    bmax = float(abs(k_c.real) if output_bmax is None else output_bmax)
     if not np.isfinite(bmax) or bmax <= 0.0:
         raise ValueError(
             f"`output_bmax` must be finite and positive when set. Got {output_bmax!r}."
@@ -61,7 +66,7 @@ def enumerate_diffraction_orders_rectangular(
     n_max = int(np.ceil((bmax - float(kp0[1])) / b2_norm))
 
     radius_sq_max = float((bmax + tol) * (bmax + tol))
-    prop_sq_max = float((k_f + tol) * (k_f + tol))
+    prop_sq_max = float((k_c.real + tol) * (k_c.real + tol))
     rows: list[tuple[int, int, np.ndarray, complex, bool]] = []
     for m in range(m_min, m_max + 1):
         for n in range(n_min, n_max + 1):
@@ -71,12 +76,17 @@ def enumerate_diffraction_orders_rectangular(
                 continue
             if output_bmax is None and kp_sq > prop_sq_max:
                 continue
-            kz2 = k_f * k_f - kp_sq
-            if kz2 >= -tol:
-                kz = complex(float(np.sqrt(max(kz2, 0.0))), 0.0)
+            kz2 = k_c * k_c - kp_sq
+            if k_c.imag == 0.0 and kz2.real >= -tol:
+                kz = complex(float(np.sqrt(max(kz2.real, 0.0))), 0.0)
                 propagating = True
+            elif k_c.imag == 0.0:
+                kz = complex(0.0, float(np.sqrt(-kz2.real)))
+                propagating = False
             else:
-                kz = complex(0.0, float(np.sqrt(-kz2)))
+                kz = complex(np.sqrt(kz2))
+                if kz.imag < 0.0 or (kz.imag == 0.0 and kz.real < 0.0):
+                    kz = -kz
                 propagating = False
             rows.append((int(m), int(n), kp, kz, bool(propagating)))
 

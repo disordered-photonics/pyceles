@@ -159,7 +159,11 @@ class SimulationConfig:
 
     Geometry / physics policy:
     - finite pairwise and MLFMM systems support passive complex `n_medium`;
-      periodic propagation requires a real host
+      periodic complex-host coupling uses Ewald, Rayleigh, or finite-image
+      `directsum`, with a real transverse Bloch vector specified explicitly
+      when it is nonzero; angle-defined `PlaneWave` sources are supported only
+      at normal incidence in an absorbing host. CuPy periodic coupling supports
+      Ewald and Rayleigh; finite-image `directsum` remains a CPU method
     - circumscribing-sphere overlap checks remain enabled by default because
       the multiple-scattering T-matrix formulation assumes disjoint
       circumscribing spheres
@@ -314,15 +318,13 @@ class SimulationConfig:
             )
         object.__setattr__(self, "coupling_backend", coupling_backend)
 
-        if n_medium.imag != 0.0 and self.periodic is not None:
-            raise NotImplementedError("Periodic propagation requires a real host.")
+        if self.periodic is not None and not isinstance(self.periodic, PeriodicSpec):
+            raise TypeError(
+                "`periodic` must be a PeriodicSpec instance or None. "
+                f"Got {type(self.periodic).__name__}."
+            )
 
         if self.periodic is not None:
-            if not isinstance(self.periodic, PeriodicSpec):
-                raise TypeError(
-                    "`periodic` must be a PeriodicSpec instance or None. "
-                    f"Got {type(self.periodic).__name__}."
-                )
             if coupling_backend == "mlfmm":
                 raise NotImplementedError(
                     "Periodic MLFMM is not implemented. Use coupling_backend='pairwise' "

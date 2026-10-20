@@ -8,7 +8,7 @@ import pytest
 
 from pyceles.core.lattice import RectangularLattice2D
 from pyceles.core.operators import MLFMMOptions
-from pyceles.core.periodic import PeriodicSpec
+from pyceles.core.periodic import PeriodicOptions, PeriodicSpec
 from pyceles.simulation import SimulationConfig
 
 pytestmark = pytest.mark.api_contract
@@ -318,13 +318,41 @@ def test_simulation_config_rejects_nonfinite_physical_inputs(field: str, invalid
         cast(Any, SimulationConfig)(**{field: invalid, "verbose": False})
 
 
-def test_passive_complex_host_requires_finite_coupling() -> None:
+def test_passive_complex_host_periodic_method_boundaries() -> None:
     host = 1.33 + 0.1j
     assert SimulationConfig(n_medium=host, verbose=False).n_medium == host
     assert SimulationConfig(n_medium=host, coupling_backend="mlfmm", verbose=False).n_medium == host
-    with pytest.raises(NotImplementedError, match="Periodic"):
-        SimulationConfig(
-            n_medium=host,
-            periodic=PeriodicSpec(lattice=RectangularLattice2D(900, 950)),
-            verbose=False,
-        )
+    ewald = SimulationConfig(
+        n_medium=host,
+        periodic=PeriodicSpec(lattice=RectangularLattice2D(900, 950)),
+        verbose=False,
+    )
+    assert ewald.periodic is not None
+    assert ewald.periodic.options.method == "ewald"
+    rayleigh = SimulationConfig(
+        n_medium=host,
+        periodic=PeriodicSpec(
+            lattice=RectangularLattice2D(900, 950),
+            options=PeriodicOptions(method="rayleigh"),
+        ),
+        verbose=False,
+    )
+    assert rayleigh.periodic is not None
+    assert rayleigh.periodic.options.method == "rayleigh"
+    cupy_ewald = SimulationConfig(
+        n_medium=host,
+        operator_backend="cupy",
+        periodic=PeriodicSpec(lattice=RectangularLattice2D(900, 950)),
+        verbose=False,
+    )
+    assert cupy_ewald.periodic is not None
+    cupy_rayleigh = SimulationConfig(
+        n_medium=host,
+        operator_backend="cupy",
+        periodic=PeriodicSpec(
+            lattice=RectangularLattice2D(900, 950),
+            options=PeriodicOptions(method="rayleigh"),
+        ),
+        verbose=False,
+    )
+    assert cupy_rayleigh.periodic is not None

@@ -17,6 +17,8 @@ import numpy as np
 
 from pyceles._optional import import_cupy
 from pyceles.core.periodic.special import (
+    _SHIFTED_DELTA_COMPLEX_SERIES_ETA_Z_LIMIT,
+    _SHIFTED_DELTA_COMPLEX_SERIES_SCALED_LIMIT,
     _SHIFTED_DELTA_SERIES_ETA_Z_LIMIT,
     _SHIFTED_DELTA_SERIES_SCALED_LIMIT,
     _SHIFTED_DELTA_SERIES_TERMS,
@@ -263,7 +265,142 @@ def _shifted_delta_sequence_cupy_raw(
     terms: int,
     cupy: Any,
 ) -> Any:
-    """Evaluate the established Faddeeva recurrence on device."""
+    """Evaluate the shifted recurrence on device for real or complex roots."""
+    cp = cupy
+    gamma_arr = cp.asarray(gamma, dtype=cp.complex128).reshape(-1)
+    x = -(gamma_arr * gamma_arr) / (4.0 * float(eta) * float(eta))
+    complex_indices = cp.flatnonzero(x.imag != 0.0)
+    real_indices = cp.flatnonzero(x.imag == 0.0)
+    if int(complex_indices.size) == 0:
+        return _shifted_delta_sequence_cupy_raw_real(
+            max_order,
+            gamma_arr,
+            z_offset,
+            eta,
+            terms=terms,
+            cupy=cp,
+        )
+    out = cp.empty(
+        (int(cp.asarray(z_offset).size), int(gamma_arr.size), int(max_order) + 1),
+        dtype=cp.complex128,
+    )
+    out[:, complex_indices] = _shifted_delta_sequence_cupy_raw_complex(
+        max_order,
+        gamma_arr[complex_indices],
+        z_offset,
+        eta,
+        terms=terms,
+        cupy=cp,
+    )
+    if int(real_indices.size):
+        out[:, real_indices] = _shifted_delta_sequence_cupy_raw_real(
+            max_order,
+            gamma_arr[real_indices],
+            z_offset,
+            eta,
+            terms=terms,
+            cupy=cp,
+        )
+    return out
+
+
+def _scaled_erfcx_product_cupy(
+    argument: Any,
+    exponential: Any,
+    phase: Any,
+    *,
+    terms: int,
+    cupy: Any,
+) -> Any:
+    """Evaluate ``exponential * erfcx(argument)`` without lower-plane overflow."""
+    cp = cupy
+    upper = argument.real >= 0.0
+    result = cp.empty_like(argument, dtype=cp.complex128)
+    upper_indices = cp.nonzero(upper)
+    if int(upper_indices[0].size):
+        upper_arg = argument[upper_indices]
+        result[upper_indices] = exponential[upper_indices] * wofz_cupy(
+            1j * upper_arg,
+            terms=int(terms),
+            cupy=cp,
+        )
+    lower_indices = cp.nonzero(~upper)
+    if int(lower_indices[0].size):
+        lower_arg = argument[lower_indices]
+        result[lower_indices] = 2.0 * phase[lower_indices] - exponential[lower_indices] * wofz_cupy(
+            -1j * lower_arg,
+            terms=int(terms),
+            cupy=cp,
+        )
+    return result
+
+
+def _shifted_delta_sequence_cupy_raw_complex(
+    max_order: int,
+    gamma: Any,
+    z_offset: Any,
+    eta: float,
+    *,
+    terms: int,
+    cupy: Any,
+) -> Any:
+    """Evaluate genuinely complex reciprocal roots with the scaled-erfcx form."""
+    cp = cupy
+    gamma_arr = cp.asarray(gamma, dtype=cp.complex128).reshape(-1)
+    z_arr = cp.asarray(z_offset, dtype=cp.float64).reshape(-1)
+    x = -(gamma_arr * gamma_arr) / (4.0 * float(eta) * float(eta))
+    root_x = cp.sqrt(x)
+    scaled = z_arr[:, None] * gamma_arr[None, :]
+    x_b = x[None, :]
+    root_b = root_x[None, :]
+    exponential = cp.exp(-x_b + scaled * scaled / (4.0 * x_b))
+    argument_plus = root_b + 1j * scaled / (2.0 * root_b)
+    argument_minus = root_b - 1j * scaled / (2.0 * root_b)
+    plus = _scaled_erfcx_product_cupy(
+        argument_plus,
+        exponential,
+        cp.exp(1j * scaled),
+        terms=terms,
+        cupy=cp,
+    )
+    minus = _scaled_erfcx_product_cupy(
+        argument_minus,
+        exponential,
+        cp.exp(-1j * scaled),
+        terms=terms,
+        cupy=cp,
+    )
+    order = int(max_order)
+    out = cp.empty((int(z_arr.size), int(gamma_arr.size), order + 1), dtype=cp.complex128)
+    out[:, :, 0] = 0.5 * math.sqrt(math.pi) * (plus + minus)
+    if order:
+        out[:, :, 1] = 1j * math.sqrt(math.pi) / scaled * (plus - minus)
+        x_power = 1.0 / x_b
+        z_squared = scaled * scaled
+        for index in range(2, order + 1):
+            out[:, :, index] = (
+                4.0
+                / z_squared
+                * (
+                    (1.5 - float(index)) * out[:, :, index - 1]
+                    - out[:, :, index - 2]
+                    + root_b * x_power * exponential
+                )
+            )
+            x_power /= x_b
+    return out
+
+
+def _shifted_delta_sequence_cupy_raw_real(
+    max_order: int,
+    gamma: Any,
+    z_offset: Any,
+    eta: float,
+    *,
+    terms: int,
+    cupy: Any,
+) -> Any:
+    """Evaluate the existing real-root Faddeeva recurrence on device."""
     cp = cupy
     n_max = int(max_order)
     gamma_arr = cp.asarray(gamma, dtype=cp.complex128).reshape(-1)
@@ -453,6 +590,110 @@ def real_integral_sequence_cupy(
     return vals[:, -1].reshape(radii_shape)
 
 
+def scaled_real_integral_sequence_cupy(
+    degree: int,
+    eta: float,
+    k: complex,
+    radii: Any,
+    *,
+    terms: int = _DEFAULT_WOFZ_TERMS,
+    cupy: Any | None = None,
+) -> Any:
+    r"""Return one degree from the scaled complex-host Ewald sequence."""
+    cp = cupy
+    if cp is None:
+        cp, _ = import_cupy()
+    l = int(degree)
+    if l < 0 or l != degree:
+        raise ValueError(f"`degree` must be a non-negative integer. Got {degree!r}.")
+    sequence = scaled_real_integral_sequences_cupy(
+        l,
+        eta,
+        k,
+        radii,
+        terms=terms,
+        cupy=cp,
+    )
+    return sequence[..., l]
+
+
+def scaled_real_integral_sequences_cupy(
+    max_degree: int,
+    eta: float,
+    k: complex,
+    radii: Any,
+    *,
+    terms: int = _DEFAULT_WOFZ_TERMS,
+    cupy: Any | None = None,
+) -> Any:
+    r"""Evaluate scaled real-space Ewald integrals for degrees ``0..max_degree``.
+
+    The absorbing-host continuation uses the even-order Kambe recurrence. Its
+    two base values reduce to scaled complementary error functions, evaluated
+    through the existing device Faddeeva implementation. Keeping this helper
+    in complex128 matches the CPU Ewald scalar path before callers choose their
+    operator storage dtype.
+    """
+    cp = cupy
+    if cp is None:
+        cp, _ = import_cupy()
+    max_l = int(max_degree)
+    if max_l < 0 or max_l != max_degree:
+        raise ValueError(f"`max_degree` must be a non-negative integer. Got {max_degree!r}.")
+    wave_number = complex(k)
+    if wave_number.imag == 0.0:
+        radii_arr = cp.asarray(radii, dtype=cp.float64)
+        return cp.stack(
+            [
+                (wave_number.real * radii_arr / 2.0) ** (degree + 1)
+                * real_integral_sequence_cupy(
+                    degree,
+                    eta,
+                    wave_number.real,
+                    radii_arr,
+                    terms=terms,
+                    cupy=cp,
+                )
+                for degree in range(max_l + 1)
+            ],
+            axis=-1,
+        ).astype(cp.complex128, copy=False)
+
+    eta_f = float(eta)
+    if not np.isfinite(eta_f) or eta_f <= 0.0:
+        raise ValueError(f"`eta` must be finite and positive. Got {eta!r}.")
+    if wave_number == 0.0:
+        raise ValueError("`k` must be nonzero for complex-host Ewald integrals.")
+    radii_arr = cp.asarray(radii, dtype=cp.float64)
+    if bool(cp.any(radii_arr <= 0.0).get()):
+        raise ValueError("Real-space Ewald radii must be positive.")
+
+    z = wave_number * radii_arr
+    eta_c = (math.sqrt(2.0) * eta_f) / wave_number
+    root_half = 1.0 / math.sqrt(2.0)
+    a_minus = (z * eta_c - 1j / eta_c) * root_half
+    a_plus = (z * eta_c + 1j / eta_c) * root_half
+    exp_factor = cp.exp(0.5 * (-z * z * eta_c * eta_c + 1.0 / (eta_c * eta_c)))
+    erfcx_minus = wofz_cupy(1j * a_minus, terms=int(terms), cupy=cp)
+    erfcx_plus = wofz_cupy(1j * a_plus, terms=int(terms), cupy=cp)
+    kambe_m2 = -0.5j * math.sqrt(math.pi / 2.0) * exp_factor * (erfcx_minus - erfcx_plus)
+    kambe_0 = math.sqrt(math.pi / 8.0) * exp_factor * (erfcx_minus + erfcx_plus) / z
+    output = cp.empty((*radii_arr.shape, max_l + 1), dtype=cp.complex128)
+    kambe_previous = kambe_0
+    output[..., 0] = math.sqrt(2.0) * z * kambe_0
+    if max_l:
+        kambe_current = (kambe_0 - kambe_m2 + eta_c * exp_factor) / (z * z)
+        output[..., 1] = math.sqrt(2.0) * z**2 * kambe_current
+        for degree in range(2, max_l + 1):
+            order = 2 * degree
+            current = (
+                (order - 1) * kambe_current - kambe_previous + eta_c ** (order - 1) * exp_factor
+            ) / (z * z)
+            output[..., degree] = math.sqrt(2.0) * z ** (degree + 1) * current
+            kambe_previous, kambe_current = kambe_current, current
+    return output
+
+
 def shifted_delta_sequence_cupy_batched(
     max_order: int,
     gamma: Any,
@@ -489,9 +730,21 @@ def shifted_delta_sequence_cupy_batched(
     x = -(gamma_arr * gamma_arr) / (4.0 * eta_f * eta_f)
     if bool(cp.any(cp.abs(x) <= float(singular_atol)).get()):
         raise ValueError("shifted reciprocal integrals are singular at gamma=0.")
+    complex_argument = x.imag != 0.0
+    complex_evanescent = (x.real > 0.0) & complex_argument
+    scaled_limit = cp.where(
+        complex_evanescent[None, :],
+        _SHIFTED_DELTA_COMPLEX_SERIES_SCALED_LIMIT,
+        _SHIFTED_DELTA_SERIES_SCALED_LIMIT,
+    )
+    eta_z_limit = cp.where(
+        complex_argument[None, :],
+        _SHIFTED_DELTA_COMPLEX_SERIES_ETA_Z_LIMIT,
+        _SHIFTED_DELTA_SERIES_ETA_Z_LIMIT,
+    )
     series_mask = (
-        (cp.abs(scaled) <= _SHIFTED_DELTA_SERIES_SCALED_LIMIT)
-        & (cp.abs(eta_f * z_arr[:, None]) <= _SHIFTED_DELTA_SERIES_ETA_Z_LIMIT)
+        (cp.abs(scaled) <= scaled_limit)
+        & (cp.abs(eta_f * z_arr[:, None]) <= eta_z_limit)
         & (cp.abs(x)[None, :] > float(singular_atol))
     )
     if series_exclusion is not None:
@@ -539,6 +792,8 @@ def shifted_delta_sequence_cupy_batched(
 
 __all__ = [
     "real_integral_sequence_cupy",
+    "scaled_real_integral_sequence_cupy",
+    "scaled_real_integral_sequences_cupy",
     "shifted_delta_sequence_cupy",
     "shifted_delta_sequence_cupy_batched",
     "wofz_cupy",

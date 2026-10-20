@@ -50,6 +50,7 @@ from pyceles.core.periodic.structural import (
     translation_contraction_tensor,
     transpose_sparse_translation_contraction,
 )
+from pyceles.core.radial import passive_wavenumber
 
 from .base import SourceBlockBatch
 
@@ -127,7 +128,7 @@ class CuPyPeriodicCouplingOperator:
     """
 
     lmax: int
-    k: float
+    k: complex
     positions: Array
     ab5: Array
     periodic: PeriodicSpec
@@ -168,6 +169,7 @@ class CuPyPeriodicCouplingOperator:
     )
 
     def __post_init__(self) -> None:
+        self.k = passive_wavenumber(self.k)
         self.dtype = np.dtype(self.dtype)
         self.accum_dtype = self.dtype if self.accum_dtype is None else np.dtype(self.accum_dtype)
         if self.dtype not in (np.dtype(np.complex64), np.dtype(np.complex128)):
@@ -226,7 +228,7 @@ class CuPyPeriodicCouplingOperator:
             )
             self._resolved_ewald_eta = resolve_ewald_eta(
                 periodic=self.periodic,
-                k=float(self.k),
+                k=self.k,
                 k_parallel=np.asarray(self.k_parallel, dtype=float).reshape(2),
                 positions=np.asarray(self.positions, dtype=float).reshape(-1, 3),
                 lmax=int(self.lmax),
@@ -241,7 +243,7 @@ class CuPyPeriodicCouplingOperator:
             )
             counts = resolve_ewald_shell_counts(
                 periodic=self.periodic,
-                k=float(self.k),
+                k=self.k,
                 k_parallel=np.asarray(self.k_parallel, dtype=float).reshape(2),
                 positions=np.asarray(self.positions, dtype=float).reshape(-1, 3),
                 lmax=int(self.lmax),
@@ -256,7 +258,7 @@ class CuPyPeriodicCouplingOperator:
             self._workspace = CupyEwaldShellWorkspace(
                 cupy=self._cupy(),
                 lattice=self.periodic.lattice,
-                k=float(self.k),
+                k=self.k,
                 k_parallel=np.asarray(self.k_parallel, dtype=np.float64).reshape(2),
                 eta=self._ewald_eta(),
             )
@@ -282,7 +284,7 @@ class CuPyPeriodicCouplingOperator:
     def _self_correction_device(self) -> Any:
         cp = self._cupy()
         if self._self_correction_gpu is None:
-            correction = ewald_self_correction(float(self.k), self._ewald_eta())
+            correction = ewald_self_correction(self.k, self._ewald_eta())
             value = structural_sum_m_normalization(0) * correction
             self._self_correction_gpu = cp.asarray(value, dtype=cp.complex128)
         return self._self_correction_gpu
@@ -376,7 +378,7 @@ class CuPyPeriodicCouplingOperator:
             return plan
         plan = prepare_rayleigh_plan(
             lmax=int(self.lmax),
-            k=float(self.k),
+            k=self.k,
             positions=self.positions,
             circumscribing_radii=self.circumscribing_radii,
             periodic=self.periodic,

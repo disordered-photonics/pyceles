@@ -295,6 +295,53 @@ def test_periodic_shared_k_parallel_rejects_mismatched_sources() -> None:
         )
 
 
+def test_complex_host_periodic_plane_wave_requires_normal_incidence() -> None:
+    host = 1.33 + 0.1j
+    spec = pcl.PeriodicSpec(lattice=pcl.RectangularLattice2D(300.0, 300.0))
+    cfg = SimulationConfig(n_medium=host, periodic=spec, verbose=False)
+    sim = Simulation(cfg, particles=[_sphere()])
+    source = pcl.PlaneWave(
+        wavelength=550.0,
+        medium_n=host,
+        polar_angle=0.2,
+    )
+
+    with pytest.raises(NotImplementedError, match="exact normal incidence"):
+        periodic_shared_k_parallel(sim, {"pw": source})
+    # The low-level helper is also used by order reconstruction, near fields,
+    # and HDF5. Do not let those callers silently use Re(n_host) at oblique angles.
+    with pytest.raises(NotImplementedError, match="transverse Bloch-wavevector"):
+        pcl.core.plane_wave_k_parallel(source)
+    for beta in (0.0, float(np.pi)):
+        normal = pcl.PlaneWave(wavelength=550.0, medium_n=host, polar_angle=beta)
+        np.testing.assert_array_equal(pcl.core.plane_wave_k_parallel(normal), np.zeros(2))
+
+
+def test_bloch_plane_wave_prescribes_real_transverse_wavevector() -> None:
+    host = 1.33 + 0.1j
+    spec = pcl.PeriodicSpec(lattice=pcl.RectangularLattice2D(300.0, 300.0))
+    cfg = SimulationConfig(n_medium=host, periodic=spec, verbose=False)
+    sim = Simulation(cfg, particles=[_sphere()])
+    source = pcl.BlochPlaneWave(
+        wavelength=550.0,
+        medium_n=host,
+        k_parallel=(0.002, -0.001),
+        direction="up",
+        reference_point=(12.0, -8.0, -200.0),
+    )
+
+    np.testing.assert_array_equal(
+        periodic_shared_k_parallel(sim, {"bloch": source}),
+        np.asarray([0.002, -0.001]),
+    )
+    with pytest.raises(ValueError, match="k_parallel must be real"):
+        pcl.BlochPlaneWave(
+            wavelength=550.0,
+            medium_n=host,
+            k_parallel=(0.002 + 1.0e-9j, 0.0),  # type: ignore[arg-type]
+        )
+
+
 def test_prepare_matvec_periodic_returns_ewald_operator() -> None:
     spec = pcl.PeriodicSpec(
         lattice=pcl.RectangularLattice2D(300.0, 400.0),
@@ -704,6 +751,169 @@ def test_periodic_ewald_solve_runs_through_dense_fallback() -> None:
     solved = sim.solve_sources({"pw": source})
 
     assert np.all(np.isfinite(solved.coeffs["pw"]))
+
+
+def test_complex_host_periodic_ewald_solve_matches_finite_images_at_normal_incidence() -> None:
+    host = 1.33 + 0.8j
+    lattice = pcl.RectangularLattice2D(1100.0, 1100.0)
+    particle = _sphere(radius=30.0)
+    source = pcl.PlaneWave(
+        wavelength=550.0,
+        medium_n=host,
+        polarization="TE",
+        polar_angle=0.0,
+        amplitude=1.0,
+    )
+    coefficients: dict[str, np.ndarray] = {}
+    methods = (
+        (
+            "ewald",
+            pcl.PeriodicOptions(
+                method="ewald",
+                eta=np.sqrt(np.pi / lattice.area),
+                real_shells=8,
+                reciprocal_shells=8,
+            ),
+        ),
+        ("directsum", pcl.PeriodicOptions(method="directsum", directsum_window=4)),
+    )
+
+    for method, options in methods:
+        config = SimulationConfig(
+            wavelength=550.0,
+            n_medium=host,
+            lmax=1,
+            periodic=pcl.PeriodicSpec(lattice, options),
+            solver_method="direct",
+            verbose=False,
+        )
+        solved = Simulation(config, particles=[particle]).solve_sources({"pw": source})
+        coefficients[method] = solved.coeffs["pw"]
+
+    np.testing.assert_allclose(
+        coefficients["ewald"], coefficients["directsum"], rtol=1.0e-10, atol=1.0e-12
+    )
+
+
+@pytest.mark.reference
+@pytest.mark.parametrize("polar_angle", (0.0, np.pi))
+def test_complex_host_periodic_ewald_fields_match_finite_images_at_normal_incidence(
+    polar_angle: float,
+) -> None:
+    host = 1.33 + 0.8j
+    lattice = pcl.RectangularLattice2D(1100.0, 1100.0)
+    source = pcl.PlaneWave(
+        wavelength=550.0,
+        medium_n=host,
+        polarization="TE",
+        polar_angle=polar_angle,
+        amplitude=1.0,
+    )
+    points = np.asarray([[45.0, 20.0, 10.0], [0.0, 0.0, 100.0], [0.0, 0.0, -100.0]])
+    runs = {}
+    for method, options in (
+        (
+            "ewald",
+            pcl.PeriodicOptions(
+                method="ewald",
+                eta=np.sqrt(np.pi / lattice.area),
+                real_shells=8,
+                reciprocal_shells=8,
+                output_bmax=0.16,
+            ),
+        ),
+        ("directsum", pcl.PeriodicOptions(method="directsum", directsum_window=4)),
+    ):
+        config = SimulationConfig(
+            wavelength=550.0,
+            n_medium=host,
+            lmax=1,
+            periodic=pcl.PeriodicSpec(lattice, options),
+            solver_method="direct",
+            verbose=False,
+        )
+        runs[method] = Simulation(config, particles=[_sphere(radius=30.0)]).run(
+            source,
+            include_farfield=False,
+        )
+
+    ewald_fields = pcl.compute_periodic_near_field(
+        runs["ewald"],
+        points=points,
+        field_bmax=0.16,
+    )
+    image_fields = pcl.compute_periodic_near_field(runs["directsum"], points=points)
+
+    assert runs["ewald"].periodic is None
+    assert runs["ewald"].power is None
+    np.testing.assert_allclose(
+        ewald_fields.E_scattered, image_fields.E_scattered, rtol=3e-4, atol=2e-8
+    )
+    np.testing.assert_allclose(
+        ewald_fields.H_scattered, image_fields.H_scattered, rtol=3e-4, atol=2e-8
+    )
+    np.testing.assert_allclose(ewald_fields.E_total, image_fields.E_total, rtol=3e-4, atol=2e-8)
+    np.testing.assert_allclose(ewald_fields.H_total, image_fields.H_total, rtol=3e-4, atol=2e-8)
+
+
+def test_complex_diffraction_order_enumeration_requires_a_finite_basis() -> None:
+    from pyceles.postprocessing.farfield import (
+        enumerate_diffraction_orders_rectangular,
+        periodic_order_amplitudes,
+        periodic_plane_wave_orders,
+    )
+
+    lattice = pcl.RectangularLattice2D(1100.0, 1100.0)
+    with pytest.raises(ValueError, match=r"output_bmax.*explicit"):
+        enumerate_diffraction_orders_rectangular(
+            lattice=lattice,
+            k_parallel_incident=np.zeros(2),
+            k=0.015 + 0.009j,
+        )
+
+    orders = enumerate_diffraction_orders_rectangular(
+        lattice=lattice,
+        k_parallel_incident=np.zeros(2),
+        k=0.015 + 0.009j,
+        output_bmax=0.03,
+    )
+    assert orders.kz.size > 0
+    assert np.all(orders.kz.imag > 0.0)
+    assert not np.any(orders.propagating)
+
+    source = pcl.PlaneWave(
+        wavelength=550.0,
+        medium_n=1.33 + 0.1j,
+        polarization="TE",
+        polar_angle=0.0,
+    )
+    with pytest.raises(ValueError, match="lossless host"):
+        periodic_plane_wave_orders(
+            source=source,
+            lattice=lattice,
+            positions=np.zeros((1, 3)),
+            coeffs=np.zeros((1, n_modes(1)), dtype=np.complex128),
+            lmax=1,
+            k=2.0 * np.pi / 550.0,
+            n_medium=1.33 + 0.1j,
+        )
+
+    tilted_source = pcl.PlaneWave(
+        wavelength=550.0,
+        medium_n=1.33 + 0.1j,
+        polarization="TE",
+        polar_angle=0.1,
+    )
+    with pytest.raises(NotImplementedError, match="normal incidence"):
+        periodic_order_amplitudes(
+            source=tilted_source,
+            lattice=lattice,
+            positions=np.zeros((1, 3)),
+            coeffs=np.zeros((1, n_modes(1)), dtype=np.complex128),
+            lmax=1,
+            k=0.015 + 0.001j,
+            output_bmax=0.03,
+        )
 
 
 def test_cupy_periodic_dense_batches_do_not_use_cache_off_matvec_budget() -> None:

@@ -228,8 +228,6 @@ def prepare_matvec(
         accum_dtype=op_dtype if accum_dtype is None else accum_dtype,
     )
     k_value = passive_wavenumber(k)
-    if k_value.imag and periodic is not None:
-        raise NotImplementedError("Periodic coupling requires a real wavenumber.")
     periodic_spec = periodic
     k_parallel_arr: np.ndarray | None = None
     if periodic_spec is not None:
@@ -290,7 +288,7 @@ def prepare_matvec(
             ab5 = translation_ab5_table(int(lmax), dtype=op_dtype)
             coupling = PeriodicCouplingOperator(
                 lmax=int(lmax),
-                k=k_value.real,
+                k=k_value,
                 positions=positions,
                 ab5=ab5,
                 periodic=periodic_spec,
@@ -367,7 +365,7 @@ def prepare_matvec(
                 CouplingOperator,
                 CuPyPeriodicCouplingOperator(
                     lmax=int(lmax),
-                    k=k_value.real,
+                    k=k_value,
                     positions=positions,
                     ab5=ab5,
                     periodic=periodic_spec,

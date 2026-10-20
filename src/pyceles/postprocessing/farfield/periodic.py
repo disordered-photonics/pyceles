@@ -10,7 +10,9 @@ from pyceles.core.conversions import transformation_coefficients
 from pyceles.core.indexing import iter_modes
 from pyceles.core.lattice import RectangularLattice2D
 from pyceles.core.periodic import plane_wave_k_parallel
-from pyceles.core.sources import PlaneWave
+from pyceles.core.radial import passive_wavenumber
+from pyceles.core.sources import BlochPlaneWave, PlaneWave
+from pyceles.core.sources.plane_wave import _plane_wave_geometry
 from pyceles.core.spherical import spherical_functions_trigon
 
 from .orders import enumerate_diffraction_orders_rectangular
@@ -66,18 +68,45 @@ class PeriodicOrderAmplitudes:
     output_bmax: float | None
 
 
+def _incidence_sign(source: PlaneWave | BlochPlaneWave) -> float:
+    return _plane_wave_geometry(source).direction_sign
+
+
+def _incidence_cosine(source: PlaneWave | BlochPlaneWave) -> float:
+    return abs(float(complex(_plane_wave_geometry(source).cos_beta).real))
+
+
+def _incident_order_polarization(source: PlaneWave | BlochPlaneWave, *, k: complex) -> np.ndarray:
+    """Express the incident zero order in its global-origin TE/TM frame.
+
+    The source amplitude is specified at its own finite reference point. At
+    an exact pole its azimuth also rotates the source Jones axes relative to
+    the zero order's fixed Cartesian frame.
+    """
+    geometry = _plane_wave_geometry(source, k=k)
+    a_te, a_tm = source.jones_coefficients()
+    if isinstance(source, PlaneWave) and source.polar_angle in (0.0, np.pi):
+        ca, sa = np.cos(geometry.azimuth), np.sin(geometry.azimuth)
+        sign = geometry.direction_sign
+        a_te, a_tm = ca * a_te + sign * sa * a_tm, -sign * sa * a_te + ca * a_tm
+    phase = np.exp(-1j * np.dot(geometry.wavevector, geometry.reference_point))
+    return np.asarray(
+        complex(source.amplitude) * phase * np.asarray([a_te, a_tm]), dtype=np.complex128
+    )
+
+
 def _order_mode_coefficients(
     *,
     lmax: int,
-    k: float,
+    k: complex,
     k_parallel: np.ndarray,
     kz: complex,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Return per-mode TE/TM order coefficients for `+kz` and `-kz` branches."""
     kp = float(np.linalg.norm(np.asarray(k_parallel, dtype=float).reshape(2)))
     alpha = float(np.arctan2(float(k_parallel[1]), float(k_parallel[0])))
-    st = np.asarray(kp / float(k), dtype=np.complex128)
-    ct_up = np.asarray(complex(kz) / float(k), dtype=np.complex128)
+    st = np.asarray(kp / complex(k), dtype=np.complex128)
+    ct_up = np.asarray(complex(kz) / complex(k), dtype=np.complex128)
     ct_down = -ct_up
 
     pi_up, tau_up = spherical_functions_trigon(ct_up, st, int(lmax), xp=np)
@@ -107,34 +136,32 @@ def _order_mode_coefficients(
 
 def periodic_order_amplitudes(
     *,
-    source: PlaneWave,
+    source: PlaneWave | BlochPlaneWave,
     lattice: RectangularLattice2D,
     positions: np.ndarray,
     coeffs: np.ndarray,
     lmax: int,
-    k: float,
+    k: complex,
     output_bmax: float | None = None,
 ) -> PeriodicOrderAmplitudes:
     """Compute branch-resolved periodic order amplitudes.
 
-    This returns the reusable periodic-order payload used by both:
-    - periodic far-field power diagnostics (`R/T/A`),
-    - periodic exterior near-field evaluation via Rayleigh sums.
+    This returns branch-resolved amplitudes for periodic exterior field
+    reconstruction. Lossless-host power diagnostics are built on this payload;
+    complex-host amplitudes are meaningful at finite distance but are not
+    normalized into infinite-distance power.
 
     The SVWF-to-PVWF prefactor follows the CELES/SMUTHI convention:
     `2*pi / (A * k * kz)`, where `A` is the unit-cell area.
     """
     pos = np.asarray(positions, dtype=float).reshape(-1, 3)
     x = np.asarray(coeffs, dtype=np.complex128).reshape(pos.shape[0], -1)
-    k_f = float(k)
-    if k_f <= 0.0 or not np.isfinite(k_f):
-        raise ValueError(f"`k` must be finite and positive. Got {k!r}.")
-
+    k_c = passive_wavenumber(k)
     kp_inc = plane_wave_k_parallel(source)
     orders = enumerate_diffraction_orders_rectangular(
         lattice=lattice,
         k_parallel_incident=kp_inc,
-        k=k_f,
+        k=k_c,
         output_bmax=output_bmax,
     )
 
@@ -153,22 +180,20 @@ def periodic_order_amplitudes(
             continue
         b_up_te, b_up_tm, b_down_te, b_down_tm = _order_mode_coefficients(
             lmax=int(lmax),
-            k=k_f,
+            k=k_c,
             k_parallel=kp,
             kz=kz,
         )
         phase_up = np.exp(-1j * (pos[:, 0] * kx + pos[:, 1] * ky + pos[:, 2] * kz))
         phase_down = np.exp(-1j * (pos[:, 0] * kx + pos[:, 1] * ky - pos[:, 2] * kz))
-        pref = (2.0 * np.pi) / (area * k_f * kz)
+        pref = (2.0 * np.pi) / (area * k_c * kz)
         scattered_up[i, 0] = pref * np.sum(phase_up * (x @ b_up_te))
         scattered_up[i, 1] = pref * np.sum(phase_up * (x @ b_up_tm))
         scattered_down[i, 0] = pref * np.sum(phase_down * (x @ b_down_te))
         scattered_down[i, 1] = pref * np.sum(phase_down * (x @ b_down_tm))
 
-    inc_sign = 1.0 if float(np.cos(float(source.polar_angle))) >= 0.0 else -1.0
-    amp = complex(source.amplitude)
-    a_te, a_tm = source.jones_coefficients()
-    incident_pol = amp * np.asarray([a_te, a_tm], dtype=np.complex128)
+    inc_sign = _incidence_sign(source)
+    incident_pol = _incident_order_polarization(source, k=k_c)
 
     if inc_sign >= 0.0:
         transmitted[:, :] = scattered_up
@@ -208,10 +233,18 @@ def _periodic_order_fluxes(
     n_medium: complex,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return normal power flux carried by each reflected/transmitted order."""
-    k_f = float(k)
+    if complex(k).imag != 0.0:
+        raise ValueError(
+            "Periodic power normalization requires a lossless host; use "
+            "`periodic_order_amplitudes` for finite-distance complex-host fields."
+        )
+    k_f = float(complex(k).real)
     if k_f <= 0.0 or not np.isfinite(k_f):
         raise ValueError(f"`k` must be finite and positive. Got {k!r}.")
-    n_real = float(np.real(complex(n_medium)))
+    n_c = complex(n_medium)
+    if n_c.imag != 0.0:
+        raise ValueError("Periodic power normalization requires a lossless host medium.")
+    n_real = float(n_c.real)
     if n_real <= 0.0:
         raise ValueError(f"`n_medium` must be positive and real. Got {n_medium!r}.")
     kz = np.asarray(order_kz, dtype=np.complex128)
@@ -236,7 +269,7 @@ def mix_periodic_farfield_payloads(
     first: PeriodicFarFieldPayload,
     second: PeriodicFarFieldPayload,
     *,
-    source: PlaneWave,
+    source: PlaneWave | BlochPlaneWave,
     a_first: complex,
     a_second: complex,
     k: float,
@@ -298,7 +331,7 @@ def mix_periodic_farfield_payloads(
     incident_norm = float(
         abs(amp) ** 2 * (abs(complex(a_first)) ** 2 + abs(complex(a_second)) ** 2)
     )
-    incident_flux = n_real * abs(float(np.cos(float(source.polar_angle)))) * incident_norm / 2.0
+    incident_flux = n_real * _incidence_cosine(source) * incident_norm / 2.0
     if incident_flux <= 0.0 or not np.isfinite(incident_flux):
         raise ValueError("Incident periodic power normalization is non-finite or non-positive.")
 
@@ -329,7 +362,7 @@ def mix_periodic_farfield_payloads(
 
 def periodic_plane_wave_orders(
     *,
-    source: PlaneWave,
+    source: PlaneWave | BlochPlaneWave,
     lattice: RectangularLattice2D,
     positions: np.ndarray,
     coeffs: np.ndarray,
@@ -345,15 +378,21 @@ def periodic_plane_wave_orders(
     unit-cell area and `kz` is the branch-selected longitudinal wavevector with
     non-negative imaginary part.
 
-    `output_bmax=None` selects the propagating-order table only (`|k_parallel|<=k`).
-    Set `output_bmax` explicitly to include evanescent orders in the output basis.
+    `output_bmax=None` selects the propagating-order table only for a lossless
+    host. A complex wavenumber requires an explicit reciprocal-radius cutoff.
     """
+    if complex(n_medium).imag != 0.0:
+        raise ValueError("Periodic power normalization requires a lossless host medium.")
     k_f = float(k)
     if k_f <= 0.0 or not np.isfinite(k_f):
         raise ValueError(f"`k` must be finite and positive. Got {k!r}.")
     n_real = float(np.real(complex(n_medium)))
     if n_real <= 0.0:
         raise ValueError(f"`n_medium` must be positive and real. Got {n_medium!r}.")
+    if _incidence_cosine(source) == 0.0:
+        raise ValueError(
+            "Periodic power normalization requires a propagating BlochPlaneWave incidence."
+        )
 
     orders_payload = periodic_order_amplitudes(
         source=source,
@@ -381,7 +420,7 @@ def periodic_plane_wave_orders(
     )
 
     incident_norm = float(np.sum(np.abs(orders_payload.incident_polarization) ** 2))
-    incident_flux = n_real * abs(float(np.cos(float(source.polar_angle)))) * incident_norm / 2.0
+    incident_flux = n_real * _incidence_cosine(source) * incident_norm / 2.0
     if incident_flux <= 0.0 or not np.isfinite(incident_flux):
         raise ValueError("Incident periodic power normalization is non-finite or non-positive.")
 

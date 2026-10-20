@@ -42,6 +42,25 @@ def test_shifted_delta_sequence_cupy_matches_numpy_reference(
     np.testing.assert_allclose(got, want, rtol=1e-14, atol=1e-14)
 
 
+def test_shifted_delta_sequence_cupy_complex_raw_recurrence_matches_numpy(
+    cupy_runtime: tuple[Any, Any],
+) -> None:
+    cp, _ = cupy_runtime
+    from pyceles.core.periodic.special import shifted_delta_sequence
+    from pyceles.core.periodic.special_cupy import shifted_delta_sequence_cupy
+
+    gamma = np.asarray(
+        [0.008 + 0.001j, 0.011 + 0.0j, 0.004 + 0.009j],
+        dtype=np.complex128,
+    )
+    z_offset = 4000.0
+    eta = 0.0015
+    got = cp.asnumpy(shifted_delta_sequence_cupy(4, cp.asarray(gamma), z_offset, eta, cupy=cp))
+    want = shifted_delta_sequence(4, gamma, z_offset, eta)
+
+    np.testing.assert_allclose(got, want, rtol=2e-10, atol=2e-12)
+
+
 def test_shifted_delta_sequence_cupy_stays_finite_for_tall_cell(
     cupy_runtime: tuple[Any, Any],
 ) -> None:
@@ -81,6 +100,30 @@ def test_real_integral_sequence_cupy_matches_numpy_reference(
     # sample: near-machine-epsilon differences in the Faddeeva seed are
     # amplified into a few 1e-10 relative error in the final real-space term.
     np.testing.assert_allclose(got, want, rtol=5e-10, atol=1e-14)
+
+
+@pytest.mark.parametrize("degree", (0, 1, 2, 4, 8, 12))
+def test_scaled_complex_host_real_integrals_cupy_match_numpy(
+    cupy_runtime: tuple[Any, Any], degree: int
+) -> None:
+    cp, _ = cupy_runtime
+    from pyceles.core.periodic.scalar import scaled_real_integral_sequence
+    from pyceles.core.periodic.special_cupy import scaled_real_integral_sequence_cupy
+
+    k = (2.0 * np.pi / 550.0) * (1.0 + 0.025j)
+    radii = np.asarray([120.0, 350.0, 900.0], dtype=np.float64)
+    got = cp.asnumpy(
+        scaled_real_integral_sequence_cupy(
+            degree,
+            0.0015,
+            k,
+            cp.asarray(radii),
+            cupy=cp,
+        )
+    )
+    want = scaled_real_integral_sequence(degree, 0.0015, k, radii)
+
+    np.testing.assert_allclose(got, want, rtol=2e-9, atol=2e-10)
 
 
 def test_shifted_delta_sequence_cupy_batched_matches_reference_rows(

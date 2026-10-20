@@ -179,6 +179,40 @@ def test_complex_k_structural_channels_match_treams_references() -> None:
         )
 
 
+@pytest.mark.reference
+def test_complex_k_vertical_structural_channels_match_treams() -> None:
+    """Noncoplanar channels match TREAMS sums in the same SVWF normalization."""
+    modes = ((0, 0), (1, -1), (1, 1), (2, 0), (2, 2), (4, -4), (4, 4))
+    # Infinite lattice sums, converted from TREAMS's spherical harmonics.
+    expected = np.asarray(
+        [
+            0.1140686385453382 - 0.7923951778392783j,
+            0.3506809780661142 + 0.21718978043930304j,
+            0.40117163386175303 - 0.18939109915826058j,
+            -1.7682307709286018 + 3.2492187050691816j,
+            0.5180381396866833 + 1.3991014628741036j,
+            -18.69200533427095 + 18.085309890809814j,
+            0.08065627987504802 - 25.139478290848793j,
+        ]
+    )
+    actual = direct_structural_sums_2d(
+        lmax=2,
+        k=1.1 + 1.3j,
+        destination=np.asarray([-0.23, 0.14, 0.4]),
+        source=np.zeros(3),
+        lattice=pcl.RectangularLattice2D(1.1, 1.1),
+        k_parallel=np.asarray([0.13, -0.17]),
+        window=16,
+    )
+
+    np.testing.assert_allclose(
+        [actual[degree, order + 4] for degree, order in modes],
+        expected,
+        rtol=5e-10,
+        atol=2e-10,
+    )
+
+
 def test_structural_block_rejects_incompatible_table_shape() -> None:
     ab5 = translation_ab5_table(1, dtype=np.complex128)
 

@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- CPU periodic direct-image sums and CPU/CuPy Ewald and Rayleigh simulations
+  support passive absorbing hosts with real transverse Bloch vectors, finite
+  E/H reconstruction, and source metadata in HDF5. Absorbing-host power
+  diagnostics remain unavailable.
 - `BlochPlaneWave` prescribes a real transverse wavevector, a vertical
   propagation direction, and a finite-reference amplitude in passive hosts.
   Plane-wave SVWF projection and incident E/H share the same analytic geometry.
@@ -45,6 +49,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retain double-precision sample generation and expose physical outgoing intervals.
 
 ### Changed
+- CPU direct-image field reconstruction uses the configured finite image
+  window in both exterior and in-slab regions, including lossless hosts.
 - Breaking: removed `MLFMMOptions.hf_start_level` and `hf_wavelength_divisor`,
   their builder arguments, and their scaling-script flags. All far-ownership
   levels participate; hierarchy depth and occupancy control coarsening.
@@ -55,6 +61,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and near-field showcase plotting. Particle-centre fields use analytic limits.
 
 ### Fixed
+- Reusing a CuPy Ewald workspace after a higher-order request preserves the
+  physical row pitch of cached incomplete-gamma tables in shifted kernels.
+- Periodic transmitted zero-order amplitudes preserve the incident reference
+  phase and rotate normal-incidence Jones weights into the order's Cartesian
+  frame. Periodic HDF5 source metadata retains the reference, amplitude,
+  polarization, and propagation state for both plane-wave source types.
 - Dense CuPy MLFMM uploads accept the grouped NumPy leaf maps as well as
   per-leaf maps, reusing their existing storage during preparation.
 - Reject nonfinite simulation wavelength, host index, radial-table spacing,

@@ -497,25 +497,29 @@ def test_compute_periodic_near_field_ignores_index_matched_particle_interiors():
     assert np.all(np.isfinite(nf_periodic.H_total))
 
 
-def test_compute_periodic_near_field_interior_rejects_directsum_method():
+@pytest.mark.parametrize("host", [1.0, 1.33 + 0.1j])
+def test_periodic_zero_image_fields_match_outgoing_spherical_fields(host):
+    from pyceles.postprocessing.nearfield.scattered import compute_scattered_field
+
     source = PlaneWave(
         wavelength=550.0,
-        medium_n=1.0 + 0j,
+        medium_n=host,
         polarization="TE",
-        polar_angle=0.4,
+        polar_angle=0.0 if complex(host).imag else 0.4,
         azimuthal_angle=0.7,
         focal_point=(0.0, 0.0, 0.0),
         amplitude=1.0,
     )
     cfg = pcl.SimulationConfig(
         wavelength=550.0,
-        n_medium=1.0 + 0j,
+        n_medium=host,
         lmax=2,
         periodic=pcl.PeriodicSpec(
             lattice=pcl.RectangularLattice2D(ax=700.0, ay=700.0),
-            options=pcl.PeriodicOptions(method="directsum", output_bmax=0.05),
+            options=pcl.PeriodicOptions(method="directsum", directsum_window=0),
         ),
         solver_method="direct",
+        radial_lut_dr=550.0 / 8192,
         verbose=False,
     )
     run = pcl.Simulation(
@@ -524,11 +528,22 @@ def test_compute_periodic_near_field_interior_rejects_directsum_method():
             Sphere(position=(220.0, 180.0, 140.0), radius=90.0, refractive_index=1.5 + 0.0j)
         ],
     ).run(source, include_farfield=False)
-    with pytest.raises(NotImplementedError, match="to be 'ewald' or 'rayleigh'"):
-        pcl.compute_periodic_near_field(
-            run,
-            points=np.array([[0.0, 0.0, 120.0]], dtype=float),
-        )
+    # Cover a point within the particle slab and one in its exterior. A zero
+    # image window is exactly the ordinary outgoing spherical-wave expansion.
+    points = np.array([[0.0, 0.0, 120.0], [0.0, 0.0, 600.0]])
+    actual = pcl.compute_periodic_near_field(run, points=points)
+    electric, magnetic = compute_scattered_field(
+        points,
+        run.positions,
+        run.coeffs,
+        k=run.k,
+        lmax=2,
+        n_medium=host,
+        particle_distance_resolution=run.config.radial_lut_dr,
+        show_progress=False,
+    )
+    np.testing.assert_allclose(actual.E_scattered, electric, rtol=2e-7, atol=1e-10)
+    np.testing.assert_allclose(actual.H_scattered, magnetic, rtol=2e-7, atol=1e-10)
 
 
 def test_compute_periodic_near_field_interior_accepts_rayleigh_method():

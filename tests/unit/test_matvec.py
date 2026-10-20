@@ -15,6 +15,7 @@ from pyceles.core.operators import (
     MLFMMOptions,
     PairwiseCouplingOperator,
     ParticleTGroupFactories,
+    PeriodicCouplingOperator,
     PreparedOperator,
     apply_A_numpy,
     assemble_dense_A_numpy,
@@ -1278,14 +1279,18 @@ def test_pairwise_preparation_rejects_physical_queries_in_singular_padding():
         )
 
 
-def test_complex_preparation_rejects_periodic_coupling():
-    with pytest.raises(NotImplementedError, match="Periodic"):
-        prepare_matvec(
-            lmax=1,
-            k=1 + 0.1j,
-            particles=spheres_from_arrays(
-                positions=np.zeros((1, 3)), radii=np.ones(1), refractive_indices=1.5
-            ),
-            radial_lut_dr=0.01,
-            periodic=PeriodicSpec(lattice=RectangularLattice2D(600, 600)),
-        )
+def test_complex_preparation_accepts_normal_incidence_periodic_ewald():
+    prepared = prepare_matvec(
+        lmax=1,
+        k=1 + 0.1j,
+        particles=spheres_from_arrays(
+            positions=np.zeros((1, 3)), radii=np.ones(1), refractive_indices=1.5
+        ),
+        radial_lut_dr=0.01,
+        periodic=PeriodicSpec(lattice=RectangularLattice2D(600, 600)),
+        k_parallel=np.zeros(2),
+    )
+
+    assert prepared.k == 1 + 0.1j
+    assert isinstance(prepared.coupling, PeriodicCouplingOperator)
+    assert prepared.coupling.k == 1 + 0.1j

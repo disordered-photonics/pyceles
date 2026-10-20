@@ -17,6 +17,7 @@ from pyceles.core.periodic.rayleigh import (
     near_point_source_csr,
     prepare_rayleigh_plan,
 )
+from pyceles.core.periodic.structural import direct_structural_sums_2d
 
 from .classification import classify_periodic_internal_points
 from .components import NearFieldComponents
@@ -38,7 +39,7 @@ def _periodic_local_regular_l1_coeffs(
     positions: np.ndarray,
     coeffs: np.ndarray,
     lmax: int,
-    k: float,
+    k: complex,
     periodic: PeriodicSpec,
     k_parallel: np.ndarray,
     circumscribing_radii: np.ndarray | None = None,
@@ -68,17 +69,11 @@ def _periodic_local_regular_l1_coeffs(
         kernel,
     ) = l1_compact_projection_data(lmax_i)
     method = str(periodic.options.method)
-    if method not in {"ewald", "rayleigh"}:
-        raise NotImplementedError(
-            "Periodic in-slab near-field evaluation requires "
-            "`periodic.options.method` to be 'ewald' or 'rayleigh'."
-        )
-
     rayleigh_z_cut: float | None = None
     if method == "rayleigh":
         plan = prepare_rayleigh_plan(
             lmax=lmax_i,
-            k=float(k),
+            k=k,
             positions=pos,
             circumscribing_radii=circumscribing_radii,
             periodic=periodic,
@@ -92,21 +87,23 @@ def _periodic_local_regular_l1_coeffs(
         rayleigh_z_cut = float(plan.z_cut)
 
     batch = max(1, int(point_batch_size))
-    eta = resolve_ewald_eta(
-        periodic=periodic,
-        k=float(k),
-        k_parallel=k_parallel,
-        positions=pos,
-        lmax=lmax_i,
-        max_vertical_offset=rayleigh_z_cut,
-    )
-    workspace = EwaldShellWorkspace(
-        lattice=periodic.lattice,
-        k=float(k),
-        k_parallel=np.asarray(k_parallel, dtype=float).reshape(2),
-        eta=float(eta),
-    )
-    if method == "ewald":
+    workspace = None
+    if method != "directsum":
+        eta = resolve_ewald_eta(
+            periodic=periodic,
+            k=k,
+            k_parallel=k_parallel,
+            positions=pos,
+            lmax=lmax_i,
+            max_vertical_offset=rayleigh_z_cut,
+        )
+        workspace = EwaldShellWorkspace(
+            lattice=periodic.lattice,
+            k=k,
+            k_parallel=np.asarray(k_parallel, dtype=float).reshape(2),
+            eta=eta,
+        )
+    if method != "rayleigh":
         n_batches = (pts.shape[0] + batch - 1) // batch
         total_work = int(n_batches * pos.shape[0])
         progress = (
@@ -120,21 +117,48 @@ def _periodic_local_regular_l1_coeffs(
                 pts_batch = np.asarray(pts[start:stop], dtype=float)
                 acc = np.zeros((pts_batch.shape[0], 6), dtype=np.complex128)
                 for j in range(pos.shape[0]):
-                    sums = ewald_structural_sums_2d_batch(
-                        lmax_struct=lmax_struct,
-                        structural_order=structural_order,
-                        k=float(k),
-                        destinations=pts_batch,
-                        source=pos[j],
-                        lattice=periodic.lattice,
-                        k_parallel=k_parallel,
-                        eta=float(eta),
-                        real_shells=periodic.options.real_shells,
-                        reciprocal_shells=periodic.options.reciprocal_shells,
-                        shell_tolerance=float(periodic.options.shell_tolerance),
-                        max_shells=int(periodic.options.max_shells),
-                        workspace=workspace,
-                    )
+                    if method == "directsum":
+                        direct_sums = np.stack(
+                            [
+                                direct_structural_sums_2d(
+                                    lmax=lmax_struct,
+                                    k=k,
+                                    destination=point,
+                                    source=pos[j],
+                                    lattice=periodic.lattice,
+                                    k_parallel=k_parallel,
+                                    window=periodic.options.directsum_window,
+                                    dtype=np.complex128,
+                                )
+                                for point in pts_batch
+                            ],
+                            axis=0,
+                        )
+                        # The projector uses the exact lmax+1 channels centered in
+                        # its compact table; discard the direct helper's padding.
+                        order_offset = 2 * lmax_struct
+                        sums = direct_sums[
+                            :,
+                            : structural_order + 1,
+                            order_offset - structural_order : order_offset + structural_order + 1,
+                        ]
+                    else:
+                        assert workspace is not None
+                        sums = ewald_structural_sums_2d_batch(
+                            lmax_struct=lmax_struct,
+                            structural_order=structural_order,
+                            k=k,
+                            destinations=pts_batch,
+                            source=pos[j],
+                            lattice=periodic.lattice,
+                            k_parallel=k_parallel,
+                            eta=workspace.eta,
+                            real_shells=periodic.options.real_shells,
+                            reciprocal_shells=periodic.options.reciprocal_shells,
+                            shell_tolerance=float(periodic.options.shell_tolerance),
+                            max_shells=int(periodic.options.max_shells),
+                            workspace=workspace,
+                        )
                     acc += reduce_compact_structural_sums_to_l1(
                         sums,
                         coeff_arr[j],
@@ -150,7 +174,7 @@ def _periodic_local_regular_l1_coeffs(
                 progress.close()
         return out
 
-    if rayleigh_z_cut is None:
+    if rayleigh_z_cut is None or workspace is None:
         raise RuntimeError("Rayleigh near-field initialization failed.")
     indptr, destination_indices, _source_indices = near_point_source_csr(
         pts,
@@ -176,12 +200,12 @@ def _periodic_local_regular_l1_coeffs(
                 sums = ewald_structural_sums_2d_batch(
                     lmax_struct=lmax_struct,
                     structural_order=structural_order,
-                    k=float(k),
+                    k=k,
                     destinations=pts_batch,
                     source=pos[j],
                     lattice=periodic.lattice,
                     k_parallel=k_parallel,
-                    eta=float(eta),
+                    eta=workspace.eta,
                     real_shells=periodic.options.real_shells,
                     reciprocal_shells=periodic.options.reciprocal_shells,
                     shell_tolerance=float(periodic.options.shell_tolerance),
@@ -269,7 +293,7 @@ def compute_periodic_near_field_interior(
         )
 
     coeffs, source = _resolve_periodic_channel_payload(run)
-    k = run.k.real  # Periodic configuration requires a real host.
+    k = complex(run.k)
 
     pts_flat, lead_shape = reshape_field_points(points)
     n_points = int(pts_flat.shape[0])
@@ -330,7 +354,7 @@ def compute_periodic_near_field_interior(
                     positions=run.positions,
                     coeffs=coeffs,
                     lmax=int(run.config.lmax),
-                    k=k,
+                    k=complex(k),
                     periodic=periodic,
                     k_parallel=k_parallel,
                     circumscribing_radii=run.circumscribing_radii,

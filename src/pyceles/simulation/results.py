@@ -161,7 +161,7 @@ def _channel_repr_body(channel: ChannelResult) -> str:
         f"source={type(channel.source).__name__}, particles={channel.n_particles}, "
         f"coeffs=({_array_summary(channel.coeffs)}), "
         f"farfield={bool(channel.farfield.scattered.coeff_te.size)}, "
-        f"periodic={channel.periodic is not None}, "
+        f"periodic={channel.config.periodic is not None}, "
         f"power={channel.power is not None}, cross_sections={channel.cross_sections is not None}, "
         f"compute_dtype={channel.compute_dtype!r}, accum_dtype={channel.accum_dtype!r}"
     )
@@ -491,7 +491,7 @@ class PolarizationResult:
     def __repr__(self) -> str:
         return (
             f"PolarizationResult(source={type(self.source).__name__}, jones={self.jones!r}, "
-            f"particles={len(self.particles)}, periodic={self.te.periodic is not None}, "
+            f"particles={len(self.particles)}, periodic={self.config.periodic is not None}, "
             f"solver={self.solver_result!r})"
         )
 

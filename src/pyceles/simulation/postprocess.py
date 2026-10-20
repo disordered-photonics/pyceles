@@ -12,6 +12,7 @@ from pyceles._optional import import_cupy, is_cupy_array
 from pyceles.core.indexing import n_modes
 from pyceles.core.particles import LayeredSphere, Particle, PECSphere, Sphere, Spheroid
 from pyceles.core.sources import (
+    BlochPlaneWave,
     DipoleCollection,
     DipoleSource,
     JonesPolarizedSource,
@@ -210,9 +211,9 @@ def _build_periodic_result(
     periodic = sim.config.periodic
     if periodic is None:
         raise RuntimeError("Internal error: periodic postprocess called without periodic config.")
-    if not isinstance(source, PlaneWave):
+    if not isinstance(source, (PlaneWave, BlochPlaneWave)):
         raise NotImplementedError(
-            "Periodic postprocessing currently supports PlaneWave excitation only."
+            "Periodic postprocessing supports PlaneWave and BlochPlaneWave excitation."
         )
 
     return periodic_plane_wave_orders(
@@ -545,46 +546,59 @@ def postprocess_sources_impl(
         for label in labels:
             x_col = solved.coeffs[label]
             rhs_col = solved.rhs[label]
-            periodic_payload = _build_periodic_result(
-                sim,
-                source=solved.sources[label],
-                coeffs=np.asarray(x_col),
-                k=solved.k.real,
+            source = solved.sources[label]
+            has_power_normalization = not isinstance(source, BlochPlaneWave) or (
+                source.longitudinal_wavenumber.imag == 0.0
+                and source.longitudinal_wavenumber.real != 0.0
             )
-            backend_coeffs = (
-                None if backend_coeffs_by_label is None else backend_coeffs_by_label[label]
-            )
-            local_components = _local_power_balance_generic_route(
-                sim,
-                initial_coeffs=solved.initial_coeffs[label],
-                coeffs=x_col if backend_coeffs is None else backend_coeffs,
-                k0=float(solved.k0),
-                accum_dtype=accum_dtype,
-            )
-            if local_components is not None:
-                periodic_payload = replace(
-                    periodic_payload,
-                    power=replace(
-                        periodic_payload.power,
-                        local_absorbed_power=local_components.local_absorbed_power,
-                        local_absorbed_power_per_particle=(
-                            local_components.local_absorbed_power_per_particle
+            if complex(cfg.n_medium).imag == 0.0 and has_power_normalization:
+                periodic_payload = _build_periodic_result(
+                    sim,
+                    source=source,
+                    coeffs=np.asarray(x_col),
+                    k=solved.k.real,
+                )
+                backend_coeffs = (
+                    None if backend_coeffs_by_label is None else backend_coeffs_by_label[label]
+                )
+                local_components = _local_power_balance_generic_route(
+                    sim,
+                    initial_coeffs=solved.initial_coeffs[label],
+                    coeffs=x_col if backend_coeffs is None else backend_coeffs,
+                    k0=float(solved.k0),
+                    accum_dtype=accum_dtype,
+                )
+                if local_components is not None:
+                    periodic_payload = replace(
+                        periodic_payload,
+                        power=replace(
+                            periodic_payload.power,
+                            local_absorbed_power=local_components.local_absorbed_power,
+                            local_absorbed_power_per_particle=(
+                                local_components.local_absorbed_power_per_particle
+                            ),
                         ),
-                    ),
-                )
-            if cfg.verbose:
-                order_count = int(np.asarray(periodic_payload.order_mn).shape[0])
-                propagating_count = int(
-                    np.count_nonzero(np.asarray(periodic_payload.order_propagating, dtype=bool))
-                )
-                prefix = "Periodic orders"
-                if n_channels > 1:
-                    prefix = f"{prefix} [{label}]"
-                print(f"{prefix}: total={order_count} propagating={propagating_count}")
-                _print_power_balance(
-                    periodic_payload.power,
-                    label=label if n_channels > 1 else None,
-                )
+                    )
+                if cfg.verbose:
+                    order_count = int(np.asarray(periodic_payload.order_mn).shape[0])
+                    propagating_count = int(
+                        np.count_nonzero(np.asarray(periodic_payload.order_propagating, dtype=bool))
+                    )
+                    prefix = "Periodic orders"
+                    if n_channels > 1:
+                        prefix = f"{prefix} [{label}]"
+                    print(f"{prefix}: total={order_count} propagating={propagating_count}")
+                    _print_power_balance(
+                        periodic_payload.power,
+                        label=label if n_channels > 1 else None,
+                    )
+            else:
+                periodic_payload = None
+                if cfg.verbose:
+                    print(
+                        "Periodic power and diffraction diagnostics are unavailable for "
+                        "absorbing-host or evanescent incidence."
+                    )
             periodic_runs[label] = _assemble_channel_result(
                 sim,
                 source=solved.sources[label],
@@ -600,7 +614,7 @@ def postprocess_sources_impl(
                 # `ChannelResult.periodic`; keep finite-cluster PWP families
                 # as intentional empty placeholders.
                 farfield=empty_farfield_patterns(compute_dtype),
-                power=periodic_payload.power,
+                power=None if periodic_payload is None else periodic_payload.power,
                 cross_sections=None,
                 decomposition_forward=None,
                 decomposition_backward=None,
@@ -754,45 +768,48 @@ def run_polarizations_impl(
     mixed_backward: PowerFluxDecomposition | None = None
 
     if sim.config.periodic is not None:
-        # Periodic diffraction orders are the canonical far-field result and
-        # are always produced by periodic postprocessing, matching `run()`.
+        # Lossless runs carry order/power payloads; complex-host runs keep the
+        # coefficient channel while those diagnostics remain undefined.
         mixed_farfield = empty_farfield_patterns(compute_dtype)
-        if not isinstance(source, PlaneWave):
+        if not isinstance(source, (PlaneWave, BlochPlaneWave)):
             raise NotImplementedError(
-                "Periodic polarization postprocessing currently requires PlaneWave excitation."
+                "Periodic polarization postprocessing supports PlaneWave and "
+                "BlochPlaneWave excitation."
             )
-        if run_te.periodic is None or run_tm.periodic is None:
-            raise RuntimeError("Periodic basis channels are missing order payloads.")
-        mixed_periodic = mix_periodic_farfield_payloads(
-            run_te.periodic,
-            run_tm.periodic,
-            source=source,
-            a_first=a_te,
-            a_second=a_tm,
-            k=run_te.k.real,
-            n_medium=sim.config.n_medium,
-        )
-        if mixed_initial_coeffs is None or local_mixed_coeffs is None:
-            raise RuntimeError("Periodic mixed-channel coefficients were not prepared.")
-        local_components = _local_power_balance_generic_route(
-            sim,
-            initial_coeffs=mixed_initial_coeffs,
-            coeffs=local_mixed_coeffs,
-            k0=run_te.k0,
-            accum_dtype=accum_dtype,
-        )
-        if local_components is not None:
-            mixed_periodic = replace(
-                mixed_periodic,
-                power=replace(
-                    mixed_periodic.power,
-                    local_absorbed_power=local_components.local_absorbed_power,
-                    local_absorbed_power_per_particle=(
-                        local_components.local_absorbed_power_per_particle
+        periodic_te, periodic_tm = run_te.periodic, run_tm.periodic
+        if (periodic_te is None) != (periodic_tm is None):
+            raise RuntimeError("Periodic basis channels disagree on order-payload availability.")
+        if periodic_te is not None and periodic_tm is not None:
+            mixed_periodic = mix_periodic_farfield_payloads(
+                periodic_te,
+                periodic_tm,
+                source=source,
+                a_first=a_te,
+                a_second=a_tm,
+                k=run_te.k.real,
+                n_medium=sim.config.n_medium,
+            )
+            if mixed_initial_coeffs is None or local_mixed_coeffs is None:
+                raise RuntimeError("Periodic mixed-channel coefficients were not prepared.")
+            local_components = _local_power_balance_generic_route(
+                sim,
+                initial_coeffs=mixed_initial_coeffs,
+                coeffs=local_mixed_coeffs,
+                k0=run_te.k0,
+                accum_dtype=accum_dtype,
+            )
+            if local_components is not None:
+                mixed_periodic = replace(
+                    mixed_periodic,
+                    power=replace(
+                        mixed_periodic.power,
+                        local_absorbed_power=local_components.local_absorbed_power,
+                        local_absorbed_power_per_particle=(
+                            local_components.local_absorbed_power_per_particle
+                        ),
                     ),
-                ),
-            )
-        mixed_power = mixed_periodic.power
+                )
+            mixed_power = mixed_periodic.power
     else:
         mixed_farfield = (
             mix_farfield_patterns(

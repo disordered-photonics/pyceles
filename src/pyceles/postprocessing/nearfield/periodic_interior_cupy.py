@@ -236,7 +236,7 @@ def _cupy_periodic_near_pair_batch_size(
 def _resolve_eta(
     *,
     periodic: Any,
-    k: float,
+    k: complex,
     k_parallel: np.ndarray,
     positions: np.ndarray,
     lmax: int,
@@ -244,7 +244,7 @@ def _resolve_eta(
 ) -> float:
     return resolve_ewald_eta(
         periodic=periodic,
-        k=float(k),
+        k=complex(k),
         k_parallel=np.asarray(k_parallel, dtype=float).reshape(2),
         positions=np.asarray(positions, dtype=float).reshape(-1, 3),
         lmax=int(lmax),
@@ -258,7 +258,7 @@ def periodic_local_regular_l1_coeffs_cupy(
     positions: np.ndarray,
     coeffs: np.ndarray,
     lmax: int,
-    k: float,
+    k: complex,
     periodic: Any,
     k_parallel: np.ndarray,
     circumscribing_radii: np.ndarray | None = None,
@@ -321,7 +321,7 @@ def periodic_local_regular_l1_coeffs_cupy(
     if method == "rayleigh":
         plan = prepare_rayleigh_plan(
             lmax=int(lmax),
-            k=float(k),
+            k=complex(k),
             positions=pos,
             circumscribing_radii=circumscribing_radii,
             periodic=periodic,
@@ -349,7 +349,7 @@ def periodic_local_regular_l1_coeffs_cupy(
 
     eta = _resolve_eta(
         periodic=periodic,
-        k=float(k),
+        k=complex(k),
         k_parallel=np.asarray(k_parallel, dtype=float).reshape(2),
         positions=pos,
         lmax=int(lmax),
@@ -358,7 +358,7 @@ def periodic_local_regular_l1_coeffs_cupy(
 
     shell_counts = resolve_ewald_shell_counts(
         periodic=periodic,
-        k=float(k),
+        k=complex(k),
         k_parallel=np.asarray(k_parallel, dtype=float).reshape(2),
         positions=pos,
         lmax=int(lmax),
@@ -376,7 +376,7 @@ def periodic_local_regular_l1_coeffs_cupy(
     workspace = CupyEwaldShellWorkspace(
         cupy=cp,
         lattice=periodic.lattice,
-        k=float(k),
+        k=complex(k),
         k_parallel=np.asarray(k_parallel, dtype=np.float64).reshape(2),
         eta=float(eta),
     )
@@ -392,7 +392,7 @@ def periodic_local_regular_l1_coeffs_cupy(
         # a Fourier series in destination xy, while its expensive multipole
         # recurrence depends on the source and the shared plane z only.
         same_plane_atol = same_plane_z_tolerance(
-            float(k),
+            complex(k),
             coordinate_scale=float(coordinate_scale),
         )
         plane_groups: list[tuple[float, np.ndarray, np.ndarray]] = []
@@ -526,7 +526,7 @@ def periodic_local_regular_l1_coeffs_cupy(
     # therefore every source contributes to every destination.
     if method == "ewald":
         same_plane_atol = same_plane_z_tolerance(
-            float(k),
+            complex(k),
             coordinate_scale=float(coordinate_scale),
         )
         ewald_plane_groups: list[tuple[float, np.ndarray, np.ndarray]] = []

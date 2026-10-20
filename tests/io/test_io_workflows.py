@@ -3,8 +3,10 @@ from typing import Any, cast
 import numpy as np
 import pytest
 
-from pyceles.core.fields import PlaneWave
+from pyceles.core.fields import BlochPlaneWave, PlaneWave
+from pyceles.core.lattice import RectangularLattice2D
 from pyceles.core.particles import ParticleCollection, Sphere, spheres_from_arrays
+from pyceles.core.periodic import PeriodicOptions, PeriodicSpec
 from pyceles.io.workflows import load_simulation_h5, save_simulation_h5
 from pyceles.postprocessing.nearfield import NearFieldSlice, compute_near_field_slice
 from pyceles.simulation import (
@@ -241,3 +243,106 @@ def test_save_simulation_h5_accepts_minimal_result_retention(tmp_path):
         assert "solution/rhs" not in h5
         assert "solution/initial_coeffs" not in h5
         assert "solution/residual_history" not in h5
+
+
+def test_save_complex_periodic_run_preserves_configuration_without_power_payload(tmp_path):
+    host = 1.33 + 0.1j
+    lattice = RectangularLattice2D(900.0, 950.0)
+    source = BlochPlaneWave(
+        wavelength=550.0,
+        medium_n=host,
+        polarization="TE",
+        k_parallel=(0.001, -0.0005),
+        direction="down",
+        reference_point=(20.0, -10.0, 200.0),
+    )
+    config = SimulationConfig(
+        wavelength=550.0,
+        n_medium=host,
+        lmax=1,
+        periodic=PeriodicSpec(lattice, PeriodicOptions(method="rayleigh")),
+        solver_method="direct",
+        verbose=False,
+    )
+    run = Simulation(
+        config,
+        particles=[Sphere(position=(0.0, 0.0, 0.0), radius=30.0, refractive_index=1.5)],
+    ).run(source, include_farfield=False)
+    assert run.periodic is None
+
+    x, z = np.meshgrid(np.asarray([-1.0, 1.0]), np.asarray([-1.0, 1.0]), indexing="xy")
+    zero = np.zeros((*x.shape, 3), dtype=np.complex128)
+    near = NearFieldSlice(
+        axis_0=x,
+        axis_1=z,
+        inside=np.zeros_like(x, dtype=bool),
+        field_maps={"total": (zero, zero)},
+        plane="y",
+        plane_value=0.0,
+        axis_0_label="x",
+        axis_1_label="z",
+    )
+
+    path = save_simulation_h5(run, near, tmp_path / "complex_periodic.h5")
+    loaded = cast(dict[str, Any], load_simulation_h5(path))
+    periodic = cast(dict[str, Any], loaded["periodic_configuration"])
+
+    assert periodic["method"] == "rayleigh"
+    assert periodic["unit_cell_area"] == lattice.area
+    assert complex(periodic["k_medium"]) == run.k
+    np.testing.assert_array_equal(periodic["incident_k_parallel"], source.k_parallel)
+    assert periodic["incident_source_type"] == "BlochPlaneWave"
+    assert periodic["incident_direction"] == source.direction
+    np.testing.assert_array_equal(periodic["incident_reference_point"], source.reference_point)
+    assert not bool(periodic["power_diagnostics_available"])
+    assert "far_field" not in loaded
+    assert "periodic" not in loaded
+    diagnostics = cast(dict[str, Any], loaded["diagnostics"])
+    assert "power" not in diagnostics
+
+
+def test_periodic_plane_wave_hdf5_retains_incident_reference_and_axes(tmp_path):
+    source = PlaneWave(
+        wavelength=550.0,
+        medium_n=1.0,
+        polar_angle=0.0,
+        azimuthal_angle=0.4,
+        focal_point=(15.0, -10.0, 70.0),
+        amplitude=0.7 + 0.2j,
+        polarization=(0.5 + 0.1j, -0.3j),
+    )
+    lattice = RectangularLattice2D(900.0, 950.0)
+    config = SimulationConfig(
+        wavelength=550.0,
+        n_medium=1.0,
+        lmax=1,
+        periodic=PeriodicSpec(lattice, PeriodicOptions(method="directsum", directsum_window=0)),
+        solver_method="direct",
+        verbose=False,
+    )
+    run = Simulation(
+        config,
+        particles=[Sphere(position=(0.0, 0.0, 0.0), radius=20.0, refractive_index=1.5)],
+    ).run(source, include_farfield=False)
+    x, z = np.meshgrid([-1.0, 1.0], [-1.0, 1.0], indexing="xy")
+    zero = np.zeros((*x.shape, 3), dtype=np.complex128)
+    near = NearFieldSlice(
+        axis_0=x,
+        axis_1=z,
+        inside=np.zeros_like(x, dtype=bool),
+        field_maps={"total": (zero, zero)},
+        plane="y",
+        plane_value=0.0,
+        axis_0_label="x",
+        axis_1_label="z",
+    )
+    path = save_simulation_h5(run, near, tmp_path / "plane_wave_periodic.h5")
+    data = cast(dict[str, Any], load_simulation_h5(path))
+    meta = cast(dict[str, Any], data["periodic_configuration"])
+    assert meta["incident_source_type"] == "PlaneWave"
+    assert meta["incident_direction"] == "up"
+    np.testing.assert_array_equal(meta["incident_reference_point"], source.focal_point)
+    np.testing.assert_allclose(meta["incident_amplitude"], source.amplitude)
+    np.testing.assert_allclose(meta["incident_jones_coefficients"], source.jones_coefficients())
+    assert meta["incident_polar_angle"] == source.polar_angle
+    assert meta["incident_azimuthal_angle"] == source.azimuthal_angle

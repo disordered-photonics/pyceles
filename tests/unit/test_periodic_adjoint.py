@@ -19,6 +19,10 @@ from pyceles.core.operators import (
 from pyceles.core.operators.base import PreparedOperator
 from pyceles.core.particles import Sphere, Spheroid
 from pyceles.core.periodic import PeriodicOptions, PeriodicSpec
+from pyceles.core.periodic.directsum import (
+    apply_periodic_direct_sum,
+    apply_periodic_direct_sum_adjoint,
+)
 from pyceles.core.translation import RadialLUT, translation_ab5_table
 from pyceles.linear import krylov_cupy
 from pyceles.linear.krylov_cupy import lsqr_cupy_native
@@ -113,6 +117,40 @@ def test_periodic_rayleigh_adjoint_matches_synthetic_action() -> None:
         assert abs(lhs - rhs) / max(abs(lhs), abs(rhs), 1e-300) < 1e-14
 
 
+def test_complex_k_direct_image_sum_has_exact_hermitian_adjoint() -> None:
+    lmax = 1
+    positions = np.asarray([[0.0, 0.0, -0.3], [0.2, -0.1, 0.4]])
+    lattice = RectangularLattice2D(2.4, 2.8)
+    k_parallel = np.asarray([0.13, -0.17])
+    ab5 = translation_ab5_table(lmax, dtype=np.complex128)
+    rng = np.random.default_rng(20261019)
+    x = rng.standard_normal(2 * n_modes(lmax)) + 1j * rng.standard_normal(2 * n_modes(lmax))
+    y = rng.standard_normal(x.size) + 1j * rng.standard_normal(x.size)
+
+    action_x = apply_periodic_direct_sum(
+        lmax=lmax,
+        k=1.1 + 0.5j,
+        positions=positions,
+        x=x,
+        lattice=lattice,
+        k_parallel=k_parallel,
+        window=2,
+        ab5=ab5,
+    )
+    adjoint_y = apply_periodic_direct_sum_adjoint(
+        lmax=lmax,
+        k=1.1 + 0.5j,
+        positions=positions,
+        x=y,
+        lattice=lattice,
+        k_parallel=k_parallel,
+        window=2,
+        ab5=ab5,
+    )
+
+    np.testing.assert_allclose(np.vdot(action_x, y), np.vdot(x, adjoint_y), rtol=2e-14, atol=2e-14)
+
+
 def test_prepared_operator_exposes_shape_preserving_adjoint() -> None:
     prepared = _synthetic_prepared()
     first = prepared.make_adjoint()
@@ -153,6 +191,39 @@ def test_periodic_rayleigh_coupling_adjoint_matches_stored_operator() -> None:
         circumscribing_radii=np.full(positions.shape[0], 80.0),
     )
     rng = np.random.default_rng(20260909)
+    x = rng.standard_normal(positions.shape[0] * n_modes(lmax)) + 1j * rng.standard_normal(
+        positions.shape[0] * n_modes(lmax)
+    )
+    y = rng.standard_normal(x.size) + 1j * rng.standard_normal(x.size)
+    lhs = np.vdot(coupling.apply(x), y)
+    rhs = np.vdot(x, coupling.apply_adjoint(y))
+    assert abs(lhs - rhs) / max(abs(lhs), abs(rhs), 1.0e-300) < 2.0e-12
+
+
+def test_complex_host_periodic_rayleigh_adjoint_matches_inner_product() -> None:
+    lmax = 1
+    positions = np.asarray([[0.0, 0.0, -220.0], [150.0, -75.0, 40.0], [-180.0, 120.0, 250.0]])
+    coupling = PeriodicCouplingOperator(
+        lmax=lmax,
+        k=2.0 * np.pi / 550.0 * (1.33 + 0.15j),
+        positions=positions,
+        ab5=translation_ab5_table(lmax, dtype=np.complex128),
+        periodic=PeriodicSpec(
+            lattice=RectangularLattice2D(900.0, 850.0),
+            options=PeriodicOptions(
+                method="rayleigh",
+                eta=0.002,
+                real_shells=4,
+                reciprocal_shells=4,
+                rayleigh_reciprocal_shells=8,
+                rayleigh_z_cut=140.0,
+            ),
+        ),
+        k_parallel=np.zeros(2),
+        dtype=np.dtype(np.complex128),
+        circumscribing_radii=np.full(positions.shape[0], 50.0),
+    )
+    rng = np.random.default_rng(20261019)
     x = rng.standard_normal(positions.shape[0] * n_modes(lmax)) + 1j * rng.standard_normal(
         positions.shape[0] * n_modes(lmax)
     )
@@ -273,6 +344,38 @@ def test_periodic_nonrayleigh_adjoint_matches_inner_product(
     lhs = np.vdot(coupling.apply(x), y)
     rhs = np.vdot(x, coupling.apply_adjoint(y))
     assert abs(lhs - rhs) / max(abs(lhs), abs(rhs), 1.0e-300) < tolerance
+
+
+@pytest.mark.parametrize("cache", [False, True])
+def test_complex_host_cpu_ewald_adjoint_matches_inner_product(cache: bool) -> None:
+    lmax = 1
+    lattice = RectangularLattice2D(1.1, 1.1)
+    coupling = PeriodicCouplingOperator(
+        lmax=lmax,
+        k=1.1 + 0.5j,
+        positions=np.asarray([[0.0, 0.0, 0.0], [0.23, -0.17, 0.4]]),
+        ab5=translation_ab5_table(lmax),
+        periodic=PeriodicSpec(
+            lattice,
+            PeriodicOptions(
+                method="ewald",
+                eta=np.sqrt(np.pi / lattice.area),
+                real_shells=12,
+                reciprocal_shells=12,
+            ),
+        ),
+        k_parallel=np.zeros(2),
+        dtype=np.dtype(np.complex128),
+        cache_blocks=cache,
+    )
+    rng = np.random.default_rng(20261019)
+    x = rng.standard_normal(2 * n_modes(lmax)) + 1j * rng.standard_normal(2 * n_modes(lmax))
+    y = rng.standard_normal(2 * n_modes(lmax)) + 1j * rng.standard_normal(2 * n_modes(lmax))
+
+    lhs = np.vdot(coupling.apply(x), y)
+    rhs = np.vdot(x, coupling.apply_adjoint(y))
+
+    assert abs(lhs - rhs) / max(abs(lhs), abs(rhs), 1.0e-300) < 2.0e-12
 
 
 @pytest.mark.fake_gpu
