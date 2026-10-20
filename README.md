@@ -27,8 +27,9 @@ used in scientific work.
 - Homogeneous, layered, axisymmetric, and perfect-conductor particles.
 - Standard dense `.tmat.h5` particle blocks, selected at an exact wavelength
   and converted to the CELES spherical-wave convention.
-- Plane waves, Gaussian and Laguerre-Gaussian beams, Bessel beams, focused
-  beams, angular-spectrum/SLM sources, local dipoles, and dipole collections.
+- Plane waves, including explicit real-q `BlochPlaneWave` periodic incidence,
+  Gaussian and Laguerre-Gaussian beams, Bessel beams, focused beams,
+  angular-spectrum/SLM sources, local dipoles, and dipole collections.
 - Direct pairwise coupling and high-frequency MLFMM for finite clusters.
 - GMRES-family methods, BiCGSTAB, GCRO-DR, LSQR with exact adjoints, and
   direct dense solves where the caller has sufficient memory.
@@ -52,13 +53,16 @@ pyceles is pre-1.0. Important boundaries are still present:
 
 - one simulation currently uses one common `lmax` for all particles;
 - finite pairwise and MLFMM workflows support passive absorbing hosts;
-  periodic propagation currently requires a real positive host index;
+  CPU periodic `directsum`, Ewald, and Rayleigh, plus CuPy Ewald and Rayleigh,
+  also support them with an explicit real transverse Bloch vector. CuPy
+  `directsum` and absorbing-host diffraction efficiencies remain unavailable;
 - T-matrix superposition requires disjoint circumscribing spheres by default;
 - opaque imported T matrices support exact operator adjoints, but cannot
   provide hidden internal fields or shape/material derivatives;
 - embedded dipoles inside particles are not yet supported by the main solver path;
 - periodic workflows are experimental and currently target homogeneous
-  rectangular 2D lattices with plane-wave excitation;
+  rectangular 2D lattices with angle-defined or explicit real-q plane-wave
+  excitation;
 - spheroid exterior fields require care inside a circumscribing sphere but
   outside the physical spheroid.
 

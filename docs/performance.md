@@ -299,6 +299,10 @@ orders for output and near-field evaluation. For exterior near fields, choose
 - The CuPy Ewald path batches structural sums and same-plane classification
   under a temporary-memory budget; it does not retain a hidden quadratic index
   cache in the matrix-free path.
+- Complex hosts retain the same operator and workspace owners, with separate
+  device special-function evaluation where needed. Real-host fused radial
+  kernels and real-valued reciprocal powers remain specialized for repeated
+  applications.
 - Rayleigh preparation builds a reciprocal projection plan, one exact periodic
   self block, and a sparse exact-near cache. Its repeated apply scales with
   retained reciprocal orders and directed near pairs rather than all dense
@@ -314,8 +318,10 @@ orders for output and near-field evaluation. For exterior near fields, choose
 Periodic observable output uses an explicit diffraction-order basis. Ewald
 shell controls (`real_shells`, `reciprocal_shells`) are not output-order
 controls: `output_bmax` and `field_bmax` select propagating and evanescent
-orders. `output_bmax=None` is sufficient for `R/T/A`; exterior near fields
-usually require an explicit `field_bmax` and a stability check.
+orders. `output_bmax=None` is sufficient for lossless-host `R/T/A`; exterior
+Ewald/Rayleigh fields require an explicit `field_bmax` and a stability check.
+Absorbing hosts require an explicit reciprocal cutoff because all orders
+attenuate, so attenuation alone cannot define a propagating-order output basis.
 
 ## Cache management
 

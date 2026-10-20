@@ -22,8 +22,8 @@ new source wrappers/classes are added.
 
 ## Angular-grid policy
 
-pyceles keeps a single shared default angular grid to stay close to CELES usage
-and avoid unnecessary complexity in standard workflows.
+pyceles uses a single shared angular grid by default to keep standard workflows
+simple.
 
 The API still keeps source and far-field grids distinct in principle:
 
@@ -105,6 +105,33 @@ simulations support this definition on NumPy and CuPy, as well as local dipoles,
 finite-centre Bessel spectra and explicit finite-plane Fourier boundaries.
 In absorbing hosts, outgoing angular amplitudes and finite E/H fields remain
 available; automatic lossless power and cross-section diagnostics are `None`.
+
+For periodic scattering in a passive complex host, `BlochPlaneWave`
+specifies a real transverse wavevector directly:
+
+```python
+source = pcl.BlochPlaneWave(
+    wavelength=550.0,
+    medium_n=1.33 + 0.1j,
+    k_parallel=(0.002, 0.0),
+    direction="down",
+    reference_point=(0.0, 0.0, 250.0),
+    polarization="TE",
+)
+```
+
+The field is normalized at `reference_point`, while periodic diffraction-order
+coefficients use the global coordinate origin. Its longitudinal wavevector is
+`-sqrt(k**2 - qx**2 - qy**2)` for downward incidence, taking the root with
+nonnegative imaginary part. A normal-incidence `PlaneWave` is also supported in
+an absorbing host; an oblique angle-defined plane wave is not, because that
+would prescribe a complex transverse wavevector rather than one real Bloch
+sector. Separate real-`q` components require separate periodic solves,
+followed by coherent field superposition. Ewald and Rayleigh coupling support
+this boundary on NumPy and CuPy; finite direct-image sums use NumPy.
+Absorbing-host diffraction power remains unavailable. Exterior Ewald/Rayleigh
+fields require an explicit `field_bmax` or `PeriodicOptions.output_bmax` and a
+convergence check as that reciprocal cutoff increases.
 
 ## Explicit source cardinality
 
@@ -233,9 +260,9 @@ source = pcl.DipoleCollection(
 
 Current dipole scope:
 
-- homogeneous medium is still restricted to real `n_medium` in the main solver.
-  This restriction was inherited from the early beam/plane-wave workflow; it is
-  not a fundamental limitation of local dipole sources and may be lifted later.
+- finite dipole simulations and E/H fields accept passive complex `n_medium`.
+  Point-emitter self-power and LDOS normalization require a nonabsorbing host;
+  periodic dipole excitation is not implemented.
 - Dipole sources do not have a TE/TM Jones basis. Use
   `DipoleSource.cartesian_basis_sources()` with `run_sources(...)` when the
   x/y/z dipole orientation basis should be solved in one multi-RHS call.

@@ -5,19 +5,22 @@ detail than the root README.
 
 ## Core conventions
 
-- CELES-compatible VSWF indexing, with tau blocks contiguous and `m=-l..l`.
+- VSWF indexing with tau blocks contiguous and `m=-l..l`, following the
+  convention used by CELES.
 - Cached Wigner-3j implementation.
-- CELES translation coefficients (`a5`/`b5` tables) with normalized Legendre
+- SVWF translation coefficients (`a5`/`b5` tables) with normalized Legendre
   recurrences.
-- CELES plane-wave incident coefficients.
+- Analytic plane-wave incident coefficients in the package's SVWF convention.
 - O(N^2) reference matvec for `(I - T W) x = T b`.
-- CELES-style precision policy through `compute_dtype` and `accum_dtype`.
+- Separate compute and accumulation precision controls through `compute_dtype`
+  and `accum_dtype`.
 
 ## Sources
 
 Current source support includes:
 
-- plane waves,
+- angle-defined plane waves and explicit real-q `BlochPlaneWave` periodic
+  sources,
 - Gaussian and Laguerre-Gaussian beams,
 - focused Laguerre-Gaussian beams,
 - Bessel beams,
@@ -34,7 +37,12 @@ spectral weights, and dipoles use finite moments. Finite-plane Fourier data
 provide an explicit boundary for a beam. Gaussian and focused profile/pupil
 models require a nonabsorbing host. Outgoing angular amplitudes and finite E/H
 fields remain available in absorbing hosts; automatic lossless power and
-cross-section diagnostics are absent. Periodic propagation requires a real host.
+cross-section diagnostics are absent. CPU periodic `directsum`, Ewald, and
+Rayleigh coupling, plus CuPy Ewald and Rayleigh coupling, also accept passive
+complex hosts when the source defines a real transverse Bloch vector. Use
+`BlochPlaneWave` for nonzero transverse wavevectors; angle-defined `PlaneWave`
+supports normal incidence in an absorbing host. Periodic CuPy `directsum` and
+absorbing-host periodic power diagnostics are unavailable.
 
 Gaussian wavebundle support includes optimized normal-incidence kernels ported
 from CELES, tilted-incidence source projection through angular spectra, and a
@@ -232,19 +240,24 @@ Homogeneous rectangular 2D periodic-cell workflows currently include:
 - periodic Ewald coupling with a direct-sum oracle for small checks,
 - geometry-only Rayleigh/Wood anomaly diagnostics for artificial periodicity
   checks,
-- periodic diffraction-order payloads on `SimulationResult.periodic`,
-- reflected/transmitted diffraction-order amplitudes and `R/T/A` totals,
+- lossless-host diffraction-order payloads and `R/T/A` totals on
+  `SimulationResult.periodic`,
+- finite-distance complex-host order amplitudes through
+  `periodic_order_amplitudes` with an explicit reciprocal cutoff,
 - periodic near-field slices:
   - exterior Rayleigh-order evaluation above/below the particle slab,
   - in-slab periodic local-SVWF evaluation outside/inside homogeneous spheres,
     including exact-near/Rayleigh-far acceleration when the solved periodic
     method is `"rayleigh"`,
+  - finite direct-image fields using the same image window as the CPU operator,
 - CuPy periodic Ewald coupling with optional explicit W-block caching subject
-  to the guarded device-memory budget,
+  to the guarded device-memory budget, including passive complex hosts with
+  real transverse Bloch vectors,
 - an opt-in NumPy/CuPy hybrid repeated-apply method through
   `PeriodicOptions(method="rayleigh")`: one shared exact periodic self block, a
   configurable exact-Ewald vertical near band, and reciprocal Rayleigh
-  upward/downward scans for vertically separated pairs.
+  upward/downward scans for vertically separated pairs, including passive
+  complex hosts with real transverse Bloch vectors.
 
 Periodic workflows remain experimental; current limits are documented in
 [limitations.md](limitations.md), and performance/convergence knobs are discussed

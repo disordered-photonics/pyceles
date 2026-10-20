@@ -5,7 +5,9 @@ This page records current limitations.
 ## Physical and geometrical scope
 
 - Finite pairwise and MLFMM `Simulation` support passive complex `n_medium` with
-  positive real part. Periodic propagation currently requires a real host.
+  positive real part. CPU periodic `directsum`, Ewald, and Rayleigh, along with
+  CuPy periodic Ewald and Rayleigh, also accept passive complex hosts for real
+  transverse Bloch vectors. Periodic CuPy `directsum` is not implemented.
 - Absorbing-host fields and outgoing angular amplitudes are available, while
   automatic lossless power/cross-section diagnostics are absent. Gaussian and
   focused profile/pupil sources require a nonabsorbing host; finite-plane
@@ -64,8 +66,14 @@ Periodic boundary conditions remain experimental.
 Current tested scope:
 
 - homogeneous rectangular 2D lattices,
-- plane-wave excitation,
-- NumPy and CuPy `complex64`/`complex128` periodic Ewald paths,
+- angle-defined `PlaneWave` incidence in real hosts; in passive complex hosts,
+  `PlaneWave` supports normal incidence and `BlochPlaneWave` accepts an explicit
+  real transverse wavevector,
+- CPU passive complex-host `directsum`, Ewald, and Rayleigh coupling,
+  with field reconstruction but no absorbing-host power output,
+- NumPy and CuPy `complex64`/`complex128` periodic Ewald and Rayleigh paths for
+  real hosts, and passive complex-host Ewald/Rayleigh paths with finite-field
+  reconstruction; absorbing-host power diagnostics remain unavailable,
 - opt-in NumPy/CuPy hybrid exact-near/Rayleigh-far repeated applies for
   vertically extended cells,
 - selected local-SVWF near-field workflows for homogeneous spheres,
@@ -98,8 +106,10 @@ action. Its automatic reciprocal truncation is conservative but heuristic;
 scientific runs should sweep `rayleigh_z_cut` or `rayleigh_reciprocal_shells`
 and compare representative cases with exact Ewald.
 
-Periodic in-slab near-field evaluation supports both `method="ewald"` and
-`method="rayleigh"`. The hybrid path retains exact Ewald local-SVWF evaluation
+Periodic in-slab near-field evaluation supports `method="ewald"`,
+`method="rayleigh"`, and CPU `method="directsum"`. Direct-image fields use the
+configured finite image window, whose convergence is the caller's responsibility.
+The hybrid path retains exact Ewald local-SVWF evaluation
 for source-point pairs inside the vertical band and uses reciprocal Rayleigh
 scans only for vertically distant sources. It therefore inherits the same
 limitation as the hybrid solve: a dense same-height point/source population can

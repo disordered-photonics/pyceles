@@ -111,6 +111,7 @@ is discarded. Callers may rotate the dense block explicitly with
 Common source descriptors include:
 
 - `pyceles.PlaneWave`
+- `pyceles.BlochPlaneWave`
 - `pyceles.GaussianBeam`
 - `pyceles.LaguerreGaussianBeam`
 - `pyceles.FocusedLaguerreGaussianBeam`
@@ -135,7 +136,13 @@ Gaussian and focused profile/pupil models require a nonabsorbing host; use
 coupling on NumPy and CuPy, including source blocks and coherent polarization
 channels.
 The host index must be finite with positive real and nonnegative imaginary
-parts. Periodic propagation currently requires a real host.
+parts. CPU periodic `directsum`, Ewald, and Rayleigh coupling, along with CuPy
+Ewald and Rayleigh coupling, also accept passive complex hosts when
+illumination has a real transverse Bloch vector.
+Use `BlochPlaneWave` to prescribe nonzero real transverse wavevectors; an
+angle-defined `PlaneWave` is supported in an absorbing host at normal
+incidence. Periodic CuPy `directsum` and absorbing-host diffraction
+efficiencies are unavailable.
 
 Custom `LocalExpansionSource` implementations expose `outgoing_lmax` and
 `outgoing_coeffs(*, dtype=...)` with one row per emitter returned by
@@ -240,7 +247,9 @@ Experimental periodic workflows use:
   - `method="ewald"`: exact pairwise Ewald operator (default),
   - `method="directsum"`: small-case NumPy oracle (NumPy backend only),
   - `method="rayleigh"`: exact self/vertical-near Ewald plus far Rayleigh scans,
-  - `rayleigh_z_cut`: exact-near half-band in the simulation length unit,
+  - `rayleigh_z_cut`: exact-near half-band in the simulation length unit;
+    the default is at least one phase wavelength, `2*pi/Re(k)`, and twice
+    the largest circumscribing radius,
   - `rayleigh_reciprocal_shells`: fixed reciprocal square half-width or `None`
     for automatic truncation,
   - `shell_tolerance` and `max_shells`: shared Ewald/Rayleigh automatic
@@ -265,6 +274,9 @@ initial and scattered intensities do not suffice.
 
 Finite-channel HDF5 output preserves the complex host index and wavenumber,
 including complex wavevector metadata in saved angular spectra.
+Periodic channels retain their lattice, numerical options, real transverse
+wavevector, and full incident source state in `periodic_configuration`.
+Order and power payloads are saved only when the channel provides them.
 
 ## Implementation modules
 

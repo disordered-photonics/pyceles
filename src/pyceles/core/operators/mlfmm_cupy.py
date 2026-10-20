@@ -8861,7 +8861,7 @@ class CuPyMLFMMCouplingOperator:
     def apply_adjoint(self, x: Any) -> Any:
         """Apply the Hermitian adjoint of the finite MLFMM coupling on device.
 
-        Production on-the-fly multilevel plans use the same bounded streamed
+        On-the-fly multilevel plans use the same bounded streamed
         residency policy as the forward action. Dense/debug leaf plans retain
         the resident reverse hierarchy as a simple algebraic reference path.
         """
