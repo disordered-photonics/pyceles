@@ -83,6 +83,38 @@ def test_shifted_rayleigh_structural_batch_matches_ewald_reference() -> None:
     np.testing.assert_allclose(actual, expected, rtol=2.0e-11, atol=5.0e-12)
 
 
+def test_complex_host_rayleigh_structural_batch_matches_ewald_reference() -> None:
+    lattice = pcl.RectangularLattice2D(900.0, 950.0)
+    k = 2.0 * np.pi / 550.0 * (1.33 + 0.15j)
+    displacements = np.asarray([[120.0, -80.0, 250.0], [-100.0, 50.0, -330.0]])
+    expected = ewald_structural_sums_2d_batch(
+        lmax_struct=2,
+        k=k,
+        destinations=displacements,
+        source=np.zeros(3),
+        lattice=lattice,
+        k_parallel=np.zeros(2),
+        eta=2.5e-3,
+        real_shells=12,
+        reciprocal_shells=12,
+        shell_tolerance=1.0e-11,
+        max_shells=24,
+        dtype=np.complex128,
+    )
+    actual = rayleigh_structural_sums_2d_batch(
+        max_degree=4,
+        k=k,
+        displacements=displacements,
+        lattice=lattice,
+        k_parallel=np.zeros(2),
+        tolerance=1.0e-11,
+        max_shells=32,
+        requested_half_width=32,
+    )
+
+    np.testing.assert_allclose(actual, expected, rtol=2.0e-10, atol=2.0e-11)
+
+
 def test_default_rayleigh_band_is_wavelength_and_particle_safe() -> None:
     k = 2.0 * np.pi / 600.0
 
@@ -96,6 +128,11 @@ def test_default_rayleigh_band_is_wavelength_and_particle_safe() -> None:
         circumscribing_radii=np.asarray([340.0, 90.0]),
         requested=None,
     ) == pytest.approx(680.0)
+    assert resolve_rayleigh_z_cut(
+        k=k * (1.5 + 0.2j),
+        circumscribing_radii=np.asarray([40.0]),
+        requested=None,
+    ) == pytest.approx(400.0)
     with pytest.raises(ValueError, match="twice the largest"):
         resolve_rayleigh_z_cut(
             k=k,

@@ -7,6 +7,7 @@ import numpy.typing as npt
 
 from pyceles.core.indexing import n_modes
 from pyceles.core.lattice import RectangularLattice2D
+from pyceles.core.radial import passive_wavenumber
 from pyceles.core.translation import translation_block
 
 Array = np.ndarray
@@ -22,7 +23,7 @@ def _validated_window(window: int) -> int:
 def periodic_direct_sum_block(
     *,
     lmax: int,
-    k: float,
+    k: complex,
     destination: Array,
     source: Array,
     lattice: RectangularLattice2D,
@@ -40,6 +41,7 @@ def periodic_direct_sum_block(
     caller.
     """
     out_dtype = np.dtype(dtype)
+    wave_number = passive_wavenumber(k)
     nm = n_modes(int(lmax))
     w = np.zeros((nm, nm), dtype=out_dtype)
     dst = np.asarray(destination, dtype=float).reshape(3)
@@ -56,7 +58,7 @@ def periodic_direct_sum_block(
             phase = np.exp(1j * float(np.dot(kp, shift[:2])))
             block = translation_block(
                 int(lmax),
-                float(k),
+                wave_number,
                 rvec,
                 ab5=ab5,
                 radial_lut=None,
@@ -68,7 +70,7 @@ def periodic_direct_sum_block(
 def apply_periodic_direct_sum(
     *,
     lmax: int,
-    k: float,
+    k: complex,
     positions: Array,
     x: Array,
     lattice: RectangularLattice2D,
@@ -83,13 +85,14 @@ def apply_periodic_direct_sum(
     ns = pos.shape[0]
     nm = n_modes(int(lmax))
     arr = np.asarray(x, dtype=out_dtype).reshape(ns, nm)
+    wave_number = passive_wavenumber(k)
     y = np.zeros_like(arr, dtype=out_dtype)
 
     for i in range(ns):
         for j in range(ns):
             wij = periodic_direct_sum_block(
                 lmax=int(lmax),
-                k=float(k),
+                k=wave_number,
                 destination=pos[i],
                 source=pos[j],
                 lattice=lattice,
@@ -106,7 +109,7 @@ def apply_periodic_direct_sum(
 def apply_periodic_direct_sum_adjoint(
     *,
     lmax: int,
-    k: float,
+    k: complex,
     positions: Array,
     x: Array,
     lattice: RectangularLattice2D,
@@ -122,12 +125,13 @@ def apply_periodic_direct_sum_adjoint(
     nm = n_modes(int(lmax))
     arr = np.asarray(x, dtype=out_dtype).reshape(ns, nm)
     arr_conj = np.conjugate(arr)
+    wave_number = passive_wavenumber(k)
     y = np.zeros_like(arr, dtype=out_dtype)
     for i in range(ns):
         for j in range(ns):
             wij = periodic_direct_sum_block(
                 lmax=int(lmax),
-                k=float(k),
+                k=wave_number,
                 destination=pos[i],
                 source=pos[j],
                 lattice=lattice,

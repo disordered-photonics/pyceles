@@ -10,6 +10,7 @@ from pyceles.core.periodic.structural import (
     apply_structural_sums_to_vector,
     block_from_structural_sums,
     blocks_from_structural_sums,
+    direct_structural_sums_2d,
     periodic_direct_structural_block,
     sparse_translation_contraction,
     translation_contraction_tensor,
@@ -100,6 +101,82 @@ def test_direct_structural_block_matches_self_image_sum() -> None:
     )
 
     np.testing.assert_allclose(actual, expected, rtol=2e-14, atol=2e-14)
+
+
+def test_complex_k_structural_block_matches_finite_image_sum() -> None:
+    lattice = pcl.RectangularLattice2D(ax=430.0, ay=470.0)
+    destination = np.array([38.0, 19.0, 24.0], dtype=float)
+    source = np.array([-27.0, -13.0, -35.0], dtype=float)
+    k_parallel = np.array([0.0012, -0.0007], dtype=float)
+    lmax = 2
+    k = 2.0 * np.pi / 550.0 * (1.0 + 0.1j)
+    ab5 = translation_ab5_table(lmax, dtype=np.complex128)
+
+    expected = periodic_direct_sum_block(
+        lmax=lmax,
+        k=k,
+        destination=destination,
+        source=source,
+        lattice=lattice,
+        k_parallel=k_parallel,
+        window=1,
+        ab5=ab5,
+        dtype=np.complex128,
+    )
+    actual = periodic_direct_structural_block(
+        lmax=lmax,
+        k=k,
+        destination=destination,
+        source=source,
+        lattice=lattice,
+        k_parallel=k_parallel,
+        window=1,
+        ab5=ab5,
+        dtype=np.complex128,
+    )
+
+    np.testing.assert_allclose(actual, expected, rtol=2e-14, atol=2e-14)
+
+
+@pytest.mark.reference
+def test_complex_k_structural_channels_match_treams_references() -> None:
+    """Low-order structural channels agree with TREAMS for a passive complex k."""
+    lattice = pcl.RectangularLattice2D(ax=1.1, ay=1.1)
+    k = 1.1 + 1.3j
+    k_parallel = np.array([0.13, -0.17], dtype=float)
+    references = {
+        (0, 0): -0.13162341341421477 - 0.5398330001188543j,
+        (1, -1): 1.3245766329564208 + 0.6402455593103076j,
+        (1, 1): -1.1970171347512775 + 0.8803182169972379j,
+        (2, 0): 5.884788872029801 - 8.570711128291595j,
+        (2, 2): 5.832078669350794 + 10.336326471419452j,
+        (4, -4): -1918.5385476714225 + 1235.6102993165173j,
+        (4, 4): -519.9602098672777 - 2221.507886170242j,
+    }
+
+    actual = direct_structural_sums_2d(
+        lmax=2,
+        k=k,
+        destination=np.array([-0.23, 0.14, 0.0]),
+        source=np.zeros(3),
+        lattice=lattice,
+        k_parallel=k_parallel,
+        window=12,
+    )
+
+    # TREAMS lattice.lsumsw2d uses h_l Y_lm at r + R. The same Bloch phase
+    # with pyceles's displacement d - R uses d=-r. CELES P_l^|m| differs
+    # from Y_lm by sqrt(2*pi), plus TREAMS's Condon sign for positive m.
+    for (degree, order), treams_value in references.items():
+        normalization = np.sqrt(2.0 * np.pi)
+        if order > 0 and order % 2:
+            normalization *= -1.0
+        np.testing.assert_allclose(
+            actual[degree, order + 4],
+            normalization * treams_value,
+            rtol=1e-8,
+            atol=1e-8,
+        )
 
 
 def test_structural_block_rejects_incompatible_table_shape() -> None:

@@ -21,6 +21,7 @@ from pyceles.core.indexing import index_vswf, iter_modes, n_modes
 from pyceles.core.lattice import RectangularLattice2D
 from pyceles.core.periodic.scalar import chebyshev_shell_indices
 from pyceles.core.periodic.types import PeriodicSpec
+from pyceles.core.radial import passive_wavenumber
 from pyceles.core.spherical import legendre_normalized_trigon, spherical_functions_trigon
 
 Array = np.ndarray
@@ -66,19 +67,17 @@ def _compact_particle_index_dtype(*sizes: int) -> np.dtype:
 
 def resolve_rayleigh_z_cut(
     *,
-    k: float,
+    k: complex,
     circumscribing_radii: npt.ArrayLike | None,
     requested: float | None,
 ) -> float:
     """Resolve a conservative uniform half-band for exact Ewald coupling.
 
-    The default is one medium wavelength in ``|dz|`` and never smaller than
-    twice the largest circumscribing radius.  The latter guarantees vertical
-    separation of every pair delegated to the plane-wave representation.
+    The default is one phase wavelength, ``2*pi/Re(k)``, in ``|dz|`` and never
+    smaller than twice the largest circumscribing radius. The latter guarantees
+    vertical separation of every pair delegated to the plane-wave representation.
     """
-    k_f = float(k)
-    if not np.isfinite(k_f) or k_f <= 0.0:
-        raise ValueError(f"`k` must be finite and positive. Got {k!r}.")
+    k_value = passive_wavenumber(k)
     radii = (
         np.zeros((0,), dtype=float)
         if circumscribing_radii is None
@@ -88,7 +87,7 @@ def resolve_rayleigh_z_cut(
         raise ValueError("`circumscribing_radii` must be finite and non-negative.")
     minimum = 2.0 * float(np.max(radii, initial=0.0))
     if requested is None:
-        value = max(2.0 * math.pi / k_f, minimum)
+        value = max(2.0 * math.pi / k_value.real, minimum)
         # The exact-near/far partition is inclusive at ``|dz| == z_cut``.
         # Nondimensional wavelength conversions can land one ulp below a
         # simple coordinate difference (for example 2*pi/(2*pi/500)).
@@ -128,9 +127,9 @@ def reciprocal_modes(
     )
 
 
-def _reciprocal_gamma(k: float, q: Array) -> Array:
+def _reciprocal_gamma(k: complex, q: Array) -> Array:
     rho = np.linalg.norm(np.asarray(q, dtype=float), axis=1)
-    gamma = np.sqrt((float(k) ** 2 - rho**2) + 0.0j)
+    gamma = np.sqrt(complex(k) ** 2 - rho**2 + 0.0j)
     if np.any(gamma == 0.0):
         raise ValueError(
             "The Rayleigh reciprocal basis contains a grazing diffraction order "
@@ -168,7 +167,7 @@ def _long_lived_scan_mode_indices(
 def _resolve_rayleigh_half_width_cached(
     *,
     lattice: RectangularLattice2D,
-    k: float,
+    k: complex,
     k_parallel: tuple[float, float],
     lmax: int,
     z_cut: float,
@@ -182,13 +181,13 @@ def _resolve_rayleigh_half_width_cached(
     cap = int(max_shells)
     if cap <= 0:
         raise ValueError(f"`max_shells` must be positive. Got {max_shells!r}.")
-    k_f = float(k)
+    k_value = complex(k)
     kp = np.asarray(k_parallel, dtype=float)
     lmax_i = int(lmax)
     if lmax_i < 0:
         raise ValueError(f"`lmax` must be non-negative. Got {lmax!r}.")
     degree_max = 2 * lmax_i
-    prefactor = 2.0 * math.pi / (float(lattice.area) * k_f)
+    prefactor = 2.0 * math.pi / (float(lattice.area) * abs(k_value))
     power = max(1, degree_max - 1)
     for shell in range(cap + 1):
         idx = np.asarray(chebyshev_shell_indices(shell), dtype=np.int64)
@@ -198,8 +197,11 @@ def _resolve_rayleigh_half_width_cached(
             + idx[:, 1, None] * np.asarray(lattice.b2, dtype=float)[None, :]
         )
         rho = np.linalg.norm(q, axis=1)
-        gamma = _reciprocal_gamma(k_f, q)
-        if np.any(np.imag(gamma) <= 0.0):
+        gamma = _reciprocal_gamma(k_value, q)
+        # In a lossy host even low-order waves attenuate vertically. Do not
+        # mistake that absorption for reciprocal-tail convergence: first reach
+        # the transverse wavenumber range dominated by evanescent decay.
+        if np.any(rho <= abs(k_value)):
             continue
         # A Rayleigh structural term contains a normalized associated-Legendre
         # factor evaluated at the complex angle of each evanescent order. At
@@ -209,13 +211,13 @@ def _resolve_rayleigh_half_width_cached(
         # decay. Keep the historical power proxy as a conservative fallback
         # for the asymptotic polynomial growth.
         angular = legendre_normalized_trigon(
-            gamma / k_f,
-            rho / k_f,
+            gamma / k_value,
+            rho / k_value,
             degree_max,
             xp=np,
         )
         angular_bound = np.max(np.abs(np.asarray(angular)), axis=(0, 1))
-        scaled = np.maximum(1.0, rho / k_f)
+        scaled = np.maximum(1.0, rho / abs(k_value))
         envelope = (
             prefactor
             * np.exp(-np.imag(gamma) * float(z_cut))
@@ -235,7 +237,7 @@ def _resolve_rayleigh_half_width_cached(
 def resolve_rayleigh_half_width(
     *,
     lattice: RectangularLattice2D,
-    k: float,
+    k: complex,
     k_parallel: npt.ArrayLike,
     lmax: int,
     z_cut: float,
@@ -260,7 +262,7 @@ def resolve_rayleigh_half_width(
     kp = np.asarray(k_parallel, dtype=float).reshape(2)
     return _resolve_rayleigh_half_width_cached(
         lattice=lattice,
-        k=float(k),
+        k=complex(k),
         k_parallel=(float(kp[0]), float(kp[1])),
         lmax=int(lmax),
         z_cut=float(z_cut),
@@ -309,7 +311,7 @@ class RayleighPlan:
 def build_rayleigh_plan(
     *,
     lmax: int,
-    k: float,
+    k: complex,
     positions: npt.ArrayLike,
     lattice: RectangularLattice2D,
     k_parallel: npt.ArrayLike,
@@ -325,15 +327,16 @@ def build_rayleigh_plan(
     pos = np.asarray(positions, dtype=float).reshape(-1, 3)
     q = reciprocal_modes(lattice=lattice, k_parallel=k_parallel, half_width=int(half_width))
     rho = np.linalg.norm(q, axis=1)
-    gamma = _reciprocal_gamma(float(k), q)
+    k_value = complex(k)
+    gamma = _reciprocal_gamma(k_value, q)
     alpha = np.arctan2(q[:, 1], q[:, 0])
     nm = n_modes(lmax_i)
     mode_m = np.zeros((nm,), dtype=np.int32)
     source = np.zeros((2, q.shape[0], 2, nm), dtype=np.complex128)
     destination = np.zeros_like(source)
     for direction_index, direction in enumerate((1.0, -1.0)):
-        ct = direction * gamma / float(k)
-        st = rho / float(k)
+        ct = direction * gamma / k_value
+        st = rho / k_value
         pi, tau = spherical_functions_trigon(ct, st, lmax_i, xp=np)
         for tau_mode, degree, order, mode_index in iter_modes(lmax_i):
             mode_m[mode_index] = int(order)
@@ -364,7 +367,7 @@ def build_rayleigh_plan(
     destination *= np.exp(-1j * alpha[:, None] * mode_m[None, :])[None, :, None, :]
     xy_phase = np.exp(1j * (pos[:, :2] @ q.T)).astype(ctype, copy=False)
     weights = np.asarray(
-        8.0 * np.pi / (float(lattice.area) * float(k) * gamma),
+        8.0 * np.pi / (float(lattice.area) * k_value * gamma),
         dtype=ctype,
     )
     index_dtype = _compact_particle_index_dtype(pos.shape[0])
@@ -390,7 +393,7 @@ def build_rayleigh_plan(
 def rayleigh_structural_sums_2d_batch(
     *,
     max_degree: int,
-    k: float,
+    k: complex,
     displacements: npt.ArrayLike,
     lattice: RectangularLattice2D,
     k_parallel: npt.ArrayLike,
@@ -412,6 +415,7 @@ def rayleigh_structural_sums_2d_batch(
     """
     if matmul_backend not in {"numpy", "cupy"}:
         raise ValueError(f"`matmul_backend` must be 'numpy' or 'cupy'. Got {matmul_backend!r}.")
+    k_value = passive_wavenumber(k)
     cupy = None
     if matmul_backend == "cupy":
         from pyceles._optional import import_cupy
@@ -421,9 +425,6 @@ def rayleigh_structural_sums_2d_batch(
     degree_max = int(max_degree)
     if degree_max < 0:
         raise ValueError(f"`max_degree` must be >= 0. Got {max_degree!r}.")
-    k_f = float(k)
-    if not np.isfinite(k_f) or k_f <= 0.0:
-        raise ValueError(f"`k` must be finite and positive. Got {k!r}.")
     delta = np.asarray(displacements, dtype=float).reshape(-1, 3)
     if np.any(~np.isfinite(delta)):
         raise ValueError("`displacements` must be finite.")
@@ -444,7 +445,7 @@ def rayleigh_structural_sums_2d_batch(
     # whose translation table reaches degree 2*lmax.  Map the explicit box
     # degree to the smallest equivalent value.
     envelope_lmax = max(1, (degree_max + 1) // 2)
-    prefactor = 2.0 * math.pi / (float(lattice.area) * k_f)
+    prefactor = 2.0 * math.pi / (float(lattice.area) * k_value)
     table_offset = degree_max
     channel_count = (degree_max + 1) ** 2
     degrees = np.empty((channel_count,), dtype=np.int32)
@@ -464,7 +465,7 @@ def rayleigh_structural_sums_2d_batch(
         group_indices = np.flatnonzero(height_mask)
         half_width = resolve_rayleigh_half_width(
             lattice=lattice,
-            k=k_f,
+            k=k_value,
             k_parallel=kp,
             lmax=envelope_lmax,
             z_cut=float(height),
@@ -478,15 +479,15 @@ def rayleigh_structural_sums_2d_batch(
             half_width=int(half_width),
         )
         rho = np.linalg.norm(wave_xy, axis=1)
-        gamma = _reciprocal_gamma(k_f, wave_xy)
+        gamma = _reciprocal_gamma(k_value, wave_xy)
         alpha = np.arctan2(wave_xy[:, 1], wave_xy[:, 0])
-        st = rho / k_f
+        st = rho / k_value
         lateral_phase = np.exp(1j * (wave_xy @ delta[group_indices, :2].T))
         propagation = np.exp(1j * gamma * float(height)) / gamma
         radial_phase = propagation[:, None] * lateral_phase
 
         plm = np.asarray(
-            legendre_normalized_trigon(gamma / k_f, st, degree_max, xp=np),
+            legendre_normalized_trigon(gamma / k_value, st, degree_max, xp=np),
             dtype=np.complex128,
         )
         angular = np.empty((channel_count, wave_xy.shape[0]), dtype=np.complex128)
@@ -523,7 +524,7 @@ def rayleigh_structural_sums_2d_batch(
 def prepare_rayleigh_plan(
     *,
     lmax: int,
-    k: float,
+    k: complex,
     positions: npt.ArrayLike,
     circumscribing_radii: npt.ArrayLike | None,
     periodic: PeriodicSpec,
@@ -533,13 +534,13 @@ def prepare_rayleigh_plan(
     """Resolve hybrid-policy defaults and build one reusable Rayleigh plan."""
     options = periodic.options
     z_cut = resolve_rayleigh_z_cut(
-        k=float(k),
+        k=complex(k),
         circumscribing_radii=circumscribing_radii,
         requested=options.rayleigh_z_cut,
     )
     half_width = resolve_rayleigh_half_width(
         lattice=periodic.lattice,
-        k=float(k),
+        k=complex(k),
         k_parallel=k_parallel,
         lmax=int(lmax),
         z_cut=z_cut,
@@ -549,7 +550,7 @@ def prepare_rayleigh_plan(
     )
     return build_rayleigh_plan(
         lmax=int(lmax),
-        k=float(k),
+        k=complex(k),
         positions=positions,
         lattice=periodic.lattice,
         k_parallel=k_parallel,

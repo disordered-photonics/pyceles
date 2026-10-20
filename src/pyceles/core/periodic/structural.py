@@ -7,8 +7,8 @@ import numpy.typing as npt
 
 from pyceles.core.indexing import iter_modes, n_modes
 from pyceles.core.lattice import RectangularLattice2D
+from pyceles.core.radial import passive_wavenumber, sph_hankel1
 from pyceles.core.spherical import legendre_normalized_trigon_scalar
-from pyceles.core.translation import spherical_bessel_jy
 
 Array = np.ndarray
 
@@ -16,7 +16,7 @@ Array = np.ndarray
 def free_space_structural_sums(
     *,
     max_degree: int,
-    k: float,
+    k: complex,
     displacement: Array,
     dtype: npt.DTypeLike = np.complex128,
 ) -> Array:
@@ -33,6 +33,7 @@ def free_space_structural_sums(
     if degree_max < 0:
         raise ValueError(f"`max_degree` must be >= 0. Got {max_degree!r}.")
     out_dtype = np.dtype(dtype)
+    wave_number = passive_wavenumber(k)
     rvec = np.asarray(displacement, dtype=float).reshape(3)
     radius = float(np.linalg.norm(rvec))
     if radius == 0.0:
@@ -42,11 +43,9 @@ def free_space_structural_sums(
     ct = float(rvec[2] / radius)
     st = float(np.sqrt(max(0.0, 1.0 - ct * ct)))
     phi = float(np.arctan2(rvec[1], rvec[0]))
-    j, y = spherical_bessel_jy(
-        degree_max,
-        np.asarray(float(k) * radius, dtype=np.complex128),
-    )
-    hankel = np.asarray(j + 1j * y, dtype=np.complex128).reshape(degree_max + 1)
+    hankel = np.asarray(
+        sph_hankel1(np.arange(degree_max + 1), wave_number * radius), dtype=np.complex128
+    ).reshape(degree_max + 1)
     plm = legendre_normalized_trigon_scalar(ct, st, degree_max)
     orders = np.arange(-degree_max, degree_max + 1, dtype=np.int32)
     azimuthal_phase = np.exp(1j * phi * orders)
@@ -70,7 +69,7 @@ def _validated_window(window: int) -> int:
 def direct_structural_sums_2d(
     *,
     lmax: int,
-    k: float,
+    k: complex,
     destination: Array,
     source: Array,
     lattice: RectangularLattice2D,
@@ -89,7 +88,7 @@ def direct_structural_sums_2d(
     out_dtype = np.dtype(dtype)
     order = 2 * int(lmax)
     sums = np.zeros((order + 1, 2 * order + 1), dtype=np.complex128)
-    k_f = float(k)
+    wave_number = passive_wavenumber(k)
     dst = np.asarray(destination, dtype=float).reshape(3)
     src = np.asarray(source, dtype=float).reshape(3)
     kp = np.asarray(k_parallel, dtype=float).reshape(2)
@@ -108,7 +107,7 @@ def direct_structural_sums_2d(
             bloch_phase = complex(np.exp(1j * float(np.dot(kp, shift[:2]))))
             sums += bloch_phase * free_space_structural_sums(
                 max_degree=order,
-                k=k_f,
+                k=wave_number,
                 displacement=rvec,
                 dtype=np.complex128,
             )
@@ -439,7 +438,7 @@ def apply_structural_sums_to_vector_adjoint(
 def periodic_direct_structural_block(
     *,
     lmax: int,
-    k: float,
+    k: complex,
     destination: Array,
     source: Array,
     lattice: RectangularLattice2D,
@@ -452,7 +451,7 @@ def periodic_direct_structural_block(
     """Assemble a finite-window Bloch block through scalar structural sums."""
     sums = direct_structural_sums_2d(
         lmax=int(lmax),
-        k=float(k),
+        k=k,
         destination=destination,
         source=source,
         lattice=lattice,

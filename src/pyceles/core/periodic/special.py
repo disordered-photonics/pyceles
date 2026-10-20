@@ -17,6 +17,8 @@ _SMALL_COMPLEX = 1e-14
 _SHIFTED_DELTA_SERIES_TERMS = 16
 _SHIFTED_DELTA_SERIES_SCALED_LIMIT = 8.0
 _SHIFTED_DELTA_SERIES_ETA_Z_LIMIT = 0.5
+_SHIFTED_DELTA_COMPLEX_SERIES_SCALED_LIMIT = 12.0
+_SHIFTED_DELTA_COMPLEX_SERIES_ETA_Z_LIMIT = 1.0
 ShiftedReciprocalRegime = Literal["same_plane", "rayleigh_limit", "shifted"]
 type UpperGammaProvider = Callable[[int], npt.ArrayLike]
 
@@ -68,10 +70,10 @@ def upper_gamma_sequence(max_index: int, z: npt.ArrayLike) -> Array:
     """Return ``Gamma(1/2-n, z)`` for ``n=0..max_index``.
 
     The negative-real-axis branch is the same one used by the Ewald formulas.
-    Building the sequence once by downward recurrence is substantially cheaper
-    than recursively evaluating every order independently, and the resulting
-    table is also the natural coefficient table for the near-plane shifted
-    reciprocal expansion.
+    The sequence uses downward recurrence except for complex arguments well
+    inside the positive half-plane, where that recurrence loses precision.
+    The resulting table is also the natural coefficient table for the
+    near-plane shifted reciprocal expansion.
     """
     n_max = int(max_index)
     if n_max < 0:
@@ -83,14 +85,84 @@ def upper_gamma_sequence(max_index: int, z: npt.ArrayLike) -> Array:
     z_arr.imag[negative_real] = -0.0
 
     out = np.empty((z_arr.size, n_max + 1), dtype=np.complex128)
-    out[:, 0] = math.sqrt(math.pi) * special.erfc(np.sqrt(z_arr))
-    exp_term = np.exp(-z_arr)
-    power = z_arr**-0.5
-    for index in range(n_max):
-        order = -0.5 - float(index)
-        out[:, index + 1] = (out[:, index] - power * exp_term) / order
-        power /= z_arr
+    positive_complex = (z_arr.real >= 2.0) & (z_arr.imag != 0.0)
+    recurrence_rows = ~positive_complex
+    if np.any(recurrence_rows):
+        z_recurrence = z_arr[recurrence_rows]
+        table = np.empty((z_recurrence.size, n_max + 1), dtype=np.complex128)
+        table[:, 0] = math.sqrt(math.pi) * special.erfc(np.sqrt(z_recurrence))
+        exp_term = np.exp(-z_recurrence)
+        power = z_recurrence**-0.5
+        for index in range(n_max):
+            order = -0.5 - float(index)
+            table[:, index + 1] = (table[:, index] - power * exp_term) / order
+            power /= z_recurrence
+        out[recurrence_rows] = table
+
+    if np.any(positive_complex):
+        out[positive_complex] = _upper_gamma_sequence_continued_fraction(
+            n_max,
+            z_arr[positive_complex],
+        )
     return out
+
+
+def _upper_gamma_sequence_continued_fraction(max_index: int, z: Array) -> Array:
+    """Evaluate upper gamma values in the positive complex half-plane.
+
+    Downward recurrence subtracts nearly equal terms for large positive
+    arguments. The continued fraction for ``Gamma(a, z)`` avoids that loss:
+
+    ``Gamma(a, z) = exp(-z + a*log(z)) * h``
+
+    where ``h`` is evaluated with Lentz's method. This route is limited to
+    complex arguments with positive real part; real and propagating branches
+    retain their established recurrence.
+    """
+    z_arr = np.asarray(z, dtype=np.complex128).reshape(-1)
+    order = 0.5 - np.arange(int(max_index) + 1, dtype=float)
+    shape = (z_arr.size, order.size)
+    order_grid = np.broadcast_to(order[None, :], shape)
+    z_grid = z_arr[:, None]
+    tiny = 1.0e-300
+    tolerance = 2.0 * np.finfo(float).eps
+
+    denominator = z_grid + 1.0 - order_grid
+    c = np.full(shape, 1.0 / tiny, dtype=np.complex128)
+    d = 1.0 / denominator
+    factor = d.copy()
+    active = np.ones(shape, dtype=bool)
+
+    for iteration in range(1, 1000):
+        if not np.any(active):
+            break
+        active_order = order_grid[active]
+        a_n = -float(iteration) * (float(iteration) - active_order)
+        active_denominator = denominator[active] + 2.0
+        active_d = a_n * d[active] + active_denominator
+        active_d = np.where(
+            np.abs(active_d) < tiny,
+            tiny + 0.0j,
+            active_d,
+        )
+        active_c = active_denominator + a_n / c[active]
+        active_c = np.where(
+            np.abs(active_c) < tiny,
+            tiny + 0.0j,
+            active_c,
+        )
+        active_d = 1.0 / active_d
+        delta = active_c * active_d
+
+        denominator[active] = active_denominator
+        c[active] = active_c
+        d[active] = active_d
+        factor[active] = factor[active] * delta
+        active[active] = np.abs(delta - 1.0) > tolerance
+    else:
+        raise ArithmeticError("Upper incomplete-gamma continued fraction did not converge.")
+
+    return np.exp(-z_grid + order_grid * np.log(z_grid)) * factor
 
 
 def reduced_incomplete_gamma_int_or_halfint(order: float, z: complex) -> complex:
@@ -265,9 +337,21 @@ def _shifted_delta_series_mask(
     """
     scaled = z_offset[:, None] * gamma[None, :]
     x = -(gamma * gamma) / (4.0 * float(eta) * float(eta))
+    complex_argument = x.imag != 0.0
+    complex_evanescent = (x.real > 0.0) & complex_argument
+    scaled_limit = np.where(
+        complex_evanescent[None, :],
+        _SHIFTED_DELTA_COMPLEX_SERIES_SCALED_LIMIT,
+        _SHIFTED_DELTA_SERIES_SCALED_LIMIT,
+    )
+    eta_z_limit = np.where(
+        complex_argument[None, :],
+        _SHIFTED_DELTA_COMPLEX_SERIES_ETA_Z_LIMIT,
+        _SHIFTED_DELTA_SERIES_ETA_Z_LIMIT,
+    )
     mask = np.asarray(
-        (np.abs(scaled) <= _SHIFTED_DELTA_SERIES_SCALED_LIMIT)
-        & (np.abs(float(eta) * z_offset[:, None]) <= _SHIFTED_DELTA_SERIES_ETA_Z_LIMIT)
+        (np.abs(scaled) <= scaled_limit)
+        & (np.abs(float(eta) * z_offset[:, None]) <= eta_z_limit)
         & (np.abs(x)[None, :] > float(singular_atol)),
         dtype=bool,
     )
@@ -331,6 +415,59 @@ def _shifted_delta_sequence_series(
     return out
 
 
+def _scaled_erfcx_product(argument: Array, exponential: Array, phase: Array) -> Array:
+    """Evaluate ``exponential * erfcx(argument)`` without lower-half-plane overflow."""
+    result = np.empty_like(argument, dtype=np.complex128)
+    upper = argument.real >= 0.0
+    result[upper] = exponential[upper] * special.erfcx(argument[upper])
+    lower = ~upper
+    result[lower] = 2.0 * phase[lower] - exponential[lower] * special.erfcx(-argument[lower])
+    return result
+
+
+def _shifted_delta_sequence_batched_raw_complex(
+    max_order: int,
+    gamma: Array,
+    z_offset: Array,
+    eta: float,
+) -> Array:
+    """Evaluate shifted integrals for genuinely complex reciprocal roots."""
+    x = -(gamma * gamma) / (4.0 * float(eta) * float(eta))
+    negative_real = (x.real < 0.0) & (x.imag == 0.0)
+    x.imag[negative_real] = -0.0
+    root_x = np.sqrt(x)
+
+    scaled = z_offset[:, None] * gamma[None, :]
+    x_b = x[None, :]
+    root_b = root_x[None, :]
+    exponential = np.exp(-x_b + scaled * scaled / (4.0 * x_b))
+    argument_plus = root_b + 1j * scaled / (2.0 * root_b)
+    argument_minus = root_b - 1j * scaled / (2.0 * root_b)
+    plus = _scaled_erfcx_product(argument_plus, exponential, np.exp(1j * scaled))
+    minus = _scaled_erfcx_product(argument_minus, exponential, np.exp(-1j * scaled))
+
+    out = np.empty((z_offset.size, gamma.size, max_order + 1), dtype=np.complex128)
+    out[:, :, 0] = 0.5 * math.sqrt(math.pi) * (plus + minus)
+    if max_order == 0:
+        return out
+
+    out[:, :, 1] = 1j * math.sqrt(math.pi) / scaled * (plus - minus)
+    x_power = 1.0 / x_b
+    z_squared = scaled * scaled
+    for index in range(2, max_order + 1):
+        out[:, :, index] = (
+            4.0
+            / z_squared
+            * (
+                (1.5 - float(index)) * out[:, :, index - 1]
+                - out[:, :, index - 2]
+                + root_b * x_power * exponential
+            )
+        )
+        x_power /= x_b
+    return out
+
+
 def _shifted_delta_sequence_batched_raw(
     max_order: int,
     gamma: npt.ArrayLike,
@@ -356,6 +493,13 @@ def _shifted_delta_sequence_batched_raw(
     x = -(gamma_arr * gamma_arr) / (4.0 * float(eta) * float(eta))
     if np.any(np.abs(x) <= float(singular_atol)):
         raise ValueError("shifted reciprocal integrals are singular at gamma=0.")
+    if np.any(x.imag != 0.0):
+        return _shifted_delta_sequence_batched_raw_complex(
+            n_max,
+            gamma_arr,
+            z_arr,
+            float(eta),
+        )
     root_x = np.where(x.real < 0.0, -1j * np.sqrt(np.abs(x)), np.sqrt(x))
     z_arg = np.where(x.real[None, :] < 0.0, scaled, 1j * np.abs(scaled))
     z_sq = scaled * scaled

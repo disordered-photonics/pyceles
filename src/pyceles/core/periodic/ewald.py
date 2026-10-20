@@ -24,6 +24,7 @@ from .scalar import (
     reciprocal_gamma_with_zero_mask,
     same_plane_z_tolerance,
     scaled_real_integral_sequence,
+    scaled_real_integral_sequences,
     structural_sum_m_normalization,
 )
 from .shells import (
@@ -54,15 +55,15 @@ def _log_abs(values: Array) -> Array:
     return out
 
 
-def _unit_phase(values: Array) -> Array:
+def _unit_phase(values: npt.ArrayLike) -> Array:
     return np.asarray(np.exp(1j * np.angle(np.asarray(values))), dtype=np.complex128)
 
 
-def _log_real_power(value: float | Array, exponent: int) -> Array:
+def _log_abs_power(value: complex | Array, exponent: int) -> Array:
     power = int(exponent)
     if power == 0:
-        return np.zeros_like(np.asarray(value, dtype=float), dtype=float)
-    return power * _log_abs(np.asarray(value, dtype=float))
+        return np.zeros_like(np.asarray(value), dtype=float)
+    return power * _log_abs(np.asarray(value))
 
 
 @dataclass(frozen=True)
@@ -89,7 +90,7 @@ class EwaldShellWorkspace:
     """Cache reusable shell geometry for periodic Ewald structural sums."""
 
     lattice: RectangularLattice2D
-    k: float
+    k: complex
     k_parallel: Array
     eta: float
     _reciprocal_shell_cache: dict[int, _ReciprocalShellData] = field(default_factory=dict)
@@ -111,7 +112,7 @@ class EwaldShellWorkspace:
         kgt = np.asarray(self.k_parallel, dtype=float).reshape(2)[None, :] + reciprocal
         rho = np.linalg.norm(kgt, axis=1)
         phi = np.arctan2(kgt[:, 1], kgt[:, 0])
-        gamma, rayleigh_zero = reciprocal_gamma_with_zero_mask(float(self.k), rho)
+        gamma, rayleigh_zero = reciprocal_gamma_with_zero_mask(complex(self.k), rho)
         xarg = -(gamma * gamma) / (4.0 * float(self.eta) * float(self.eta))
         data = _ReciprocalShellData(
             kgt=np.asarray(kgt, dtype=float),
@@ -163,7 +164,8 @@ class EwaldShellWorkspace:
         cached = self._propagating_min_shell_cache.get(margin)
         if cached is not None:
             return int(cached)
-        k_lim = float(self.k) * (1.0 + margin)
+        # Retain the real-host light-cone shell floor as loss tends to zero.
+        k_lim = abs(complex(self.k).real) * (1.0 + margin)
         kp = np.asarray(self.k_parallel, dtype=float).reshape(2)
         b1 = np.asarray(self.lattice.b1, dtype=float).reshape(2)
         b2 = np.asarray(self.lattice.b2, dtype=float).reshape(2)
@@ -185,7 +187,7 @@ class EwaldShellWorkspace:
 def _ensure_workspace(
     *,
     workspace: EwaldShellWorkspace | None,
-    k: float,
+    k: complex,
     k_parallel: Array,
     lattice: RectangularLattice2D,
     eta: float,
@@ -193,7 +195,7 @@ def _ensure_workspace(
     if workspace is None:
         return EwaldShellWorkspace(
             lattice=lattice,
-            k=float(k),
+            k=k,
             k_parallel=np.asarray(k_parallel, dtype=float).reshape(2),
             eta=float(eta),
         )
@@ -231,7 +233,7 @@ class EwaldShellCounts:
 
 
 def _candidate_ewald_etas(
-    *, canonical_eta: float, k: float, max_steps: int = 16
+    *, canonical_eta: float, k: complex, max_steps: int = 16
 ) -> tuple[float, ...]:
     """Return the bounded eta ladder used by the automatic safety preflight.
 
@@ -243,7 +245,7 @@ def _candidate_ewald_etas(
     canonical = float(canonical_eta)
     if not np.isfinite(canonical) or canonical <= 0.0:
         raise ValueError(f"`canonical_eta` must be finite and positive. Got {canonical_eta!r}.")
-    eta_ceiling = max(canonical, _ETA_PROBE_MAX_K_FACTOR * abs(float(k)))
+    eta_ceiling = max(canonical, _ETA_PROBE_MAX_K_FACTOR * abs(complex(k)))
     candidates = [canonical]
     eta = canonical
     for _ in range(max(1, int(max_steps))):
@@ -295,7 +297,7 @@ def _representative_ewald_eta_offsets(
     *,
     positions: Array,
     lattice: RectangularLattice2D,
-    k: float,
+    k: complex,
     max_offsets: int = 6,
     max_vertical_offset: float | None = None,
 ) -> Array:
@@ -361,7 +363,7 @@ def _eta_probe_vector(
     eta: float,
     offsets: Array,
     lmax_struct: int,
-    k: float,
+    k: complex,
     lattice: RectangularLattice2D,
     k_parallel: Array,
     real_shells: int | None,
@@ -371,7 +373,7 @@ def _eta_probe_vector(
 ) -> Array | None:
     workspace = EwaldShellWorkspace(
         lattice=lattice,
-        k=float(k),
+        k=k,
         k_parallel=np.asarray(k_parallel, dtype=float).reshape(2),
         eta=float(eta),
     )
@@ -379,7 +381,7 @@ def _eta_probe_vector(
         try:
             sums = ewald_structural_sums_2d_batch(
                 lmax_struct=int(lmax_struct),
-                k=float(k),
+                k=k,
                 destinations=np.asarray(offsets, dtype=float).reshape(-1, 3),
                 source=np.zeros(3, dtype=float),
                 lattice=lattice,
@@ -438,7 +440,7 @@ def _probe_offsets_key(offsets: Array) -> tuple[tuple[float, float, float], ...]
 def _select_ewald_eta_from_offsets_cached(
     *,
     lattice: RectangularLattice2D,
-    k: float,
+    k: complex,
     k_parallel: tuple[float, float],
     offsets_key: tuple[tuple[float, float, float], ...],
     lmax: int,
@@ -450,7 +452,7 @@ def _select_ewald_eta_from_offsets_cached(
 ) -> float:
     """Run the expensive eta probe for one compact deterministic probe set."""
     canonical = default_ewald_eta(lattice)
-    candidates = _candidate_ewald_etas(canonical_eta=canonical, k=float(k))
+    candidates = _candidate_ewald_etas(canonical_eta=canonical, k=k)
     if len(candidates) == 1 or not offsets_key:
         return float(canonical)
     offsets = np.asarray(offsets_key, dtype=float).reshape(-1, 3)
@@ -470,7 +472,7 @@ def _select_ewald_eta_from_offsets_cached(
             eta=float(eta),
             offsets=offsets,
             lmax_struct=lmax_probe,
-            k=float(k),
+            k=k,
             lattice=lattice,
             k_parallel=kp,
             real_shells=probe_real,
@@ -503,7 +505,7 @@ def _select_ewald_eta_from_offsets_cached(
 def select_ewald_eta(
     *,
     lattice: RectangularLattice2D,
-    k: float,
+    k: complex,
     k_parallel: Array,
     positions: Array,
     lmax: int,
@@ -522,13 +524,13 @@ def select_ewald_eta(
     shares the already-validated split without retaining a large workspace.
     """
     canonical = default_ewald_eta(lattice)
-    candidates = _candidate_ewald_etas(canonical_eta=canonical, k=float(k))
+    candidates = _candidate_ewald_etas(canonical_eta=canonical, k=k)
     if len(candidates) == 1:
         return float(canonical)
     offsets = _representative_ewald_eta_offsets(
         positions=positions,
         lattice=lattice,
-        k=float(k),
+        k=k,
         max_vertical_offset=max_vertical_offset,
     )
     if offsets.size == 0:
@@ -537,7 +539,7 @@ def select_ewald_eta(
     return float(
         _select_ewald_eta_from_offsets_cached(
             lattice=lattice,
-            k=float(k),
+            k=k,
             k_parallel=(float(kp[0]), float(kp[1])),
             offsets_key=_probe_offsets_key(offsets),
             lmax=int(lmax),
@@ -553,7 +555,7 @@ def select_ewald_eta(
 def resolve_ewald_eta(
     *,
     periodic,
-    k: float,
+    k: complex,
     k_parallel: Array,
     positions: Array,
     lmax: int,
@@ -574,12 +576,12 @@ def resolve_ewald_eta(
         probe_vertical_limit = (
             float(periodic.options.rayleigh_z_cut)
             if periodic.options.rayleigh_z_cut is not None
-            else 2.0 * math.pi / max(abs(float(k)), 1.0e-300)
+            else 2.0 * math.pi / complex(k).real
         )
     return float(
         select_ewald_eta(
             lattice=periodic.lattice,
-            k=float(k),
+            k=k,
             k_parallel=np.asarray(k_parallel, dtype=float).reshape(2),
             positions=np.asarray(positions, dtype=float).reshape(-1, 3),
             lmax=int(lmax),
@@ -597,7 +599,7 @@ def _reference_shell_probe_vector(
     eta: float,
     offsets: Array,
     lmax_struct: int,
-    k: float,
+    k: complex,
     lattice: RectangularLattice2D,
     k_parallel: Array,
     shell_tolerance: float,
@@ -608,7 +610,7 @@ def _reference_shell_probe_vector(
         eta=float(eta),
         offsets=np.asarray(offsets, dtype=float).reshape(-1, 3),
         lmax_struct=int(lmax_struct),
-        k=float(k),
+        k=k,
         lattice=lattice,
         k_parallel=k_parallel,
         real_shells=int(max_shells),
@@ -623,7 +625,7 @@ def _select_one_shell_count(
     eta: float,
     offsets: Array,
     lmax_struct: int,
-    k: float,
+    k: complex,
     lattice: RectangularLattice2D,
     k_parallel: Array,
     shell_tolerance: float,
@@ -644,7 +646,7 @@ def _select_one_shell_count(
             eta=float(eta),
             offsets=np.asarray(offsets, dtype=float).reshape(-1, 3),
             lmax_struct=int(lmax_struct),
-            k=float(k),
+            k=k,
             lattice=lattice,
             k_parallel=k_parallel,
             real_shells=int(real_count),
@@ -663,7 +665,7 @@ def _select_one_shell_count(
 def _resolve_ewald_shell_counts_from_offsets_cached(
     *,
     lattice: RectangularLattice2D,
-    k: float,
+    k: complex,
     k_parallel: tuple[float, float],
     offsets_key: tuple[tuple[float, float, float], ...],
     lmax: int,
@@ -696,7 +698,7 @@ def _resolve_ewald_shell_counts_from_offsets_cached(
         eta=float(eta),
         offsets=offsets,
         lmax_struct=lmax_probe,
-        k=float(k),
+        k=k,
         lattice=lattice,
         k_parallel=kp,
         shell_tolerance=float(shell_tolerance),
@@ -717,7 +719,7 @@ def _resolve_ewald_shell_counts_from_offsets_cached(
             eta=float(eta),
             offsets=offsets,
             lmax_struct=lmax_probe,
-            k=float(k),
+            k=k,
             lattice=lattice,
             k_parallel=kp,
             shell_tolerance=float(shell_tolerance),
@@ -736,7 +738,7 @@ def _resolve_ewald_shell_counts_from_offsets_cached(
             eta=float(eta),
             offsets=offsets,
             lmax_struct=lmax_probe,
-            k=float(k),
+            k=k,
             lattice=lattice,
             k_parallel=kp,
             shell_tolerance=float(shell_tolerance),
@@ -756,7 +758,7 @@ def _resolve_ewald_shell_counts_from_offsets_cached(
 def resolve_ewald_shell_counts(
     *,
     periodic,
-    k: float,
+    k: complex,
     k_parallel: Array,
     positions: Array,
     lmax: int,
@@ -785,7 +787,7 @@ def resolve_ewald_shell_counts(
         probe_vertical_limit = (
             float(options.rayleigh_z_cut)
             if options.rayleigh_z_cut is not None
-            else 2.0 * math.pi / max(abs(float(k)), 1.0e-300)
+            else 2.0 * math.pi / complex(k).real
         )
     kp = np.asarray(k_parallel, dtype=float).reshape(2)
     pos = np.asarray(positions, dtype=float).reshape(-1, 3)
@@ -794,7 +796,7 @@ def resolve_ewald_shell_counts(
         if eta is not None
         else resolve_ewald_eta(
             periodic=periodic,
-            k=float(k),
+            k=k,
             k_parallel=kp,
             positions=pos,
             lmax=int(lmax),
@@ -804,12 +806,12 @@ def resolve_ewald_shell_counts(
     offsets = _representative_ewald_eta_offsets(
         positions=pos,
         lattice=periodic.lattice,
-        k=float(k),
+        k=k,
         max_vertical_offset=probe_vertical_limit,
     )
     return _resolve_ewald_shell_counts_from_offsets_cached(
         lattice=periodic.lattice,
-        k=float(k),
+        k=k,
         k_parallel=(float(kp[0]), float(kp[1])),
         offsets_key=_probe_offsets_key(offsets),
         lmax=int(lmax),
@@ -827,7 +829,7 @@ def _same_plane_reciprocal_sum(
     degree: int,
     order: int,
     *,
-    k: float,
+    k: complex,
     k_parallel: Array,
     lattice: RectangularLattice2D,
     eta: float,
@@ -841,15 +843,18 @@ def _same_plane_reciprocal_sum(
     m = int(order)
     if (l - abs(m)) % 2:
         return 0.0 + 0.0j
+    wave_number = complex(k)
     base_log = (
         log_spherical_factorial_root(l, m)
-        - math.log(lattice.area * float(k))
-        - l * math.log(2.0 * float(k))
+        - math.log(lattice.area)
+        - (l + 1) * math.log(abs(wave_number))
+        - l * math.log(2.0)
     )
+    base_phase = complex(_unit_phase(wave_number) ** (-(l + 1)))
 
     ws = _ensure_workspace(
         workspace=workspace,
-        k=float(k),
+        k=wave_number,
         k_parallel=k_parallel,
         lattice=lattice,
         eta=float(eta),
@@ -880,8 +885,13 @@ def _same_plane_reciprocal_sum(
             q = 2 * int(n) - 1
             p = l - 2 * int(n)
             log_abs = log_weight + _log_abs(gamma_fun[:, int(n)])
-            log_abs += q * _log_abs(gamma) + _log_real_power(rho, p)
-            inner += np.exp(log_abs) * _unit_phase(gamma_fun[:, int(n)]) * _unit_phase(gamma) ** q
+            log_abs += q * _log_abs(gamma) + _log_abs_power(rho, p)
+            inner += (
+                base_phase
+                * np.exp(log_abs)
+                * _unit_phase(gamma_fun[:, int(n)])
+                * _unit_phase(gamma) ** q
+            )
         return complex((1j) ** m * np.sum(np.exp(-1j * (kgt @ cxy)) * np.exp(1j * m * phi) * inner))
 
     acc = accumulate_lattice_shell_series(
@@ -897,7 +907,7 @@ def _same_plane_real_sum(
     degree: int,
     order: int,
     *,
-    k: float,
+    k: complex,
     k_parallel: Array,
     lattice: RectangularLattice2D,
     eta: float,
@@ -912,7 +922,7 @@ def _same_plane_real_sum(
         return 0.0 + 0.0j
     ws = _ensure_workspace(
         workspace=workspace,
-        k=float(k),
+        k=k,
         k_parallel=k_parallel,
         lattice=lattice,
         eta=float(eta),
@@ -944,7 +954,7 @@ def _same_plane_real_sum(
         scaled_integral = scaled_real_integral_sequence(
             l,
             float(eta),
-            float(k),
+            complex(k),
             radii,
         )
         return complex(
@@ -952,7 +962,7 @@ def _same_plane_real_sum(
                 shell_data.phase_xy
                 * np.exp(1j * m * (phi + math.pi))
                 * scaled_integral
-                / (float(k) * radii)
+                / (complex(k) * radii)
             )
         )
 
@@ -965,16 +975,17 @@ def _same_plane_real_sum(
     return complex(prefactor * acc)
 
 
-def _self_correction(k: float, eta: float) -> complex:
+def _self_correction(k: complex, eta: float) -> complex:
     """Return the same-particle Ewald central-point correction."""
     eta_f = float(eta)
-    x = -(float(k) * float(k)) / (4.0 * eta_f * eta_f)
+    wave_number = complex(k)
+    x = -(wave_number * wave_number) / (4.0 * eta_f * eta_f)
     return complex(upper_incomplete_gamma_int_or_halfint(-0.5, x) / (4.0 * math.pi))
 
 
-def ewald_self_correction(k: float, eta: float) -> complex:
+def ewald_self_correction(k: complex, eta: float) -> complex:
     """Return the public-internal same-particle Ewald central-point correction."""
-    return _self_correction(float(k), float(eta))
+    return _self_correction(complex(k), float(eta))
 
 
 def _shifted_reciprocal_sum(
@@ -982,7 +993,7 @@ def _shifted_reciprocal_sum(
     order: int,
     *,
     rvec: Array,
-    k: float,
+    k: complex,
     k_parallel: Array,
     lattice: RectangularLattice2D,
     eta: float,
@@ -998,7 +1009,7 @@ def _shifted_reciprocal_sum(
         return _same_plane_reciprocal_sum(
             l,
             m,
-            k=float(k),
+            k=k,
             k_parallel=k_parallel,
             lattice=lattice,
             eta=float(eta),
@@ -1011,17 +1022,19 @@ def _shifted_reciprocal_sum(
 
     ws = _ensure_workspace(
         workspace=workspace,
-        k=float(k),
+        k=k,
         k_parallel=k_parallel,
         lattice=lattice,
         eta=float(eta),
     )
+    wave_number = complex(k)
     base_log = (
         log_spherical_factorial_root(l, m)
         - l * math.log(2.0)
         - math.log(lattice.area)
-        - 2.0 * math.log(float(k))
+        - 2.0 * math.log(abs(wave_number))
     )
+    base_phase = complex(_unit_phase(wave_number) ** -2)
     min_recip_shell = ws.minimum_reciprocal_shell_for_propagating_orders(rayleigh_margin=1.0e-12)
     control = make_lattice_shell_control(
         shells=shells,
@@ -1057,9 +1070,13 @@ def _shifted_reciprocal_sum(
                 )
                 q = 2 * int(n) - int(s)
                 p = l - int(s)
-                z = -float(k) * c[2]
-                terms += np.sign(z) ** q * np.exp(
-                    log_weight + _log_real_power(z, q) + _log_real_power(rho / float(k), p)
+                z = -wave_number * c[2]
+                rho_over_k = rho / wave_number
+                terms += (
+                    base_phase
+                    * np.exp(log_weight + _log_abs_power(z, q) + _log_abs_power(rho_over_k, p))
+                    * _unit_phase(z) ** q
+                    * _unit_phase(rho_over_k) ** p
                 )
             inner[:, int(n)] = terms
         delta_order = int(n_values[-1])
@@ -1075,7 +1092,9 @@ def _shifted_reciprocal_sum(
             np.sum(
                 np.exp(-1j * (kgt @ c[:2]))
                 * np.exp(1j * m * phi)
-                * np.sum((gamma / float(k))[:, None] ** (2 * n_values - 1) * delta * inner, axis=1)
+                * np.sum(
+                    (gamma / complex(k))[:, None] ** (2 * n_values - 1) * delta * inner, axis=1
+                )
             )
         )
 
@@ -1093,7 +1112,7 @@ def _shifted_real_sum(
     order: int,
     *,
     rvec: Array,
-    k: float,
+    k: complex,
     k_parallel: Array,
     lattice: RectangularLattice2D,
     eta: float,
@@ -1108,9 +1127,10 @@ def _shifted_real_sum(
     if c[2] == 0.0 and (l - abs(m)) % 2:
         return 0.0 + 0.0j
 
+    wave_number = complex(k)
     ws = _ensure_workspace(
         workspace=workspace,
-        k=float(k),
+        k=wave_number,
         k_parallel=k_parallel,
         lattice=lattice,
         eta=float(eta),
@@ -1147,7 +1167,7 @@ def _shifted_real_sum(
         scaled_integral = scaled_real_integral_sequence(
             l,
             float(eta),
-            float(k),
+            wave_number,
             radii,
         )
         return complex(
@@ -1155,7 +1175,7 @@ def _shifted_real_sum(
                 np.exp(1j * (shifts_xy @ kp))
                 * angular
                 * scaled_integral
-                / (math.sqrt(2.0) * float(k) * radii)
+                / (math.sqrt(2.0) * wave_number * radii)
             )
         )
 
@@ -1172,7 +1192,7 @@ def ewald_structural_constant_2d(
     degree: int,
     order: int,
     *,
-    k: float,
+    k: complex,
     destination: Array,
     source: Array,
     lattice: RectangularLattice2D,
@@ -1203,7 +1223,7 @@ def ewald_structural_constant_2d(
         raise ValueError(f"`eta` must be finite and positive. Got {eta!r}.")
     ws = _ensure_workspace(
         workspace=workspace,
-        k=float(k),
+        k=k,
         k_parallel=k_parallel,
         lattice=lattice,
         eta=eta_f,
@@ -1223,7 +1243,7 @@ def ewald_structural_constant_2d(
         )
     )
     coordinate_scale = float(max(abs(float(destination_arr[2])), abs(float(source_arr[2]))))
-    same_plane_atol = same_plane_z_tolerance(float(k), coordinate_scale=coordinate_scale)
+    same_plane_atol = same_plane_z_tolerance(complex(k), coordinate_scale=coordinate_scale)
     if abs(float(rvec[2])) <= same_plane_atol:
         rvec[2] = 0.0
     is_self = (
@@ -1236,7 +1256,7 @@ def ewald_structural_constant_2d(
         value = _same_plane_reciprocal_sum(
             l,
             m,
-            k=float(k),
+            k=k,
             k_parallel=k_parallel,
             lattice=lattice,
             eta=eta_f,
@@ -1248,7 +1268,7 @@ def ewald_structural_constant_2d(
         ) + _same_plane_real_sum(
             l,
             m,
-            k=float(k),
+            k=k,
             k_parallel=k_parallel,
             lattice=lattice,
             eta=eta_f,
@@ -1258,13 +1278,13 @@ def ewald_structural_constant_2d(
             workspace=ws,
         )
         if l == 0:
-            value += _self_correction(float(k), eta_f)
+            value += _self_correction(complex(k), eta_f)
     else:
         value = _shifted_reciprocal_sum(
             l,
             m,
             rvec=rvec,
-            k=float(k),
+            k=k,
             k_parallel=k_parallel,
             lattice=lattice,
             eta=eta_f,
@@ -1276,7 +1296,7 @@ def ewald_structural_constant_2d(
             l,
             m,
             rvec=rvec,
-            k=float(k),
+            k=k,
             k_parallel=k_parallel,
             lattice=lattice,
             eta=eta_f,
@@ -1291,7 +1311,7 @@ def ewald_structural_constant_2d(
 def ewald_structural_sums_2d(
     *,
     lmax: int,
-    k: float,
+    k: complex,
     destination: Array,
     source: Array,
     lattice: RectangularLattice2D,
@@ -1314,7 +1334,7 @@ def ewald_structural_sums_2d(
     offset = order
     ws = _ensure_workspace(
         workspace=workspace,
-        k=float(k),
+        k=k,
         k_parallel=k_parallel,
         lattice=lattice,
         eta=float(eta),
@@ -1324,7 +1344,7 @@ def ewald_structural_sums_2d(
             sums[degree, m + offset] = ewald_structural_constant_2d(
                 degree,
                 m,
-                k=float(k),
+                k=k,
                 destination=destination,
                 source=source,
                 lattice=lattice,
@@ -1344,7 +1364,7 @@ def ewald_structural_sums_2d_batch(
     *,
     lmax_struct: int,
     structural_order: int | None = None,
-    k: float,
+    k: complex,
     destinations: Array,
     source: Array,
     lattice: RectangularLattice2D,
@@ -1390,7 +1410,7 @@ def ewald_structural_sums_2d_batch(
         return np.asarray(sums, dtype=out_dtype)
     ws = _ensure_workspace(
         workspace=workspace,
-        k=float(k),
+        k=k,
         k_parallel=k_parallel,
         lattice=lattice,
         eta=float(eta),
@@ -1406,7 +1426,7 @@ def ewald_structural_sums_2d_batch(
     coordinate_scale = float(
         max(abs(float(source_arr[2])), np.max(np.abs(dest[:, 2]), initial=0.0))
     )
-    same_plane_atol = same_plane_z_tolerance(float(k), coordinate_scale=coordinate_scale)
+    same_plane_atol = same_plane_z_tolerance(complex(k), coordinate_scale=coordinate_scale)
     same_plane_points = np.abs(cz) <= same_plane_atol
     if np.any(same_plane_points):
         c = np.asarray(c, dtype=float).copy()
@@ -1442,11 +1462,14 @@ def ewald_structural_sums_2d_batch(
                 for m in range(-degree, degree + 1):
                     if (degree - abs(m)) % 2:
                         continue
+                    wave_number = complex(k)
                     base_log = (
                         log_spherical_factorial_root(degree, m)
-                        - math.log(lattice.area * float(k))
-                        - degree * math.log(2.0 * float(k))
+                        - math.log(lattice.area)
+                        - (degree + 1) * math.log(abs(wave_number))
+                        - degree * math.log(2.0)
                     )
+                    base_phase = complex(_unit_phase(wave_number) ** (-(degree + 1)))
                     n_vals = np.arange((degree - abs(m)) // 2 + 1, dtype=np.int64)
                     inner = np.zeros_like(gamma, dtype=np.complex128)
                     for n in n_vals:
@@ -1458,9 +1481,10 @@ def ewald_structural_sums_2d_batch(
                         q = 2 * int(n) - 1
                         p = degree - 2 * int(n)
                         log_abs = log_weight + _log_abs(gamma_fun[:, int(n)])
-                        log_abs += q * _log_abs(gamma) + _log_real_power(rho, p)
+                        log_abs += q * _log_abs(gamma) + _log_abs_power(rho, p)
                         inner += (
-                            np.exp(log_abs)
+                            base_phase
+                            * np.exp(log_abs)
                             * _unit_phase(gamma_fun[:, int(n)])
                             * _unit_phase(gamma) ** q
                         )
@@ -1484,15 +1508,17 @@ def ewald_structural_sums_2d_batch(
                 ),
                 series_exclusion=shell_data.rayleigh_zero,
             )
-            gamma_over_k = gamma / float(k)
+            wave_number = complex(k)
+            gamma_over_k = gamma / wave_number
             for degree in range(order + 1):
                 for m in range(-degree, degree + 1):
                     base_log = (
                         log_spherical_factorial_root(degree, m)
                         - degree * math.log(2.0)
                         - math.log(lattice.area)
-                        - 2.0 * math.log(float(k))
+                        - 2.0 * math.log(abs(wave_number))
                     )
+                    base_phase = complex(_unit_phase(wave_number) ** -2)
                     n_vals = np.arange(0, degree - abs(m) + 1, dtype=np.int64)
                     if n_vals.size == 0:
                         continue
@@ -1518,11 +1544,17 @@ def ewald_structural_sums_2d_batch(
                             )
                             q = 2 * int(n) - int(s)
                             p = degree - int(s)
-                            z = -float(k) * cz_shifted[:, None]
-                            terms += np.sign(z) ** q * np.exp(
-                                log_weight
-                                + _log_real_power(z, q)
-                                + _log_real_power(rho[None, :] / float(k), p)
+                            z = -wave_number * cz_shifted[:, None]
+                            rho_over_k = rho[None, :] / wave_number
+                            terms += (
+                                base_phase
+                                * np.exp(
+                                    log_weight
+                                    + _log_abs_power(z, q)
+                                    + _log_abs_power(rho_over_k, p)
+                                )
+                                * _unit_phase(z) ** q
+                                * _unit_phase(rho_over_k) ** p
                             )
                         acc += (
                             gamma_over_k[None, :] ** (2 * int(n) - 1)
@@ -1587,10 +1619,17 @@ def ewald_structural_sums_2d_batch(
             plm = np.asarray(legendre_normalized_trigon(ct, st, max(1, order)), dtype=np.float64)
             phase_shell = np.asarray(shell_data.phase_xy[shell_idx], dtype=np.complex128)
             exp_m_phi = {m: np.exp(1j * m * phi) for m in range(-order, order + 1)}
-            kz_r = float(k) * radii_valid
+            kz_r = complex(k) * radii_valid
+            complex_radial = (
+                scaled_real_integral_sequences(order, eta, k, radii_valid)
+                if complex(k).imag != 0.0
+                else None
+            )
             for degree in range(order + 1):
-                scaled_integral = scaled_real_integral_sequence(
-                    degree, float(eta), float(k), radii_valid
+                scaled_integral = (
+                    complex_radial[:, degree]
+                    if complex_radial is not None
+                    else scaled_real_integral_sequence(degree, eta, k, radii_valid)
                 )
                 radial = -1j / math.sqrt(math.pi) * phase_shell * scaled_integral / kz_r
                 for m in range(-degree, degree + 1):
@@ -1639,7 +1678,7 @@ def ewald_structural_sums_2d_batch(
 def periodic_ewald_block(
     *,
     lmax: int,
-    k: float,
+    k: complex,
     destination: Array,
     source: Array,
     lattice: RectangularLattice2D,
@@ -1657,7 +1696,7 @@ def periodic_ewald_block(
     """Assemble one periodic SVWF coupling block from Ewald structural constants."""
     sums = ewald_structural_sums_2d(
         lmax=int(lmax),
-        k=float(k),
+        k=k,
         destination=destination,
         source=source,
         lattice=lattice,
@@ -1683,7 +1722,7 @@ def _add_self_correction_to_batched_sums(
     sums: Array,
     *,
     local_destination_index: int,
-    k: float,
+    k: complex,
     eta: float,
 ) -> None:
     """Patch the same-particle central-point correction into one batched table."""
@@ -1692,7 +1731,7 @@ def _add_self_correction_to_batched_sums(
         return
     order = int(sums.shape[1] - 1)
     sums[idx, 0, order] += structural_sum_m_normalization(0) * _self_correction(
-        float(k), float(eta)
+        complex(k), float(eta)
     )
 
 
@@ -1700,7 +1739,7 @@ def periodic_ewald_blocks_for_source(
     *,
     source_index: int,
     lmax: int,
-    k: float,
+    k: complex,
     positions: Array,
     lattice: RectangularLattice2D,
     k_parallel: Array,
@@ -1725,7 +1764,7 @@ def periodic_ewald_blocks_for_source(
     )
     sums = ewald_structural_sums_2d_batch(
         lmax_struct=int(lmax),
-        k=float(k),
+        k=k,
         destinations=pos[destinations],
         source=pos[src_idx],
         lattice=lattice,
@@ -1743,7 +1782,7 @@ def periodic_ewald_blocks_for_source(
         _add_self_correction_to_batched_sums(
             sums,
             local_destination_index=int(self_rows[0]),
-            k=float(k),
+            k=k,
             eta=float(eta),
         )
     return blocks_from_structural_sums(
@@ -1760,7 +1799,7 @@ def _fill_block_cache_for_source(
     source_index: int,
     cache: dict[tuple[int, int], Array],
     lmax: int,
-    k: float,
+    k: complex,
     positions: Array,
     lattice: RectangularLattice2D,
     k_parallel: Array,
@@ -1783,7 +1822,7 @@ def _fill_block_cache_for_source(
     blocks = periodic_ewald_blocks_for_source(
         source_index=src_idx,
         lmax=int(lmax),
-        k=float(k),
+        k=k,
         positions=pos,
         lattice=lattice,
         k_parallel=k_parallel,
@@ -1806,7 +1845,7 @@ def fill_periodic_ewald_block_cache(
     *,
     cache: dict[tuple[int, int], Array],
     lmax: int,
-    k: float,
+    k: complex,
     positions: Array,
     lattice: RectangularLattice2D,
     k_parallel: Array,
@@ -1825,7 +1864,7 @@ def fill_periodic_ewald_block_cache(
     pos = np.asarray(positions, dtype=float).reshape(-1, 3)
     ws = _ensure_workspace(
         workspace=workspace,
-        k=float(k),
+        k=k,
         k_parallel=k_parallel,
         lattice=lattice,
         eta=float(eta),
@@ -1836,7 +1875,7 @@ def fill_periodic_ewald_block_cache(
             source_index=int(j),
             cache=cache,
             lmax=int(lmax),
-            k=float(k),
+            k=k,
             positions=pos,
             lattice=lattice,
             k_parallel=k_parallel,
@@ -1855,7 +1894,7 @@ def fill_periodic_ewald_block_cache(
 def apply_periodic_ewald_sum(
     *,
     lmax: int,
-    k: float,
+    k: complex,
     positions: Array,
     x: Array,
     lattice: RectangularLattice2D,
@@ -1885,7 +1924,7 @@ def apply_periodic_ewald_sum(
     y = np.zeros_like(arr, dtype=out_dtype)
     ws = _ensure_workspace(
         workspace=workspace,
-        k=float(k),
+        k=k,
         k_parallel=k_parallel,
         lattice=lattice,
         eta=float(eta),
@@ -1895,7 +1934,7 @@ def apply_periodic_ewald_sum(
         if block_cache is None:
             sums = ewald_structural_sums_2d_batch(
                 lmax_struct=int(lmax),
-                k=float(k),
+                k=k,
                 destinations=pos,
                 source=pos[j],
                 lattice=lattice,
@@ -1911,7 +1950,7 @@ def apply_periodic_ewald_sum(
             _add_self_correction_to_batched_sums(
                 sums,
                 local_destination_index=j,
-                k=float(k),
+                k=k,
                 eta=float(eta),
             )
             y += apply_structural_sums_to_vector(
@@ -1928,7 +1967,7 @@ def apply_periodic_ewald_sum(
             source_index=j,
             cache=block_cache,
             lmax=int(lmax),
-            k=float(k),
+            k=k,
             positions=pos,
             lattice=lattice,
             k_parallel=k_parallel,
@@ -1950,7 +1989,7 @@ def apply_periodic_ewald_sum(
 def apply_periodic_ewald_adjoint_sum(
     *,
     lmax: int,
-    k: float,
+    k: complex,
     positions: Array,
     x: Array,
     lattice: RectangularLattice2D,
@@ -1980,7 +2019,7 @@ def apply_periodic_ewald_adjoint_sum(
     y = np.zeros_like(arr, dtype=out_dtype)
     ws = _ensure_workspace(
         workspace=workspace,
-        k=float(k),
+        k=k,
         k_parallel=k_parallel,
         lattice=lattice,
         eta=float(eta),
@@ -1990,7 +2029,7 @@ def apply_periodic_ewald_adjoint_sum(
         fill_periodic_ewald_block_cache(
             cache=block_cache,
             lmax=int(lmax),
-            k=float(k),
+            k=k,
             positions=pos,
             lattice=lattice,
             k_parallel=k_parallel,
@@ -2013,7 +2052,7 @@ def apply_periodic_ewald_adjoint_sum(
     for source in range(ns):
         sums = ewald_structural_sums_2d_batch(
             lmax_struct=int(lmax),
-            k=float(k),
+            k=k,
             destinations=pos,
             source=pos[source],
             lattice=lattice,
@@ -2029,7 +2068,7 @@ def apply_periodic_ewald_adjoint_sum(
         _add_self_correction_to_batched_sums(
             sums,
             local_destination_index=source,
-            k=float(k),
+            k=k,
             eta=float(eta),
         )
         y[source] = apply_structural_sums_to_vector_adjoint(

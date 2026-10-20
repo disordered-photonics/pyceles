@@ -7,7 +7,10 @@ import numpy as np
 import pytest
 from scipy import integrate, special
 
-from pyceles.core.periodic.scalar import reciprocal_gamma_with_zero_mask
+from pyceles.core.periodic.scalar import (
+    reciprocal_gamma_with_zero_mask,
+    scaled_real_integral_sequences,
+)
 from pyceles.core.periodic.special import (
     kambe_integral,
     reduced_incomplete_gamma_int_or_halfint,
@@ -25,6 +28,25 @@ def _quad_kambe(order: int, z: complex, eta: float) -> complex:
     real = integrate.quad(lambda t: float(np.real(integrand(t))), eta, np.inf, limit=200)[0]
     imag = integrate.quad(lambda t: float(np.imag(integrand(t))), eta, np.inf, limit=200)[0]
     return complex(real, imag)
+
+
+@pytest.mark.parametrize("k", [1.1 + 0.1j, 1.3 + 0.8j])
+def test_scaled_radial_sequence_matches_scalar_kambe(k: complex) -> None:
+    radii = np.asarray([0.2, 0.7, 1.3])
+    eta = 0.9
+    actual = scaled_real_integral_sequences(8, eta, k, radii)
+    expected = np.asarray(
+        [
+            [
+                np.sqrt(2.0)
+                * (k * radius) ** (degree + 1)
+                * kambe_integral(2 * degree, k * radius, np.sqrt(2.0) * eta / k)
+                for degree in range(9)
+            ]
+            for radius in radii
+        ]
+    )
+    np.testing.assert_allclose(actual, expected, rtol=2e-12, atol=1e-12)
 
 
 def test_upper_incomplete_gamma_matches_known_positive_real_values() -> None:
@@ -48,6 +70,23 @@ def test_upper_incomplete_gamma_keeps_complex_branch_conjugacy() -> None:
     below = upper_incomplete_gamma_int_or_halfint(order, complex(-1.2, -1e-12))
 
     assert above == pytest.approx(np.conj(below))
+
+
+def test_upper_gamma_sequence_mixed_complex_routes() -> None:
+    # A single Ewald shell can contain different reciprocal regimes. Each
+    # argument must select its own stable sequence, regardless of its neighbors.
+    arguments = np.asarray([3.0 + 0.5j, complex(-1.2, -0.0), 0.7 + 0.3j])
+    combined = upper_gamma_sequence(16, arguments)
+    for index, argument in enumerate(arguments):
+        np.testing.assert_allclose(
+            combined[index], upper_gamma_sequence(16, [argument])[0], rtol=1e-13, atol=1e-14
+        )
+    np.testing.assert_allclose(
+        combined[0, 0],
+        math.sqrt(math.pi) * special.erfc(np.sqrt(arguments[0])),
+        rtol=1e-13,
+        atol=1e-14,
+    )
 
 
 def test_reduced_incomplete_gamma_matches_definition() -> None:
@@ -90,6 +129,94 @@ def test_shifted_delta_sequence_returns_finite_recurrence_values() -> None:
     assert delta.shape == (2, 4)
     assert np.all(np.isfinite(delta.real))
     assert np.all(np.isfinite(delta.imag))
+
+
+def test_shifted_delta_sequence_matches_complex_treams_reference() -> None:
+    gamma = np.asarray([1.1 + 0.5j, 0.8 + 1.7j])
+    expected = np.asarray(
+        [
+            [
+                -0.7425786056416375 + 0.4839875594993020j,
+                -0.30031023048789474 - 0.46581559671760486j,
+                0.29047352509224080 - 0.11522747477948687j,
+                0.00734189880039784 + 0.16747768793045767j,
+                -0.08166218806534035 - 0.03436698221270592j,
+                0.03765948480180489 - 0.02844007518958043j,
+                0.00153568630219542 + 0.02561618198391143j,
+            ],
+            [
+                -0.018700964384003215 - 0.0015831657150971335j,
+                -0.0030576370992868394 - 0.0032097037284871252j,
+                -0.0000028768597376933273 - 0.0010623365280800290j,
+                0.00018173340420014157 - 0.00018330855129056460j,
+                0.00006352809031128087 + 0.0000008574183637547930j,
+                0.000010660235943723534 + 0.000011694366864730096j,
+                -0.0000003599249584667997 + 0.000003967231597861686j,
+            ],
+        ],
+        dtype=np.complex128,
+    )
+
+    actual = shifted_delta_sequence(6, gamma, z_offset=2.2, eta=0.5)
+
+    # Frozen values from TREAMS' compiled Kambe integral at complex arguments.
+    np.testing.assert_allclose(actual, expected, rtol=2e-12, atol=1e-14)
+    np.testing.assert_allclose(
+        actual,
+        shifted_delta_sequence(6, gamma, z_offset=-2.2, eta=0.5),
+        rtol=1e-13,
+        atol=1e-14,
+    )
+
+
+def test_shifted_delta_complex_batch_preserves_real_argument_channels() -> None:
+    gamma = np.asarray([1.1 + 0.0j, 1.1 + 0.5j, 2.0j])
+
+    batched = shifted_delta_sequence(6, gamma, z_offset=0.4, eta=1.3)
+    separate = np.asarray(
+        [shifted_delta_sequence(6, [value], z_offset=0.4, eta=1.3)[0] for value in gamma]
+    )
+
+    np.testing.assert_allclose(batched, separate, rtol=3e-11, atol=1e-12)
+
+
+def test_shifted_delta_near_plane_uses_stable_complex_gamma_series() -> None:
+    # Direct upper-incomplete-gamma contour integral references for a complex
+    # evanescent root. The dimensionless height is just above the former series
+    # crossover, where the order-12 forward recurrence loses accuracy.
+    gamma = 0.055265064000928434 + 9.952037692216555j
+    expected = np.asarray(
+        [
+            8.392349480335680e-8 + 1.4242259453421969e-8j,
+            1.4386156323019380e-12 + 3.0721225292740895e-13j,
+            2.5605348908887340e-17 + 6.629169063017819e-18j,
+            4.6788899715590250e-22 + 1.4304046054405500e-22j,
+        ],
+        dtype=np.complex128,
+    )
+
+    actual = shifted_delta_sequence(12, [gamma], z_offset=0.4, eta=1.3)[0]
+
+    np.testing.assert_allclose(actual[[0, 4, 8, 12]], expected, rtol=3e-12, atol=1e-30)
+
+
+def test_shifted_delta_complex_series_covers_recurrence_crossover() -> None:
+    # Direct contour-integral references at |gamma*z|=9.6 and eta*|z|=1.
+    # The raw order recurrence loses about 2.5e-5 relative accuracy by n=12.
+    gamma = 0.1 + 24.0j
+    expected = np.asarray(
+        [
+            7.559259787570088e-12 + 1.5033242536907253e-12j,
+            2.2759731453722017e-17 + 5.291833995358668e-18j,
+            6.984817967155483e-23 + 1.8646207182807603e-23j,
+            2.1752332804790307e-28 + 6.573843869096256e-29j,
+        ],
+        dtype=np.complex128,
+    )
+
+    actual = shifted_delta_sequence(12, [gamma], z_offset=0.4, eta=2.5)[0]
+
+    np.testing.assert_allclose(actual[[0, 4, 8, 12]], expected, rtol=3e-12, atol=1e-35)
 
 
 def test_shifted_delta_sequence_matches_tall_propagating_reference() -> None:
@@ -224,7 +351,7 @@ def test_shifted_delta_sequence_requests_cached_series_table_lazily() -> None:
         3,
         np.asarray([0.7 + 0.1j], dtype=np.complex128),
         z_offset=0.6,
-        eta=1.2,
+        eta=2.0,
         upper_gamma_provider=provider,
     )
     assert calls == []

@@ -36,6 +36,7 @@ from pyceles.core.periodic.rayleigh import (
 )
 from pyceles.core.periodic.scalar import structural_sum_m_normalization
 from pyceles.core.periodic.structural import translation_contraction_tensor
+from pyceles.core.radial import passive_wavenumber
 
 from .base import SourceBlockBatch
 
@@ -54,7 +55,7 @@ class PeriodicCouplingOperator:
     """
 
     lmax: int
-    k: float
+    k: complex
     positions: Array
     ab5: Array
     periodic: PeriodicSpec
@@ -80,6 +81,7 @@ class PeriodicCouplingOperator:
     _near_contraction_tensor_cache: Array | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
+        self.k = passive_wavenumber(self.k)
         self.dtype = np.dtype(self.dtype)
         self.accum_dtype = self.dtype if self.accum_dtype is None else np.dtype(self.accum_dtype)
         if self.accum_dtype not in {np.dtype(np.complex64), np.dtype(np.complex128)}:
@@ -117,7 +119,7 @@ class PeriodicCouplingOperator:
             )
             self._resolved_ewald_eta = resolve_ewald_eta(
                 periodic=self.periodic,
-                k=float(self.k),
+                k=self.k,
                 k_parallel=self.k_parallel,
                 positions=self.positions,
                 lmax=int(self.lmax),
@@ -143,7 +145,7 @@ class PeriodicCouplingOperator:
         if workspace is None:
             workspace = EwaldShellWorkspace(
                 lattice=self.periodic.lattice,
-                k=float(self.k),
+                k=self.k,
                 k_parallel=np.asarray(self.k_parallel, dtype=float).reshape(2),
                 eta=self._ewald_eta(),
             )
@@ -156,7 +158,7 @@ class PeriodicCouplingOperator:
             return plan
         plan = prepare_rayleigh_plan(
             lmax=int(self.lmax),
-            k=float(self.k),
+            k=self.k,
             positions=self.positions,
             circumscribing_radii=self.circumscribing_radii,
             periodic=self.periodic,
@@ -210,7 +212,7 @@ class PeriodicCouplingOperator:
         origin = np.zeros((3,), dtype=float)
         structural = ewald_structural_sums_2d_batch(
             lmax_struct=int(self.lmax),
-            k=float(self.k),
+            k=self.k,
             destinations=origin[None, :],
             source=origin,
             lattice=self.periodic.lattice,
@@ -224,7 +226,7 @@ class PeriodicCouplingOperator:
             workspace=self._workspace(),
         )[0]
         structural[0, order] += structural_sum_m_normalization(0) * ewald_self_correction(
-            float(self.k), self._ewald_eta()
+            self.k, self._ewald_eta()
         )
         block = np.asarray(
             np.einsum(
@@ -267,7 +269,7 @@ class PeriodicCouplingOperator:
             dest = destinations[start:stop]
             local = ewald_structural_sums_2d_batch(
                 lmax_struct=int(self.lmax),
-                k=float(self.k),
+                k=self.k,
                 destinations=pos[dest],
                 source=pos[source],
                 lattice=self.periodic.lattice,
@@ -401,7 +403,7 @@ class PeriodicCouplingOperator:
         if method == "directsum":
             return apply_periodic_direct_sum_adjoint(
                 lmax=int(self.lmax),
-                k=float(self.k),
+                k=self.k,
                 positions=self.positions,
                 x=x,
                 lattice=self.periodic.lattice,
@@ -413,7 +415,7 @@ class PeriodicCouplingOperator:
         options = self.periodic.options
         return apply_periodic_ewald_adjoint_sum(
             lmax=int(self.lmax),
-            k=float(self.k),
+            k=self.k,
             positions=self.positions,
             x=x,
             lattice=self.periodic.lattice,
@@ -436,7 +438,7 @@ class PeriodicCouplingOperator:
         if method == "directsum":
             return apply_periodic_direct_sum(
                 lmax=int(self.lmax),
-                k=float(self.k),
+                k=self.k,
                 positions=self.positions,
                 x=x,
                 lattice=self.periodic.lattice,
@@ -451,7 +453,7 @@ class PeriodicCouplingOperator:
         workspace = self._workspace()
         return apply_periodic_ewald_sum(
             lmax=int(self.lmax),
-            k=float(self.k),
+            k=self.k,
             positions=self.positions,
             x=x,
             lattice=self.periodic.lattice,
@@ -494,7 +496,7 @@ class PeriodicCouplingOperator:
         fill_periodic_ewald_block_cache(
             cache=self._ewald_block_cache,
             lmax=int(self.lmax),
-            k=float(self.k),
+            k=self.k,
             positions=pos,
             lattice=self.periodic.lattice,
             k_parallel=self.k_parallel,
@@ -526,7 +528,7 @@ class PeriodicCouplingOperator:
                 fill_periodic_ewald_block_cache(
                     cache=self._ewald_block_cache,
                     lmax=int(self.lmax),
-                    k=float(self.k),
+                    k=self.k,
                     positions=pos,
                     lattice=self.periodic.lattice,
                     k_parallel=self.k_parallel,
@@ -552,7 +554,7 @@ class PeriodicCouplingOperator:
                 blocks = periodic_ewald_blocks_for_source(
                     source_index=source,
                     lmax=int(self.lmax),
-                    k=float(self.k),
+                    k=self.k,
                     positions=pos,
                     lattice=self.periodic.lattice,
                     k_parallel=self.k_parallel,

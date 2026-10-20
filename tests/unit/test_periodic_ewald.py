@@ -274,6 +274,42 @@ def test_off_plane_ewald_high_order_matches_reliable_direct_window() -> None:
     assert ewald[4, 1 + 4] == pytest.approx(direct[4, 1 + 4], rel=8e-5, abs=8e-4)
 
 
+def test_complex_host_ewald_batch_matches_direct_images_at_normal_incidence() -> None:
+    k = 1.1 + 0.5j
+    lattice = pcl.RectangularLattice2D(1.1, 1.1)
+    source = np.zeros(3, dtype=float)
+    destinations = np.array([[0.23, -0.17, 0.0], [0.23, -0.17, 0.4]])
+    k_parallel = np.zeros(2, dtype=float)
+
+    actual = ewald_structural_sums_2d_batch(
+        lmax_struct=2,
+        destinations=destinations,
+        source=source,
+        k=k,
+        lattice=lattice,
+        k_parallel=k_parallel,
+        eta=default_ewald_eta(lattice),
+        real_shells=12,
+        reciprocal_shells=12,
+    )
+    direct = np.stack(
+        [
+            direct_structural_sums_2d(
+                lmax=2,
+                destination=destination,
+                source=source,
+                k=k,
+                lattice=lattice,
+                k_parallel=k_parallel,
+                window=40,
+            )
+            for destination in destinations
+        ]
+    )
+
+    np.testing.assert_allclose(actual, direct, rtol=2.0e-10, atol=3.0e-10)
+
+
 def test_ewald_structural_sums_are_eta_invariant_for_same_plane_case() -> None:
     k = 2.0 * np.pi / 550.0
     k_parallel = np.array([0.0012, -0.0007], dtype=float)
