@@ -46,7 +46,9 @@ from .results import MultiSourceSolveResult
 
 def _source_projection_uses_angular_grid(source: Source) -> bool:
     """Return whether RHS projection uses the configured angular quadrature grid."""
-    return not isinstance(source, (LocalExpansionSource, FinitePlaneSpectrumSource, PlaneWave))
+    return not isinstance(
+        source, (LocalExpansionSource, FinitePlaneSpectrumSource, PlaneWave, BlochPlaneWave)
+    )
 
 
 def _record_elapsed(timings: dict[str, float] | None, key: str, start: float) -> None:

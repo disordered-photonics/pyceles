@@ -525,7 +525,7 @@ def _compute_initial_field_general(
     else:
         raise TypeError(
             "Initial-field evaluation is unavailable for source type "
-            f"{type(beam).__name__}. Supported initial-field sources are PlaneWave, "
+            f"{type(beam).__name__}. Supported initial-field sources are PlaneWave, BlochPlaneWave, "
             "local outgoing-expansion sources, finite-plane sources, and angular-spectrum sources."
         )
 
