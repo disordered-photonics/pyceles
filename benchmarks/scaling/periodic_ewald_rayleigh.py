@@ -21,6 +21,11 @@ growth at fixed ``H/lambda=20`` and vertical growth at fixed ``P/lambda=4.75``.
 Override the lists and geometry controls explicitly for smaller probes.
 The complete preflight runs before any timed solve and ``--anomaly-policy error``
 is the default.
+
+CuPy cases record allocator counters before and after the solve to distinguish
+live arrays from cached pool capacity. These snapshots do not measure transient
+peaks or allocations outside the default pool. Driver free-memory counters also
+include unrelated device activity.
 """
 
 from __future__ import annotations
@@ -41,6 +46,7 @@ import numpy as np
 from tqdm.auto import tqdm
 
 import pyceles as pcl
+from pyceles._cupy_memory import cupy_allocator_memory_info
 from pyceles.core.indexing import n_modes
 from pyceles.core.periodic import plane_wave_k_parallel, rayleigh_report
 
@@ -137,6 +143,14 @@ def _free_backend_memory(backend: Backend) -> None:
         cp.cuda.get_current_stream().synchronize()
         cp.get_default_memory_pool().free_all_blocks()
         cp.get_default_pinned_memory_pool().free_all_blocks()
+
+
+def _allocator_memory_info(backend: Backend) -> dict[str, int] | None:
+    if backend != "cupy":
+        return None
+    import cupy as cp
+
+    return cupy_allocator_memory_info(cp)
 
 
 def _is_memory_exhaustion(exc: BaseException) -> bool:
@@ -560,11 +574,13 @@ def _run_one(
 
     _free_backend_memory(backend)
     _sync(backend)
+    memory_before = _allocator_memory_info(backend)
     simulation = pcl.Simulation(config, particles=particles)
     started = time.perf_counter()
     run = simulation.run(source, include_farfield=False)
     _sync(backend)
     elapsed = time.perf_counter() - started
+    memory_after = _allocator_memory_info(backend)
 
     solver = run.solver_result
     metadata = solver.block_metadata or {}
@@ -612,6 +628,14 @@ def _run_one(
         "preparation_timings_s": preparation_timings,
         "preparation_wall_time_s": float(sum(preparation_timings.values())),
         "cache_translation_blocks": cache_translation_blocks,
+        "device_memory": (
+            {
+                "before_solve": memory_before,
+                "after_solve": memory_after,
+            }
+            if memory_after is not None
+            else None
+        ),
         "operator_diagnostics": _operator_diagnostics(simulation, method),
         "geometry": _geometry_summary(geometry, float(args.wavelength)),
         "rayleigh_safety": _safety_summary(args, geometry),
