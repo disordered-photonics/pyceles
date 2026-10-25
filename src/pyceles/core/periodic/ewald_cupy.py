@@ -806,7 +806,6 @@ __device__ void _pyceles_shifted_delta_sequence(
             delta[1] = complex<double>(0.0, sqrt(PYCELES_PI)) / scaled * (plus - minus);
         }
     } else if (x.real() < 0.0) {
-        const complex<double> z_arg = scaled;
         // The two Faddeeva arguments are conjugates.  Reflect the lower
         // half-plane value analytically before multiplying by exp_term; the
         // direct product otherwise becomes 0*inf for tall cells.
