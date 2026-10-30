@@ -22,6 +22,7 @@ from typing import Any
 
 import numpy as np
 
+from pyceles._dtypes import resolve_compute_accum_dtypes
 from pyceles._optional import asnumpy, coerce_array, import_cupy, is_cupy_array
 from pyceles.core.indexing import n_modes
 from pyceles.core.translation import (
@@ -37,12 +38,22 @@ COMPLEX128_DTYPE = np.dtype(np.complex128)
 
 @cache
 def _source_parallel_kernel(
-    lmax: int, dtype_str: str, adjoint: bool = False, rhs_tile_size: int = 1
+    lmax: int,
+    dtype_str: str,
+    adjoint: bool = False,
+    rhs_tile_size: int = 1,
+    selected_rows: bool = False,
+    accum_dtype_str: str | None = None,
 ):
     """Compile one fixed scalar-mode kernel for ``W`` or ``W^H``."""
 
     cupy, _ = import_cupy()
     dtype = np.dtype(dtype_str)
+    accum_dtype = np.dtype(accum_dtype_str) if accum_dtype_str is not None else dtype
+    if accum_dtype not in (dtype, np.dtype(np.complex128)):
+        raise TypeError("Pairwise accumulation must preserve compute precision")
+    if selected_rows and adjoint:
+        raise ValueError("Selected rows define forward reception, not an operator adjoint")
     if dtype == np.dtype(np.complex64):
         real_type = "float"
         complex_type = "complex<float>"
@@ -77,6 +88,23 @@ def _source_parallel_kernel(
     n_phase = 2 * n_orders - 1
     action = "adjoint" if adjoint else "forward"
     name = f"pairwise_source_parallel_{action}_{real_type}_l{lmax_i}_r{rhs_tile}"
+    accum_real_type = "float" if accum_dtype == np.dtype(np.complex64) else "double"
+    accum_complex_type = f"complex<{accum_real_type}>"
+    if selected_rows:
+        name += f"_rows_{accum_real_type}"
+    elif accum_dtype != dtype:
+        name += f"_accum_{accum_real_type}"
+    target_args = "const int ntargets, const int* __restrict__ target_ids," if selected_rows else ""
+    target_count = "ntargets" if selected_rows else "ns"
+    target_index = "destination_base + threadIdx.x"
+    target_setup = (
+        "const long long target = destination_base + threadIdx.x;\n"
+        "            const long long s1 = target < ntargets ? target_ids[target] : -1;"
+        if selected_rows
+        else f"const long long s1 = {target_index};"
+    )
+    valid_target = "target < ntargets" if selected_rows else "s1 < ns"
+    output_target = "target" if selected_rows else "s1"
 
     # W^H reverses the displacement, transposes the mode pair, and conjugates
     # the scalar translation coefficient.
@@ -117,7 +145,8 @@ extern "C" __global__ void {name}(
     const int* __restrict__ pair_pmin,
     const int* __restrict__ pair_pcount,
     const {complex_type}* __restrict__ x,
-    {complex_type}* __restrict__ wx
+    {target_args}
+    {accum_complex_type}* __restrict__ wx
 ) {{
     const int n1 = blockIdx.y;
     if (n1 >= {scalar_modes}) return;
@@ -132,13 +161,13 @@ extern "C" __global__ void {name}(
         // every source and participate in both barriers. Keep one owned
         // output per lane across the complete ascending source traversal.
         for (long long destination_base = (long long)blockIdx.x * blockDim.x;
-             destination_base < ns;
+             destination_base < {target_count};
              destination_base += (long long)blockDim.x * gridDim.x) {{
-            const long long s1 = destination_base + threadIdx.x;
-            {real_type} total_m_re[{rhs_tile}] = {{}};
-            {real_type} total_m_im[{rhs_tile}] = {{}};
-            {real_type} total_n_re[{rhs_tile}] = {{}};
-            {real_type} total_n_im[{rhs_tile}] = {{}};
+            {target_setup}
+            {accum_real_type} total_m_re[{rhs_tile}] = {{}};
+            {accum_real_type} total_m_im[{rhs_tile}] = {{}};
+            {accum_real_type} total_n_re[{rhs_tile}] = {{}};
+            {accum_real_type} total_n_im[{rhs_tile}] = {{}};
             for (int source_idx = 0; source_idx < ns; ++source_idx) {{
                 for (int entry = threadIdx.x; entry < {nmodes * rhs_tile};
                      entry += blockDim.x) {{
@@ -153,7 +182,7 @@ extern "C" __global__ void {name}(
                 }}
                 __syncthreads();
 
-                if (s1 < ns && s1 != source_idx) {{
+                if ({valid_target} && s1 != source_idx) {{
                     const {real_type} x21 = ({real_type})
                         (positions[3 * {geom_dst}] - positions[3 * {geom_src}]);
                     const {real_type} y21 = ({real_type})
@@ -211,10 +240,10 @@ extern "C" __global__ void {name}(
                             &sin_mphi[idx], &cos_mphi[idx]);
                     }}
 
-                    {real_type} re_m[{rhs_tile}] = {{}};
-                    {real_type} im_m[{rhs_tile}] = {{}};
-                    {real_type} re_n[{rhs_tile}] = {{}};
-                    {real_type} im_n[{rhs_tile}] = {{}};
+                    {accum_real_type} re_m[{rhs_tile}] = {{}};
+                    {accum_real_type} im_m[{rhs_tile}] = {{}};
+                    {accum_real_type} re_n[{rhs_tile}] = {{}};
+                    {accum_real_type} im_n[{rhs_tile}] = {{}};
                     for (int n2 = 0; n2 < {scalar_modes}; ++n2) {{
                         const int delta_m = {delta};
                         const int abs_dm = delta_m < 0 ? -delta_m : delta_m;
@@ -243,10 +272,10 @@ extern "C" __global__ void {name}(
                         }}
                         const {real_type} c = cos_mphi[phase_idx];
                         const {real_type} s = sin_mphi[phase_idx];
-                        const {real_type} ar = a_re * c - a_im * s;
-                        const {real_type} ai = {imag_sign}(a_re * s + a_im * c);
-                        const {real_type} br = -b_im * c - b_re * s;
-                        const {real_type} bi = {imag_sign}(-b_im * s + b_re * c);
+                        const {accum_real_type} ar = a_re * c - a_im * s;
+                        const {accum_real_type} ai = {imag_sign}(a_re * s + a_im * c);
+                        const {accum_real_type} br = -b_im * c - b_re * s;
+                        const {accum_real_type} bi = {imag_sign}(-b_im * s + b_re * c);
                         #pragma unroll
                         for (int rr = 0; rr < {rhs_tile}; ++rr) {{
                             const int xm = n2 * {rhs_tile} + rr;
@@ -277,16 +306,16 @@ extern "C" __global__ void {name}(
                 }}
                 __syncthreads();
             }}
-            if (s1 < ns) {{
+            if ({valid_target}) {{
                 #pragma unroll
                 for (int rr = 0; rr < {rhs_tile}; ++rr) {{
                     const int rhs = rhs_base + rr;
                     if (rhs < nrhs) {{
                         const long long ym =
-                            (s1 * {nmodes} + n1) * nrhs + rhs;
+                            ({output_target} * {nmodes} + n1) * nrhs + rhs;
                         const long long yn = ym + (long long){scalar_modes} * nrhs;
-                        wx[ym] = {complex_type}(total_m_re[rr], total_m_im[rr]);
-                        wx[yn] = {complex_type}(total_n_re[rr], total_n_im[rr]);
+                        wx[ym] = {accum_complex_type}(total_m_re[rr], total_m_im[rr]);
+                        wx[yn] = {accum_complex_type}(total_n_re[rr], total_n_im[rr]);
                     }}
                 }}
             }}
@@ -404,7 +433,7 @@ class CuPyPairwiseCouplingOperator:
             ), False
         raise ValueError(f"Input must be 1D or 2D. Got shape {tuple(raw.shape)}.")
 
-    def _launch_config(self, nrhs: int) -> tuple[int, int, int, int]:
+    def _launch_config(self, nrhs: int, n_targets: int | None = None) -> tuple[int, int, int, int]:
         cupy, _ = import_cupy()
         props = cupy.cuda.runtime.getDeviceProperties(cupy.cuda.runtime.getDevice())
         max_threads = int(props["maxThreadsPerBlock"])
@@ -412,7 +441,7 @@ class CuPyPairwiseCouplingOperator:
         threads = min(max_threads, target)
         blocks_x = min(
             int(props["maxGridSize"][0]),
-            (self.n_particles + threads - 1) // threads,
+            ((self.n_particles if n_targets is None else n_targets) + threads - 1) // threads,
         )
         grid_y = self.n_modes // 2
         rhs_tile = 1 if nrhs == 1 else min(4, nrhs)
@@ -422,15 +451,27 @@ class CuPyPairwiseCouplingOperator:
         )
         return int(blocks_x), int(threads), int(grid_y), int(grid_z)
 
-    def _apply_gpu(self, x: np.ndarray | object, *, adjoint: bool = False):
+    def _apply_gpu(
+        self,
+        x: np.ndarray | object,
+        *,
+        adjoint: bool = False,
+        targets: np.ndarray | None = None,
+        accum_dtype: np.dtype | None = None,
+    ):
         cupy, _ = import_cupy()
         arr, squeezed = self._array(x)
         nrhs = int(arr.shape[2])
         rhs_tile = 1 if nrhs == 1 else min(4, nrhs)
+        _, output_dtype = resolve_compute_accum_dtypes(
+            compute_dtype=self.dtype,
+            accum_dtype=self.dtype if accum_dtype is None else accum_dtype,
+        )
+        n_targets = self.n_particles if targets is None else len(targets)
         # No particle pair means W=0, with no translation tables or kernel
         # resources needed for either the forward or adjoint action.
-        output = cupy.zeros((self.n_particles, self.n_modes, nrhs), dtype=self.dtype)
-        if self.n_particles > 1 and nrhs:
+        output = cupy.zeros((n_targets, self.n_modes, nrhs), dtype=output_dtype)
+        if self.n_particles > 1 and nrhs and n_targets:
             radial_lut = self.radial_lut
             if radial_lut is None:
                 raise ValueError("Multi-particle CuPy coupling requires a radial LUT.")
@@ -447,8 +488,20 @@ class CuPyPairwiseCouplingOperator:
                 pair_pmin,
                 pair_pcount,
             ) = self._raw_kernel_resources(radial_lut, rhs_tile_size=rhs_tile)
-            kernel = _source_parallel_kernel(self.lmax, self.dtype.str, adjoint, rhs_tile)
-            blocks_x, threads, grid_y, grid_z = self._launch_config(nrhs)
+            kernel = (
+                _source_parallel_kernel(self.lmax, self.dtype.str, adjoint, rhs_tile)
+                if targets is None and output_dtype == self.dtype
+                else _source_parallel_kernel(
+                    self.lmax,
+                    self.dtype.str,
+                    adjoint,
+                    rhs_tile,
+                    selected_rows=targets is not None,
+                    accum_dtype_str=output_dtype.str,
+                )
+            )
+            blocks_x, threads, grid_y, grid_z = self._launch_config(nrhs, n_targets)
+            target_args = () if targets is None else (np.int32(n_targets), cupy.asarray(targets))
             inv_dr = self.real_dtype.type(radial_lut._inv_dr)
             kernel(
                 (blocks_x, grid_y, grid_z),
@@ -469,12 +522,35 @@ class CuPyPairwiseCouplingOperator:
                     pair_pmin,
                     pair_pcount,
                     arr.reshape(-1),
+                    *target_args,
                     output.reshape(-1),
                 ),
             )
         if squeezed:
-            return output.reshape(self.n_particles * self.n_modes)
-        return output.reshape(self.n_particles * self.n_modes, nrhs)
+            return output.reshape(n_targets * self.n_modes)
+        return output.reshape(n_targets * self.n_modes, nrhs)
+
+    def apply_rows(
+        self, x: np.ndarray | object, targets: np.ndarray, *, accum_dtype: np.dtype | None = None
+    ) -> np.ndarray | object:
+        """Evaluate exact regular reception at selected particle centres.
+
+        Output follows target order, including repeats. Sources stay global;
+        each target excludes only its own particle. No full all-target action
+        or dense translation blocks are formed.
+        """
+        indices = np.asarray(targets)
+        if indices.ndim != 1:
+            raise ValueError("Reception targets must be a one-dimensional index vector")
+        if indices.size == 0:
+            indices = np.zeros(0, dtype=np.int32)
+        if not np.issubdtype(indices.dtype, np.integer):
+            raise TypeError("Reception targets must contain integers")
+        if np.any(indices < 0) or np.any(indices >= self.n_particles):
+            raise IndexError("Reception targets must be valid particle indices")
+        indices = np.ascontiguousarray(indices, dtype=np.int32)
+        out = self._apply_gpu(x, targets=indices, accum_dtype=accum_dtype)
+        return out if is_cupy_array(x) else asnumpy(out)
 
     def apply(self, x: np.ndarray | object) -> np.ndarray | object:
         out = self._apply_gpu(x)

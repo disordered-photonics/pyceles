@@ -14,14 +14,16 @@ from pyceles.core.particles import (
     Spheroid,
     spheres_from_arrays,
 )
+from pyceles.core.svwf import (
+    _cupy_svwf_pair_batch_size,
+    _svwf_cupy_workspace_bytes_per_pair,
+    _svwf_pair_batch_size_for_workspace,
+    regular_radial_factors,
+)
 from pyceles.postprocessing.nearfield.classification import InternalPointClassification
 from pyceles.postprocessing.nearfield.internal import (
-    _cupy_internal_pair_batch_size,
-    _internal_cupy_workspace_bytes_per_pair,
-    _internal_pair_batch_size_for_workspace,
     _layered_radial_factors,
     _radial_internal_point_pairs,
-    _regular_radial_factors,
     compute_internal_field,
 )
 
@@ -118,7 +120,7 @@ def test_layered_outgoing_factors_retain_strongly_attenuated_hankel_values():
 @pytest.mark.parametrize(("l", "z"), [(1, 1e-46 + 2e-47j), (2, 1e-24 + 2e-25j)])
 def test_regular_factors_are_normalized_before_single_precision_underflow(l, z):
     argument = np.array([z])
-    jl, jl_over_z, derivative_over_z = _regular_radial_factors(l, argument, dtype=np.complex64)
+    jl, jl_over_z, derivative_over_z = regular_radial_factors(l, argument, dtype=np.complex64)
     # j_l ~ z**l/(2*l+1)!! can underflow while its N-wave factors remain finite.
     leading = argument ** (l - 1) / (3 if l == 1 else 15)
     np.testing.assert_array_equal(jl, 0)
@@ -127,13 +129,11 @@ def test_regular_factors_are_normalized_before_single_precision_underflow(l, z):
 
 
 def test_internal_cupy_pair_workspace_planner_scales_with_order_and_dtype() -> None:
-    low_order = _internal_cupy_workspace_bytes_per_pair(
-        lmax=2, compute_dtype=np.dtype(np.complex128)
-    )
-    high_order_64 = _internal_cupy_workspace_bytes_per_pair(
+    low_order = _svwf_cupy_workspace_bytes_per_pair(lmax=2, compute_dtype=np.dtype(np.complex128))
+    high_order_64 = _svwf_cupy_workspace_bytes_per_pair(
         lmax=20, compute_dtype=np.dtype(np.complex64)
     )
-    high_order_128 = _internal_cupy_workspace_bytes_per_pair(
+    high_order_128 = _svwf_cupy_workspace_bytes_per_pair(
         lmax=20, compute_dtype=np.dtype(np.complex128)
     )
 
@@ -143,7 +143,7 @@ def test_internal_cupy_pair_workspace_planner_scales_with_order_and_dtype() -> N
 
     workspace = 3 * 1024**3
     assert (
-        _internal_pair_batch_size_for_workspace(
+        _svwf_pair_batch_size_for_workspace(
             total_pairs=100_000,
             lmax=2,
             compute_dtype=np.dtype(np.complex128),
@@ -151,7 +151,7 @@ def test_internal_cupy_pair_workspace_planner_scales_with_order_and_dtype() -> N
         )
         == 65_536
     )
-    high_order_batch = _internal_pair_batch_size_for_workspace(
+    high_order_batch = _svwf_pair_batch_size_for_workspace(
         total_pairs=100_000,
         lmax=20,
         compute_dtype=np.dtype(np.complex128),
@@ -163,7 +163,6 @@ def test_internal_cupy_pair_workspace_planner_scales_with_order_and_dtype() -> N
 def test_internal_cupy_pair_batch_uses_current_guarded_headroom(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import pyceles.postprocessing.nearfield.internal as internal_module
 
     snapshot = SimpleNamespace(
         raw_free_bytes=6 * 1024**3,
@@ -176,16 +175,18 @@ def test_internal_cupy_pair_batch_uses_current_guarded_headroom(
         apply_pool_limit_calls.append(bool(apply_pool_limit))
         return snapshot
 
-    monkeypatch.setattr(internal_module, "cupy_allocator_snapshot", fake_snapshot)
+    import pyceles.core.svwf as svwf_module
+
+    monkeypatch.setattr(svwf_module, "cupy_allocator_snapshot", fake_snapshot)
     expected_workspace = int(0.5 * snapshot.active_headroom_bytes)
-    expected = _internal_pair_batch_size_for_workspace(
+    expected = _svwf_pair_batch_size_for_workspace(
         total_pairs=100_000,
         lmax=20,
         compute_dtype=np.dtype(np.complex128),
         workspace_bytes=expected_workspace,
     )
 
-    actual = _cupy_internal_pair_batch_size(
+    actual = _cupy_svwf_pair_batch_size(
         cupy=object(),
         total_pairs=100_000,
         lmax=20,
@@ -203,7 +204,7 @@ def test_numpy_complex64_internal_modes_stay_in_compute_dtype(
     """Prevent float64 geometry from silently promoting NumPy mode algebra."""
     import pyceles.postprocessing.nearfield.internal as internal_module
 
-    original = internal_module.build_internal_mode_tensors
+    original = internal_module.build_mode_tensors
     observed: list[tuple[np.dtype, np.dtype]] = []
 
     def checked(*args: Any, **kwargs: Any) -> Any:
@@ -211,7 +212,7 @@ def test_numpy_complex64_internal_modes_stay_in_compute_dtype(
         observed.append((m_modes.dtype, n_modes_batch.dtype))
         return m_modes, n_modes_batch
 
-    monkeypatch.setattr(internal_module, "build_internal_mode_tensors", checked)
+    monkeypatch.setattr(internal_module, "build_mode_tensors", checked)
     particles = ParticleCollection.from_particles(
         [
             Sphere(position=(0.0, 0.0, 0.0), radius=100.0, refractive_index=1.5 + 0.02j),

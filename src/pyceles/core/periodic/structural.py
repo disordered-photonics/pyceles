@@ -2,15 +2,78 @@
 
 from __future__ import annotations
 
+from functools import cache
+
 import numpy as np
 import numpy.typing as npt
 
+from pyceles._arrays import expose_read_only_view
 from pyceles.core.indexing import iter_modes, n_modes
 from pyceles.core.lattice import RectangularLattice2D
 from pyceles.core.radial import passive_wavenumber, sph_hankel1
 from pyceles.core.spherical import legendre_normalized_trigon_scalar
+from pyceles.core.translation import _mode_indices_within_larger_lmax, translation_ab5_table
 
 Array = np.ndarray
+
+
+def _nonzero_structural_entries(
+    ab5: Array, m_out: Array, m_in: Array
+) -> tuple[Array, Array, Array, Array]:
+    """Select valid angular couplings in output/input/degree order.
+
+    Both square coupling and rectangular reception use the same channel rule.
+    No tensor with an additional full azimuthal axis is materialized.
+    """
+    rows, cols, degrees = np.nonzero(ab5)
+    orders = m_in[cols] - m_out[rows]
+    valid = np.abs(orders) <= degrees
+    rows, cols, degrees, orders = (v[valid] for v in (rows, cols, degrees, orders))
+    return rows, cols, degrees * degrees + degrees + orders, ab5[rows, cols, degrees]
+
+
+@cache
+def rectangular_projection_data(
+    lmax_out: int, lmax_in: int
+) -> tuple[Array, Array, Array, Array, Array]:
+    """Return channel indices and CSR data for outgoing source projection.
+
+    The sparse matrix has shape ``(channels * n_modes(lmax_out), n_modes(lmax_in))``.
+    Multiplying it by one source vector, then reshaping to ``(channels, output_modes)``,
+    leaves only a dense structural-sum contraction per receiving point. This avoids
+    the mostly zero O(L**6) output/input/channel tensor at equal multipole orders.
+    The underlying degree-only ab5 table is still the existing canonical provider.
+    """
+    if min(lmax_out, lmax_in) < 1:
+        raise ValueError("Translation orders must be positive")
+    order = lmax_out + lmax_in
+    full = max(lmax_out, lmax_in)
+    rows = np.asarray(_mode_indices_within_larger_lmax(lmax_out, full))
+    cols = np.asarray(_mode_indices_within_larger_lmax(lmax_in, full))
+    ab5 = translation_ab5_table(full, dtype=np.complex128)[np.ix_(rows, cols, np.arange(order + 1))]
+    degrees = np.repeat(np.arange(order + 1, dtype=np.int32), 2 * np.arange(order + 1) + 1)
+    orders = np.concatenate([np.arange(-p, p + 1, dtype=np.int32) for p in range(order + 1)])
+    m_out = np.asarray([m for _, _, m, _ in iter_modes(lmax_out)])
+    m_in = np.asarray([m for _, _, m, _ in iter_modes(lmax_in)])
+    dst, src, channels, values = _nonzero_structural_entries(ab5, m_out, m_in)
+    projection_rows = channels * len(m_out) + dst
+    permutation = np.argsort(projection_rows, kind="stable")
+    counts = np.bincount(projection_rows, minlength=len(degrees) * len(m_out))
+    indptr = np.empty(len(counts) + 1, dtype=np.int64)
+    indptr[0] = 0
+    np.cumsum(counts, out=indptr[1:])
+    return (
+        expose_read_only_view(degrees),
+        expose_read_only_view(orders + order),
+        expose_read_only_view(indptr),
+        expose_read_only_view(src[permutation].astype(np.int32)),
+        expose_read_only_view(values[permutation]),
+    )
+
+
+def clear_caches() -> None:
+    """Release process-global rectangular translation contractions."""
+    rectangular_projection_data.cache_clear()
 
 
 def free_space_structural_sums(
@@ -139,27 +202,16 @@ def sparse_translation_contraction(
     out_dtype = (
         np.dtype(dtype) if dtype is not None else np.result_type(ab5_arr.dtype, np.complex64)
     )
-    modes = tuple(iter_modes(lmax_i))
-    row_ptr = np.zeros((nm + 1,), dtype=np.int64)
-    input_modes: list[int] = []
-    structural_channels: list[int] = []
-    values: list[complex] = []
-    for _tau_dst, _l_dst, m_dst, dst_idx in modes:
-        for _tau_src, _l_src, m_src, src_idx in modes:
-            m_delta = int(m_src - m_dst)
-            for degree in range(abs(m_delta), order + 1):
-                value = ab5_arr[dst_idx, src_idx, degree]
-                if value == 0:
-                    continue
-                input_modes.append(int(src_idx))
-                structural_channels.append(degree * degree + degree + m_delta)
-                values.append(complex(value))
-        row_ptr[int(dst_idx) + 1] = len(values)
+    modes = np.asarray([m for _, _, m, _ in iter_modes(lmax_i)])
+    rows, input_modes, channels, values = _nonzero_structural_entries(ab5_arr, modes, modes)
+    row_ptr = np.empty(nm + 1, dtype=np.int64)
+    row_ptr[0] = 0
+    np.cumsum(np.bincount(rows, minlength=nm), out=row_ptr[1:])
     return (
         row_ptr,
-        np.asarray(input_modes, dtype=np.int32),
-        np.asarray(structural_channels, dtype=np.int32),
-        np.asarray(values, dtype=out_dtype),
+        input_modes.astype(np.int32),
+        channels.astype(np.int32),
+        values.astype(out_dtype),
     )
 
 

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from pyceles.core.lattice import nearest_image_points
 from pyceles.core.particles import (
     LayeredSphere,
     Particle,
@@ -195,16 +196,12 @@ def _wrap_points_to_nearest_rectangular_image(
     lattice_ay: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Wrap points to the nearest rectangular-lattice image of one center."""
-    pts = np.asarray(points, dtype=float).reshape(-1, 3)
-    ctr = np.asarray(center, dtype=float).reshape(3)
-    dx = pts[:, 0] - float(ctr[0])
-    dy = pts[:, 1] - float(ctr[1])
-    nx = np.rint(dx / float(lattice_ax)).astype(np.int64, copy=False)
-    ny = np.rint(dy / float(lattice_ay)).astype(np.int64, copy=False)
-    wrapped = np.asarray(pts, dtype=float).copy()
-    wrapped[:, 0] -= nx.astype(float) * float(lattice_ax)
-    wrapped[:, 1] -= ny.astype(float) * float(lattice_ay)
-    return wrapped, nx, ny
+    wrapped, shifts = nearest_image_points(points, center, ax=lattice_ax, ay=lattice_ay)
+    return (
+        wrapped,
+        np.rint(shifts[:, 0] / lattice_ax).astype(np.int64),
+        np.rint(shifts[:, 1] / lattice_ay).astype(np.int64),
+    )
 
 
 def _classify_periodic_internal_points_reference(

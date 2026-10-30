@@ -2,14 +2,11 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import Any
 
 import numpy as np
 import numpy.typing as npt
-from scipy.special import spherical_jn
 from tqdm.auto import tqdm
 
-from pyceles._cupy_memory import cupy_allocator_snapshot
 from pyceles._optional import asnumpy, import_cupy
 from pyceles.core.indexing import n_modes
 from pyceles.core.particles import (
@@ -24,6 +21,15 @@ from pyceles.core.particles import (
 )
 from pyceles.core.radial import dx_xz_hankel1, passive_wavenumber, sph_hankel1
 from pyceles.core.spherical import spherical_functions_trigon
+from pyceles.core.svwf import (
+    _SVWF_PAIR_BATCH_SIZE,
+    _cupy_svwf_pair_batch_size,
+    build_mode_tensors,
+    contract_modes,
+    mode_indices_by_l,
+    regular_radial_factors,
+    spherical_frame,
+)
 from pyceles.core.tmatrix import (
     _spheroid_internal_block,
     layered_internal_ab_ratios,
@@ -31,27 +37,6 @@ from pyceles.core.tmatrix import (
 )
 
 from .classification import InternalPointClassification
-from .common import build_internal_mode_tensors, contract_modes, mode_indices_by_l
-
-
-def _regular_radial_factors(
-    l: int, kr: np.ndarray, *, dtype: npt.DTypeLike
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Sample j_l, j_l/z and (z*j_l)'/z for l >= 1, including the origin.
-
-    Native SciPy evaluation and normalization precede the field-compute cast.
-    No nonzero radial argument is replaced by a length-dependent floor.
-    """
-    argument = np.asarray(kr, dtype=np.complex128)
-    jl = np.asarray(spherical_jn(l, argument))
-    jl_over_z = np.divide(
-        jl,
-        argument,
-        out=np.full_like(jl, 1 / 3 if l == 1 else 0),
-        where=argument != 0,
-    )
-    derivative_over_z = jl_over_z + spherical_jn(l, argument, derivative=True)
-    return jl.astype(dtype), jl_over_z.astype(dtype), np.asarray(derivative_over_z, dtype=dtype)
 
 
 def _layered_radial_factors(
@@ -65,7 +50,7 @@ def _layered_radial_factors(
     dtype: npt.DTypeLike,
 ) -> tuple[tuple[np.ndarray, ...], tuple[np.ndarray, ...]]:
     """Combine regular and outgoing factors for both material polarizations."""
-    regular = _regular_radial_factors(l, kr, dtype=np.complex128)
+    regular = regular_radial_factors(l, kr, dtype=np.complex128)
     outgoing = np.zeros((3, kr.size), dtype=np.complex128)
     active = (b_m != 0) | (b_n != 0)
     # The regular core has no outgoing contribution, including at its centre.
@@ -83,28 +68,6 @@ def _layered_radial_factors(
             for j, h in zip(regular, outgoing, strict=True)
         ),
     )
-
-
-def _internal_spherical_frame(
-    displacements: np.ndarray,
-    radii: np.ndarray,
-    *,
-    xp: Any,
-    dtype: np.dtype,
-) -> tuple[Any, ...]:
-    """Use the z-axis at the origin; regular radial limits remove that choice."""
-    rvec = xp.asarray(displacements, dtype=dtype)
-    r = xp.asarray(radii, dtype=dtype)
-    nonzero = r != 0
-    safe_r = xp.where(nonzero, r, 1.0)
-    ct = xp.where(nonzero, rvec[:, 2] / safe_r, 1.0)
-    st = xp.hypot(rvec[:, 0], rvec[:, 1]) / safe_r
-    phi = xp.where(nonzero, xp.arctan2(rvec[:, 1], rvec[:, 0]), 0.0)
-    ca, sa = xp.cos(phi), xp.sin(phi)
-    e_r = xp.stack((st * ca, st * sa, ct), axis=1)
-    e_theta = xp.stack((ct * ca, ct * sa, -st), axis=1)
-    e_phi = xp.stack((-sa, ca, xp.zeros_like(phi)), axis=1)
-    return ct, st, phi, e_r, e_theta, e_phi
 
 
 def compute_internal_field(
@@ -211,87 +174,6 @@ def _compute_internal_field_homogeneous_spheres(
         show_progress=show_progress,
         compute_dtype=compute_dtype,
         accum_dtype=accum_dtype,
-    )
-
-
-_INTERNAL_PAIR_BATCH_SIZE = 65_536
-_INTERNAL_CUPY_WORKSPACE_HEADROOM_FRACTION = 0.5
-
-
-def _internal_cupy_workspace_bytes_per_pair(
-    *,
-    lmax: int,
-    compute_dtype: np.dtype,
-) -> int:
-    """Conservatively estimate CuPy allocator footprint per radial pair."""
-    lmax_i = max(1, int(lmax))
-    complex_dtype = np.dtype(compute_dtype)
-    real_itemsize = np.dtype(
-        np.float32 if complex_dtype == np.dtype(np.complex64) else np.float64
-    ).itemsize
-    complex_itemsize = complex_dtype.itemsize
-
-    # pi/tau/P grids plus geometry/angular scratch.
-    angular_real_values = 4 * (lmax_i + 1) ** 2
-    # Cover the layered path (two radial bases), mode-tensor temporaries,
-    # einsum inputs/outputs, and CuPy pool retention across degrees. This is
-    # intentionally a safe allocator-footprint estimate, not a live tensor
-    # byte count.
-    mode_complex_values = 28 * lmax_i * (lmax_i + 2)
-    fixed_real_values = 24
-    fixed_complex_values = 24
-    return int(
-        (angular_real_values + fixed_real_values) * real_itemsize
-        + (mode_complex_values + fixed_complex_values) * complex_itemsize
-    )
-
-
-def _internal_pair_batch_size_for_workspace(
-    *,
-    total_pairs: int,
-    lmax: int,
-    compute_dtype: np.dtype,
-    workspace_bytes: int,
-) -> int:
-    """Resolve a nonzero radial-pair batch within one workspace budget."""
-    total = max(1, int(total_pairs))
-    fast_cap = min(total, _INTERNAL_PAIR_BATCH_SIZE)
-    bytes_per_pair = _internal_cupy_workspace_bytes_per_pair(
-        lmax=int(lmax), compute_dtype=np.dtype(compute_dtype)
-    )
-    memory_cap = max(1, int(workspace_bytes) // max(1, int(bytes_per_pair)))
-    return max(1, min(fast_cap, memory_cap))
-
-
-def _cupy_internal_pair_batch_size(
-    *,
-    cupy: object,
-    total_pairs: int,
-    lmax: int,
-    compute_dtype: np.dtype,
-) -> int:
-    """Choose a scalable CuPy pair batch from current guarded headroom.
-
-    Keep half of usable device headroom outside this postprocessing workspace
-    for the solver state, allocator fragmentation, and other temporaries. The
-    fixed 65,536-pair path remains the maximum and therefore stays intact
-    whenever the estimated workspace fits.
-    """
-    snapshot = cupy_allocator_snapshot(cupy, apply_pool_limit=False)
-    reusable_or_fresh = int(snapshot.raw_free_bytes) + int(snapshot.pool_free_bytes)
-    usable_headroom = max(
-        1,
-        min(int(snapshot.active_headroom_bytes), int(reusable_or_fresh)),
-    )
-    workspace_bytes = max(
-        1,
-        int(float(usable_headroom) * _INTERNAL_CUPY_WORKSPACE_HEADROOM_FRACTION),
-    )
-    return _internal_pair_batch_size_for_workspace(
-        total_pairs=int(total_pairs),
-        lmax=int(lmax),
-        compute_dtype=np.dtype(compute_dtype),
-        workspace_bytes=int(workspace_bytes),
     )
 
 
@@ -476,8 +358,8 @@ def _compute_internal_field_homogeneous_spheres_numpy_batched(
         else None
     )
 
-    for start in range(0, pair_points.size, _INTERNAL_PAIR_BATCH_SIZE):
-        stop = min(pair_points.size, start + _INTERNAL_PAIR_BATCH_SIZE)
+    for start in range(0, pair_points.size, _SVWF_PAIR_BATCH_SIZE):
+        stop = min(pair_points.size, start + _SVWF_PAIR_BATCH_SIZE)
         point_batch = pair_points[start:stop]
         sphere_batch = pair_spheres[start:stop]
         group_batch = pair_groups[start:stop]
@@ -486,7 +368,7 @@ def _compute_internal_field_homogeneous_spheres_numpy_batched(
         r = np.linalg.norm(rvec_full, axis=1)
         k_group = k * (group_refractive_indices[group_batch] / n_medium)
         kr = k_group * r
-        ct, st, phi, e_r, e_theta, e_phi = _internal_spherical_frame(
+        ct, st, phi, e_r, e_theta, e_phi = spherical_frame(
             rvec_full,
             r,
             xp=np,
@@ -498,9 +380,9 @@ def _compute_internal_field_homogeneous_spheres_numpy_batched(
         h_factor = np.asarray(-1j * group_refractive_indices[group_batch], dtype=compute_dtype)
 
         for l in range(1, lmax + 1):
-            z_l, z_over_kr, dxxz_over_kr = _regular_radial_factors(l, kr, dtype=compute_dtype)
+            z_l, z_over_kr, dxxz_over_kr = regular_radial_factors(l, kr, dtype=compute_dtype)
             m_vals, abs_m, n1_idx, n2_idx = mode_by_l[l - 1]
-            m_all, n_all = build_internal_mode_tensors(
+            m_all, n_all = build_mode_tensors(
                 l=l,
                 m_vals=m_vals,
                 abs_m=abs_m,
@@ -599,7 +481,7 @@ def _compute_internal_field_homogeneous_spheres_cupy(
     h = np.zeros_like(e)
     has_overlap = unique_pair_points.size != pair_points.size
     mode_by_l = mode_indices_by_l(lmax)
-    pair_batch_size = _cupy_internal_pair_batch_size(
+    pair_batch_size = _cupy_svwf_pair_batch_size(
         cupy=cupy,
         total_pairs=int(pair_points.size),
         lmax=lmax,
@@ -621,7 +503,7 @@ def _compute_internal_field_homogeneous_spheres_cupy(
         r_host = np.linalg.norm(rvec_full, axis=1)
         k_group = k * (group_refractive_indices[group_batch] / n_medium)
         kr_host = k_group * r_host
-        ct, st, phi, e_r, e_theta, e_phi = _internal_spherical_frame(
+        ct, st, phi, e_r, e_theta, e_phi = spherical_frame(
             rvec_full,
             r_host,
             xp=cupy,
@@ -637,10 +519,10 @@ def _compute_internal_field_homogeneous_spheres_cupy(
         for l in range(1, lmax + 1):
             z_l, z_over_kr, dxxz_over_kr = (
                 cupy.asarray(value)
-                for value in _regular_radial_factors(l, kr_host, dtype=compute_dtype)
+                for value in regular_radial_factors(l, kr_host, dtype=compute_dtype)
             )
             m_vals, abs_m, n1_idx, n2_idx = mode_by_l[l - 1]
-            m_all, n_all = build_internal_mode_tensors(
+            m_all, n_all = build_mode_tensors(
                 l=l,
                 m_vals=m_vals,
                 abs_m=abs_m,
@@ -848,8 +730,8 @@ def _compute_internal_field_layered_spheres_numpy_batched(
         else None
     )
 
-    for start in range(0, pair_points.size, _INTERNAL_PAIR_BATCH_SIZE):
-        stop = min(pair_points.size, start + _INTERNAL_PAIR_BATCH_SIZE)
+    for start in range(0, pair_points.size, _SVWF_PAIR_BATCH_SIZE):
+        stop = min(pair_points.size, start + _SVWF_PAIR_BATCH_SIZE)
         point_batch = pair_points[start:stop]
         global_particle_batch = global_particles[start:stop]
         archetype_batch = pair_archetypes[start:stop]
@@ -858,7 +740,7 @@ def _compute_internal_field_layered_spheres_numpy_batched(
         flat_layer_ids = _layered_flat_layer_ids(archetype_batch, r, radial_plan)
         n_layer = radial_plan.refractive_indices[flat_layer_ids]
         kr = k * (n_layer / n_medium) * r
-        ct, st, phi, e_r, e_theta, e_phi = _internal_spherical_frame(
+        ct, st, phi, e_r, e_theta, e_phi = spherical_frame(
             rvec_full,
             r,
             xp=np,
@@ -887,7 +769,7 @@ def _compute_internal_field_layered_spheres_numpy_batched(
                 )
             )
             m_vals, abs_m, n1_idx, n2_idx = mode_by_l[l - 1]
-            m_m, n_m = build_internal_mode_tensors(
+            m_m, n_m = build_mode_tensors(
                 l=l,
                 m_vals=m_vals,
                 abs_m=abs_m,
@@ -903,7 +785,7 @@ def _compute_internal_field_layered_spheres_numpy_batched(
                 dxxz_over_kr=dxxz_m_over_kr,
                 compute_dtype=compute_dtype,
             )
-            m_n, n_n = build_internal_mode_tensors(
+            m_n, n_n = build_mode_tensors(
                 l=l,
                 m_vals=m_vals,
                 abs_m=abs_m,
@@ -996,7 +878,7 @@ def _compute_internal_field_layered_spheres_cupy(
     h = np.zeros_like(e)
     has_overlap = unique_pair_points.size != pair_points.size
     mode_by_l = mode_indices_by_l(lmax)
-    pair_batch_size = _cupy_internal_pair_batch_size(
+    pair_batch_size = _cupy_svwf_pair_batch_size(
         cupy=cupy,
         total_pairs=int(pair_points.size),
         lmax=lmax,
@@ -1018,7 +900,7 @@ def _compute_internal_field_layered_spheres_cupy(
         flat_layer_ids = _layered_flat_layer_ids(archetype_batch, r_host, radial_plan)
         n_layer_host = radial_plan.refractive_indices[flat_layer_ids]
         kr_host = k * (n_layer_host / n_medium) * r_host
-        ct, st, phi, e_r, e_theta, e_phi = _internal_spherical_frame(
+        ct, st, phi, e_r, e_theta, e_phi = spherical_frame(
             rvec_full,
             r_host,
             xp=cupy,
@@ -1047,7 +929,7 @@ def _compute_internal_field_layered_spheres_cupy(
                 dtype=compute_dtype,
             )
             m_vals, abs_m, n1_idx, n2_idx = mode_by_l[l - 1]
-            m_m, n_m = build_internal_mode_tensors(
+            m_m, n_m = build_mode_tensors(
                 l=l,
                 m_vals=m_vals,
                 abs_m=abs_m,
@@ -1063,7 +945,7 @@ def _compute_internal_field_layered_spheres_cupy(
                 dxxz_over_kr=cupy.asarray(m_radial[2]),
                 compute_dtype=compute_dtype,
             )
-            m_n, n_n = build_internal_mode_tensors(
+            m_n, n_n = build_mode_tensors(
                 l=l,
                 m_vals=m_vals,
                 abs_m=abs_m,
@@ -1295,7 +1177,7 @@ def _compute_internal_field_particles(
             center = part.positions[j_sphere]
             rvec_full = pts[idx] - center[None, :]
             r = np.linalg.norm(rvec_full, axis=1)
-            ct, st, phi, e_r, e_theta, e_phi = _internal_spherical_frame(
+            ct, st, phi, e_r, e_theta, e_phi = spherical_frame(
                 rvec_full,
                 r,
                 xp=np,
@@ -1312,10 +1194,10 @@ def _compute_internal_field_particles(
                 m_vals, abs_m, n1_idx, n2_idx = mode_by_l[l - 1]
                 a_int = c_internal[n1_idx].astype(compute_dtype, copy=False)
                 b_int = c_internal[n2_idx].astype(compute_dtype, copy=False)
-                jl, jl_over_kr, dxxj_over_kr = _regular_radial_factors(
+                jl, jl_over_kr, dxxj_over_kr = regular_radial_factors(
                     l, kr_full, dtype=compute_dtype
                 )
-                m_reg, n_reg = build_internal_mode_tensors(
+                m_reg, n_reg = build_mode_tensors(
                     l=l,
                     m_vals=m_vals,
                     abs_m=abs_m,

@@ -19,8 +19,7 @@ from pyceles.core.radial import (
     sph_hankel1,
 )
 from pyceles.core.spherical import spherical_functions_trigon
-
-from .common import contract_modes, mode_indices_by_l
+from pyceles.core.svwf import contract_modes, mode_indices_by_l
 
 
 @cache

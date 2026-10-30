@@ -7,7 +7,8 @@ used to inspect those contributions at arbitrary observation points.
 
 from __future__ import annotations
 
-from .common import clear_caches
+from pyceles.core.svwf import clear_caches
+
 from .components import (
     ElectricFieldComponents,
     NearFieldComponents,

@@ -12,8 +12,9 @@ copies of potentially GiB-scale payloads.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
+from typing import TYPE_CHECKING
 
 import numpy as np
 import numpy.typing as npt
@@ -32,6 +33,9 @@ from pyceles.postprocessing.farfield import (
 )
 
 from .config import SimulationConfig
+
+if TYPE_CHECKING:
+    from pyceles.core.sources.embedded import PreparedDipoleSource
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,6 +197,10 @@ class ChannelResult:
     periodic: PeriodicFarFieldPayload | None
     compute_dtype: str
     accum_dtype: str
+    # Optional execution state; the source descriptor remains the physical input.
+    _dipole_source: PreparedDipoleSource | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         particles = ParticleCollection.from_particles(self.particles)
@@ -597,7 +605,7 @@ def simulation_result_from_channel(
     solver_result: LinearSolveResult,
 ) -> SimulationResult:
     """Attach a matching single-RHS solver report to one solved channel."""
-    return SimulationResult(
+    result = SimulationResult(
         config=channel.config,
         source=channel.source,
         k=channel.k,
@@ -616,6 +624,8 @@ def simulation_result_from_channel(
         accum_dtype=channel.accum_dtype,
         solver_result=solver_result,
     )
+    object.__setattr__(result, "_dipole_source", channel._dipole_source)
+    return result
 
 
 __all__ = [

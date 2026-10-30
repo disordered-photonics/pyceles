@@ -8,9 +8,9 @@ import pytest
 from pyceles._cupy_memory import cupy_pool_limit_bytes
 from pyceles.core.indexing import n_modes
 from pyceles.core.particles import LayeredSphere, ParticleCollection, Sphere, spheres_from_arrays
+from pyceles.core.svwf import _cupy_svwf_pair_batch_size
 from pyceles.postprocessing.nearfield.classification import classify_internal_points
 from pyceles.postprocessing.nearfield.internal import (
-    _cupy_internal_pair_batch_size,
     compute_internal_field,
 )
 from pyceles.postprocessing.nearfield.scattered import (
@@ -174,7 +174,7 @@ def test_cupy_internal_field_parity_crosses_real_batch_boundaries(
         del kwargs
         return 2
 
-    monkeypatch.setattr(internal_module, "_cupy_internal_pair_batch_size", tiny_batch)
+    monkeypatch.setattr(internal_module, "_cupy_svwf_pair_batch_size", tiny_batch)
     centers = np.array(
         [[0.0, 0.0, 0.0], [320.0, 0.0, 0.0], [0.0, 320.0, 0.0]],
         dtype=float,
@@ -215,7 +215,7 @@ def test_cupy_internal_workspace_planner_does_not_change_pool_limit(
     pool = cupy.get_default_memory_pool()
     before = cupy_pool_limit_bytes(pool)
 
-    batch = _cupy_internal_pair_batch_size(
+    batch = _cupy_svwf_pair_batch_size(
         cupy=cupy,
         total_pairs=100_000,
         lmax=20,

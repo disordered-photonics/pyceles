@@ -5,6 +5,52 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+import numpy.typing as npt
+
+
+def real_transverse_wavevector(value: npt.ArrayLike) -> np.ndarray:
+    """Validate a real, finite Bloch vector and return owned xy components."""
+    raw = np.asarray(value)
+    if np.iscomplexobj(raw) and np.any(raw.imag != 0):
+        raise ValueError("k_parallel must be real")
+    q = np.asarray(raw.real, dtype=float).reshape(-1)
+    if q.size != 2 or not np.all(np.isfinite(q)):
+        raise ValueError("k_parallel must contain two finite real components")
+    return q.copy()
+
+
+def canonical_cell_points(
+    points: np.ndarray, *, ax: float, ay: float
+) -> tuple[np.ndarray, np.ndarray]:
+    """Reduce xy representatives to [0, ax) x [0, ay), returning their shifts."""
+    points = np.asarray(points, dtype=float).reshape(-1, 3)
+    shifts = np.zeros_like(points)
+    periods = np.asarray([ax, ay], dtype=float)
+    shifts[:, :2] = np.floor(points[:, :2] / periods) * periods
+    return points - shifts, shifts
+
+
+def nearest_image_points(
+    points: np.ndarray, center: np.ndarray, *, ax: float, ay: float
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return points beside one rectangular-lattice centre and their cell shifts."""
+    points = np.asarray(points, dtype=float).reshape(-1, 3)
+    shifts = np.zeros_like(points)
+    periods = np.asarray([ax, ay], dtype=float)
+    shifts[:, :2] = np.rint((points[:, :2] - np.asarray(center)[:2]) / periods) * periods
+    return points - shifts, shifts
+
+
+def periodic_image_mask(
+    points: np.ndarray, center: np.ndarray, *, ax: float, ay: float
+) -> np.ndarray:
+    """Identify exact image coordinates without a displacement tolerance.
+
+    Subtracting a large cell shift need not recover a fractional base coordinate
+    exactly. Compare with the constructed image instead of that subtraction.
+    """
+    _, shifts = nearest_image_points(points, center, ax=ax, ay=ay)
+    return np.all(np.asarray(points).reshape(-1, 3) == np.asarray(center) + shifts, axis=1)
 
 
 @dataclass(frozen=True)

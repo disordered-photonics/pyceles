@@ -65,8 +65,10 @@ from .particles import (
     spheroids_from_arrays,
 )
 from .periodic import PeriodicOptions, PeriodicSpec, plane_wave_k_parallel
+from .periodic.structural import clear_caches as _clear_periodic_structural_caches
 from .plane_wave_spectrum import PlaneWaveSpectrum
 from .spherical import clear_caches as _clear_spherical_caches
+from .svwf import clear_caches as _clear_svwf_caches
 from .svwf_rotation import clear_caches as _clear_svwf_rotation_caches
 from .svwf_rotation import rotate_svwf_tmatrix_block, svwf_rotation_matrix
 from .tmatrix import (
@@ -96,7 +98,9 @@ def clear_caches() -> None:
     """
 
     _clear_translation_caches()
+    _clear_periodic_structural_caches()
     _clear_spherical_caches()
+    _clear_svwf_caches()
     _clear_svwf_rotation_caches()
     _clear_wigner_caches()
 
