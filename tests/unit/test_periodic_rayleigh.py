@@ -21,6 +21,7 @@ from pyceles.core.operators.coupling_periodic_cupy import (
 )
 from pyceles.core.periodic import PeriodicOptions, PeriodicSpec
 from pyceles.core.periodic import rayleigh as rayleigh_module
+from pyceles.core.periodic import reception as periodic_reception_module
 from pyceles.core.periodic.ewald import ewald_structural_sums_2d_batch, periodic_ewald_block
 from pyceles.core.periodic.rayleigh import (
     apply_rayleigh_far_numpy,
@@ -35,11 +36,8 @@ from pyceles.core.periodic.rayleigh import (
     resolve_rayleigh_mode_chunk_size,
     resolve_rayleigh_z_cut,
 )
+from pyceles.core.periodic.reception import apply_periodic_reception
 from pyceles.core.translation import translation_ab5_table
-from pyceles.postprocessing.nearfield import periodic_interior as periodic_interior_module
-from pyceles.postprocessing.nearfield.periodic_interior import (
-    _periodic_local_regular_l1_coeffs,
-)
 
 
 def test_shifted_rayleigh_structural_batch_matches_ewald_reference() -> None:
@@ -585,15 +583,15 @@ def test_hybrid_interior_local_l1_matches_exact_ewald() -> None:
     kwargs = dict(
         points=points,
         positions=positions,
-        coeffs=coeffs,
-        lmax=lmax,
+        coefficients=coeffs,
+        lmax_in=lmax,
         k=k,
         k_parallel=k_parallel,
         circumscribing_radii=np.full(positions.shape[0], 40.0),
     )
 
-    expected = _periodic_local_regular_l1_coeffs(periodic=exact, **cast(Any, kwargs))
-    actual = _periodic_local_regular_l1_coeffs(periodic=hybrid, **cast(Any, kwargs))
+    expected = apply_periodic_reception(periodic=exact, **cast(Any, kwargs))
+    actual = apply_periodic_reception(periodic=hybrid, **cast(Any, kwargs))
 
     np.testing.assert_allclose(actual, expected, rtol=2e-11, atol=2e-11)
 
@@ -614,18 +612,18 @@ def test_rayleigh_nearfield_eta_preflight_uses_resolved_exact_band(monkeypatch) 
         ),
     )
     seen: list[float | None] = []
-    original = periodic_interior_module.resolve_ewald_eta
+    original = periodic_reception_module.resolve_ewald_eta
 
     def capture_eta(**kwargs: Any) -> float:
         seen.append(kwargs.get("max_vertical_offset"))
         return float(original(**kwargs))
 
-    monkeypatch.setattr(periodic_interior_module, "resolve_ewald_eta", capture_eta)
-    _periodic_local_regular_l1_coeffs(
+    monkeypatch.setattr(periodic_reception_module, "resolve_ewald_eta", capture_eta)
+    apply_periodic_reception(
         points=points,
         positions=positions,
-        coeffs=coeffs,
-        lmax=1,
+        coefficients=coeffs,
+        lmax_in=1,
         k=k,
         periodic=periodic,
         k_parallel=np.zeros(2),

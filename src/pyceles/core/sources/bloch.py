@@ -6,6 +6,7 @@ from typing import Literal
 import numpy as np
 import numpy.typing as npt
 
+from ..lattice import real_transverse_wavevector
 from ..projection import incident_coeffs_planewave
 from .base import PolarizationInput, _canonicalize_polarization_input, polarization_to_jones
 from .common import _float_triplet_tuple
@@ -45,19 +46,7 @@ class BlochPlaneWave:
         if not np.isfinite(amplitude):
             raise ValueError("amplitude must be finite")
 
-        q_raw = np.asarray(self.k_parallel)
-        if np.iscomplexobj(q_raw):
-            if np.any(q_raw.imag != 0.0):
-                raise ValueError("k_parallel must be real")
-            q_raw = q_raw.real
-        q = np.asarray(q_raw, dtype=float).reshape(-1)
-        if q.size != 2:
-            raise ValueError(
-                "k_parallel must contain exactly two values. "
-                f"Got shape {np.asarray(self.k_parallel).shape}."
-            )
-        if not np.all(np.isfinite(q)):
-            raise ValueError("k_parallel must contain finite values")
+        q = real_transverse_wavevector(self.k_parallel)
 
         direction = str(self.direction).lower()
         if direction not in {"up", "down"}:

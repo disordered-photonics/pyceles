@@ -41,14 +41,12 @@ from pyceles.core.periodic.rayleigh_cupy import (
     apply_sparse_near_coupling_cupy,
     scan_far_cupy,
 )
+from pyceles.core.periodic.reception import apply_periodic_reception
+from pyceles.core.periodic.reception_cupy import (
+    apply_periodic_reception_cupy,
+)
 from pyceles.core.periodic.scalar import structural_sum_m_normalization
 from pyceles.core.translation import translation_ab5_table
-from pyceles.postprocessing.nearfield.periodic_interior import (
-    _periodic_local_regular_l1_coeffs,
-)
-from pyceles.postprocessing.nearfield.periodic_interior_cupy import (
-    periodic_local_regular_l1_coeffs_cupy,
-)
 from pyceles.simulation import Simulation, SimulationConfig
 from pyceles.simulation.solve import _assemble_dense_operator_for_prepared
 
@@ -1294,16 +1292,16 @@ def test_periodic_cupy_rayleigh_interior_points_match_numpy(
     kwargs = dict(
         points=points,
         positions=positions,
-        coeffs=coeffs,
-        lmax=lmax,
+        coefficients=coeffs,
+        lmax_in=lmax,
         k=k,
         periodic=periodic,
         k_parallel=np.asarray([0.0003, -0.0002]),
         circumscribing_radii=np.full(positions.shape[0], 40.0),
     )
 
-    expected = _periodic_local_regular_l1_coeffs(**cast(Any, kwargs))
-    actual = periodic_local_regular_l1_coeffs_cupy(
+    expected = apply_periodic_reception(**cast(Any, kwargs))
+    actual = apply_periodic_reception_cupy(
         **cast(Any, kwargs),
         compute_dtype=compute_dtype,
         accum_dtype=accum_dtype,
@@ -1346,15 +1344,15 @@ def test_periodic_cupy_rayleigh_repeated_horizontal_plane_matches_numpy(
     kwargs = dict(
         points=points,
         positions=positions,
-        coeffs=coeffs,
-        lmax=lmax,
+        coefficients=coeffs,
+        lmax_in=lmax,
         k=k,
         periodic=periodic,
         k_parallel=np.asarray([0.0003, -0.0002]),
         circumscribing_radii=np.full(positions.shape[0], 40.0),
     )
-    expected = _periodic_local_regular_l1_coeffs(**cast(Any, kwargs))
-    actual = periodic_local_regular_l1_coeffs_cupy(
+    expected = apply_periodic_reception(**cast(Any, kwargs))
+    actual = apply_periodic_reception_cupy(
         **cast(Any, kwargs),
         compute_dtype=np.complex64,
         accum_dtype=np.complex128,
@@ -1395,14 +1393,14 @@ def test_periodic_cupy_ewald_repeated_horizontal_plane_matches_numpy(
     kwargs = dict(
         points=points,
         positions=positions,
-        coeffs=coeffs,
-        lmax=lmax,
+        coefficients=coeffs,
+        lmax_in=lmax,
         k=k,
         periodic=periodic,
         k_parallel=np.asarray([0.0003, -0.0002]),
     )
-    expected = _periodic_local_regular_l1_coeffs(**cast(Any, kwargs))
-    actual = periodic_local_regular_l1_coeffs_cupy(
+    expected = apply_periodic_reception(**cast(Any, kwargs))
+    actual = apply_periodic_reception_cupy(
         **cast(Any, kwargs),
         compute_dtype=np.complex64,
         accum_dtype=np.complex128,
@@ -1446,16 +1444,16 @@ def test_periodic_cupy_complex_host_interior_fields_match_numpy(
     kwargs = dict(
         points=points,
         positions=positions,
-        coeffs=coeffs,
-        lmax=lmax,
+        coefficients=coeffs,
+        lmax_in=lmax,
         k=k,
         periodic=periodic,
         k_parallel=np.asarray([0.0003, -0.0002]),
         circumscribing_radii=np.full(positions.shape[0], 40.0),
     )
 
-    expected = _periodic_local_regular_l1_coeffs(**cast(Any, kwargs))
-    actual = periodic_local_regular_l1_coeffs_cupy(
+    expected = apply_periodic_reception(**cast(Any, kwargs))
+    actual = apply_periodic_reception_cupy(
         **cast(Any, kwargs),
         compute_dtype=np.complex128,
         accum_dtype=np.complex128,

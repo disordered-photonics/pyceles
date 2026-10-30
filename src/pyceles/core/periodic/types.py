@@ -7,8 +7,8 @@ from typing import Literal
 
 import numpy as np
 
-from pyceles.core.lattice import RectangularLattice2D
-from pyceles.core.sources import BlochPlaneWave, PlaneWave
+from pyceles.core.lattice import RectangularLattice2D, real_transverse_wavevector
+from pyceles.core.sources import BlochPlaneWave, DipoleCollection, DipoleSource, PlaneWave, Source
 
 
 @dataclass(frozen=True)
@@ -45,7 +45,10 @@ class PeriodicOptions:
     automatically from a bounded temporary-memory budget rather than exposed
     as a user-facing tuning knob. ``method="directsum"`` evaluates exactly
     the finite image window set by ``directsum_window``; convergence of that
-    truncation is the caller's responsibility. In-slab periodic near-field
+    truncation is the caller's responsibility. Finite windows use particle,
+    source and query representatives in ``[0, ax) x [0, ay)`` with their Bloch
+    phases restored, so changing cell representatives preserves the operator.
+    In-slab periodic near-field
     evaluation reuses this exact-near/Rayleigh-far policy for source-point
     coupling.
 
@@ -135,10 +138,18 @@ class PeriodicOptions:
 
 @dataclass(frozen=True)
 class PeriodicSpec:
-    """Periodic-boundary-condition specification for one reduced unit cell."""
+    """Boundary condition for one reduced unit cell.
+
+    Fields obey ``F(r+R) = exp(i*k_parallel.R)*F(r)``. An explicit real
+    ``k_parallel`` fixes this boundary independently of the source. When omitted,
+    plane waves supply their transverse wavevector and dipole arrays use zero.
+    Dipoles describe a coherently driven array, not an isolated emitter next to
+    a periodic structure.
+    """
 
     lattice: RectangularLattice2D
     options: PeriodicOptions = field(default_factory=PeriodicOptions)
+    k_parallel: tuple[float, float] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.lattice, RectangularLattice2D):
@@ -151,6 +162,23 @@ class PeriodicSpec:
                 "`periodic.options` must be a PeriodicOptions instance. "
                 f"Got {type(self.options).__name__}."
             )
+        if self.k_parallel is not None:
+            q = real_transverse_wavevector(self.k_parallel)
+            object.__setattr__(self, "k_parallel", (float(q[0]), float(q[1])))
+
+
+def periodic_source_k_parallel(periodic: PeriodicSpec, source: Source) -> np.ndarray:
+    """Resolve the boundary vector and check a source's intrinsic Bloch phase."""
+    if isinstance(source, (PlaneWave, BlochPlaneWave)):
+        q = plane_wave_k_parallel(source)
+        if periodic.k_parallel is not None and not np.array_equal(q, periodic.k_parallel):
+            raise ValueError("Source wavevector disagrees with periodic.k_parallel")
+        return q
+    if isinstance(source, (DipoleSource, DipoleCollection)):
+        return np.asarray((0.0, 0.0) if periodic.k_parallel is None else periodic.k_parallel)
+    raise NotImplementedError(
+        "Periodic workflows support PlaneWave, BlochPlaneWave, DipoleSource and DipoleCollection"
+    )
 
 
 def plane_wave_k_parallel(source: PlaneWave | BlochPlaneWave) -> np.ndarray:
@@ -177,4 +205,4 @@ def plane_wave_k_parallel(source: PlaneWave | BlochPlaneWave) -> np.ndarray:
     )
 
 
-__all__ = ["PeriodicOptions", "PeriodicSpec", "plane_wave_k_parallel"]
+__all__ = ["PeriodicOptions", "PeriodicSpec", "periodic_source_k_parallel", "plane_wave_k_parallel"]

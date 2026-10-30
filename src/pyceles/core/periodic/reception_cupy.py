@@ -1,13 +1,15 @@
-"""CuPy owner for periodic in-slab near-field coefficients.
+"""CuPy owner for periodic outgoing-to-regular reception.
 
 Exact Ewald batches evaluate all pairs for ``method="ewald"``.  The Rayleigh
 path instead uses reciprocal scans for vertically separated sources and retains
-exact Ewald only inside the configured z band.  Both paths contract directly
-into the local regular ``l=1`` sector needed by field reconstruction.
+exact Ewald only inside the configured z band. Point fields use the regular
+``l=1`` sector; source forcing and interior reception use arbitrary receiving
+orders through bounded Ewald batches.
 """
 
 from __future__ import annotations
 
+from importlib import import_module
 from typing import Any
 
 import numpy as np
@@ -17,7 +19,12 @@ from pyceles._cupy_memory import cupy_allocator_snapshot
 from pyceles._dtypes import resolve_compute_accum_dtypes
 from pyceles._optional import import_cupy
 from pyceles.core.indexing import n_modes
-from pyceles.core.periodic.ewald import resolve_ewald_eta, resolve_ewald_shell_counts
+from pyceles.core.lattice import canonical_cell_points
+from pyceles.core.periodic.ewald import (
+    ewald_self_correction,
+    resolve_ewald_eta,
+    resolve_ewald_shell_counts,
+)
 from pyceles.core.periodic.ewald_cupy import (
     CupyEwaldShellWorkspace,
     _shifted_reciprocal_compact_terms_cupy,
@@ -28,42 +35,48 @@ from pyceles.core.periodic.rayleigh_cupy import (
     apply_rayleigh_far_to_points_cupy,
     scatter_add_complex,
 )
-from pyceles.core.periodic.scalar import same_plane_z_tolerance
+from pyceles.core.periodic.scalar import same_plane_z_tolerance, structural_sum_m_normalization
+from pyceles.core.periodic.structural import rectangular_projection_data
 
-from .periodic_projection import l1_compact_projection_data
+from .reception import _check_reception_origins
+from .types import PeriodicSpec
 
 
-def _build_source_projection_cupy(
+def _rectangular_projection_cupy(
     *,
     lmax: int,
-    coeffs: np.ndarray,
+    lmax_out: int,
     projection_dtype: np.dtype,
     cupy: Any,
 ) -> tuple[int, int, Any, Any, Any]:
-    """Return compact source-specific ``l=1`` projection data on the GPU.
+    """Upload the shared rectangular translation contraction once.
 
     ``projection_dtype`` is the reduction precision for the coefficient-weighted
     translation map. Periodic exact-near Ewald values are produced in
     complex128, so callers should use accumulation precision rather than round
     structural channels before this contraction.
     """
-    (
+    structural_order = int(lmax) + int(lmax_out)
+    lmax_struct = (structural_order + 1) // 2
+    degree_indices, order_indices, indptr, input_modes, values = rectangular_projection_data(
+        lmax_out, lmax
+    )
+    dtype_cp = cupy.complex64 if projection_dtype == np.dtype(np.complex64) else cupy.complex128
+    sparse = import_module("cupyx.scipy.sparse")
+    projection = sparse.csr_matrix(
+        (
+            cupy.asarray(values, dtype=dtype_cp),
+            cupy.asarray(input_modes),
+            cupy.asarray(indptr),
+        ),
+        shape=(len(degree_indices) * n_modes(lmax_out), n_modes(lmax)),
+    )
+    return (
         lmax_struct,
         structural_order,
-        degree_indices,
-        order_indices,
-        kernel_np,
-    ) = l1_compact_projection_data(int(lmax))
-    dtype_cp = cupy.complex64 if projection_dtype == np.dtype(np.complex64) else cupy.complex128
-    coeff_cp = cupy.asarray(np.asarray(coeffs, dtype=projection_dtype), dtype=dtype_cp)
-    kernel_cp = cupy.asarray(np.asarray(kernel_np, dtype=projection_dtype), dtype=dtype_cp)
-    source_projection = cupy.einsum("rck,jc->jkr", kernel_cp, coeff_cp, optimize=True)
-    return (
-        int(lmax_struct),
-        int(structural_order),
         cupy.asarray(degree_indices, dtype=cupy.int32),
         cupy.asarray(order_indices, dtype=cupy.int32),
-        source_projection,
+        projection,
     )
 
 
@@ -125,7 +138,8 @@ def _project_shifted_reciprocal_plane_cupy(
     projection = cp.asarray(source_projection, dtype=cp.complex128)
     n_dest = int(dest_xy.shape[0])
     n_sources = int(sources.shape[0])
-    out = cp.zeros((n_dest, 6), dtype=cp.complex128)
+    output_modes = int(projection.shape[2])
+    out = cp.zeros((n_dest, output_modes), dtype=cp.complex128)
     if n_dest == 0 or n_sources == 0:
         return out
 
@@ -133,7 +147,9 @@ def _project_shifted_reciprocal_plane_cupy(
     n_terms = int(reciprocal_terms.rho.shape[0])
     compact_width = (int(structural_order) + 1) ** 2
     bytes_per_source = (
-        _SHIFTED_RECIPROCAL_TERM_CHUNK * (compact_width + 6) * np.dtype(np.complex128).itemsize
+        _SHIFTED_RECIPROCAL_TERM_CHUNK
+        * (compact_width + output_modes)
+        * np.dtype(np.complex128).itemsize
     )
     source_chunk = min(
         _SHIFTED_RECIPROCAL_SOURCE_CHUNK_CAP,
@@ -142,7 +158,7 @@ def _project_shifted_reciprocal_plane_cupy(
 
     for start in range(0, n_terms, _SHIFTED_RECIPROCAL_TERM_CHUNK):
         stop = min(n_terms, start + _SHIFTED_RECIPROCAL_TERM_CHUNK)
-        projected_sum = cp.zeros((stop - start, 6), dtype=cp.complex128)
+        projected_sum = cp.zeros((stop - start, output_modes), dtype=cp.complex128)
         for source_start in range(0, n_sources, source_chunk):
             source_stop = min(n_sources, source_start + source_chunk)
             compact = _shifted_reciprocal_compact_terms_cupy(
@@ -171,10 +187,12 @@ def _periodic_near_pair_workspace_bytes_per_pair(
     *,
     lmax: int,
     projection_dtype: np.dtype,
+    lmax_out: int = 1,
 ) -> int:
     """Conservatively estimate live CuPy workspace for one exact-near pair."""
     lmax_i = max(1, int(lmax))
-    structural_order = lmax_i + 1
+    structural_order = lmax_i + int(lmax_out)
+    output_modes = n_modes(lmax_out)
     rectangular_channels = (structural_order + 1) * (2 * structural_order + 1)
     compact_channels = (structural_order + 1) ** 2
     projection_itemsize = int(np.dtype(projection_dtype).itemsize)
@@ -184,8 +202,8 @@ def _periodic_near_pair_workspace_bytes_per_pair(
     return int(
         rectangular_channels * np.dtype(np.complex128).itemsize
         + compact_channels * projection_itemsize
-        + 6 * compact_channels * projection_itemsize
-        + 6 * projection_itemsize
+        + output_modes * compact_channels * projection_itemsize
+        + output_modes * projection_itemsize
         + 128
     )
 
@@ -195,6 +213,7 @@ def _periodic_near_pair_batch_size_for_workspace(
     total_pairs: int,
     lmax: int,
     projection_dtype: np.dtype,
+    lmax_out: int = 1,
     workspace_bytes: int,
 ) -> int:
     """Choose a nonzero exact-near pair batch within a workspace budget."""
@@ -202,6 +221,7 @@ def _periodic_near_pair_batch_size_for_workspace(
     bytes_per_pair = _periodic_near_pair_workspace_bytes_per_pair(
         lmax=int(lmax),
         projection_dtype=np.dtype(projection_dtype),
+        lmax_out=lmax_out,
     )
     memory_cap = max(1, int(workspace_bytes) // max(1, bytes_per_pair))
     return max(1, min(total, _PERIODIC_NEAR_PAIR_BATCH_CAP, memory_cap))
@@ -213,6 +233,7 @@ def _cupy_periodic_near_pair_batch_size(
     total_pairs: int,
     lmax: int,
     projection_dtype: np.dtype,
+    lmax_out: int = 1,
 ) -> int:
     """Resolve an exact-near batch from current allocator headroom without mutation."""
     snapshot = cupy_allocator_snapshot(cupy, apply_pool_limit=False)
@@ -229,37 +250,21 @@ def _cupy_periodic_near_pair_batch_size(
         total_pairs=int(total_pairs),
         lmax=int(lmax),
         projection_dtype=np.dtype(projection_dtype),
+        lmax_out=lmax_out,
         workspace_bytes=int(workspace_bytes),
     )
 
 
-def _resolve_eta(
-    *,
-    periodic: Any,
-    k: complex,
-    k_parallel: np.ndarray,
-    positions: np.ndarray,
-    lmax: int,
-    max_vertical_offset: float | None = None,
-) -> float:
-    return resolve_ewald_eta(
-        periodic=periodic,
-        k=complex(k),
-        k_parallel=np.asarray(k_parallel, dtype=float).reshape(2),
-        positions=np.asarray(positions, dtype=float).reshape(-1, 3),
-        lmax=int(lmax),
-        max_vertical_offset=max_vertical_offset,
-    )
-
-
-def periodic_local_regular_l1_coeffs_cupy(
-    *,
+def apply_periodic_reception_cupy(
     points: np.ndarray,
     positions: np.ndarray,
-    coeffs: np.ndarray,
-    lmax: int,
+    coefficients: np.ndarray,
+    *,
+    lmax_in: int,
+    lmax_out: int = 1,
+    exclude_self: bool = False,
     k: complex,
-    periodic: Any,
+    periodic: PeriodicSpec,
     k_parallel: np.ndarray,
     circumscribing_radii: np.ndarray | None = None,
     point_batch_size: int = 128,
@@ -268,9 +273,11 @@ def periodic_local_regular_l1_coeffs_cupy(
     compute_dtype: npt.DTypeLike = np.complex128,
     accum_dtype: npt.DTypeLike = np.complex128,
 ) -> np.ndarray:
-    """Return point-local regular ``l=1`` coefficients using the CuPy path.
+    """Return rectangular regular reception using existing Ewald/Rayleigh kernels.
 
-    The function is intentionally specialized to periodic in-slab near fields.
+    Point-local receiving order one retains plane synthesis and Rayleigh scans.
+    Higher-order reception uses bounded Ewald source batches. Inputs survive
+    subsequent calls and the returned NumPy array owns its values.
     It uses explicit shell ranges when supplied, otherwise a centralized
     one-shot shell resolver chooses fixed ranges compatible with the NumPy
     adaptive options. With ``method='rayleigh'``, reciprocal scans evaluate
@@ -285,16 +292,44 @@ def periodic_local_regular_l1_coeffs_cupy(
     accum_dtype_cp = cp.complex64 if accum_dtype == np.dtype(np.complex64) else cp.complex128
     pts = np.asarray(points, dtype=np.float64).reshape(-1, 3)
     pos = np.asarray(positions, dtype=np.float64).reshape(-1, 3)
-    coeff_arr = np.asarray(coeffs, dtype=compute_dtype).reshape(pos.shape[0], n_modes(int(lmax)))
-    out = np.zeros((pts.shape[0], 6), dtype=accum_dtype)
-    if pts.shape[0] == 0 or pos.shape[0] == 0:
+    coeff_arr = np.asarray(coefficients, dtype=compute_dtype).reshape(
+        pos.shape[0], n_modes(int(lmax_in))
+    )
+    output_modes = n_modes(lmax_out)
+    out = np.zeros((pts.shape[0], output_modes), dtype=accum_dtype)
+    active = np.any(coeff_arr != 0, axis=1)
+    if pts.shape[0] == 0 or not np.any(active):
         return out
+    # Zero rows are physically absent; do not let their heights/radii enter
+    # numerical policy or evaluate growing special functions for them.
+    if not np.all(active):
+        pos, coeff_arr = pos[active], coeff_arr[active]
+        if circumscribing_radii is not None:
+            circumscribing_radii = np.asarray(circumscribing_radii)[active]
     method = str(periodic.options.method)
     if method not in {"ewald", "rayleigh"}:
         raise NotImplementedError(
             "Periodic in-slab near-field evaluation requires "
             "`periodic.options.method` to be 'ewald' or 'rayleigh'."
         )
+
+    pts, point_shifts = canonical_cell_points(pts, ax=periodic.lattice.ax, ay=periodic.lattice.ay)
+    pos, source_shifts = canonical_cell_points(pos, ax=periodic.lattice.ax, ay=periodic.lattice.ay)
+    point_phase: np.ndarray = np.exp(1j * (point_shifts[:, :2] @ k_parallel))[:, None]
+    coeff_arr = (
+        coeff_arr.astype(accum_dtype) * np.exp(-1j * (source_shifts[:, :2] @ k_parallel))[:, None]
+    )
+
+    if not exclude_self:
+        _check_reception_origins(pts, pos, coeff_arr)
+
+    def host_result(values: Any) -> np.ndarray:
+        result = np.asarray(cp.asnumpy(values), dtype=accum_dtype)
+        result *= point_phase
+        return result
+
+    if lmax_out != 1:
+        method = "ewald"
 
     point_batch_size = max(1, int(point_batch_size))
     if source_batch_size is None:
@@ -304,29 +339,54 @@ def periodic_local_regular_l1_coeffs_cupy(
         source_batch_size = max(1, min(pos.shape[0], 2048 // point_batch_size))
     source_batch_size = max(1, int(source_batch_size))
 
+    pair_cap = _cupy_periodic_near_pair_batch_size(
+        cupy=cp,
+        total_pairs=len(pts) * len(pos),
+        lmax=lmax_in,
+        lmax_out=lmax_out,
+        projection_dtype=accum_dtype,
+    )
+    point_batch_size = min(point_batch_size, pair_cap)
+    source_batch_size = min(source_batch_size, max(1, pair_cap // point_batch_size))
+
     (
         lmax_struct,
         structural_order,
         degree_indices_cp,
         order_indices_cp,
-        source_projection_cp,
-    ) = _build_source_projection_cupy(
-        lmax=int(lmax),
-        coeffs=coeff_arr,
+        projection_matrix_cp,
+    ) = _rectangular_projection_cupy(
+        lmax=int(lmax_in),
+        lmax_out=lmax_out,
         projection_dtype=accum_dtype,
         cupy=cp,
     )
 
+    coeff_cp = cp.asarray(coeff_arr, dtype=accum_dtype_cp)
+
+    # Only point-local fields retain the full source-weighted projection.
+    # Higher receiving orders form it within each bounded source batch.
+    def project_sources(coefficients: Any) -> Any:
+        projected = projection_matrix_cp @ coefficients.T
+        return projected.T.reshape(-1, (structural_order + 1) ** 2, output_modes)
+
+    source_projection_cp = project_sources(coeff_cp) if lmax_out == 1 else None
+
+    def source_projection(indices: Any) -> Any:
+        if source_projection_cp is not None:
+            return source_projection_cp[indices]
+        return project_sources(coeff_cp[indices])
+
     rayleigh_z_cut: float | None = None
     if method == "rayleigh":
         plan = prepare_rayleigh_plan(
-            lmax=int(lmax),
+            lmax=int(lmax_in),
             k=complex(k),
             positions=pos,
             circumscribing_radii=circumscribing_radii,
             periodic=periodic,
             k_parallel=k_parallel,
-            dtype=compute_dtype,
+            dtype=accum_dtype,
         )
         local_cp = apply_rayleigh_far_to_points_cupy(
             plan,
@@ -341,29 +401,33 @@ def periodic_local_regular_l1_coeffs_cupy(
         )
         rayleigh_z_cut = float(plan.z_cut)
         if destination_indices.size == 0:
-            return np.asarray(cp.asnumpy(local_cp), dtype=accum_dtype)
+            return host_result(local_cp)
     else:
         local_cp = None
         destination_indices = np.zeros((0,), dtype=np.int64)
         source_indices = np.zeros((0,), dtype=np.int64)
 
-    eta = _resolve_eta(
+    policy_positions = np.concatenate((pts, pos))
+    vertical_limit = (
+        rayleigh_z_cut if method == "rayleigh" else float(np.ptp(policy_positions[:, 2]))
+    )
+    eta = resolve_ewald_eta(
         periodic=periodic,
         k=complex(k),
         k_parallel=np.asarray(k_parallel, dtype=float).reshape(2),
-        positions=pos,
-        lmax=int(lmax),
-        max_vertical_offset=rayleigh_z_cut,
+        positions=policy_positions,
+        lmax=lmax_struct,
+        max_vertical_offset=vertical_limit,
     )
 
     shell_counts = resolve_ewald_shell_counts(
         periodic=periodic,
         k=complex(k),
         k_parallel=np.asarray(k_parallel, dtype=float).reshape(2),
-        positions=pos,
-        lmax=int(lmax),
+        positions=policy_positions,
+        lmax=lmax_struct,
         eta=float(eta),
-        max_vertical_offset=rayleigh_z_cut,
+        max_vertical_offset=vertical_limit,
     )
     real_count = int(shell_counts.real_shells)
     recip_count = int(shell_counts.reciprocal_shells)
@@ -380,6 +444,26 @@ def periodic_local_regular_l1_coeffs_cupy(
         k_parallel=np.asarray(k_parallel, dtype=np.float64).reshape(2),
         eta=float(eta),
     )
+
+    self_correction = (
+        structural_sum_m_normalization(0) * ewald_self_correction(k, eta) if exclude_self else 0
+    )
+
+    def evaluate_sums(relative: Any, *, include_shifted_reciprocal: bool = True) -> Any:
+        sums = ewald_structural_sums_2d_fixed_cupy(
+            relative_source_minus_destination=relative,
+            lmax_struct=lmax_struct,
+            structural_order=structural_order,
+            workspace=workspace,
+            real_shell_count=real_count,
+            reciprocal_shell_count=recip_count,
+            coordinate_scale=coordinate_scale,
+            include_shifted_reciprocal=include_shifted_reciprocal,
+        )
+        if exclude_self:
+            same = cp.all(relative == 0.0, axis=1)
+            sums[same, 0, structural_order] += self_correction
+        return sums
 
     if method == "rayleigh":
         if local_cp is None:
@@ -420,8 +504,9 @@ def periodic_local_regular_l1_coeffs_cupy(
         pair_batch_size = _cupy_periodic_near_pair_batch_size(
             cupy=cp,
             total_pairs=int(destination_indices.size),
-            lmax=int(lmax),
+            lmax=int(lmax_in),
             projection_dtype=accum_dtype,
+            lmax_out=lmax_out,
         )
         progress = None
         if show_progress:
@@ -453,20 +538,11 @@ def periodic_local_regular_l1_coeffs_cupy(
                 dst = destinations_cp[pair_start:pair_stop]
                 src = sources_cp[pair_start:pair_stop]
                 rel_cp = pos_cp[src] - pts_cp[dst]
-                sums = ewald_structural_sums_2d_fixed_cupy(
-                    relative_source_minus_destination=rel_cp,
-                    lmax_struct=int(lmax_struct),
-                    structural_order=int(structural_order),
-                    workspace=workspace,
-                    real_shell_count=int(real_count),
-                    reciprocal_shell_count=int(recip_count),
-                    coordinate_scale=coordinate_scale,
-                    include_shifted_reciprocal=bool(include_shifted_reciprocal),
-                )
+                sums = evaluate_sums(rel_cp, include_shifted_reciprocal=include_shifted_reciprocal)
                 compact = sums[:, degree_indices_cp, order_indices_cp].astype(
                     accum_dtype_cp, copy=False
                 )
-                pair_projection = source_projection_cp[src]
+                pair_projection = source_projection(src)
                 pair_l1 = cp.einsum(
                     "nk,nkr->nr",
                     compact,
@@ -501,7 +577,7 @@ def periodic_local_regular_l1_coeffs_cupy(
                         destination_xy=pts_cp[destination_group_cp, :2],
                         plane_z=float(plane_z),
                         source_positions=pos_cp[shifted_sources_cp],
-                        source_projection=source_projection_cp[shifted_sources_cp],
+                        source_projection=source_projection(shifted_sources_cp),
                         workspace=workspace,
                         reciprocal_shell_count=int(recip_count),
                         structural_order=int(structural_order),
@@ -515,7 +591,7 @@ def periodic_local_regular_l1_coeffs_cupy(
         finally:
             if progress is not None:
                 progress.close()
-        return np.asarray(cp.asnumpy(local_cp), dtype=accum_dtype)
+        return host_result(local_cp)
 
     # Pure Ewald has the same shifted-reciprocal plane structure as the
     # Rayleigh-hybrid path.  For repeated horizontal destinations, evaluate
@@ -524,7 +600,7 @@ def periodic_local_regular_l1_coeffs_cupy(
     # source-reduced Fourier coefficients.  This branch is deliberately kept
     # separate from the Rayleigh sparse-pair path: pure Ewald has no z-cut and
     # therefore every source contributes to every destination.
-    if method == "ewald":
+    if method == "ewald" and source_projection_cp is not None:
         same_plane_atol = same_plane_z_tolerance(
             complex(k),
             coordinate_scale=float(coordinate_scale),
@@ -543,7 +619,7 @@ def periodic_local_regular_l1_coeffs_cupy(
         if ewald_plane_groups:
             pts_cp = cp.asarray(pts, dtype=cp.float64)
             pos_cp = cp.asarray(pos, dtype=cp.float64)
-            local_ewald_cp = cp.zeros((pts.shape[0], 6), dtype=accum_dtype_cp)
+            local_ewald_cp = cp.zeros((pts.shape[0], output_modes), dtype=accum_dtype_cp)
 
             def accumulate_dense(
                 destination_indices_dense: np.ndarray,
@@ -557,22 +633,15 @@ def periodic_local_regular_l1_coeffs_cupy(
                     destination_batch = destination_indices_dense[p0:p1]
                     pts_batch = np.asarray(pts[destination_batch], dtype=np.float64)
                     n_points = int(pts_batch.shape[0])
-                    local_batch = cp.zeros((n_points, 6), dtype=accum_dtype_cp)
+                    local_batch = cp.zeros((n_points, output_modes), dtype=accum_dtype_cp)
                     for s0 in range(0, pos.shape[0], source_batch_size):
                         s1 = min(pos.shape[0], s0 + source_batch_size)
                         src_batch = np.asarray(pos[s0:s1], dtype=np.float64)
                         n_sources_batch = int(src_batch.shape[0])
                         rel = src_batch[None, :, :] - pts_batch[:, None, :]
                         rel_cp = cp.asarray(rel.reshape(-1, 3), dtype=cp.float64)
-                        sums = ewald_structural_sums_2d_fixed_cupy(
-                            relative_source_minus_destination=rel_cp,
-                            lmax_struct=int(lmax_struct),
-                            structural_order=int(structural_order),
-                            workspace=workspace,
-                            real_shell_count=int(real_count),
-                            reciprocal_shell_count=int(recip_count),
-                            coordinate_scale=float(coordinate_scale),
-                            include_shifted_reciprocal=bool(include_shifted_reciprocal),
+                        sums = evaluate_sums(
+                            rel_cp, include_shifted_reciprocal=include_shifted_reciprocal
                         )
                         compact = (
                             sums[:, degree_indices_cp, order_indices_cp]
@@ -582,7 +651,7 @@ def periodic_local_regular_l1_coeffs_cupy(
                         local_batch += cp.einsum(
                             "psk,skr->pr",
                             compact,
-                            source_projection_cp[s0:s1],
+                            source_projection(slice(s0, s1)),
                             optimize=True,
                         )
                     local_ewald_cp[cp.asarray(destination_batch, dtype=cp.int64)] = local_batch
@@ -603,7 +672,7 @@ def periodic_local_regular_l1_coeffs_cupy(
                     destination_xy=pts_cp[destination_group_cp, :2],
                     plane_z=float(plane_z),
                     source_positions=pos_cp[shifted_sources_cp],
-                    source_projection=source_projection_cp[shifted_sources_cp],
+                    source_projection=source_projection(shifted_sources_cp),
                     workspace=workspace,
                     reciprocal_shell_count=int(recip_count),
                     structural_order=int(structural_order),
@@ -612,7 +681,7 @@ def periodic_local_regular_l1_coeffs_cupy(
                     accum_dtype_cp,
                     copy=False,
                 )
-            return np.asarray(cp.asnumpy(local_ewald_cp), dtype=accum_dtype)
+            return host_result(local_ewald_cp)
 
     progress = None
     if show_progress:
@@ -634,7 +703,7 @@ def periodic_local_regular_l1_coeffs_cupy(
         for p0 in range(0, pts.shape[0], point_batch_size):
             p1 = min(pts.shape[0], p0 + point_batch_size)
             pts_batch = np.asarray(pts[p0:p1], dtype=np.float64)
-            local_cp = cp.zeros((pts_batch.shape[0], 6), dtype=accum_dtype_cp)
+            local_cp = cp.zeros((pts_batch.shape[0], output_modes), dtype=accum_dtype_cp)
             for s0 in range(0, pos.shape[0], source_batch_size):
                 s1 = min(pos.shape[0], s0 + source_batch_size)
                 src_batch = np.asarray(pos[s0:s1], dtype=np.float64)
@@ -642,15 +711,7 @@ def periodic_local_regular_l1_coeffs_cupy(
                 n_points = int(pts_batch.shape[0])
                 n_sources = int(src_batch.shape[0])
                 rel_cp = cp.asarray(rel.reshape(-1, 3), dtype=cp.float64)
-                sums = ewald_structural_sums_2d_fixed_cupy(
-                    relative_source_minus_destination=rel_cp,
-                    lmax_struct=int(lmax_struct),
-                    structural_order=int(structural_order),
-                    workspace=workspace,
-                    real_shell_count=int(real_count),
-                    reciprocal_shell_count=int(recip_count),
-                    coordinate_scale=float(coordinate_scale),
-                )
+                sums = evaluate_sums(rel_cp)
                 compact = (
                     sums[:, degree_indices_cp, order_indices_cp]
                     .astype(accum_dtype_cp, copy=False)
@@ -659,7 +720,7 @@ def periodic_local_regular_l1_coeffs_cupy(
                 local_cp += cp.einsum(
                     "psk,skr->pr",
                     compact,
-                    source_projection_cp[s0:s1],
+                    source_projection(slice(s0, s1)),
                     optimize=True,
                 )
                 if progress is not None:
@@ -668,7 +729,8 @@ def periodic_local_regular_l1_coeffs_cupy(
     finally:
         if progress is not None:
             progress.close()
+    out *= point_phase
     return out
 
 
-__all__ = ["periodic_local_regular_l1_coeffs_cupy"]
+__all__ = ["apply_periodic_reception_cupy"]

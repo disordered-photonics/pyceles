@@ -26,8 +26,12 @@ from .patterns import (
 from .periodic import (
     PeriodicFarFieldPayload,
     PeriodicOrderAmplitudes,
+    PeriodicOutgoingAmplitudes,
+    compute_periodic_outgoing_amplitudes,
     mix_periodic_farfield_payloads,
     periodic_order_amplitudes,
+    periodic_outgoing_amplitudes,
+    periodic_outgoing_flux,
     periodic_plane_wave_orders,
 )
 from .power import (
@@ -47,9 +51,11 @@ __all__ = [
     "FarFieldPatterns",
     "PeriodicFarFieldPayload",
     "PeriodicOrderAmplitudes",
+    "PeriodicOutgoingAmplitudes",
     "PowerBalance",
     "PowerFluxDecomposition",
     "compute_far_field_patterns",
+    "compute_periodic_outgoing_amplitudes",
     "enumerate_diffraction_orders_rectangular",
     "extinction_cross_section",
     "finite_beam_power_balance",
@@ -59,6 +65,8 @@ __all__ = [
     "local_power_balance_from_exciting",
     "mix_periodic_farfield_payloads",
     "periodic_order_amplitudes",
+    "periodic_outgoing_amplitudes",
+    "periodic_outgoing_flux",
     "periodic_plane_wave_orders",
     "plane_wave_cross_section_balance",
     "pwp_power_decomposition",

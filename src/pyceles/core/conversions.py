@@ -22,6 +22,37 @@ if TYPE_CHECKING:
     from .sources import AngularSpectrumSource
 
 
+def plane_wave_basis(
+    *,
+    k: complex,
+    k_parallel: np.ndarray,
+    kz: complex,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Return TE/TM unit vectors and corresponding H-vector factors."""
+    kx = float(k_parallel[0])
+    ky = float(k_parallel[1])
+    alpha = float(np.arctan2(ky, kx))
+    kp = float(np.hypot(kx, ky))
+    sb = kp / complex(k)
+    cb = complex(kz) / complex(k)
+
+    e_te = np.asarray(
+        [-np.sin(alpha), np.cos(alpha), 0.0],
+        dtype=np.complex128,
+    )
+    e_tm = np.asarray(
+        [cb * np.cos(alpha), cb * np.sin(alpha), -sb],
+        dtype=np.complex128,
+    )
+    khat = np.asarray(
+        [sb * np.cos(alpha), sb * np.sin(alpha), cb],
+        dtype=np.complex128,
+    )
+    h_te = np.cross(khat, e_te)
+    h_tm = np.cross(khat, e_tm)
+    return e_te, e_tm, h_te, h_tm
+
+
 def _array_cache_key(arr: np.ndarray) -> tuple[tuple[int, ...], str, bytes]:
     """Return a hashable cache key for a small angular grid."""
 

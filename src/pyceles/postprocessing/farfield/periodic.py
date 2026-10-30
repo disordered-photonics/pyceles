@@ -3,20 +3,61 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 
-from pyceles.core.conversions import transformation_coefficients
-from pyceles.core.indexing import iter_modes
-from pyceles.core.lattice import RectangularLattice2D
+from pyceles.core.conversions import plane_wave_basis, transformation_coefficients
+from pyceles.core.indexing import iter_modes, n_modes
+from pyceles.core.lattice import RectangularLattice2D, real_transverse_wavevector
+from pyceles.core.particles import ParticleCollection
 from pyceles.core.periodic import plane_wave_k_parallel
+from pyceles.core.periodic.types import periodic_source_k_parallel
 from pyceles.core.radial import passive_wavenumber
-from pyceles.core.sources import BlochPlaneWave, PlaneWave
+from pyceles.core.sources import BlochPlaneWave, DipoleCollection, DipoleSource, PlaneWave
+from pyceles.core.sources.embedded import locate_dipole_source
 from pyceles.core.sources.plane_wave import _plane_wave_geometry
 from pyceles.core.spherical import spherical_functions_trigon
 
-from .orders import enumerate_diffraction_orders_rectangular
+from .orders import DiffractionOrders, enumerate_diffraction_orders_rectangular
 from .power import PowerBalance
+
+if TYPE_CHECKING:
+    from pyceles.simulation import ChannelResult
+
+
+@dataclass(frozen=True)
+class PeriodicOutgoingAmplitudes:
+    """TE/TM outgoing orders at finite upper/lower reference planes.
+
+    Upward waves use +kz, downward waves use -kz. Their phases are
+    exp(i*(q_mn.rho +/- kz*(z-reference_z))). Reference planes are ordered
+    (upper, lower). No incident wave or plane-wave power normalization is
+    implied, and absorbing hosts require an explicit reciprocal cutoff.
+    """
+
+    orders: DiffractionOrders
+    up_amplitudes: np.ndarray
+    down_amplitudes: np.ndarray
+    reference_z: tuple[float, float]
+    k_parallel: np.ndarray
+    unit_cell_area: float
+    output_bmax: float | None
+
+    def to_mapping(self) -> dict[str, object]:
+        """Return field amplitudes and their finite-plane interpretation for I/O."""
+        return dict(
+            order_mn=np.column_stack((self.orders.m, self.orders.n)),
+            order_k_parallel=self.orders.k_parallel,
+            order_kz=self.orders.kz,
+            order_propagating=self.orders.propagating,
+            up_amplitudes=self.up_amplitudes,
+            down_amplitudes=self.down_amplitudes,
+            reference_z=self.reference_z,
+            k_parallel=self.k_parallel,
+            unit_cell_area=self.unit_cell_area,
+            output_bmax=self.output_bmax,
+        )
 
 
 @dataclass(frozen=True)
@@ -111,7 +152,7 @@ def _order_mode_coefficients(
 
     pi_up, tau_up = spherical_functions_trigon(ct_up, st, int(lmax), xp=np)
     pi_down, tau_down = spherical_functions_trigon(ct_down, st, int(lmax), xp=np)
-    nmodes = sum(1 for _ in iter_modes(int(lmax)))
+    nmodes = n_modes(int(lmax))
     b_up_te = np.zeros((nmodes,), dtype=np.complex128)
     b_up_tm = np.zeros((nmodes,), dtype=np.complex128)
     b_down_te = np.zeros((nmodes,), dtype=np.complex128)
@@ -134,6 +175,185 @@ def _order_mode_coefficients(
     return b_up_te, b_up_tm, b_down_te, b_down_tm
 
 
+def _add_outgoing_amplitudes(
+    outgoing: PeriodicOutgoingAmplitudes,
+    *,
+    positions: np.ndarray,
+    coeffs: np.ndarray,
+    lmax: int,
+    k: complex,
+) -> None:
+    """Add one outgoing expansion family to an owned order-amplitude sink."""
+    pos = np.asarray(positions, dtype=float).reshape(-1, 3)
+    x = np.asarray(coeffs, dtype=np.complex128).reshape(len(pos), n_modes(lmax))
+    active = np.any(x != 0, axis=1)
+    pos, x = pos[active], x[active]
+    if not len(pos):
+        return
+    k_c = complex(k)
+    area = outgoing.unit_cell_area
+    orders = outgoing.orders
+    n_orders = len(orders.m)
+    for i in range(n_orders):
+        kp = orders.k_parallel[i]
+        kz = complex(orders.kz[i])
+        kx, ky = float(kp[0]), float(kp[1])
+        if kz == 0:
+            raise ValueError(
+                "Outgoing amplitudes at a grazing Rayleigh-threshold order need a limiting prescription"
+            )
+        b_up_te, b_up_tm, b_down_te, b_down_tm = _order_mode_coefficients(
+            lmax=int(lmax),
+            k=k_c,
+            k_parallel=kp,
+            kz=kz,
+        )
+        phase_up = np.exp(
+            -1j * (pos[:, 0] * kx + pos[:, 1] * ky + (pos[:, 2] - outgoing.reference_z[0]) * kz)
+        )
+        phase_down = np.exp(
+            -1j * (pos[:, 0] * kx + pos[:, 1] * ky - (pos[:, 2] - outgoing.reference_z[1]) * kz)
+        )
+        pref = (2.0 * np.pi) / (area * k_c * kz)
+        outgoing.up_amplitudes[i, 0] += pref * np.sum(phase_up * (x @ b_up_te))
+        outgoing.up_amplitudes[i, 1] += pref * np.sum(phase_up * (x @ b_up_tm))
+        outgoing.down_amplitudes[i, 0] += pref * np.sum(phase_down * (x @ b_down_te))
+        outgoing.down_amplitudes[i, 1] += pref * np.sum(phase_down * (x @ b_down_tm))
+
+
+def periodic_outgoing_amplitudes(
+    *,
+    lattice: RectangularLattice2D,
+    positions: np.ndarray,
+    coeffs: np.ndarray,
+    lmax: int,
+    k: complex,
+    k_parallel: np.ndarray,
+    output_bmax: float | None = None,
+    reference_z: tuple[float, float] = (0.0, 0.0),
+) -> PeriodicOutgoingAmplitudes:
+    """Transform outgoing SVWF arrays without imposing an incident source.
+
+    The prefactor is 2*pi/(area*k*kz). Finite reference planes avoid growing
+    evanescent phase factors when a source is far from the global origin.
+    Choose them outside the source slab when reconstructing physical fields.
+    """
+    wave_number = passive_wavenumber(k)
+    if len(reference_z) != 2 or not np.all(np.isfinite(reference_z)):
+        raise ValueError("reference_z must contain two finite heights")
+    q = real_transverse_wavevector(k_parallel)
+    orders = enumerate_diffraction_orders_rectangular(
+        lattice=lattice,
+        k_parallel_incident=q,
+        k=wave_number,
+        output_bmax=output_bmax,
+    )
+    out = PeriodicOutgoingAmplitudes(
+        orders,
+        np.zeros((len(orders.m), 2), dtype=np.complex128),
+        np.zeros((len(orders.m), 2), dtype=np.complex128),
+        (float(reference_z[0]), float(reference_z[1])),
+        q,
+        float(lattice.area),
+        output_bmax,
+    )
+    _add_outgoing_amplitudes(out, positions=positions, coeffs=coeffs, lmax=lmax, k=wave_number)
+    return out
+
+
+def compute_periodic_outgoing_amplitudes(
+    run: ChannelResult,
+    *,
+    output_bmax: float | None = None,
+) -> PeriodicOutgoingAmplitudes:
+    """Outgoing orders of one periodic channel at its source-slab boundaries.
+
+    Plane-wave channels contain particle-scattered waves. Dipole arrays also
+    include direct host-source emission; embedded emission is already part of
+    the solved outgoing coefficients. The same amplitude definition applies
+    in absorbing hosts without assigning infinite-distance radiation power.
+    """
+    periodic = run.config.periodic
+    if periodic is None:
+        raise ValueError("Outgoing periodic orders require a periodic channel")
+    q = periodic_source_k_parallel(periodic, run.source)
+    host = None
+    heights = np.r_[
+        run.positions[:, 2] - run.circumscribing_radii,
+        run.positions[:, 2] + run.circumscribing_radii,
+    ]
+    if isinstance(run.source, (DipoleSource, DipoleCollection)):
+        # Outgoing waves already contain embedded emission. Only the host
+        # subset is needed here, so no local interface solve is prepared.
+        prepared = run._dipole_source
+        placement = (
+            prepared.placement
+            if prepared is not None
+            else locate_dipole_source(
+                ParticleCollection.from_particles(run.particles),
+                run.source,
+                lattice=periodic.lattice,
+                k_parallel=q,
+            )
+        )
+        host = placement.host_source
+        active = np.any(host.outgoing_coeffs() != 0, axis=1)
+        heights = np.r_[heights, host.source_positions()[active, 2]]
+    reference_z = (float(heights.max()), float(heights.min())) if len(heights) else (0.0, 0.0)
+    out = periodic_outgoing_amplitudes(
+        lattice=periodic.lattice,
+        positions=run.positions,
+        coeffs=run.coeffs,
+        lmax=run.config.lmax,
+        k=run.k,
+        k_parallel=q,
+        reference_z=reference_z,
+        output_bmax=periodic.options.output_bmax if output_bmax is None else output_bmax,
+    )
+    if host is not None:
+        _add_outgoing_amplitudes(
+            out, positions=host.source_positions(), coeffs=host.outgoing_coeffs(), lmax=1, k=run.k
+        )
+    return out
+
+
+def periodic_outgoing_flux(
+    outgoing: PeriodicOutgoingAmplitudes,
+    *,
+    k: complex,
+    n_medium: complex,
+    z_above: float | None = None,
+    z_below: float | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Outward power per cell/order through finite upper and lower planes.
+
+    Integrating one cell eliminates cross-order interference for real q.
+    Evaluate the full complex TE/TM Maxwell basis, retaining evanescent flux
+    in absorbing hosts. This is finite-plane flux, not R/T normalization.
+    """
+    upper, lower = outgoing.reference_z
+    z_above = upper if z_above is None else float(z_above)
+    z_below = lower if z_below is None else float(z_below)
+    if not np.all(np.isfinite([z_above, z_below])) or z_above < upper or z_below > lower:
+        raise ValueError("Flux planes must be finite and outside the outgoing reference slab")
+    fluxes = []
+    for sign, amplitude, distance in (
+        (1, outgoing.up_amplitudes, z_above - upper),
+        (-1, outgoing.down_amplitudes, z_below - lower),
+    ):
+        flux = np.zeros(len(outgoing.orders.m), dtype=float)
+        for i, (q, kz) in enumerate(
+            zip(outgoing.orders.k_parallel, outgoing.orders.kz, strict=True)
+        ):
+            e_te, e_tm, h_te, h_tm = plane_wave_basis(k=k, k_parallel=q, kz=sign * kz)
+            a_te, a_tm = amplitude[i] * np.exp(1j * sign * kz * distance)
+            e = a_te * e_te + a_tm * e_tm
+            h = complex(n_medium) * (a_te * h_te + a_tm * h_tm)
+            flux[i] = sign * outgoing.unit_cell_area / 2 * np.cross(e, h.conj())[2].real
+        fluxes.append(flux)
+    return fluxes[0], fluxes[1]
+
+
 def periodic_order_amplitudes(
     *,
     source: PlaneWave | BlochPlaneWave,
@@ -154,43 +374,23 @@ def periodic_order_amplitudes(
     The SVWF-to-PVWF prefactor follows the CELES/SMUTHI convention:
     `2*pi / (A * k * kz)`, where `A` is the unit-cell area.
     """
-    pos = np.asarray(positions, dtype=float).reshape(-1, 3)
-    x = np.asarray(coeffs, dtype=np.complex128).reshape(pos.shape[0], -1)
     k_c = passive_wavenumber(k)
     kp_inc = plane_wave_k_parallel(source)
-    orders = enumerate_diffraction_orders_rectangular(
+    outgoing = periodic_outgoing_amplitudes(
         lattice=lattice,
-        k_parallel_incident=kp_inc,
+        positions=positions,
+        coeffs=coeffs,
+        lmax=lmax,
         k=k_c,
+        k_parallel=kp_inc,
         output_bmax=output_bmax,
     )
-
-    n_orders = int(orders.m.size)
-    reflected = np.zeros((n_orders, 2), dtype=np.complex128)
-    transmitted = np.zeros((n_orders, 2), dtype=np.complex128)
-    scattered_up = np.zeros((n_orders, 2), dtype=np.complex128)
-    scattered_down = np.zeros((n_orders, 2), dtype=np.complex128)
-
-    area = float(lattice.area)
-    for i in range(n_orders):
-        kp = orders.k_parallel[i]
-        kz = complex(orders.kz[i])
-        kx, ky = float(kp[0]), float(kp[1])
-        if abs(kz) <= 1e-15:
-            continue
-        b_up_te, b_up_tm, b_down_te, b_down_tm = _order_mode_coefficients(
-            lmax=int(lmax),
-            k=k_c,
-            k_parallel=kp,
-            kz=kz,
-        )
-        phase_up = np.exp(-1j * (pos[:, 0] * kx + pos[:, 1] * ky + pos[:, 2] * kz))
-        phase_down = np.exp(-1j * (pos[:, 0] * kx + pos[:, 1] * ky - pos[:, 2] * kz))
-        pref = (2.0 * np.pi) / (area * k_c * kz)
-        scattered_up[i, 0] = pref * np.sum(phase_up * (x @ b_up_te))
-        scattered_up[i, 1] = pref * np.sum(phase_up * (x @ b_up_tm))
-        scattered_down[i, 0] = pref * np.sum(phase_down * (x @ b_down_te))
-        scattered_down[i, 1] = pref * np.sum(phase_down * (x @ b_down_tm))
+    orders = outgoing.orders
+    n_orders = len(orders.m)
+    scattered_up, scattered_down = outgoing.up_amplitudes, outgoing.down_amplitudes
+    reflected = np.zeros_like(scattered_up)
+    transmitted = np.zeros_like(scattered_down)
+    area = outgoing.unit_cell_area
 
     inc_sign = _incidence_sign(source)
     incident_pol = _incident_order_polarization(source, k=k_c)
@@ -456,7 +656,11 @@ def periodic_plane_wave_orders(
 __all__ = [
     "PeriodicFarFieldPayload",
     "PeriodicOrderAmplitudes",
+    "PeriodicOutgoingAmplitudes",
+    "compute_periodic_outgoing_amplitudes",
     "mix_periodic_farfield_payloads",
     "periodic_order_amplitudes",
+    "periodic_outgoing_amplitudes",
+    "periodic_outgoing_flux",
     "periodic_plane_wave_orders",
 ]

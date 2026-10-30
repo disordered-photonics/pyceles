@@ -18,6 +18,29 @@ from pyceles.core.periodic.structural import (
 from pyceles.core.translation import translation_ab5_table
 
 
+@pytest.mark.parametrize("k", [0.01, 0.01 + 0.003j])
+def test_finite_image_blocks_preserve_bloch_phase_under_cell_representative_changes(k):
+    lattice = pcl.RectangularLattice2D(430, 470)
+    destination, source = np.array([38.0, 19.0, 24.0]), np.array([-27.0, -13.0, -35.0])
+    q = np.array([0.0012, -0.0007])
+    shift = lattice.lattice_vector(2, -1)
+    phase = np.exp(1j * (q @ shift[:2]))
+    kwargs = dict(
+        lmax=2,
+        k=k,
+        lattice=lattice,
+        k_parallel=q,
+        window=1,
+        ab5=translation_ab5_table(2, dtype=np.complex128),
+    )
+    for block in (periodic_direct_sum_block, periodic_direct_structural_block):
+        reference = block(destination=destination, source=source, **kwargs)
+        moved_destination = block(destination=destination + shift, source=source, **kwargs)
+        moved_source = block(destination=destination, source=source + shift, **kwargs)
+        np.testing.assert_allclose(moved_destination, reference * phase, rtol=3e-14, atol=3e-14)
+        np.testing.assert_allclose(moved_source, reference / phase, rtol=3e-14, atol=3e-14)
+
+
 @pytest.mark.parametrize(
     ("destination", "source"),
     [

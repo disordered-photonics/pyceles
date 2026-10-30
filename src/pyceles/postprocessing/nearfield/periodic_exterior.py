@@ -4,6 +4,8 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from pyceles.core.conversions import plane_wave_basis
+from pyceles.core.lattice import canonical_cell_points
 from pyceles.core.periodic import PeriodicSpec, plane_wave_k_parallel
 from pyceles.core.sources import BlochPlaneWave, PlaneWave
 from pyceles.postprocessing.farfield import periodic_order_amplitudes
@@ -63,37 +65,6 @@ def _slab_classification_tolerance(
     return float(max(tol_user, tol_auto))
 
 
-def _plane_wave_vectors(
-    *,
-    k: complex,
-    k_parallel: np.ndarray,
-    kz: complex,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Return TE/TM unit vectors and corresponding H-vector factors."""
-    kx = float(k_parallel[0])
-    ky = float(k_parallel[1])
-    alpha = float(np.arctan2(ky, kx))
-    kp = float(np.hypot(kx, ky))
-    sb = kp / complex(k)
-    cb = complex(kz) / complex(k)
-
-    e_te = np.asarray(
-        [-np.sin(alpha), np.cos(alpha), 0.0],
-        dtype=np.complex128,
-    )
-    e_tm = np.asarray(
-        [cb * np.cos(alpha), cb * np.sin(alpha), -sb],
-        dtype=np.complex128,
-    )
-    khat = np.asarray(
-        [sb * np.cos(alpha), sb * np.sin(alpha), cb],
-        dtype=np.complex128,
-    )
-    h_te = np.cross(khat, e_te)
-    h_tm = np.cross(khat, e_tm)
-    return e_te, e_tm, h_te, h_tm
-
-
 def _initial_plane_wave_field(
     points: np.ndarray,
     *,
@@ -134,6 +105,17 @@ def _periodic_directsum_scattered_field(
     periodic = run.config.periodic
     if periodic is None:
         raise RuntimeError("Periodic direct-sum field evaluation requires periodic settings.")
+    positions, source_shifts = canonical_cell_points(
+        positions,
+        ax=periodic.lattice.ax,
+        ay=periodic.lattice.ay,
+    )
+    points, point_shifts = canonical_cell_points(
+        points,
+        ax=periodic.lattice.ax,
+        ay=periodic.lattice.ay,
+    )
+    coeffs = coeffs * np.exp(-1j * (source_shifts[:, :2] @ k_parallel))[:, None]
     window = int(periodic.options.directsum_window)
     image_positions: list[np.ndarray] = []
     image_coeffs: list[np.ndarray] = []
@@ -144,7 +126,7 @@ def _periodic_directsum_scattered_field(
             image_positions.append(positions + shift[None, :])
             image_coeffs.append(bloch_phase * coeffs)
 
-    return compute_scattered_field(
+    e, h = compute_scattered_field(
         points,
         np.concatenate(image_positions, axis=0),
         np.concatenate(image_coeffs, axis=0),
@@ -157,6 +139,8 @@ def _periodic_directsum_scattered_field(
         compute_dtype=np.dtype(run.compute_dtype),
         accum_dtype=np.dtype(run.accum_dtype),
     )
+    phase = np.exp(1j * (point_shifts[:, :2] @ k_parallel))[:, None]
+    return e * phase, h * phase
 
 
 def _accumulate_order_field(
@@ -167,6 +151,7 @@ def _accumulate_order_field(
     order_k_parallel: np.ndarray,
     order_kz: np.ndarray,
     amplitudes: np.ndarray,
+    reference_z: float = 0.0,
     progress: Any | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Accumulate one-hemisphere periodic order field on query points."""
@@ -185,20 +170,18 @@ def _accumulate_order_field(
             kx = float(kpar[i, 0])
             ky = float(kpar[i, 1])
             kz = complex(kz_arr[i])
-            if abs(kz) <= 1e-15:
-                continue
             a_te = complex(amp[i, 0])
             a_tm = complex(amp[i, 1])
             if abs(a_te) <= 0.0 and abs(a_tm) <= 0.0:
                 continue
-            e_te, e_tm, h_te, h_tm = _plane_wave_vectors(
+            e_te, e_tm, h_te, h_tm = plane_wave_basis(
                 k=complex(k),
                 k_parallel=kpar[i],
                 kz=kz,
             )
             e_vec = a_te * e_te + a_tm * e_tm
             h_vec = complex(n_medium) * (a_te * h_te + a_tm * h_tm)
-            phase = np.exp(1j * (kx * pts[:, 0] + ky * pts[:, 1] + kz * pts[:, 2]))
+            phase = np.exp(1j * (kx * pts[:, 0] + ky * pts[:, 1] + kz * (pts[:, 2] - reference_z)))
             e += phase[:, None] * e_vec[None, :]
             h += phase[:, None] * h_vec[None, :]
         finally:

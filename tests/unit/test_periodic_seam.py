@@ -215,7 +215,7 @@ def test_periodic_config_rejects_mlfmm_backend(
         )
 
 
-def test_periodic_config_rejects_non_plane_wave_embedded_source() -> None:
+def test_periodic_config_rejects_unbounded_beam_source() -> None:
     source = pcl.GaussianBeam(
         wavelength=550.0,
         medium_n=1.0 + 0j,
@@ -232,7 +232,7 @@ def test_periodic_config_rejects_non_plane_wave_embedded_source() -> None:
         ),
         particles=[_sphere(radius=10.0)],
     )
-    with pytest.raises(NotImplementedError, match="PlaneWave excitation"):
+    with pytest.raises(NotImplementedError, match="Periodic workflows support"):
         sim.run(source)
 
 

@@ -6,7 +6,7 @@ import numpy as np
 import numpy.typing as npt
 
 from pyceles.core.indexing import n_modes
-from pyceles.core.lattice import RectangularLattice2D
+from pyceles.core.lattice import RectangularLattice2D, canonical_cell_points
 from pyceles.core.radial import passive_wavenumber
 from pyceles.core.translation import translation_block
 
@@ -46,6 +46,8 @@ def periodic_direct_sum_block(
     w = np.zeros((nm, nm), dtype=out_dtype)
     dst = np.asarray(destination, dtype=float).reshape(3)
     src = np.asarray(source, dtype=float).reshape(3)
+    canonical, shifts = canonical_cell_points(np.stack((dst, src)), ax=lattice.ax, ay=lattice.ay)
+    dst, src = canonical
     kp = np.asarray(k_parallel, dtype=float).reshape(2)
     nwin = _validated_window(window)
 
@@ -64,6 +66,7 @@ def periodic_direct_sum_block(
                 radial_lut=None,
             )
             w += np.asarray(phase * block, dtype=out_dtype)
+    w *= np.exp(1j * ((shifts[0, :2] - shifts[1, :2]) @ kp))
     return w
 
 

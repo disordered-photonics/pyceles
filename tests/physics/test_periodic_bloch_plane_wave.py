@@ -396,7 +396,9 @@ def test_shifted_real_host_plane_wave_keeps_periodic_order_phase_coherent() -> N
     phase_at_origin = np.exp(-1j * k * shifted_source.focal_point[2])
     rng = np.random.default_rng(20261020)
     coeffs = rng.standard_normal((1, n_modes(1))) + 1j * rng.standard_normal((1, n_modes(1)))
-    lattice = pcl.RectangularLattice2D(900.0, 1100.0)
+    # Phase covariance is independent of a Rayleigh-threshold limit. Keep
+    # this lattice off exact grazing; that singular contract is tested separately.
+    lattice = pcl.RectangularLattice2D(900.0, 1070.0)
     positions = np.asarray([[20.0, -30.0, 40.0]])
     reference = periodic_order_amplitudes(
         source=source,

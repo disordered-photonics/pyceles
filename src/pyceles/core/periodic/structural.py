@@ -9,7 +9,7 @@ import numpy.typing as npt
 
 from pyceles._arrays import expose_read_only_view
 from pyceles.core.indexing import iter_modes, n_modes
-from pyceles.core.lattice import RectangularLattice2D
+from pyceles.core.lattice import RectangularLattice2D, canonical_cell_points
 from pyceles.core.radial import passive_wavenumber, sph_hankel1
 from pyceles.core.spherical import legendre_normalized_trigon_scalar
 from pyceles.core.translation import _mode_indices_within_larger_lmax, translation_ab5_table
@@ -140,6 +140,7 @@ def direct_structural_sums_2d(
     window: int,
     exclude_zero_shift: bool = False,
     dtype: npt.DTypeLike = np.complex128,
+    structural_order: int | None = None,
 ) -> Array:
     """Evaluate finite-window scalar lattice sums for SVWF block assembly.
 
@@ -149,11 +150,15 @@ def direct_structural_sums_2d(
     accelerated structural constants used by a periodic Ewald coupling.
     """
     out_dtype = np.dtype(dtype)
-    order = 2 * int(lmax)
+    order = 2 * int(lmax) if structural_order is None else int(structural_order)
+    if not 0 <= order <= 2 * int(lmax):
+        raise ValueError("structural_order must lie between zero and 2*lmax")
     sums = np.zeros((order + 1, 2 * order + 1), dtype=np.complex128)
     wave_number = passive_wavenumber(k)
     dst = np.asarray(destination, dtype=float).reshape(3)
     src = np.asarray(source, dtype=float).reshape(3)
+    canonical, shifts = canonical_cell_points(np.stack((dst, src)), ax=lattice.ax, ay=lattice.ay)
+    dst, src = canonical
     kp = np.asarray(k_parallel, dtype=float).reshape(2)
     nwin = _validated_window(window)
 
@@ -175,6 +180,7 @@ def direct_structural_sums_2d(
                 dtype=np.complex128,
             )
 
+    sums *= np.exp(1j * ((shifts[0, :2] - shifts[1, :2]) @ kp))
     return np.asarray(sums, dtype=out_dtype)
 
 

@@ -3,228 +3,18 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import numpy as np
-from tqdm.auto import tqdm
 
-from pyceles.core.indexing import n_modes
 from pyceles.core.periodic import PeriodicSpec, plane_wave_k_parallel
-from pyceles.core.periodic.ewald import (
-    EwaldShellWorkspace,
-    ewald_structural_sums_2d_batch,
-    resolve_ewald_eta,
-)
-from pyceles.core.periodic.rayleigh import (
-    apply_rayleigh_far_to_points_numpy,
-    near_point_source_csr,
-    prepare_rayleigh_plan,
-)
-from pyceles.core.periodic.structural import direct_structural_sums_2d
+from pyceles.core.periodic.reception import apply_periodic_reception
 
 from .classification import classify_periodic_internal_points
 from .components import NearFieldComponents
 from .internal import compute_internal_field
 from .periodic_exterior import _initial_plane_wave_field, _resolve_periodic_channel_payload
-from .periodic_projection import (
-    l1_compact_projection_data,
-    reduce_compact_structural_sums_to_l1,
-)
 from .slice import reshape_field_points
 
 if TYPE_CHECKING:
     from pyceles.simulation import ChannelResult
-
-
-def _periodic_local_regular_l1_coeffs(
-    *,
-    points: np.ndarray,
-    positions: np.ndarray,
-    coeffs: np.ndarray,
-    lmax: int,
-    k: complex,
-    periodic: PeriodicSpec,
-    k_parallel: np.ndarray,
-    circumscribing_radii: np.ndarray | None = None,
-    point_batch_size: int = 128,
-    show_progress: bool = False,
-) -> np.ndarray:
-    """Return point-local regular `l=1` coefficients for periodic in-slab points.
-
-    The Ewald path contracts every source-point structural sum directly into the
-    destination ``l=1`` sector. The hybrid Rayleigh path uses the same exact
-    contraction inside its vertical band and z-sorted reciprocal scans outside.
-    """
-    pts = np.asarray(points, dtype=float).reshape(-1, 3)
-    pos = np.asarray(positions, dtype=float).reshape(-1, 3)
-    lmax_i = int(lmax)
-    nm = n_modes(lmax_i)
-    out = np.zeros((pts.shape[0], 6), dtype=np.complex128)
-    if pts.shape[0] == 0 or pos.shape[0] == 0:
-        return out
-
-    coeff_arr = np.asarray(coeffs, dtype=np.complex128).reshape(pos.shape[0], nm)
-    (
-        lmax_struct,
-        structural_order,
-        degree_indices,
-        order_indices,
-        kernel,
-    ) = l1_compact_projection_data(lmax_i)
-    method = str(periodic.options.method)
-    rayleigh_z_cut: float | None = None
-    if method == "rayleigh":
-        plan = prepare_rayleigh_plan(
-            lmax=lmax_i,
-            k=k,
-            positions=pos,
-            circumscribing_radii=circumscribing_radii,
-            periodic=periodic,
-            k_parallel=k_parallel,
-            dtype=np.complex128,
-        )
-        out += np.asarray(
-            apply_rayleigh_far_to_points_numpy(plan, coeff_arr, pts),
-            dtype=np.complex128,
-        )
-        rayleigh_z_cut = float(plan.z_cut)
-
-    batch = max(1, int(point_batch_size))
-    workspace = None
-    if method != "directsum":
-        eta = resolve_ewald_eta(
-            periodic=periodic,
-            k=k,
-            k_parallel=k_parallel,
-            positions=pos,
-            lmax=lmax_i,
-            max_vertical_offset=rayleigh_z_cut,
-        )
-        workspace = EwaldShellWorkspace(
-            lattice=periodic.lattice,
-            k=k,
-            k_parallel=np.asarray(k_parallel, dtype=float).reshape(2),
-            eta=eta,
-        )
-    if method != "rayleigh":
-        n_batches = (pts.shape[0] + batch - 1) // batch
-        total_work = int(n_batches * pos.shape[0])
-        progress = (
-            tqdm(total=total_work, desc="Periodic slab field", unit="source-batch", leave=True)
-            if show_progress and total_work > 0
-            else None
-        )
-        try:
-            for start in range(0, pts.shape[0], batch):
-                stop = min(pts.shape[0], start + batch)
-                pts_batch = np.asarray(pts[start:stop], dtype=float)
-                acc = np.zeros((pts_batch.shape[0], 6), dtype=np.complex128)
-                for j in range(pos.shape[0]):
-                    if method == "directsum":
-                        direct_sums = np.stack(
-                            [
-                                direct_structural_sums_2d(
-                                    lmax=lmax_struct,
-                                    k=k,
-                                    destination=point,
-                                    source=pos[j],
-                                    lattice=periodic.lattice,
-                                    k_parallel=k_parallel,
-                                    window=periodic.options.directsum_window,
-                                    dtype=np.complex128,
-                                )
-                                for point in pts_batch
-                            ],
-                            axis=0,
-                        )
-                        # The projector uses the exact lmax+1 channels centered in
-                        # its compact table; discard the direct helper's padding.
-                        order_offset = 2 * lmax_struct
-                        sums = direct_sums[
-                            :,
-                            : structural_order + 1,
-                            order_offset - structural_order : order_offset + structural_order + 1,
-                        ]
-                    else:
-                        assert workspace is not None
-                        sums = ewald_structural_sums_2d_batch(
-                            lmax_struct=lmax_struct,
-                            structural_order=structural_order,
-                            k=k,
-                            destinations=pts_batch,
-                            source=pos[j],
-                            lattice=periodic.lattice,
-                            k_parallel=k_parallel,
-                            eta=workspace.eta,
-                            real_shells=periodic.options.real_shells,
-                            reciprocal_shells=periodic.options.reciprocal_shells,
-                            shell_tolerance=float(periodic.options.shell_tolerance),
-                            max_shells=int(periodic.options.max_shells),
-                            workspace=workspace,
-                        )
-                    acc += reduce_compact_structural_sums_to_l1(
-                        sums,
-                        coeff_arr[j],
-                        degree_indices=degree_indices,
-                        order_indices=order_indices,
-                        kernel=kernel,
-                    )
-                    if progress is not None:
-                        progress.update(1)
-                out[start:stop] = acc
-        finally:
-            if progress is not None:
-                progress.close()
-        return out
-
-    if rayleigh_z_cut is None or workspace is None:
-        raise RuntimeError("Rayleigh near-field initialization failed.")
-    indptr, destination_indices, _source_indices = near_point_source_csr(
-        pts,
-        pos,
-        rayleigh_z_cut,
-    )
-    if destination_indices.size == 0:
-        return out
-    total_work = sum(
-        (int(indptr[j + 1] - indptr[j]) + batch - 1) // batch for j in range(pos.shape[0])
-    )
-    progress = (
-        tqdm(total=total_work, desc="Periodic slab field", unit="source-batch", leave=True)
-        if show_progress and total_work > 0
-        else None
-    )
-    try:
-        for j in range(pos.shape[0]):
-            point_indices = destination_indices[indptr[j] : indptr[j + 1]]
-            for start in range(0, point_indices.size, batch):
-                batch_indices = point_indices[start : start + batch]
-                pts_batch = np.asarray(pts[batch_indices], dtype=float)
-                sums = ewald_structural_sums_2d_batch(
-                    lmax_struct=lmax_struct,
-                    structural_order=structural_order,
-                    k=k,
-                    destinations=pts_batch,
-                    source=pos[j],
-                    lattice=periodic.lattice,
-                    k_parallel=k_parallel,
-                    eta=workspace.eta,
-                    real_shells=periodic.options.real_shells,
-                    reciprocal_shells=periodic.options.reciprocal_shells,
-                    shell_tolerance=float(periodic.options.shell_tolerance),
-                    max_shells=int(periodic.options.max_shells),
-                    workspace=workspace,
-                )
-                out[batch_indices] += reduce_compact_structural_sums_to_l1(
-                    sums,
-                    coeff_arr[j],
-                    degree_indices=degree_indices,
-                    order_indices=order_indices,
-                    kernel=kernel,
-                )
-                if progress is not None:
-                    progress.update(1)
-    finally:
-        if progress is not None:
-            progress.close()
-    return out
 
 
 def _local_regular_l1_fields_at_center(
@@ -346,34 +136,20 @@ def compute_periodic_near_field_interior(
         valid_idx = np.flatnonzero(~inside_mask)
         if valid_idx.size > 0:
             points_valid = np.asarray(pts_flat[valid_idx], dtype=float)
-            if run.config.resolved_postprocessing_backend() == "cupy":
-                from .periodic_interior_cupy import periodic_local_regular_l1_coeffs_cupy
-
-                local_l1 = periodic_local_regular_l1_coeffs_cupy(
-                    points=points_valid,
-                    positions=run.positions,
-                    coeffs=coeffs,
-                    lmax=int(run.config.lmax),
-                    k=complex(k),
-                    periodic=periodic,
-                    k_parallel=k_parallel,
-                    circumscribing_radii=run.circumscribing_radii,
-                    show_progress=show_progress,
-                    compute_dtype=np.dtype(run.config.compute_dtype),
-                    accum_dtype=np.dtype(run.accum_dtype),
-                )
-            else:
-                local_l1 = _periodic_local_regular_l1_coeffs(
-                    points=points_valid,
-                    positions=run.positions,
-                    coeffs=coeffs,
-                    lmax=int(run.config.lmax),
-                    k=k,
-                    periodic=periodic,
-                    k_parallel=k_parallel,
-                    circumscribing_radii=run.circumscribing_radii,
-                    show_progress=show_progress,
-                )
+            local_l1 = apply_periodic_reception(
+                points=points_valid,
+                positions=run.positions,
+                coefficients=coeffs,
+                lmax_in=int(run.config.lmax),
+                k=k,
+                periodic=periodic,
+                k_parallel=k_parallel,
+                circumscribing_radii=run.circumscribing_radii,
+                show_progress=show_progress,
+                backend=run.config.resolved_postprocessing_backend(),
+                compute_dtype=run.config.compute_dtype,
+                accum_dtype=run.accum_dtype,
+            )
             e_valid, h_valid = _local_regular_l1_fields_at_center(
                 local_l1_coeffs=local_l1,
                 n_medium=run.config.n_medium,

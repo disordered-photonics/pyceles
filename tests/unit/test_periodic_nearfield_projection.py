@@ -4,36 +4,37 @@ from typing import Any, cast
 
 import numpy as np
 import pytest
+from scipy.sparse import csr_matrix
 
-from pyceles.core.indexing import n_modes
-from pyceles.core.translation import translation_ab5_table
-from pyceles.postprocessing.nearfield.periodic_interior_cupy import (
+from pyceles.core.indexing import iter_modes, n_modes
+from pyceles.core.periodic.reception_cupy import (
     _periodic_near_pair_batch_size_for_workspace,
     _periodic_near_pair_workspace_bytes_per_pair,
 )
-from pyceles.postprocessing.nearfield.periodic_projection import (
-    l1_compact_projection_data,
-    l1_projection_data,
-    reduce_compact_structural_sums_to_l1,
-    reduce_structural_sums_to_l1,
-)
+from pyceles.core.periodic.structural import rectangular_projection_data
+from pyceles.core.translation import translation_ab5_table
+
+
+def _dense_l1_kernel(lmax):
+    """Independent dense mode/channel selection for the rectangular contraction."""
+    modes = tuple(iter_modes(lmax))
+    rows = [(m, index) for _, degree, m, index in modes if degree == 1]
+    order = 2 * ((lmax + 2) // 2)
+    p_count = lmax + 2
+    table = translation_ab5_table(lmax, dtype=np.complex128)
+    kernel = np.zeros((6, n_modes(lmax), p_count, 2 * order + 1), dtype=complex)
+    for row, (m_dst, dst) in enumerate(rows):
+        for _, _, m_src, src in modes:
+            kernel[row, src, :, m_src - m_dst + order] = table[dst, src, :p_count]
+    return order, kernel
 
 
 @pytest.mark.parametrize("lmax", [1, 2, 3, 4, 5, 8])
 def test_compact_l1_projection_matches_dense_reference(lmax: int) -> None:
     rng = np.random.default_rng(1800 + lmax)
-    lmax_struct, _offset, dense_kernel, _rows = l1_projection_data(lmax)
-    (
-        compact_lmax_struct,
-        structural_order,
-        degrees,
-        orders,
-        compact_kernel,
-    ) = l1_compact_projection_data(lmax)
-    assert compact_lmax_struct == lmax_struct
-    assert structural_order == lmax + 1
-
-    maximum_order = 2 * lmax_struct
+    maximum_order, dense_kernel = _dense_l1_kernel(lmax)
+    structural_order = lmax + 1
+    degrees, orders, indptr, inputs, values = rectangular_projection_data(1, lmax)
     structural = rng.normal(size=(7, maximum_order + 1, 2 * maximum_order + 1)) + 1j * rng.normal(
         size=(7, maximum_order + 1, 2 * maximum_order + 1)
     )
@@ -46,26 +47,24 @@ def test_compact_l1_projection_matches_dense_reference(lmax: int) -> None:
                 structural[:, degree, column] = 0.0
     coeffs = rng.normal(size=n_modes(lmax)) + 1j * rng.normal(size=n_modes(lmax))
 
-    want = reduce_structural_sums_to_l1(structural, coeffs, kernel=dense_kernel)
+    want = np.einsum(
+        "dpm,rcpm,c->dr", structural[:, : lmax + 2], dense_kernel, coeffs, optimize=True
+    )
     compact_structural = structural[
         :,
         : structural_order + 1,
         maximum_order - structural_order : maximum_order + structural_order + 1,
     ]
-    got = reduce_compact_structural_sums_to_l1(
-        compact_structural,
-        coeffs,
-        degree_indices=degrees,
-        order_indices=orders,
-        kernel=compact_kernel,
-    )
+    projection = csr_matrix((values, inputs, indptr), shape=(len(degrees) * 6, n_modes(lmax)))
+    weighted_source = (projection @ coeffs).reshape(len(degrees), 6)
+    got = compact_structural[:, degrees, orders] @ weighted_source
     np.testing.assert_allclose(got, want, rtol=5e-13, atol=5e-13)
 
 
 @pytest.mark.parametrize("lmax", [2, 3, 4, 5, 8])
 def test_l1_translation_has_no_support_above_triangle_limit(lmax: int) -> None:
     """The compact p<=lmax+1 cutoff follows the exact Wigner triangle rule."""
-    _lmax_struct, _offset, _kernel, l1_rows = l1_projection_data(lmax)
+    l1_rows = [index for _, degree, _, index in iter_modes(lmax) if degree == 1]
     ab5 = translation_ab5_table(lmax, dtype=np.complex128)
     unsupported = np.asarray(ab5[l1_rows, :, lmax + 2 :])
     np.testing.assert_array_equal(unsupported, np.zeros_like(unsupported))
@@ -160,3 +159,34 @@ def test_shifted_plane_source_reduction_commutes_with_lateral_synthesis() -> Non
     reduced_first = phase @ np.sum(projected, axis=0, dtype=np.complex128)
 
     np.testing.assert_allclose(reduced_first, reference, rtol=2e-15, atol=2e-15)
+
+
+@pytest.mark.parametrize("orders", [(1, 4), (4, 1), (3, 3), (2, 4)])
+def test_sparse_rectangular_source_projection_matches_explicit_mode_pairs(orders):
+    lout, lin = orders
+    full = max(orders)
+    degree_max = lout + lin
+    degrees, columns, indptr, inputs, values = rectangular_projection_data(lout, lin)
+    matrix = csr_matrix(
+        (values, inputs, indptr), shape=(len(degrees) * n_modes(lout), n_modes(lin))
+    )
+    rng = np.random.default_rng(2718)
+    coeffs = rng.normal(size=(3, n_modes(lin))) + 1j * rng.normal(size=(3, n_modes(lin)))
+    expected = np.zeros((3, len(degrees), n_modes(lout)), dtype=complex)
+    table = translation_ab5_table(full, dtype=np.complex128)
+    global_modes = {(tau, l, m): idx for tau, l, m, idx in iter_modes(full)}
+    for tau_out, l_out, m_out, out_idx in iter_modes(lout):
+        for tau_in, l_in, m_in, in_idx in iter_modes(lin):
+            delta = m_in - m_out
+            for p in range(abs(delta), degree_max + 1):
+                global_out = global_modes[tau_out, l_out, m_out]
+                global_in = global_modes[tau_in, l_in, m_in]
+                expected[:, p * p + p + delta, out_idx] += (
+                    table[global_out, global_in, p] * coeffs[:, in_idx]
+                )
+    actual = (matrix @ coeffs.T).T.reshape(3, len(degrees), n_modes(lout))
+    np.testing.assert_allclose(actual, expected, rtol=5e-13, atol=5e-13)
+    assert np.all(np.abs(columns - degree_max) <= degrees)
+    assert all(a.ndim == 1 for a in (degrees, columns, indptr, inputs, values))
+    # Structural storage is bounded by degree-only mode pairs, not all azimuths.
+    assert values.size <= n_modes(lout) * n_modes(lin) * (degree_max + 1)
