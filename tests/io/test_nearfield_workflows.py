@@ -180,6 +180,7 @@ def test_compute_near_field_uses_explicit_channel_payload(monkeypatch):
         coeffs=coeffs,
         particles=tuple(),
         k=2.0,
+        _dipole_source=None,
     )
     out_scalar = fn(run, points=np.array([1.0, 2.0, 3.0]), show_progress=False)
     assert out_scalar.E_total.shape == (3,)

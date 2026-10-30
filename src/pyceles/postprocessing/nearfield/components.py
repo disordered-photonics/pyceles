@@ -7,9 +7,12 @@ import numpy as np
 import numpy.typing as npt
 from tqdm.auto import tqdm
 
-from pyceles.core.particles import Particle, ParticleCollection
+from pyceles.core.particles import LayeredSphere, Particle, ParticleCollection, Sphere
+from pyceles.core.sources import DipoleCollection, DipoleSource
+from pyceles.core.sources.embedded import PreparedDipoleSource, prepare_dipole_source
 
 from .classification import classify_internal_points
+from .excitation import exciting_coefficients, spherical_exciting_fields
 from .initial import compute_initial_field
 from .internal import compute_internal_field
 from .scattered import compute_scattered_electric_field, compute_scattered_field
@@ -53,10 +56,13 @@ class NearFieldComponents:
     """Decomposed complex near fields evaluated at the same spatial points.
 
     Components follow standard multiple-scattering bookkeeping:
-    - `initial`: incident source field in the host medium
+    - `initial`: field of sources in the exterior host medium
     - `scattered`: re-radiated field from all particles
-    - `internal`: regular field valid inside particles
+    - `internal`: physical total field inside particles
     - `total`: outside `initial+scattered`, inside replaced by `internal`
+
+    Embedded emitters contribute through particle emission and internal fields,
+    without a second homogeneous-host field in `initial`.
     """
 
     E_initial: np.ndarray
@@ -95,6 +101,125 @@ def _positions_from_particles(particles: Sequence[Particle]) -> np.ndarray:
     return np.asarray(
         [np.asarray(p.position, dtype=float) for p in particles], dtype=float
     ).reshape(-1, 3)
+
+
+def _embedded_dipole_components(
+    points: np.ndarray,
+    *,
+    coeffs: np.ndarray,
+    k: complex,
+    lmax: int,
+    source: PreparedDipoleSource,
+    particles: ParticleCollection,
+    n_medium: complex,
+    lut_dr: float,
+    compute_dtype: npt.DTypeLike,
+    accum_dtype: npt.DTypeLike,
+    show_progress: bool,
+    backend: str,
+) -> NearFieldComponents:
+    """Reconstruct embedded-source fields from external excitation and emission.
+
+    The solved outgoing coefficients already contain native emission. Only the
+    host-source subset contributes to `initial`; internal fields use the
+    external exciting field plus each locally prepared particular response.
+    """
+    compute_dtype, accum_dtype = np.dtype(compute_dtype), np.dtype(accum_dtype)
+    positions = particles.positions
+    progress = _NearFieldStageProgress(enabled=show_progress, total=3)
+    try:
+        progress.status("initial")
+        ei, hi = compute_initial_field(
+            points,
+            k=k,
+            n_medium=n_medium,
+            beam=source.host_source,
+            polar_angles=np.empty(0),
+            azimuthal_angles=np.empty(0),
+            compute_dtype=compute_dtype,
+            accum_dtype=accum_dtype,
+            show_progress=False,
+            backend=backend,
+        )
+        progress.advance()
+        classification = classify_internal_points(points, particles, n_medium=n_medium)
+        inside = classification.inside_any
+        progress.status("scattered")
+        es, hs = compute_scattered_field(
+            points,
+            positions,
+            coeffs,
+            k=k,
+            lmax=lmax,
+            n_medium=n_medium,
+            particle_distance_resolution=lut_dr,
+            active_mask=~inside,
+            compute_dtype=compute_dtype,
+            accum_dtype=accum_dtype,
+            show_progress=False,
+            backend=backend,
+        )
+        progress.advance()
+        eint, hint = np.zeros_like(ei), np.zeros_like(hi)
+        if np.any(inside):
+            progress.status("internal")
+            owners = classification.active_particle_indices
+            incoming = exciting_coefficients(
+                owners,
+                particles=particles,
+                host_source=source.host_source,
+                coeffs=coeffs,
+                k=k,
+                lmax=lmax,
+                lut_dr=lut_dr,
+                compute_dtype=compute_dtype,
+                accum_dtype=accum_dtype,
+                backend=backend,
+            )
+            for local, owner_index in enumerate(owners):
+                owner = int(owner_index)
+                selected = classification.points_for_particle(owner)
+                if not len(selected):
+                    continue
+                particle = particles[owner]
+                if isinstance(particle, (Sphere, LayeredSphere)):
+                    e, h = spherical_exciting_fields(
+                        points[selected],
+                        particle=particle,
+                        incident=incoming[local],
+                        wavelength=source.host_source.wavelength,
+                        n_medium=n_medium,
+                        lmax=lmax,
+                        compute_dtype=compute_dtype,
+                        accum_dtype=accum_dtype,
+                        backend=backend,
+                        source_responses=(
+                            emitter.response
+                            for emitter in source.embedded
+                            if emitter.particle_index == owner
+                        ),
+                    )
+                    eint[selected], hint[selected] = e, h
+                else:
+                    e, h, _ = compute_internal_field(
+                        points[selected],
+                        np.asarray(coeffs)[owner : owner + 1],
+                        k=k,
+                        lmax=lmax,
+                        particles=(particle,),
+                        n_medium=n_medium,
+                        compute_dtype=compute_dtype,
+                        accum_dtype=accum_dtype,
+                        show_progress=False,
+                        backend=backend,
+                    )
+                    eint[selected], hint[selected] = e, h
+        progress.advance()
+        et, ht = ei + es, hi + hs
+        et[inside], ht[inside] = eint[inside], hint[inside]
+        return NearFieldComponents(ei, hi, es, hs, eint, hint, et, ht, inside)
+    finally:
+        progress.close()
 
 
 def compute_total_field(
@@ -156,12 +281,40 @@ def _compute_near_field_components(
     backend: str = "numpy",
     compute_dtype: npt.DTypeLike = np.complex128,
     accum_dtype: npt.DTypeLike = np.complex128,
+    _dipole_source: PreparedDipoleSource | None = None,
     compute_magnetic: bool = True,
 ) -> NearFieldComponents | ElectricFieldComponents:
     """Compute near-field components through one shared classification workflow."""
     pts = np.asarray(field_points, dtype=float)
     pos = _positions_from_particles(particles)
     has_particles = len(particles) > 0
+    if isinstance(beam, (DipoleSource, DipoleCollection)):
+        part = ParticleCollection.from_particles(particles)
+        source = _dipole_source or prepare_dipole_source(part, beam, lmax=lmax)
+        if source.embedded:
+            fields = _embedded_dipole_components(
+                pts,
+                coeffs=coeffs,
+                k=k,
+                lmax=lmax,
+                source=source,
+                particles=part,
+                n_medium=n_medium,
+                lut_dr=lut_dr,
+                compute_dtype=compute_dtype,
+                accum_dtype=accum_dtype,
+                show_progress=show_progress,
+                backend=backend,
+            )
+            if compute_magnetic:
+                return fields
+            return ElectricFieldComponents(
+                fields.E_initial,
+                fields.E_scattered,
+                fields.E_internal,
+                fields.E_total,
+                fields.inside_mask,
+            )
     progress = _NearFieldStageProgress(enabled=show_progress, total=3 if has_particles else 1)
     try:
         progress.status("initial")
@@ -307,6 +460,7 @@ def compute_near_field_components(
     backend: str = "numpy",
     compute_dtype: npt.DTypeLike = np.complex128,
     accum_dtype: npt.DTypeLike = np.complex128,
+    _dipole_source: PreparedDipoleSource | None = None,
 ) -> NearFieldComponents:
     """Compute the full near-field decomposition on shared points."""
     result = _compute_near_field_components(
@@ -326,6 +480,7 @@ def compute_near_field_components(
         backend=backend,
         compute_dtype=compute_dtype,
         accum_dtype=accum_dtype,
+        _dipole_source=_dipole_source,
         compute_magnetic=True,
     )
     if not isinstance(result, NearFieldComponents):
@@ -351,6 +506,7 @@ def compute_electric_field_components(
     backend: str = "numpy",
     compute_dtype: npt.DTypeLike = np.complex128,
     accum_dtype: npt.DTypeLike = np.complex128,
+    _dipole_source: PreparedDipoleSource | None = None,
 ) -> ElectricFieldComponents:
     """Compute only electric near-field components."""
     result = _compute_near_field_components(
@@ -370,6 +526,7 @@ def compute_electric_field_components(
         backend=backend,
         compute_dtype=compute_dtype,
         accum_dtype=accum_dtype,
+        _dipole_source=_dipole_source,
         compute_magnetic=False,
     )
     if not isinstance(result, ElectricFieldComponents):

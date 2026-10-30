@@ -19,15 +19,19 @@ from pyceles.core.operators import (
     assemble_dense_A_numpy,
     prepare_matvec,
 )
-from pyceles.core.periodic import plane_wave_k_parallel
+from pyceles.core.periodic.reception import apply_periodic_reception
+from pyceles.core.periodic.types import periodic_source_k_parallel
 from pyceles.core.projection import project_source_to_svwf
 from pyceles.core.sources import (
     BlochPlaneWave,
+    DipoleCollection,
+    DipoleSource,
     FinitePlaneSpectrumSource,
     LocalExpansionSource,
     PlaneWave,
     Source,
 )
+from pyceles.core.sources.embedded import PreparedDipoleSource, prepare_dipole_source
 from pyceles.linear.solvers import (
     DenseLUFactorization,
     _capture_backend_solution,
@@ -158,7 +162,9 @@ def validate_source_compatibility(
     n_src = complex(source.medium_n)
     if not np.isclose(n_src, complex(cfg.n_medium), rtol=0.0, atol=0.0):
         raise ValueError(f"Source '{label}' medium_n mismatch: {n_src!r} != {cfg.n_medium!r}.")
-    if isinstance(source, LocalExpansionSource):
+    if isinstance(source, LocalExpansionSource) and not isinstance(
+        source, (DipoleSource, DipoleCollection)
+    ):
         src_pos = np.asarray(source.source_positions(), dtype=float).reshape(-1, 3)
         warn_local_sources_inside_circumspheres(
             label=label,
@@ -267,12 +273,7 @@ def periodic_shared_k_parallel(
     ref_label: str | None = None
     ref_kp: np.ndarray | None = None
     for label, source in labeled_sources.items():
-        if not isinstance(source, (PlaneWave, BlochPlaneWave)):
-            raise NotImplementedError(
-                "Periodic workflows currently support PlaneWave and BlochPlaneWave excitation. "
-                f"Source '{label}' is {type(source).__name__}."
-            )
-        kp = plane_wave_k_parallel(source)
+        kp = periodic_source_k_parallel(sim.config.periodic, source)
         if ref_kp is None:
             ref_label = str(label)
             ref_kp = kp
@@ -294,6 +295,7 @@ class _MultiSourceExecution:
 
     solved: MultiSourceSolveResult
     backend_coeffs: dict[str, Any] | None = None
+    dipole_sources: Mapping[str, PreparedDipoleSource] | None = None
 
 
 @dataclass(frozen=True)
@@ -564,20 +566,57 @@ def _solve_sources_impl(
             print("Source projection: analytic/local coefficients (no angular quadrature)")
 
     initial_coeffs: dict[str, np.ndarray] = {}
+    dipole_sources: dict[str, PreparedDipoleSource] = {}
     source_projection_t0 = time.perf_counter()
     source_labels: Iterable[str] = labels
     if cfg.verbose and n_channels > 1 and uses_source_grid:
         source_labels = tqdm(labels, desc="Source projection", unit="channel")
     for label in source_labels:
         src = labeled_sources[label]
-        coeff = project_source_to_svwf(
-            positions,
-            cfg.lmax,
-            src,
-            polar_angles=source_polar_angles,
-            azimuthal_angles=source_azimuthal_angles,
-            dtype=compute_dtype,
-        )
+        receivers: slice | np.ndarray = slice(None)
+        if isinstance(src, (DipoleSource, DipoleCollection)):
+            dipole_source = prepare_dipole_source(
+                sim.particles,
+                src,
+                lmax=cfg.lmax,
+                lattice=None if cfg.periodic is None else cfg.periodic.lattice,
+                k_parallel=k_parallel,
+            )
+            dipole_sources[label] = dipole_source
+            src = dipole_source.host_source
+            if dipole_source.nonreceiving_particles:
+                # Coincident bulk sources have no regular expansion here,
+                # but fully index-matched particles have T=0 and need none.
+                receivers = np.ones(Ns, dtype=bool)
+                receivers[list(dipole_source.nonreceiving_particles)] = False
+        if cfg.periodic is not None and isinstance(src, (DipoleSource, DipoleCollection)):
+            assert k_parallel is not None
+            coeff = apply_periodic_reception(
+                positions[receivers],
+                src.source_positions(),
+                src.outgoing_coeffs(),
+                lmax_out=cfg.lmax,
+                lmax_in=1,
+                k=k,
+                periodic=cfg.periodic,
+                k_parallel=k_parallel,
+                compute_dtype=compute_dtype,
+                accum_dtype=accum_dtype,
+                backend=operator_backend,
+            )
+        else:
+            coeff = project_source_to_svwf(
+                positions[receivers],
+                cfg.lmax,
+                src,
+                polar_angles=source_polar_angles,
+                azimuthal_angles=source_azimuthal_angles,
+                dtype=compute_dtype,
+            )
+        if isinstance(receivers, np.ndarray):
+            full = np.zeros((Ns, Nm), dtype=coeff.dtype)
+            full[receivers] = coeff
+            coeff = full
         initial_coeffs[label] = np.asarray(coeff, dtype=accum_dtype)
     phase_timings["source_projection_s"] = time.perf_counter() - source_projection_t0
 
@@ -594,6 +633,13 @@ def _solve_sources_impl(
     )
     prepared = prepared_system.prepared_operator
     rhs_flat = prepared_system.rhs_flat
+    for label, dipole_source in dipole_sources.items():
+        # The unknown includes native emission: a = T*e + s. Only host-located
+        # dipoles contribute to b; an embedded dipole enters through s once.
+        for emitter in dipole_source.embedded:
+            rhs_flat[label].reshape(Ns, Nm)[emitter.particle_index] += (
+                emitter.response.exterior_coefficients
+            )
     A_mv = prepared_system.apply_operator
     A_dense = prepared_system.dense_operator
     A_lu = prepared_system.dense_factorization
@@ -706,7 +752,9 @@ def _solve_sources_impl(
         compute_dtype=str(compute_dtype),
         accum_dtype=str(accum_dtype),
     )
-    return _MultiSourceExecution(solved=solved, backend_coeffs=backend_coeffs)
+    return _MultiSourceExecution(
+        solved=solved, backend_coeffs=backend_coeffs, dipole_sources=dipole_sources
+    )
 
 
 def solve_sources_core(

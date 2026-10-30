@@ -141,6 +141,7 @@ def compute_electric_field(
         backend=run.config.resolved_postprocessing_backend(),
         compute_dtype=compute_dtype,
         accum_dtype=accum_dtype,
+        _dipole_source=run._dipole_source,
     )
     if lead_shape == ():
         vec_shape: tuple[int, ...] = (3,)
@@ -202,6 +203,7 @@ def compute_near_field(
         backend=postprocessing_backend,
         compute_dtype=compute_dtype,
         accum_dtype=accum_dtype,
+        _dipole_source=run._dipole_source,
     )
 
     if lead_shape == ():

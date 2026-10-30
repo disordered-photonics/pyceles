@@ -11,6 +11,7 @@ import numpy as np
 from pyceles._optional import import_cupy, is_cupy_array
 from pyceles.core.indexing import n_modes
 from pyceles.core.particles import LayeredSphere, Particle, PECSphere, Sphere, Spheroid
+from pyceles.core.periodic.types import periodic_source_k_parallel
 from pyceles.core.sources import (
     BlochPlaneWave,
     DipoleCollection,
@@ -18,6 +19,11 @@ from pyceles.core.sources import (
     JonesPolarizedSource,
     PlaneWave,
     Source,
+)
+from pyceles.core.sources.embedded import (
+    PreparedDipoleSource,
+    locate_dipole_source,
+    prepare_dipole_source,
 )
 from pyceles.postprocessing.farfield import (
     CrossSectionBalance,
@@ -269,6 +275,7 @@ def _build_channel_diagnostics(
     k: complex,
     k0: float,
     accum_dtype: np.dtype,
+    dipole_source: PreparedDipoleSource | None = None,
 ) -> tuple[
     PowerBalance | None,
     CrossSectionBalance | None,
@@ -365,6 +372,16 @@ def _build_channel_diagnostics(
         return power, cross_sections, decomposition_forward, decomposition_backward
 
     if isinstance(source, (DipoleSource, DipoleCollection)):
+        placement = (
+            dipole_source.placement
+            if dipole_source is not None
+            else locate_dipole_source(sim.particles, source)
+        )
+        if placement.embedded:
+            # Exterior flux of an emitting particle includes source work; it
+            # cannot be labeled passive particle absorption using the T-only
+            # power identity. Source-work diagnostics use the local reaction.
+            return power, cross_sections, decomposition_forward, decomposition_backward
         p_abs_diag = _local_power_balance_generic_route(
             sim,
             initial_coeffs=local_b,
@@ -412,11 +429,12 @@ def _assemble_channel_result(
     decomposition_forward: PowerFluxDecomposition | None,
     decomposition_backward: PowerFluxDecomposition | None,
     periodic: PeriodicFarFieldPayload | None = None,
+    dipole_source: PreparedDipoleSource | None = None,
 ) -> ChannelResult:
     """Assemble one physical channel without assigning solve provenance."""
     ns = int(sim.positions.shape[0])
     nm = int(n_modes(sim.config.lmax))
-    return ChannelResult(
+    result = ChannelResult(
         config=sim.config,
         source=source,
         particles=sim.particles,
@@ -434,6 +452,9 @@ def _assemble_channel_result(
         compute_dtype=str(compute_dtype),
         accum_dtype=str(accum_dtype),
     )
+    if retention != ResultRetention.minimal():
+        object.__setattr__(result, "_dipole_source", dipole_source)
+    return result
 
 
 def build_single_channel_result(
@@ -452,6 +473,7 @@ def build_single_channel_result(
     farfield_polar_angles: np.ndarray,
     farfield_azimuthal_angles: np.ndarray,
     include_farfield: bool,
+    dipole_source: PreparedDipoleSource | None = None,
 ) -> ChannelResult:
     """Assemble one solved channel from its coefficients and observables."""
     cfg = sim.config
@@ -459,11 +481,17 @@ def build_single_channel_result(
     Ns = positions.shape[0]
     Nm = n_modes(cfg.lmax)
 
+    if dipole_source is None and isinstance(source, (DipoleSource, DipoleCollection)):
+        dipole_source = prepare_dipole_source(sim.particles, source, lmax=cfg.lmax)
+
     power: PowerBalance | None = None
     cross_sections = None
     decomposition_forward = None
     decomposition_backward = None
     if include_farfield:
+        field_source = source
+        if dipole_source is not None:
+            field_source = dipole_source.host_source
         ff = compute_far_field_patterns(
             positions,
             coeffs,
@@ -471,7 +499,7 @@ def build_single_channel_result(
             lmax=cfg.lmax,
             polar_angles=farfield_polar_angles,
             azimuthal_angles=farfield_azimuthal_angles,
-            source=source,
+            source=field_source,
             backend=cfg.resolved_postprocessing_backend(),
             dtype=compute_dtype,
             show_progress=bool(cfg.verbose),
@@ -488,6 +516,7 @@ def build_single_channel_result(
                 k=k,
                 k0=k0,
                 accum_dtype=accum_dtype,
+                dipole_source=dipole_source,
             )
         )
     else:
@@ -497,6 +526,7 @@ def build_single_channel_result(
         sim,
         source=source,
         retention=retention,
+        dipole_source=dipole_source,
         k=k,
         k0=k0,
         coeffs=coeffs,
@@ -520,6 +550,7 @@ def postprocess_sources_impl(
     farfield_polar_angles: np.ndarray | None = None,
     farfield_azimuthal_angles: np.ndarray | None = None,
     backend_coeffs_by_label: Mapping[str, Any] | None = None,
+    dipole_sources_by_label: Mapping[str, PreparedDipoleSource] | None = None,
     retention: ResultRetention | None = None,
 ) -> MultiSourceResult:
     """Postprocess one block solve into explicit per-source channel payloads."""
@@ -541,15 +572,32 @@ def postprocess_sources_impl(
     compute_dtype = np.dtype(solved.compute_dtype)
     accum_dtype = np.dtype(solved.accum_dtype)
 
+    dipole_sources = dict(dipole_sources_by_label or {})
+    for label in labels:
+        source = solved.sources[label]
+        if label not in dipole_sources and isinstance(source, (DipoleSource, DipoleCollection)):
+            dipole_sources[label] = prepare_dipole_source(
+                sim.particles,
+                source,
+                lmax=cfg.lmax,
+                lattice=None if cfg.periodic is None else cfg.periodic.lattice,
+                k_parallel=None
+                if cfg.periodic is None
+                else periodic_source_k_parallel(cfg.periodic, source),
+            )
+
     if periodic_run:
         periodic_runs: dict[str, ChannelResult] = {}
         for label in labels:
             x_col = solved.coeffs[label]
             rhs_col = solved.rhs[label]
             source = solved.sources[label]
-            has_power_normalization = not isinstance(source, BlochPlaneWave) or (
-                source.longitudinal_wavenumber.imag == 0.0
-                and source.longitudinal_wavenumber.real != 0.0
+            has_power_normalization = isinstance(source, (PlaneWave, BlochPlaneWave)) and (
+                not isinstance(source, BlochPlaneWave)
+                or (
+                    source.longitudinal_wavenumber.imag == 0.0
+                    and source.longitudinal_wavenumber.real != 0.0
+                )
             )
             if complex(cfg.n_medium).imag == 0.0 and has_power_normalization:
                 periodic_payload = _build_periodic_result(
@@ -596,13 +644,14 @@ def postprocess_sources_impl(
                 periodic_payload = None
                 if cfg.verbose:
                     print(
-                        "Periodic power and diffraction diagnostics are unavailable for "
-                        "absorbing-host or evanescent incidence."
+                        "Periodic plane-wave power diagnostics are unavailable for "
+                        "this excitation or host."
                     )
             periodic_runs[label] = _assemble_channel_result(
                 sim,
                 source=solved.sources[label],
                 retention=retained,
+                dipole_source=dipole_sources.get(label),
                 k=solved.k,
                 k0=float(solved.k0),
                 coeffs=np.asarray(x_col),
@@ -652,6 +701,7 @@ def postprocess_sources_impl(
             sim,
             source=solved.sources[label],
             retention=retained,
+            dipole_source=dipole_sources.get(label),
             initial_coeffs=solved.initial_coeffs[label],
             rhs_flat=np.asarray(rhs_col, dtype=accum_dtype).reshape(Ns * Nm),
             coeffs=x_col,

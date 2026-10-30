@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, fields, is_dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import h5py
 import numpy as np
 
-from pyceles.core.periodic import plane_wave_k_parallel
-from pyceles.core.sources import BlochPlaneWave, PlaneWave
+from pyceles.core.periodic.types import periodic_source_k_parallel
+from pyceles.core.sources import BlochPlaneWave, PlaneWave, Source
 from pyceles.core.sources.plane_wave import _plane_wave_geometry
 
 from .hdf5 import (
@@ -31,6 +31,43 @@ if TYPE_CHECKING:
     from pyceles.simulation import ChannelResult
 
 
+def _source_mapping(source: Source) -> dict[str, object]:
+    """Describe constructor state without copying source arrays or caches.
+
+    Loading returns data only; saved class names are never imported/executed.
+    Incomplete constructor state never prevents saving numerical artifacts.
+    Omit the constructor payload when it cannot be represented faithfully.
+    """
+    description: dict[str, object] = {
+        "type": type(source).__name__,
+        "module": type(source).__module__,
+        "parameters_complete": False,
+    }
+    if not is_dataclass(source):
+        return description
+    parameters: dict[str, object] = {}
+    for field in fields(source):
+        if not field.init:
+            continue
+        value = getattr(source, field.name)
+        if isinstance(value, Source):
+            value = _source_mapping(value)
+            if not value["parameters_complete"]:
+                return description
+        elif callable(value):
+            return description
+        elif not isinstance(value, (str, bytes)):
+            try:
+                array = np.asarray(value)
+            except (TypeError, ValueError):
+                return description
+            if array.dtype.kind not in "biufc":
+                return description
+        parameters[field.name] = value
+    description.update(parameters=parameters, parameters_complete=True)
+    return description
+
+
 def save_simulation_h5(run: ChannelResult, near_field: NearFieldSlice, out_h5: str | Path) -> Path:
     """Persist one explicit channel, its fields, and scalar diagnostics.
 
@@ -39,8 +76,12 @@ def save_simulation_h5(run: ChannelResult, near_field: NearFieldSlice, out_h5: s
     ``save_simulation_h5(result["left"], ...)`` or
     ``save_simulation_h5(polarized.mixed, ...)``. Periodic runs include a
     separate configuration payload; order and power results are stored only
-    when the channel provides them.
+    when the channel provides them. Dataclass source constructor parameters are
+    saved separately when representable, including nested SLM sources with
+    sampled modulation. Other sources retain their type/module with an explicit
+    incomplete-state flag; numerical artifacts are still saved.
     """
+    source_mapping = _source_mapping(run.source)
     out_h5 = Path(out_h5)
     out_h5.parent.mkdir(parents=True, exist_ok=True)
     save_geometry_h5(
@@ -83,6 +124,7 @@ def save_simulation_h5(run: ChannelResult, near_field: NearFieldSlice, out_h5: s
         info=info,
         attrs=solver_attrs,
     )
+    save_mapping_h5(out_h5, mapping=source_mapping, group="source")
     save_near_field_components_h5(
         out_h5,
         X=near_field.axis_0,
@@ -101,34 +143,31 @@ def save_simulation_h5(run: ChannelResult, near_field: NearFieldSlice, out_h5: s
     periodic_configuration: dict[str, object] | None = None
     periodic_spec = run.config.periodic
     if periodic_spec is not None:
-        if not isinstance(run.source, (PlaneWave, BlochPlaneWave)):
-            raise TypeError(
-                "Periodic simulation serialization requires a PlaneWave or BlochPlaneWave source."
-            )
         periodic_configuration = {
             "method": periodic_spec.options.method,
             "lattice_a1": periodic_spec.lattice.a1,
             "lattice_a2": periodic_spec.lattice.a2,
             "unit_cell_area": periodic_spec.lattice.area,
             "k_medium": run.k,
-            "incident_k_parallel": plane_wave_k_parallel(run.source),
+            "k_parallel": periodic_source_k_parallel(periodic_spec, run.source),
             "options": asdict(periodic_spec.options),
             "order_amplitudes_saved": run.periodic is not None,
             "power_diagnostics_available": run.power is not None,
             "incident_source_type": type(run.source).__name__,
         }
-        geometry = _plane_wave_geometry(run.source, k=run.k)
-        if isinstance(run.source, PlaneWave):
+        if isinstance(run.source, (PlaneWave, BlochPlaneWave)):
+            geometry = _plane_wave_geometry(run.source, k=run.k)
+            if isinstance(run.source, PlaneWave):
+                periodic_configuration.update(
+                    incident_polar_angle=run.source.polar_angle,
+                    incident_azimuthal_angle=run.source.azimuthal_angle,
+                )
             periodic_configuration.update(
-                incident_polar_angle=run.source.polar_angle,
-                incident_azimuthal_angle=run.source.azimuthal_angle,
+                incident_direction="up" if geometry.direction_sign > 0 else "down",
+                incident_reference_point=geometry.reference_point,
+                incident_amplitude=run.source.amplitude,
+                incident_jones_coefficients=run.source.jones_coefficients(),
             )
-        periodic_configuration.update(
-            incident_direction="up" if geometry.direction_sign > 0 else "down",
-            incident_reference_point=geometry.reference_point,
-            incident_amplitude=run.source.amplitude,
-            incident_jones_coefficients=run.source.jones_coefficients(),
-        )
     if periodic_spec is None:
         ff = run.farfield
         source_beta, source_alpha = run.config.source_angular_grids()
@@ -209,7 +248,8 @@ def load_simulation_h5(path: str | Path) -> dict[str, object]:
     not need to reconstruct a full `SimulationResult` instance. Periodic runs
     include order data and a separate configuration payload when available.
     Absorbing-host runs retain the periodic configuration while omitting
-    undefined order/power results.
+    undefined order/power results. `source` contains the saved source type,
+    module and constructor parameters as data, without instantiating a class.
     """
     p = Path(path)
     out: dict[str, object] = {
@@ -223,6 +263,7 @@ def load_simulation_h5(path: str | Path) -> dict[str, object]:
         has_periodic = "periodic" in h5
         has_periodic_configuration = "periodic_configuration" in h5
         has_diagnostics = "diagnostics" in h5
+        has_source = "source" in h5
 
     if has_near_field_components:
         out["near_field_components"] = load_near_field_components_h5(
@@ -236,5 +277,7 @@ def load_simulation_h5(path: str | Path) -> dict[str, object]:
         out["periodic_configuration"] = load_mapping_h5(p, group="periodic_configuration")
     if has_diagnostics:
         out["diagnostics"] = load_mapping_h5(p, group="diagnostics")
+    if has_source:
+        out["source"] = load_mapping_h5(p, group="source")
 
     return out

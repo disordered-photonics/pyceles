@@ -38,15 +38,19 @@ from pyceles.core.plane_wave_spectrum import PlaneWaveSpectrum
 from pyceles.io.standard_tmatrix import TMatrixData, load_tmatrix_h5
 from pyceles.io.workflows import load_simulation_h5, save_simulation_h5
 from pyceles.postprocessing.dipole_metrics import (
-    DipolePowerLDOSResult,
+    DipoleSourceWork,
     compute_dipole_ldos_enhancement,
-    compute_dipole_power_ldos,
+    compute_dipole_reaction_field,
+    compute_dipole_source_work,
 )
 from pyceles.postprocessing.farfield import (
     CrossSectionBalance,
     PeriodicFarFieldPayload,
+    PeriodicOutgoingAmplitudes,
     PowerBalance,
     PowerFluxDecomposition,
+    compute_periodic_outgoing_amplitudes,
+    periodic_outgoing_flux,
 )
 from pyceles.postprocessing.nearfield import (
     ElectricFieldComponents,
@@ -80,8 +84,8 @@ __all__ = [
     "ChannelResult",
     "CrossSectionBalance",
     "DipoleCollection",
-    "DipolePowerLDOSResult",
     "DipoleSource",
+    "DipoleSourceWork",
     "ElectricFieldComponents",
     "FinitePlaneSource",
     "FocusedLaguerreGaussianBeam",
@@ -97,6 +101,7 @@ __all__ = [
     "ParticleCollection",
     "PeriodicFarFieldPayload",
     "PeriodicOptions",
+    "PeriodicOutgoingAmplitudes",
     "PeriodicSpec",
     "PlaneWave",
     "PlaneWaveSpectrum",
@@ -116,12 +121,14 @@ __all__ = [
     "UnpolarizedDiagnostics",
     "__version__",
     "compute_dipole_ldos_enhancement",
-    "compute_dipole_power_ldos",
+    "compute_dipole_reaction_field",
+    "compute_dipole_source_work",
     "compute_electric_field",
     "compute_near_field",
     "compute_near_field_slice",
     "compute_periodic_near_field",
     "compute_periodic_near_field_slice",
+    "compute_periodic_outgoing_amplitudes",
     "core",
     "io",
     "layered_spheres_from_arrays",
@@ -131,6 +138,7 @@ __all__ = [
     "mix_near_field_components",
     "mix_near_field_slices",
     "pec_spheres_from_arrays",
+    "periodic_outgoing_flux",
     "postprocessing",
     "print_logo",
     "project_source_basis_to_svwf",

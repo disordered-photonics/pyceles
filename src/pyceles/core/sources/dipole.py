@@ -27,6 +27,10 @@ class DipoleSource:
     with k = k0*medium_n and r measured from the emitter. Finite exterior E and
     Z0*H are defined away from the emitter; self-power in an absorbing host
     requires a microscopic emitter model.
+
+    Simulations infer the local material for sources inside spheres and
+    layered spheres. ``medium_n`` still denotes the exterior host; direct
+    ``incident_coeffs`` calls describe that homogeneous medium only.
     """
 
     wavelength: float
@@ -136,7 +140,8 @@ class DipoleSource:
 class DipoleCollection:
     """Coherent electric point dipoles with finite exterior fields in a passive host.
 
-    Moments use the normalization and self-power policy of DipoleSource.
+    Moments use the normalization and local-material policy of DipoleSource.
+    A periodic simulation repeats the collection with its prescribed Bloch phase.
     """
 
     wavelength: float

@@ -209,6 +209,7 @@ class Simulation:
             farfield_polar_angles=farfield_polar_angles,
             farfield_azimuthal_angles=farfield_azimuthal_angles,
             backend_coeffs_by_label=execution.backend_coeffs,
+            dipole_sources_by_label=execution.dipole_sources,
             retention=retention,
         )
 

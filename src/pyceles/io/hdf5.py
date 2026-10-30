@@ -524,6 +524,8 @@ def _periodic_to_mapping(periodic: Any, *, include_power: bool = True) -> dict[s
         if not include_power:
             out.pop("power", None)
         return out
+    if hasattr(periodic, "to_mapping"):
+        return dict(periodic.to_mapping())
     keys: tuple[str, ...] = (
         "lattice_a1",
         "lattice_a2",

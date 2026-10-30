@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
@@ -22,7 +24,7 @@ def _single_sphere(radius: float, n_particle: complex):
     )
 
 
-def test_dipole_power_ldos_no_scatterers_single_dipole():
+def test_dipole_source_work_no_scatterers_single_dipole():
     source = pcl.DipoleSource(
         wavelength=550.0,
         medium_n=1.0 + 0j,
@@ -37,12 +39,12 @@ def test_dipole_power_ldos_no_scatterers_single_dipole():
         verbose=False,
     )
     run = _run_no_scatterers(cfg, source)
-    out = pcl.compute_dipole_power_ldos(run)
+    out = pcl.compute_dipole_source_work(run)
 
-    np.testing.assert_allclose(out.E_scattered_at_dipoles, 0.0, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(out.E_reaction_at_dipoles, 0.0, rtol=0.0, atol=0.0)
     np.testing.assert_allclose(out.delta_power, 0.0, rtol=0.0, atol=0.0)
     np.testing.assert_allclose(out.power_total, out.power_homogeneous, rtol=1e-13, atol=0.0)
-    np.testing.assert_allclose(out.enhancement, 1.0, rtol=1e-13, atol=0.0)
+    np.testing.assert_allclose(out.power_ratio, 1.0, rtol=1e-13, atol=0.0)
     np.testing.assert_allclose(
         pcl.compute_dipole_ldos_enhancement(run),
         1.0,
@@ -92,12 +94,12 @@ def test_absorbing_host_dipole_fields_and_source_blocks_exclude_self_power(metho
     block = simulation.run_sources(source.cartesian_basis_sources())
     mixed = block["px"].coeffs + 0.2j * block["py"].coeffs + 0.3 * block["pz"].coeffs
     assert np.linalg.norm(run.coeffs - mixed) / np.linalg.norm(run.coeffs) < 1e-8
-    for diagnostic in (pcl.compute_dipole_power_ldos, pcl.compute_dipole_ldos_enhancement):
-        with pytest.raises(ValueError, match=r"self-power/LDOS.*nonabsorbing host"):
+    for diagnostic in (pcl.compute_dipole_source_work, pcl.compute_dipole_ldos_enhancement):
+        with pytest.raises(ValueError, match=r"self-power/LDOS.*nonabsorbing local material"):
             diagnostic(run)
 
 
-def test_dipole_power_ldos_no_scatterers_collection_matches_background_formula():
+def test_coherent_collection_source_work_equals_total_radiation():
     source = pcl.DipoleCollection(
         wavelength=550.0,
         medium_n=1.0 + 0j,
@@ -115,18 +117,35 @@ def test_dipole_power_ldos_no_scatterers_collection_matches_background_formula()
         verbose=False,
     )
     run = _run_no_scatterers(cfg, source)
-    out = pcl.compute_dipole_power_ldos(run)
+    out = pcl.compute_dipole_source_work(run)
 
     p0_ref = source.dissipated_power_homogeneous_background_per_dipole()
     np.testing.assert_allclose(out.power_homogeneous, p0_ref, rtol=1e-13, atol=0.0)
-    np.testing.assert_allclose(out.power_total, p0_ref, rtol=1e-13, atol=0.0)
-    np.testing.assert_allclose(out.enhancement, np.ones_like(p0_ref), rtol=1e-13, atol=0.0)
-    np.testing.assert_allclose(
-        pcl.compute_dipole_ldos_enhancement(run, squeeze=False),
-        np.ones_like(p0_ref),
-        rtol=1e-13,
-        atol=0.0,
+    # The coherent collection includes direct mutual work, even in a uniform
+    # medium. Compare with the independent radiation integral of its far field.
+    from numpy.polynomial.legendre import leggauss
+
+    ct, weights = leggauss(20)
+    phi = np.arange(40) * 2 * np.pi / 40
+    st = np.sqrt(1 - ct**2)
+    directions = np.stack(
+        np.broadcast_arrays(st[:, None] * np.cos(phi), st[:, None] * np.sin(phi), ct[:, None]),
+        axis=-1,
+    ).reshape(-1, 3)
+    amplitude = np.zeros_like(directions, dtype=complex)
+    k0 = 2 * np.pi / source.wavelength
+    for position, moment in zip(source.positions, source.dipole_moments_array(), strict=True):
+        amplitude += (moment - directions * (directions @ moment)[:, None]) * np.exp(
+            -1j * k0 * (directions @ position)
+        )[:, None]
+    radiation = (
+        k0**4
+        / (32 * np.pi**2)
+        * np.dot(np.repeat(weights, 40) * 2 * np.pi / 40, np.sum(np.abs(amplitude) ** 2, axis=1))
     )
+    np.testing.assert_allclose(out.power_total.sum(), radiation, rtol=3e-13, atol=0)
+    with pytest.raises(ValueError, match="one active emitter"):
+        pcl.compute_dipole_ldos_enhancement(run)
 
 
 def test_dipole_run_reports_local_absorbed_power_no_scatterers():
@@ -201,40 +220,15 @@ def test_dipole_run_absorbing_sphere_reports_positive_local_absorption():
     np.testing.assert_allclose(np.sum(pvec), p_abs, rtol=1e-13, atol=1e-13)
 
 
-def test_dipole_power_ldos_inside_particle_requires_explicit_override():
-    source = pcl.DipoleSource(
-        wavelength=550.0,
-        medium_n=1.0 + 0j,
-        position=(50.0, 0.0, 0.0),  # inside the sphere, but not at the center
-        dipole_moment=(1.0 + 0.0j, 0.0 + 0.0j, 0.0 + 0.0j),
+def test_embedded_absorbing_material_rejects_absolute_point_ldos():
+    source = pcl.DipoleSource(550, position=(10, 0, 0))
+    cfg = pcl.SimulationConfig(wavelength=550, lmax=3, solver_method="direct", verbose=False)
+    run = pcl.Simulation(cfg, particles=_single_sphere(100, 1.5 + 0.01j)).run(
+        source, include_farfield=False
     )
-    cfg = pcl.SimulationConfig(
-        wavelength=550.0,
-        n_medium=1.0 + 0j,
-        lmax=1,
-        solver_method="direct",
-        verbose=False,
-    )
-
-    with pytest.warns(
-        UserWarning,
-        match="Untested configuration: (dipole|local source) center lies inside",
-    ):
-        run = pcl.Simulation(
-            cfg,
-            particles=spheres_from_arrays(
-                positions=np.array([[0.0, 0.0, 0.0]], dtype=float),
-                radii=np.array([100.0], dtype=float),
-                refractive_indices=np.array([1.5 + 0.01j], dtype=np.complex128),
-            ),
-        ).run(source)
-
-    with pytest.raises(ValueError, match="inside particle index"):
-        _ = pcl.compute_dipole_power_ldos(run)
-
-    with pytest.warns(UserWarning, match="inside particle index"):
-        out = pcl.compute_dipole_power_ldos(run, allow_inside_particle=True)
-    assert out.enhancement.shape == (1,)
+    for diagnostic in (pcl.compute_dipole_source_work, pcl.compute_dipole_ldos_enhancement):
+        with pytest.raises(ValueError, match="nonabsorbing local material"):
+            diagnostic(run)
 
 
 def test_dipole_near_field_masks_exact_source_position():
@@ -294,7 +288,7 @@ def test_dipole_ldos_uses_channel_source_from_postprocess_sources():
 
 
 @pytest.mark.fake_gpu
-def test_dipole_power_ldos_inherits_resolved_postprocessing_backend(monkeypatch):
+def test_dipole_source_work_inherits_resolved_postprocessing_backend(monkeypatch):
     source = pcl.DipoleSource(
         wavelength=550.0,
         medium_n=1.0 + 0j,
@@ -321,7 +315,36 @@ def test_dipole_power_ldos_inherits_resolved_postprocessing_backend(monkeypatch)
         return zeros, zeros
 
     monkeypatch.setattr(dipole_metrics, "compute_scattered_field", _fake_compute_scattered_field)
-    out = pcl.compute_dipole_power_ldos(run)
+    out = pcl.compute_dipole_source_work(run)
 
     assert seen["backend"] == "cupy"
-    np.testing.assert_allclose(out.enhancement, 1.0, rtol=1e-13, atol=0.0)
+    np.testing.assert_allclose(out.power_ratio, 1.0, rtol=1e-13, atol=0.0)
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("dtype", ["complex64", "complex128"])
+def test_coherent_host_mutual_work_matches_numpy_on_gpu(cupy_runtime, dtype):
+    source = pcl.DipoleCollection(
+        550,
+        medium_n=1.33,
+        positions=np.array([[0, 0, 0], [100, 20, -30]]),
+        dipole_moments=np.array([[1, 0.2j, 0.3], [-0.7, 0.1, -0.4j]]),
+    )
+    cfg = pcl.SimulationConfig(
+        wavelength=550,
+        n_medium=1.33,
+        lmax=1,
+        compute_dtype=dtype,
+        accum_dtype="complex128",
+        verbose=False,
+    )
+    expected = pcl.compute_dipole_source_work(_run_no_scatterers(cfg, source))
+    actual = pcl.compute_dipole_source_work(
+        _run_no_scatterers(replace(cfg, postprocessing_backend="cupy"), source)
+    )
+    tolerance = 3e-6 if dtype == "complex64" else 2e-13
+    assert actual.E_reaction_at_dipoles.dtype == np.complex128
+    np.testing.assert_allclose(
+        actual.E_reaction_at_dipoles, expected.E_reaction_at_dipoles, rtol=tolerance
+    )
+    np.testing.assert_allclose(actual.power_total, expected.power_total, rtol=tolerance)

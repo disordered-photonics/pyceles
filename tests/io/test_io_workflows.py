@@ -290,7 +290,7 @@ def test_save_complex_periodic_run_preserves_configuration_without_power_payload
     assert periodic["method"] == "rayleigh"
     assert periodic["unit_cell_area"] == lattice.area
     assert complex(periodic["k_medium"]) == run.k
-    np.testing.assert_array_equal(periodic["incident_k_parallel"], source.k_parallel)
+    np.testing.assert_array_equal(periodic["k_parallel"], source.k_parallel)
     assert periodic["incident_source_type"] == "BlochPlaneWave"
     assert periodic["incident_direction"] == source.direction
     np.testing.assert_array_equal(periodic["incident_reference_point"], source.reference_point)

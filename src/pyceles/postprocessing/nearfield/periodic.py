@@ -4,6 +4,8 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from pyceles.core.sources import DipoleCollection, DipoleSource
+
 from .components import NearFieldComponents
 from .periodic_exterior import (
     _slab_classification_tolerance,
@@ -36,8 +38,14 @@ def compute_periodic_near_field(
     while points intersecting the slab use the local periodic evaluator.
     Complex-host Ewald and Rayleigh fields are evaluated at finite distances
     from an explicit reciprocal-order basis; absorbing-host power diagnostics
-    are not defined by this interface.
+    are not defined by this interface. Dipole arrays use the shared structural
+    reception and Rayleigh scans. An explicit ``field_bmax`` selects outgoing
+    orders outside each source plane; directsum retains its finite image window.
     """
+    if isinstance(run.source, (DipoleSource, DipoleCollection)):
+        from .periodic_dipoles import compute_periodic_dipole_field
+
+        return compute_periodic_dipole_field(run, points, field_bmax=field_bmax)
     pts_flat, lead_shape = reshape_field_points(points)
     n_points = int(pts_flat.shape[0])
 
