@@ -190,6 +190,8 @@ For multi-source and polarization runs, every solved RHS remains essential and
 is retained exactly once through channel views of the shared block solution.
 Minimal retention does not keep hidden basis copies or a permanently materialized
 coherent mixture.
+It also releases prepared local-source responses; deferred dipole fields and
+reactions remain available and rebuild that setup when needed.
 
 ## Polarization runs
 
@@ -261,8 +263,11 @@ source = pcl.DipoleCollection(
 Current dipole scope:
 
 - finite dipole simulations and E/H fields accept passive complex `n_medium`.
-  Point-emitter self-power and LDOS normalization require a nonabsorbing host;
-  periodic dipole excitation is not implemented.
+  NumPy/CuPy pairwise and MLFMM support emitters inside spheres and layered spheres,
+  with local material inferred from geometry. `medium_n` remains the exterior
+  host. NumPy/CuPy periodic Ewald and Rayleigh, plus CPU directsum, accept the
+  same sources, including embedded emitters, fields and regular reactions.
+  PEC and non-spherical particles can scatter, but cannot contain an emitter.
 - Dipole sources do not have a TE/TM Jones basis. Use
   `DipoleSource.cartesian_basis_sources()` with `run_sources(...)` when the
   x/y/z dipole orientation basis should be solved in one multi-RHS call.
@@ -273,8 +278,8 @@ Current dipole scope:
 - dipole far-field helper provides direct, particle-scattered, and coherent
   total PWPs,
 - dipole `SimulationResult` objects do not carry TE/TM Jones metadata,
-- dipole centers are expected in the homogeneous host medium outside particle
-  circumscribing spheres.
+- host-located dipoles must lie outside particle circumscribing spheres;
+  embedded emitters must lie strictly on one side of each material interface.
 
 Dipole moments use the same length-unit convention as geometry and wavelength.
 A practical reference scale is `|p| ~ k0^-3 = (wavelength / (2*pi))^3`; for
@@ -283,14 +288,71 @@ A practical reference scale is `|p| ~ k0^-3 = (wavelength / (2*pi))^3`; for
 Power/LDOS helpers:
 
 ```python
-res = pcl.compute_dipole_power_ldos(run)
-print(res.power_total, res.power_homogeneous, res.enhancement)
+res = pcl.compute_dipole_source_work(run)
+print(res.power_total, res.power_homogeneous, res.power_ratio)
 
+# For a run with one active emitter:
 purcell = pcl.compute_dipole_ldos_enhancement(run)
 ```
 
-These helpers evaluate the particle-scattered field at dipole positions and do
-not sample direct self-fields at `r=0`.
+Source work subtracts each emitter's own singular homogeneous field and adds
+the lossless local bulk self-power. It includes direct mutual fields and
+particle response; individual coherent emitters can receive net work. Only
+their sum is the total delivered power. For periodic sources this is work per
+cell, including direct mutual fields and nonzero self images. A fixed-Bloch
+dipole array does not give an isolated emitter's LDOS. The LDOS convenience
+function requires a finite configuration with one active emitter; use separate
+channels for independent LDOS queries.
+
+For periodic dipoles, set the boundary independently of the source:
+
+```python
+periodic = pcl.PeriodicSpec(
+    lattice=pcl.RectangularLattice2D(ax=600.0, ay=650.0),
+    k_parallel=(0.0013, -0.0007),
+)
+```
+
+Each source moment is the moment in its specified cell representative;
+translating it by a lattice vector R multiplies the equivalent moment by
+`exp(1j * k_parallel @ R[:2])`. Omitting `k_parallel` uses zero for dipole
+arrays; plane waves continue to supply their own transverse wavevector.
+All channels in a block solve share the same boundary. Periodic E/H evaluates
+host source planes independently of the particle slab and includes native
+interior fields. `run.power` and `run.periodic` remain absent for dipoles:
+plane-wave R/T normalization does not describe driven emitter arrays.
+
+Outgoing orders and finite-plane flux do not need a plane-wave source:
+
+```python
+orders = pcl.compute_periodic_outgoing_amplitudes(run, output_bmax=0.1)
+upper, lower = orders.reference_z
+flux_up, flux_down = pcl.periodic_outgoing_flux(
+    orders,
+    k=run.k,
+    n_medium=run.config.n_medium,
+    z_above=upper + 300.0,
+    z_below=lower - 300.0,
+)
+```
+
+The cutoff uses inverse simulation length units and needs convergence checks.
+Absorbing hosts require an explicit cutoff because all orders attenuate.
+The returned fluxes are outward power per cell and order through the specified
+finite planes, including evanescent transport. In a lossless host their sum at
+exterior planes gives outgoing radiation per cell. They are not divided by an
+incident plane-wave flux. `save_periodic_h5` accepts this outgoing payload and
+retains its reference planes. Periodic dipole near fields use the same orders
+outside the source planes when `field_bmax` or `periodic.options.output_bmax`
+is set; otherwise structural sums and Rayleigh scans supply the fields.
+
+Source work requires nonabsorbing material at each active emitter. Other layers
+and the exterior host may absorb. `compute_dipole_reaction_field(run)` also
+accepts absorbing local material, without assigning absolute point self-power.
+For emitters near interfaces, increase `reaction_lmax` in either diagnostic
+independently of `config.lmax`. This refines local source-interface response;
+it does not replace convergence checks on the solved multiple-scattering order.
+Combine coincident moments before requesting a per-emitter work decomposition.
 
 To solve one dipole position in x/y/z orientations with one multi-RHS call:
 
@@ -541,6 +603,14 @@ Notes:
 arrays, near field, finite far field or periodic diffraction orders, and typed
 scalar diagnostics. A direct `SimulationResult` also carries its matching
 single-RHS solver metadata.
+
+Dataclass source constructor parameters are stored in a separate `source`
+group, including physical dipole positions/moments and nested SLM base sources.
+Loading returns this description as data; it never imports or instantiates a
+saved class. `source.parameters_complete` indicates whether constructor state
+is available. Custom sources and callable SLM masks still save their numerical
+artifacts; incomplete descriptions omit constructor parameters. Supply sampled
+modulation arrays when the SLM source itself needs a reproducible description.
 
 Multi-source and polarization envelopes are not serialized as disguised single
 runs. Select the physical channel deliberately:

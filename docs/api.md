@@ -188,11 +188,19 @@ includes host absorption between surfaces. It is not power at infinity.
 
 Dipole diagnostics:
 
-- `pyceles.compute_dipole_power_ldos`
+- `pyceles.compute_dipole_source_work`
+- `pyceles.compute_dipole_reaction_field`
 - `pyceles.compute_dipole_ldos_enhancement`
 
-These dipole self-power/LDOS normalizations require a nonabsorbing host.
-Finite dipole fields away from the emitter remain available in absorbing hosts.
+Finite and periodic NumPy/CuPy simulations infer the local material for emitters
+inside spheres and layered spheres. Source work requires lossless material at
+each active emitter; other layers and the exterior host may absorb. The regular reaction
+field remains defined in an absorbing local material. Coherent collections
+include mutual work. LDOS enhancement is restricted to a single active finite
+emitter; periodic diagnostics describe collective work at the prescribed
+Bloch vector.
+`reaction_lmax` refines the native source-interface response independently of
+the global coupling order `config.lmax`, which must also be converged.
 
 Power accounting is exposed uniformly through `ChannelResult.power`
 (including the directly solved `SimulationResult` subtype), as an immutable
@@ -243,6 +251,8 @@ Experimental periodic workflows use:
 
 - `pyceles.RectangularLattice2D`
 - `pyceles.PeriodicSpec`
+  - optional real `k_parallel` fixes the Bloch boundary independently of the
+    source; otherwise plane waves supply it and dipole arrays use zero,
 - `pyceles.PeriodicOptions`
   - `method="ewald"`: exact pairwise Ewald operator (default),
   - `method="directsum"`: small-case NumPy oracle (NumPy backend only),
@@ -258,6 +268,15 @@ Experimental periodic workflows use:
 - `pyceles.core.periodic.rayleigh_report`
 - `pyceles.core.periodic.rayleigh_threshold_scales`
 - `pyceles.core.periodic.suggest_safe_period_scales`
+- `pyceles.compute_periodic_outgoing_amplitudes`
+- `pyceles.PeriodicOutgoingAmplitudes`: one `DiffractionOrders` geometry,
+  upward/downward TE/TM amplitudes, and finite reference planes
+- `pyceles.periodic_outgoing_flux`: outward power per cell and order through
+  finite planes, including passive absorbing hosts without R/T normalization
+
+Periodic dipoles use the same sources on NumPy and CuPy. The lower-level
+`pyceles.postprocessing.farfield.periodic_outgoing_amplitudes` transforms
+arbitrary outgoing expansion arrays independently of an incident source.
 
 ## I/O
 

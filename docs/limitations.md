@@ -52,12 +52,24 @@ This page records current limitations.
 
 ## Dipoles
 
-- Local dipole sources are supported in the homogeneous host medium.
-- Dipole-driven local absorbed-power and self-power/LDOS diagnostics require a
-  nonabsorbing host. Point-emitter self-power in an absorbing continuum needs
-  a microscopic emitter model; finite fields away from the emitter are supported.
-- Embedded dipoles inside particles are not supported in the main solver path yet.
-- Dipole near-field initial fields mask exact dipole-center grid hits as `NaN`.
+- Finite dipoles and coherent collections are supported in the host and inside
+  spheres/layered spheres on NumPy and CuPy, with pairwise or MLFMM coupling.
+  PEC, spheroid and opaque imported T-matrix particles cannot contain emitters.
+  NumPy/CuPy periodic Ewald and Rayleigh, plus CPU directsum, accept the same
+  placements, total E/H, regular reaction fields and source work per cell.
+- Source work and single-emitter LDOS require nonabsorbing material at each
+  active emitter. Other layers and the exterior host may absorb. Regular
+  reaction fields and finite E/H away from an emitter remain available in
+  absorbing local material; absolute point self-power needs a microscopic model.
+  Periodic source work is collective work per cell, not isolated-emitter LDOS.
+  Plane-wave R/T and automatic periodic order payloads are absent for dipoles.
+  Use `compute_periodic_outgoing_amplitudes` for their outgoing orders and
+  `periodic_outgoing_flux` for finite-plane power per cell.
+- Passive T-only particle-absorption identities do not apply to an emitting
+  particle. Automatic power diagnostics are omitted for embedded-source runs.
+- Source positions on genuine material interfaces require a side prescription.
+  Exact source-point total fields are masked as `NaN`. Local reaction order and
+  global coupling order require independent convergence checks near interfaces.
 
 ## Periodic workflows
 
@@ -70,13 +82,13 @@ Current tested scope:
   `PlaneWave` supports normal incidence and `BlochPlaneWave` accepts an explicit
   real transverse wavevector,
 - CPU passive complex-host `directsum`, Ewald, and Rayleigh coupling,
-  with field reconstruction but no absorbing-host power output,
+  including finite-field reconstruction,
 - NumPy and CuPy `complex64`/`complex128` periodic Ewald and Rayleigh paths for
   real hosts, and passive complex-host Ewald/Rayleigh paths with finite-field
-  reconstruction; absorbing-host power diagnostics remain unavailable,
+  reconstruction; R/T normalization requires a lossless host,
 - opt-in NumPy/CuPy hybrid exact-near/Rayleigh-far repeated applies for
   vertically extended cells,
-- selected local-SVWF near-field workflows for homogeneous spheres,
+- local-SVWF near-field workflows for spheres and layered spheres,
 - direct dense validation paths for controlled cases.
 
 LSQR is limited to single-RHS prepared operators with exact Hermitian adjoints.
@@ -95,7 +107,9 @@ Other periodic limitations include:
 - periodized MLFMM coupling is not implemented (finite MLFMM remains available
   for nonperiodic clusters),
 - non-rectangular lattices,
-- reduced-cell local sources,
+- isolated, non-Bloch-periodic local excitation of an infinite array. A single
+  localized emitter requires an inverse Bloch transform over multiple transverse
+  wavevectors; prescribed Bloch-periodic dipole arrays are supported.
 
 The hybrid Rayleigh method is not a general cure for dense planar cells. Its
 exact-near cache scales with the number of directed non-self pairs inside the

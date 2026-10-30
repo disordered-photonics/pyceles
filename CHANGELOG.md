@@ -8,10 +8,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+
+- NumPy/CuPy periodic Ewald and Rayleigh dipoles and coherent collections support
+  host and native sphere/layered-sphere emitters, total E/H, regular reaction fields and work
+  per cell. `PeriodicSpec.k_parallel` specifies their real Bloch boundary;
+  fixed-Bloch arrays are not interpreted as isolated-emitter LDOS or plane-wave
+  R/T. Periodic HDF5 configuration stores this boundary as `k_parallel`.
+- Source-independent periodic outgoing orders use finite upper/lower reference
+  planes. Finite-plane flux includes evanescent transport in absorbing hosts;
+  outgoing amplitudes and their references can be saved to HDF5.
+- Finite NumPy/CuPy pairwise and MLFMM simulations accept electric dipoles inside
+  spheres and layered spheres, with inferred local material and total E/H
+  reconstruction. Other particles retain their ordinary scattering response.
+- Regular dipole reaction fields and coherent source work use the emitter's
+  local material. Local reaction order can be refined independently of the
+  coupling order; absolute point self-power requires a lossless local material.
+- CuPy embedded-field reconstruction uses selected-particle reception and
+  bounded SVWF workspaces, retaining double-precision native radial samples
+  before the compute cast and the requested accumulation precision.
+- HDF5 simulation output retains dataclass source constructor parameters,
+  including dipole collections and nested SLM sources with sampled modulation.
+  Custom sources and callable masks retain numerical artifacts with an explicit
+  incomplete-source-state flag.
+
 - CPU periodic direct-image sums and CPU/CuPy Ewald and Rayleigh simulations
   support passive absorbing hosts with real transverse Bloch vectors, finite
-  E/H reconstruction, and source metadata in HDF5. Absorbing-host power
-  diagnostics remain unavailable.
+  E/H reconstruction, and source metadata in HDF5. R/T normalization remains
+  unavailable in absorbing hosts.
 - `BlochPlaneWave` prescribes a real transverse wavevector, a vertical
   propagation direction, and a finite-reference amplitude in passive hosts.
   Plane-wave SVWF projection and incident E/H share the same analytic geometry.
@@ -24,7 +47,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CuPy, with single-source, source-block and coherent polarization workflows,
   finite E/H and native internal fields. Results and HDF5 metadata preserve
   complex wavenumbers. Automatic lossless power/cross-section diagnostics are
-  absent; point-emitter self-power/LDOS normalization requires a nonabsorbing host.
+  absent; point-emitter self-power/LDOS normalization requires nonabsorbing
+  local material.
 - `FinitePlaneSource` prescribes tangential Fourier data on an oriented finite
   plane, including evanescent waves, passive complex hosts, CPU/GPU finite E/H,
   and regular SVWF projection. Its sampling is independent of output angles;
@@ -33,8 +57,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and CuPy, with an explicit asymptotic field and reference-origin convention.
 - Electric dipole sources and collections support passive complex hosts and
   complex amplitudes for finite E/H fields and regular incident projections.
-  Absorbing-host point-emitter self-power requires a microscopic model and is
-  explicitly rejected.
+  Point-emitter self-power in absorbing local material requires a microscopic
+  model and is explicitly rejected.
 - Native sphere, layered-sphere, and spheroid interior E/H evaluation supports
   passive complex host wavenumbers, including CPU/GPU radial particle paths.
 - Exterior scattered E/H evaluation retains passive complex wavenumbers on
@@ -49,6 +73,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retain double-precision sample generation and expose physical outgoing intervals.
 
 ### Changed
+- Periodic rectangular reception stores only nonzero angular couplings and
+  forms higher-order source projections in bounded device batches.
+- Breaking: `compute_dipole_source_work` and `DipoleSourceWork` replace
+  `compute_dipole_power_ldos` and `DipolePowerLDOSResult`. Coherent collections
+  include direct mutual work; `compute_dipole_ldos_enhancement` accepts one
+  active emitter. The diagnostic interior-sampling bypass is removed.
 - CPU direct-image field reconstruction uses the configured finite image
   window in both exterior and in-slab regions, including lossless hosts.
 - Breaking: removed `MLFMMOptions.hf_start_level` and `hf_wavelength_divisor`,
@@ -61,6 +91,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and near-field showcase plotting. Particle-centre fields use analytic limits.
 
 ### Fixed
+
+- Selected finite reception validates outgoing radial-table support; periodic
+  reception consistently rejects active source origins without explicit self subtraction.
+- Inactive outgoing sources do not set periodic reception bounds or overflow
+  evanescent phases; exact fractional-cell images retain transparent-centre exemptions.
+- Near-coplanar Ewald routing preserves the actual real-space displacement
+  and exact self identity on NumPy and CuPy, retaining nearby-source Green fields.
+- Core cache clearing releases shared periodic translation projections.
+- Active outgoing sources at an exact grazing diffraction order require an
+  explicit limiting prescription rather than silently losing that order.
+- Finite periodic image windows preserve Bloch covariance when particle,
+  source or query representatives change cells.
 - Reusing a CuPy Ewald workspace after a higher-order request preserves the
   physical row pitch of cached incomplete-gamma tables in shifted kernels.
 - Periodic transmitted zero-order amplitudes preserve the incident reference

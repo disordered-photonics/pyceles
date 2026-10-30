@@ -27,7 +27,8 @@ Current source support includes:
 - Cartesian-polarized Bessel and focused Laguerre-Gaussian beams,
 - SLM-modulated angular-spectrum sources (`AngularSpectrumSLMSource` and
   `SLMSource`),
-- local electric dipoles and dipole collections,
+- electric dipoles and coherent collections in the host or inside native
+  spheres and layered spheres, in finite and Bloch-periodic configurations,
 - finite-plane tangential Fourier sources, including evanescent components.
 
 Finite pairwise and MLFMM workflows support passive absorbing hosts on NumPy
@@ -40,9 +41,11 @@ fields remain available in absorbing hosts; automatic lossless power and
 cross-section diagnostics are absent. CPU periodic `directsum`, Ewald, and
 Rayleigh coupling, plus CuPy Ewald and Rayleigh coupling, also accept passive
 complex hosts when the source defines a real transverse Bloch vector. Use
-`BlochPlaneWave` for nonzero transverse wavevectors; angle-defined `PlaneWave`
+`BlochPlaneWave` for nonzero transverse plane-wave wavevectors; dipole arrays
+take their boundary from `PeriodicSpec.k_parallel`. Angle-defined `PlaneWave`
 supports normal incidence in an absorbing host. Periodic CuPy `directsum` and
-absorbing-host periodic power diagnostics are unavailable.
+absorbing-host R/T normalization are unavailable. Finite-plane outgoing flux
+remains defined; source work requires lossless material at the emitter.
 
 Gaussian wavebundle support includes optimized normal-incidence kernels ported
 from CELES, tilted-incidence source projection through angular spectra, and a
@@ -227,7 +230,10 @@ uses available CuPy postprocessing paths by default. Current CuPy slices include
 - scattered near-field,
 - dominant Gaussian/general initial-field paths,
 - homogeneous-sphere internal fields,
-- layered-sphere internal fields with host-evaluated shell radial functions and device angular/mode contractions.
+- layered-sphere internal fields with host-evaluated shell radial functions and
+  device angular/mode contractions,
+- embedded-dipole internal fields and regular reaction fields, sharing native
+  interface responses and selected finite or periodic reception.
 
 Spheroid internal-field cases still use the NumPy reference implementation.
 
@@ -237,6 +243,8 @@ Homogeneous rectangular 2D periodic-cell workflows currently include:
 
 - `RectangularLattice2D`, `PeriodicSpec`, and `PeriodicOptions`,
 - plane-wave Bloch source validation through incident `k_parallel`,
+- host and native sphere/layered-sphere dipole arrays, with a source-independent
+  real `PeriodicSpec.k_parallel` boundary and coherent work per cell,
 - periodic Ewald coupling with a direct-sum oracle for small checks,
 - geometry-only Rayleigh/Wood anomaly diagnostics for artificial periodicity
   checks,
@@ -244,9 +252,13 @@ Homogeneous rectangular 2D periodic-cell workflows currently include:
   `SimulationResult.periodic`,
 - finite-distance complex-host order amplitudes through
   `periodic_order_amplitudes` with an explicit reciprocal cutoff,
+- source-independent outgoing amplitudes through
+  `compute_periodic_outgoing_amplitudes`, with finite reference planes and
+  `periodic_outgoing_flux` on either side of the source slab,
 - periodic near-field slices:
   - exterior Rayleigh-order evaluation above/below the particle slab,
-  - in-slab periodic local-SVWF evaluation outside/inside homogeneous spheres,
+  - in-slab periodic local-SVWF evaluation outside/inside spheres and layered
+    spheres,
     including exact-near/Rayleigh-far acceleration when the solved periodic
     method is `"rayleigh"`,
   - finite direct-image fields using the same image window as the CPU operator,

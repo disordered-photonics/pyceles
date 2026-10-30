@@ -59,10 +59,12 @@ pyceles is pre-1.0. Important boundaries are still present:
 - T-matrix superposition requires disjoint circumscribing spheres by default;
 - opaque imported T matrices support exact operator adjoints, but cannot
   provide hidden internal fields or shape/material derivatives;
-- embedded dipoles inside particles are not yet supported by the main solver path;
+- finite dipoles may lie inside spheres and layered spheres on NumPy and CuPy;
+  other native/imported particles can scatter but cannot contain an emitter;
 - periodic workflows are experimental and currently target homogeneous
-  rectangular 2D lattices with angle-defined or explicit real-q plane-wave
-  excitation;
+  rectangular 2D lattices with angle-defined or explicit real-q plane waves;
+  NumPy/CuPy Ewald and Rayleigh, plus CPU directsum, also support driven dipole
+  arrays in the host and inside spheres/layered spheres;
 - spheroid exterior fields require care inside a circumscribing sphere but
   outside the physical spheroid.
 
