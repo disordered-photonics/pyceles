@@ -1244,13 +1244,14 @@ def ewald_structural_constant_2d(
     )
     coordinate_scale = float(max(abs(float(destination_arr[2])), abs(float(source_arr[2]))))
     same_plane_atol = same_plane_z_tolerance(complex(k), coordinate_scale=coordinate_scale)
+    reciprocal_rvec = rvec.copy()
     if abs(float(rvec[2])) <= same_plane_atol:
-        rvec[2] = 0.0
+        reciprocal_rvec[2] = 0.0
     is_self = (
         bool(exclude_zero_shift)
         and float(raw_rvec[0]) == 0.0
         and float(raw_rvec[1]) == 0.0
-        and abs(float(raw_rvec[2])) <= same_plane_atol
+        and float(raw_rvec[2]) == 0.0
     )
     if is_self:
         value = _same_plane_reciprocal_sum(
@@ -1283,7 +1284,7 @@ def ewald_structural_constant_2d(
         value = _shifted_reciprocal_sum(
             l,
             m,
-            rvec=rvec,
+            rvec=reciprocal_rvec,
             k=k,
             k_parallel=k_parallel,
             lattice=lattice,
@@ -1428,10 +1429,10 @@ def ewald_structural_sums_2d_batch(
     )
     same_plane_atol = same_plane_z_tolerance(complex(k), coordinate_scale=coordinate_scale)
     same_plane_points = np.abs(cz) <= same_plane_atol
-    if np.any(same_plane_points):
-        c = np.asarray(c, dtype=float).copy()
-        c[same_plane_points, 2] = 0.0
-        cz = np.asarray(c[:, 2], dtype=float)
+    exact_same_plane_points = cz == 0.0
+    # Only reciprocal recurrence routing uses the roundoff-scale plane window.
+    # Real-space evaluation retains the actual separation and bulk singularity.
+    cz = np.where(same_plane_points, 0.0, cz)
 
     reciprocal_sums = np.zeros_like(sums)
     max_same_n = max(0, order // 2)
@@ -1639,7 +1640,7 @@ def ewald_structural_sums_2d_batch(
                         # degree-|m|.  Apply this per point, not per batch:
                         # regular xz/yz diagnostic slices often contain a
                         # same-z row embedded in otherwise shifted rows.
-                        contrib = np.where(same_plane_points[point_idx], 0.0 + 0.0j, contrib)
+                        contrib = np.where(exact_same_plane_points[point_idx], 0.0 + 0.0j, contrib)
                     np.add.at(inc[:, degree, m + offset], point_idx, contrib)
         if not np.all(np.isfinite(inc)):
             raise FloatingPointError(

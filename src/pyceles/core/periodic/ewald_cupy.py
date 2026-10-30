@@ -1476,7 +1476,6 @@ def ewald_structural_sums_2d_fixed_cupy(
     # mask is needed below regardless, and retaining caller-side pair-index
     # caches can otherwise turn matrix-free source batching into O(N^2) state.
     same_idx = cp.nonzero(same_plane)[0].astype(cp.int32, copy=False)
-    c[:, 2] = cp.where(same_plane, 0.0, cz_raw)
 
     n_same = int(same_idx.size)
     if n_same:
@@ -1545,7 +1544,9 @@ def ewald_structural_sums_2d_fixed_cupy(
 
     _add_real_space_structural_sums_cupy(
         c=c,
-        same_plane=same_plane,
+        # Approximate coplanarity routes reciprocal recurrence only; the real
+        # part must retain nonzero vertical separations and exact parity.
+        same_plane=cz_raw == 0.0,
         sums=sums,
         workspace=workspace,
         real_shell_count=int(real_shell_count),
