@@ -141,35 +141,36 @@ def _order_mode_coefficients(
     lmax: int,
     k: complex,
     k_parallel: np.ndarray,
-    kz: complex,
+    kz: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Return per-mode TE/TM order coefficients for `+kz` and `-kz` branches."""
-    kp = float(np.linalg.norm(np.asarray(k_parallel, dtype=float).reshape(2)))
-    alpha = float(np.arctan2(float(k_parallel[1]), float(k_parallel[0])))
+    """Return order-by-mode TE/TM coefficients for both longitudinal branches."""
+    kpar = np.asarray(k_parallel, dtype=float).reshape(-1, 2)
+    kp = np.linalg.norm(kpar, axis=1)
+    alpha = np.arctan2(kpar[:, 1], kpar[:, 0])
     st = np.asarray(kp / complex(k), dtype=np.complex128)
-    ct_up = np.asarray(complex(kz) / complex(k), dtype=np.complex128)
+    ct_up = np.asarray(kz, dtype=np.complex128).reshape(-1) / complex(k)
     ct_down = -ct_up
 
     pi_up, tau_up = spherical_functions_trigon(ct_up, st, int(lmax), xp=np)
     pi_down, tau_down = spherical_functions_trigon(ct_down, st, int(lmax), xp=np)
     nmodes = n_modes(int(lmax))
-    b_up_te = np.zeros((nmodes,), dtype=np.complex128)
-    b_up_tm = np.zeros((nmodes,), dtype=np.complex128)
-    b_down_te = np.zeros((nmodes,), dtype=np.complex128)
-    b_down_tm = np.zeros((nmodes,), dtype=np.complex128)
+    b_up_te = np.empty((len(kpar), nmodes), dtype=np.complex128)
+    b_up_tm = np.empty_like(b_up_te)
+    b_down_te = np.empty_like(b_up_te)
+    b_down_tm = np.empty_like(b_up_te)
 
     for tau, l, m, idx in iter_modes(int(lmax)):
         phase = np.exp(1j * float(m) * alpha)
-        b_up_te[idx] = (
+        b_up_te[:, idx] = (
             transformation_coefficients(pi_up, tau_up, tau, l, m, pol=1, dagger=False) * phase
         )
-        b_up_tm[idx] = (
+        b_up_tm[:, idx] = (
             transformation_coefficients(pi_up, tau_up, tau, l, m, pol=2, dagger=False) * phase
         )
-        b_down_te[idx] = (
+        b_down_te[:, idx] = (
             transformation_coefficients(pi_down, tau_down, tau, l, m, pol=1, dagger=False) * phase
         )
-        b_down_tm[idx] = (
+        b_down_tm[:, idx] = (
             transformation_coefficients(pi_down, tau_down, tau, l, m, pol=2, dagger=False) * phase
         )
     return b_up_te, b_up_tm, b_down_te, b_down_tm
@@ -194,31 +195,36 @@ def _add_outgoing_amplitudes(
     area = outgoing.unit_cell_area
     orders = outgoing.orders
     n_orders = len(orders.m)
-    for i in range(n_orders):
-        kp = orders.k_parallel[i]
-        kz = complex(orders.kz[i])
-        kx, ky = float(kp[0]), float(kp[1])
-        if kz == 0:
-            raise ValueError(
-                "Outgoing amplitudes at a grazing Rayleigh-threshold order need a limiting prescription"
-            )
-        b_up_te, b_up_tm, b_down_te, b_down_tm = _order_mode_coefficients(
+    if np.any(orders.kz == 0):
+        raise ValueError(
+            "Outgoing amplitudes at a grazing Rayleigh-threshold order need a limiting prescription"
+        )
+    # Bound the four conversion tables to about 2 MiB in complex128. Particle
+    # contractions remain streamed, without a particle-by-order workspace.
+    batch_size = max(1, 32768 // n_modes(lmax))
+    for start in range(0, n_orders, batch_size):
+        stop = min(start + batch_size, n_orders)
+        coefficients = _order_mode_coefficients(
             lmax=int(lmax),
             k=k_c,
-            k_parallel=kp,
-            kz=kz,
+            k_parallel=orders.k_parallel[start:stop],
+            kz=orders.kz[start:stop],
         )
-        phase_up = np.exp(
-            -1j * (pos[:, 0] * kx + pos[:, 1] * ky + (pos[:, 2] - outgoing.reference_z[0]) * kz)
-        )
-        phase_down = np.exp(
-            -1j * (pos[:, 0] * kx + pos[:, 1] * ky - (pos[:, 2] - outgoing.reference_z[1]) * kz)
-        )
-        pref = (2.0 * np.pi) / (area * k_c * kz)
-        outgoing.up_amplitudes[i, 0] += pref * np.sum(phase_up * (x @ b_up_te))
-        outgoing.up_amplitudes[i, 1] += pref * np.sum(phase_up * (x @ b_up_tm))
-        outgoing.down_amplitudes[i, 0] += pref * np.sum(phase_down * (x @ b_down_te))
-        outgoing.down_amplitudes[i, 1] += pref * np.sum(phase_down * (x @ b_down_tm))
+        for j, i in enumerate(range(start, stop)):
+            kx, ky = orders.k_parallel[i]
+            kz = orders.kz[i]
+            b_up_te, b_up_tm, b_down_te, b_down_tm = (table[j] for table in coefficients)
+            phase_up = np.exp(
+                -1j * (pos[:, 0] * kx + pos[:, 1] * ky + (pos[:, 2] - outgoing.reference_z[0]) * kz)
+            )
+            phase_down = np.exp(
+                -1j * (pos[:, 0] * kx + pos[:, 1] * ky - (pos[:, 2] - outgoing.reference_z[1]) * kz)
+            )
+            pref = (2.0 * np.pi) / (area * k_c * kz)
+            outgoing.up_amplitudes[i, 0] += pref * np.sum(phase_up * (x @ b_up_te))
+            outgoing.up_amplitudes[i, 1] += pref * np.sum(phase_up * (x @ b_up_tm))
+            outgoing.down_amplitudes[i, 0] += pref * np.sum(phase_down * (x @ b_down_te))
+            outgoing.down_amplitudes[i, 1] += pref * np.sum(phase_down * (x @ b_down_tm))
 
 
 def periodic_outgoing_amplitudes(
@@ -342,14 +348,17 @@ def periodic_outgoing_flux(
         (-1, outgoing.down_amplitudes, z_below - lower),
     ):
         flux = np.zeros(len(outgoing.orders.m), dtype=float)
-        for i, (q, kz) in enumerate(
-            zip(outgoing.orders.k_parallel, outgoing.orders.kz, strict=True)
-        ):
-            e_te, e_tm, h_te, h_tm = plane_wave_basis(k=k, k_parallel=q, kz=sign * kz)
-            a_te, a_tm = amplitude[i] * np.exp(1j * sign * kz * distance)
-            e = a_te * e_te + a_tm * e_tm
-            h = complex(n_medium) * (a_te * h_te + a_tm * h_tm)
-            flux[i] = sign * outgoing.unit_cell_area / 2 * np.cross(e, h.conj())[2].real
+        # Keep Maxwell-vector work bounded, as in exterior E/H reconstruction.
+        for start in range(0, len(flux), 4096):
+            stop = min(start + 4096, len(flux))
+            kz = sign * outgoing.orders.kz[start:stop]
+            e_te, e_tm, h_te, h_tm = plane_wave_basis(
+                k=k, k_parallel=outgoing.orders.k_parallel[start:stop], kz=kz
+            )
+            weights = amplitude[start:stop] * np.exp(1j * kz * distance)[:, None]
+            e = weights[:, 0, None] * e_te + weights[:, 1, None] * e_tm
+            h = complex(n_medium) * (weights[:, 0, None] * h_te + weights[:, 1, None] * h_tm)
+            flux[start:stop] = sign * outgoing.unit_cell_area / 2 * np.cross(e, h.conj())[:, 2].real
         fluxes.append(flux)
     return fluxes[0], fluxes[1]
 

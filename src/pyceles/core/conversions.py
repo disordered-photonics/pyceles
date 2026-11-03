@@ -26,28 +26,26 @@ def plane_wave_basis(
     *,
     k: complex,
     k_parallel: np.ndarray,
-    kz: complex,
+    kz: complex | np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Return TE/TM unit vectors and corresponding H-vector factors."""
-    kx = float(k_parallel[0])
-    ky = float(k_parallel[1])
-    alpha = float(np.arctan2(ky, kx))
-    kp = float(np.hypot(kx, ky))
-    sb = kp / complex(k)
-    cb = complex(kz) / complex(k)
+    """Return TE/TM vectors and H factors, broadcasting leading wavevector axes.
 
-    e_te = np.asarray(
-        [-np.sin(alpha), np.cos(alpha), 0.0],
-        dtype=np.complex128,
+    The final `k_parallel` axis contains x/y components; preceding axes
+    broadcast against `kz`. Scalar wavevectors return vectors of shape (3,).
+    """
+    kpar = np.asarray(k_parallel, dtype=float)
+    kx, ky, kz = np.broadcast_arrays(
+        kpar[..., 0], kpar[..., 1], np.asarray(kz, dtype=np.complex128)
     )
-    e_tm = np.asarray(
-        [cb * np.cos(alpha), cb * np.sin(alpha), -sb],
-        dtype=np.complex128,
-    )
-    khat = np.asarray(
-        [sb * np.cos(alpha), sb * np.sin(alpha), cb],
-        dtype=np.complex128,
-    )
+    alpha = np.arctan2(ky, kx)
+    ca, sa = np.cos(alpha), np.sin(alpha)
+    kp = np.hypot(kx, ky)
+    sb = kp / complex(k)
+    cb = kz / complex(k)
+
+    e_te = np.stack((-sa, ca, np.zeros_like(alpha)), axis=-1).astype(np.complex128, copy=False)
+    e_tm = np.stack((cb * ca, cb * sa, -sb), axis=-1)
+    khat = np.stack((sb * ca, sb * sa, cb), axis=-1)
     h_te = np.cross(khat, e_te)
     h_tm = np.cross(khat, e_tm)
     return e_te, e_tm, h_te, h_tm

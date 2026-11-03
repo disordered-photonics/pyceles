@@ -5,10 +5,66 @@ from typing import Any
 import numpy as np
 import pytest
 
+from pyceles.core.conversions import transformation_coefficients
+from pyceles.core.indexing import iter_modes, n_modes
 from pyceles.core.lattice import RectangularLattice2D
 from pyceles.core.periodic import rayleigh_report
+from pyceles.core.spherical import spherical_functions_trigon
 from pyceles.postprocessing.farfield import periodic_outgoing_amplitudes
 from pyceles.postprocessing.farfield.orders import enumerate_diffraction_orders_rectangular
+
+
+def _scalar_outgoing_reference(outgoing, positions, coefficients, *, lmax, k):
+    """Independently contract one order and one SVWF mode at a time."""
+    branches = []
+    for sign, reference_z in zip((1, -1), outgoing.reference_z, strict=True):
+        amplitudes = np.zeros((len(outgoing.orders.m), 2), dtype=complex)
+        for i, (kp, kz) in enumerate(
+            zip(outgoing.orders.k_parallel, outgoing.orders.kz, strict=True)
+        ):
+            alpha = np.arctan2(kp[1], kp[0])
+            pi, tau = spherical_functions_trigon(
+                np.asarray(sign * kz / k), np.asarray(np.linalg.norm(kp) / k), lmax
+            )
+            phase = np.exp(
+                -1j * (positions[:, :2] @ kp + sign * kz * (positions[:, 2] - reference_z))
+            )
+            for svwf_pol, l, m, mode in iter_modes(lmax):
+                for plane_pol in (1, 2):
+                    conversion = transformation_coefficients(
+                        pi, tau, svwf_pol, l, m, pol=plane_pol, dagger=False
+                    ) * np.exp(1j * m * alpha)
+                    amplitudes[i, plane_pol - 1] += conversion * np.sum(
+                        coefficients[:, mode] * phase
+                    )
+            amplitudes[i] *= 2 * np.pi / (outgoing.unit_cell_area * k * kz)
+        branches.append(amplitudes)
+    return branches
+
+
+@pytest.mark.parametrize("k", [0.015 + 0j, 0.015 + 0.002j])
+@pytest.mark.parametrize("lmax,bmax", [(1, 0.04), (3, 0.04), (6, 0.11)])
+def test_outgoing_order_batches_match_scalar_full_mode_contraction(k, lmax, bmax):
+    rng = np.random.default_rng(218)
+    positions = rng.uniform(-100, 100, (4, 3))
+    coefficients = rng.standard_normal((4, n_modes(lmax))) + 1j * rng.standard_normal(
+        (4, n_modes(lmax))
+    )
+    outgoing = periodic_outgoing_amplitudes(
+        lattice=RectangularLattice2D(600, 650),
+        positions=positions,
+        coeffs=coefficients,
+        lmax=lmax,
+        k=k,
+        k_parallel=np.array([0.0013, -0.0007]),
+        output_bmax=bmax,
+        reference_z=(150, -150),
+    )
+    reference = _scalar_outgoing_reference(outgoing, positions, coefficients, lmax=lmax, k=k)
+    for actual, expected in zip(
+        (outgoing.up_amplitudes, outgoing.down_amplitudes), reference, strict=True
+    ):
+        np.testing.assert_allclose(actual, expected, rtol=3e-13, atol=3e-15)
 
 
 @pytest.mark.parametrize("imaginary_zero", [0.0, -0.0], ids=["positive-zero", "negative-zero"])

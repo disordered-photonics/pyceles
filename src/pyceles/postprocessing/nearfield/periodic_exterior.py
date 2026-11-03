@@ -165,28 +165,35 @@ def _accumulate_order_field(
     kpar = np.asarray(order_k_parallel, dtype=float).reshape(-1, 2)
     kz_arr = np.asarray(order_kz, dtype=np.complex128).reshape(-1)
     amp = np.asarray(amplitudes, dtype=np.complex128).reshape(-1, 2)
-    for i in range(kpar.shape[0]):
-        try:
-            kx = float(kpar[i, 0])
-            ky = float(kpar[i, 1])
-            kz = complex(kz_arr[i])
-            a_te = complex(amp[i, 0])
-            a_tm = complex(amp[i, 1])
-            if abs(a_te) <= 0.0 and abs(a_tm) <= 0.0:
-                continue
+    # Bound basis/vector temporaries to a few MiB, independently of the number
+    # of output orders. Point phases remain streamed for large field maps.
+    for start in range(0, len(kpar), 4096):
+        stop = min(start + 4096, len(kpar))
+        active = np.any(amp[start:stop] != 0, axis=1)
+        e_vectors = np.zeros((stop - start, 3), dtype=np.complex128)
+        h_vectors = np.zeros_like(e_vectors)
+        if np.any(active):
             e_te, e_tm, h_te, h_tm = plane_wave_basis(
-                k=complex(k),
-                k_parallel=kpar[i],
-                kz=kz,
+                k=complex(k), k_parallel=kpar[start:stop][active], kz=kz_arr[start:stop][active]
             )
-            e_vec = a_te * e_te + a_tm * e_tm
-            h_vec = complex(n_medium) * (a_te * h_te + a_tm * h_tm)
-            phase = np.exp(1j * (kx * pts[:, 0] + ky * pts[:, 1] + kz * (pts[:, 2] - reference_z)))
-            e += phase[:, None] * e_vec[None, :]
-            h += phase[:, None] * h_vec[None, :]
-        finally:
-            if progress is not None:
-                progress.update(1)
+            a_te, a_tm = amp[start:stop][active, 0, None], amp[start:stop][active, 1, None]
+            e_vectors[active] = a_te * e_te + a_tm * e_tm
+            h_vectors[active] = complex(n_medium) * (a_te * h_te + a_tm * h_tm)
+        for j, i in enumerate(range(start, stop)):
+            try:
+                if not active[j]:
+                    continue
+                kx = float(kpar[i, 0])
+                ky = float(kpar[i, 1])
+                kz = complex(kz_arr[i])
+                phase = np.exp(
+                    1j * (kx * pts[:, 0] + ky * pts[:, 1] + kz * (pts[:, 2] - reference_z))
+                )
+                e += phase[:, None] * e_vectors[j]
+                h += phase[:, None] * h_vectors[j]
+            finally:
+                if progress is not None:
+                    progress.update(1)
     return e, h
 
 

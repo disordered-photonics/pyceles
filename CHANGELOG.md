@@ -73,6 +73,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retain double-precision sample generation and expose physical outgoing intervals.
 
 ### Changed
+- Periodic outgoing amplitudes, exterior E/H and finite-plane flux batch angular
+  conversions in bounded workspaces while streaming particle and query-point
+  contractions.
 - Breaking: removed `threshold` from `RectangularLattice2D.diffraction_orders`;
   longitudinal roots and propagation classification follow physical dispersion.
 - Periodic rectangular reception stores only nonzero angular couplings and
