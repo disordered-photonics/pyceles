@@ -86,16 +86,6 @@ def _validate_k_and_k_parallel(k: float, k_parallel: npt.ArrayLike) -> tuple[flo
     return k_f, kp
 
 
-def _kz_from_order(
-    k: float, k_parallel_order: np.ndarray, *, threshold: float
-) -> tuple[complex, bool]:
-    kz2 = float(k) * float(k) - float(np.dot(k_parallel_order, k_parallel_order))
-    tol = float(threshold)
-    if kz2 >= -tol:
-        return complex(math.sqrt(max(kz2, 0.0)), 0.0), True
-    return complex(0.0, math.sqrt(-kz2)), False
-
-
 def _automatic_order_bounds(
     lattice: RectangularLattice2D,
     *,
@@ -159,13 +149,13 @@ def rayleigh_report(
         m_bound = n_bound = value
 
     orders: list[PeriodicRayleighOrder] = []
-    threshold = (float(at_threshold) * k_f) ** 2
     for m in range(-m_bound, m_bound + 1):
         for n in range(-n_bound, n_bound + 1):
             if not include_specular and m == 0 and n == 0:
                 continue
             kp_order = kp0 + lattice.reciprocal_vector(m, n)
-            kz, propagating = _kz_from_order(k_f, kp_order, threshold=threshold)
+            kz = complex(np.sqrt(complex(k_f * k_f - float(np.dot(kp_order, kp_order)))))
+            propagating = kz.imag == 0.0
             clearance = abs(kz) / k_f
             orders.append(
                 PeriodicRayleighOrder(

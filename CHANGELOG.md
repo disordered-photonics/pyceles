@@ -73,6 +73,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retain double-precision sample generation and expose physical outgoing intervals.
 
 ### Changed
+- Breaking: removed `threshold` from `RectangularLattice2D.diffraction_orders`;
+  longitudinal roots and propagation classification follow physical dispersion.
 - Periodic rectangular reception stores only nonzero angular couplings and
   forms higher-order source projections in bounded device batches.
 - Breaking: `compute_dipole_source_work` and `DipoleSourceWork` replace
@@ -92,6 +94,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve weakly evanescent diffraction orders near grazing and their outgoing
+  attenuation across length units. Enumeration and warning tolerances no longer
+  modify longitudinal wavevectors.
 - Selected finite reception validates outgoing radial-table support; periodic
   reception consistently rejects active source origins without explicit self subtraction.
 - Inactive outgoing sources do not set periodic reception bounds or overflow

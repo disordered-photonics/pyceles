@@ -37,6 +37,8 @@ def enumerate_diffraction_orders_rectangular(
     When `output_bmax` is `None`, the returned table is propagating-only for a
     lossless host (`|k_parallel_mn| <= k`). Absorbing hosts require an explicit
     reciprocal-radius cutoff because no order propagates without attenuation.
+    ``threshold`` widens the enumeration radius only; it does not modify
+    longitudinal wavevectors or turn evanescent orders into grazing orders.
     """
     k_c = passive_wavenumber(k)
     if k_c.imag != 0.0 and output_bmax is None:
@@ -66,7 +68,6 @@ def enumerate_diffraction_orders_rectangular(
     n_max = int(np.ceil((bmax - float(kp0[1])) / b2_norm))
 
     radius_sq_max = float((bmax + tol) * (bmax + tol))
-    prop_sq_max = float((k_c.real + tol) * (k_c.real + tol))
     rows: list[tuple[int, int, np.ndarray, complex, bool]] = []
     for m in range(m_min, m_max + 1):
         for n in range(n_min, n_max + 1):
@@ -74,20 +75,12 @@ def enumerate_diffraction_orders_rectangular(
             kp_sq = float(np.dot(kp, kp))
             if kp_sq > radius_sq_max:
                 continue
-            if output_bmax is None and kp_sq > prop_sq_max:
+            # The principal root is outgoing for passive k. A cutoff tolerance
+            # must not flatten the evanescent side of a Rayleigh threshold.
+            kz = complex(np.sqrt(k_c * k_c - kp_sq + 0j))
+            propagating = k_c.imag == 0.0 and kz.imag == 0.0
+            if output_bmax is None and not propagating:
                 continue
-            kz2 = k_c * k_c - kp_sq
-            if k_c.imag == 0.0 and kz2.real >= -tol:
-                kz = complex(float(np.sqrt(max(kz2.real, 0.0))), 0.0)
-                propagating = True
-            elif k_c.imag == 0.0:
-                kz = complex(0.0, float(np.sqrt(-kz2.real)))
-                propagating = False
-            else:
-                kz = complex(np.sqrt(kz2))
-                if kz.imag < 0.0 or (kz.imag == 0.0 and kz.real < 0.0):
-                    kz = -kz
-                propagating = False
             rows.append((int(m), int(n), kp, kz, bool(propagating)))
 
     if not rows:

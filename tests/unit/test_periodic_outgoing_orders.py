@@ -6,7 +6,60 @@ import numpy as np
 import pytest
 
 from pyceles.core.lattice import RectangularLattice2D
+from pyceles.core.periodic import rayleigh_report
 from pyceles.postprocessing.farfield import periodic_outgoing_amplitudes
+from pyceles.postprocessing.farfield.orders import enumerate_diffraction_orders_rectangular
+
+
+@pytest.mark.parametrize("imaginary_zero", [0.0, -0.0], ids=["positive-zero", "negative-zero"])
+@pytest.mark.parametrize("length_scale", [1e-3, 1.0, 1e3])
+def test_evanescent_orders_near_grazing_preserve_dispersion_and_length_units(
+    length_scale, imaginary_zero
+):
+    k = 0.01 / length_scale
+    transverse = k * np.sqrt(1 + 2e-9)
+    lattice = RectangularLattice2D(2 * np.pi / transverse, 2 * np.pi / transverse)
+    outgoing = periodic_outgoing_amplitudes(
+        lattice=lattice,
+        k=complex(k, imaginary_zero),
+        k_parallel=np.zeros(2),
+        output_bmax=1.01 * k,
+        positions=np.zeros((1, 3)),
+        coeffs=np.ones((1, 6)),
+        lmax=1,
+    )
+    assert np.all(np.isfinite(outgoing.up_amplitudes))
+    assert np.all(np.isfinite(outgoing.down_amplitudes))
+    idx = np.flatnonzero((outgoing.orders.m == 1) & (outgoing.orders.n == 0))[0]
+    table_order = next(
+        o
+        for o in lattice.diffraction_orders(k_parallel=np.zeros(2), k=k, max_order=1)
+        if (o.m, o.n) == (1, 0)
+    )
+    report = rayleigh_report(lattice, k=k, k_parallel=np.zeros(2), at_threshold=1e-3)
+    assert report.warning_level == "at"  # A warning threshold is not a dispersion clamp.
+    assert report.min_clearance > 0
+    for kz, propagating, kp in (
+        (
+            outgoing.orders.kz[idx],
+            outgoing.orders.propagating[idx],
+            outgoing.orders.k_parallel[idx],
+        ),
+        (table_order.kz, table_order.propagating, table_order.k_parallel),
+        *[(o.kz, o.propagating, o.k_parallel) for o in report.nearest_orders],
+    ):
+        assert not propagating
+        assert kz.real == 0 and kz.imag > 0
+        np.testing.assert_allclose(
+            kz * kz + np.dot(kp, kp), k * k, rtol=32 * np.finfo(float).eps, atol=0
+        )
+    propagating_only = enumerate_diffraction_orders_rectangular(
+        lattice=lattice,
+        k=complex(k, imaginary_zero),
+        k_parallel_incident=np.zeros(2),
+    )
+    assert np.all(propagating_only.propagating)
+    assert not np.any((propagating_only.m == 1) & (propagating_only.n == 0))
 
 
 def test_grazing_outgoing_order_requires_a_limiting_prescription():

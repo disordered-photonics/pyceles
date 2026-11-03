@@ -118,7 +118,6 @@ class RectangularLattice2D:
         k_parallel: np.ndarray,
         k: float,
         max_order: int,
-        threshold: float = 1e-12,
     ) -> tuple[DiffractionOrder2D, ...]:
         """Enumerate rectangular-lattice diffraction orders.
 
@@ -132,18 +131,13 @@ class RectangularLattice2D:
         order = int(max_order)
         if order < 0:
             raise ValueError(f"`max_order` must be >= 0. Got {max_order!r}.")
-        tol = float(threshold)
         out: list[DiffractionOrder2D] = []
         for m in range(-order, order + 1):
             for n in range(-order, order + 1):
                 kp = kp0 + self.reciprocal_vector(m, n)
                 kz2 = k_f * k_f - float(np.dot(kp, kp))
-                if kz2 >= -tol:
-                    kz = complex(float(np.sqrt(max(kz2, 0.0))), 0.0)
-                    propagating = True
-                else:
-                    kz = complex(0.0, float(np.sqrt(-kz2)))
-                    propagating = False
+                kz = complex(np.sqrt(complex(kz2)))
+                propagating = kz.imag == 0.0
                 out.append(
                     DiffractionOrder2D(
                         m=int(m),

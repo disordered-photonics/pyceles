@@ -3,6 +3,7 @@
 import numpy as np
 import pytest
 
+from pyceles.core.radial import passive_wavenumber
 from pyceles.core.translation import (
     RadialLUT,
     translation_ab5_table,
@@ -11,6 +12,19 @@ from pyceles.core.translation import (
 )
 from pyceles.postprocessing.nearfield import scattered
 from pyceles.postprocessing.nearfield.scattered import NearFieldRadialLUT, compute_scattered_field
+
+
+def test_passive_wavenumber_normalizes_signed_imaginary_zero():
+    for imag in (0.0, -0.0):
+        normalized = passive_wavenumber(complex(1.5, imag))
+        assert normalized == 1.5 + 0j
+        assert not np.signbit(normalized.imag)
+    smallest_absorption = np.nextafter(0.0, 1.0)
+    for imag in (0.2, smallest_absorption):
+        absorbing = complex(1.5, imag)
+        assert passive_wavenumber(absorbing) == absorbing
+    with pytest.raises(ValueError, match="nonnegative"):
+        passive_wavenumber(complex(1.5, -smallest_absorption))
 
 
 @pytest.mark.parametrize("factory", [RadialLUT, NearFieldRadialLUT])

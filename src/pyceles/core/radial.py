@@ -29,11 +29,13 @@ def dx_xz_hankel1(l: int | np.ndarray, z: npt.ArrayLike) -> np.ndarray:
 
 
 def passive_wavenumber(k: complex) -> complex:
-    """Require a finite wavenumber with positive real and nonnegative imaginary parts."""
+    """Require passive k, canonicalizing negative signed imaginary zero to +0."""
     value = complex(k)
     if not np.isfinite(value) or value.real <= 0 or value.imag < 0:
         raise ValueError("k must be finite with positive real and nonnegative imaginary parts")
-    return value
+    # A lossless k written as real-0j must not select the growing branch of
+    # sqrt(k**2 - q**2) for evanescent transverse wavevectors.
+    return complex(value.real, 0.0 if value.imag == 0.0 else value.imag)
 
 
 def _cast_radial_table_with_finite_guard(
