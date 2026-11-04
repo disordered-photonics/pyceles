@@ -16,6 +16,7 @@ from pyceles.core.operators.mlfmm import (
     box_order_rokhlin_like,
     build_multilevel_mlfmm_operators,
     build_single_level_mlfmm_operators,
+    estimate_rokhlin_order,
     prepare_mlfmm_coupling,
     resolve_mlfmm_plan,
 )
@@ -863,6 +864,29 @@ def test_mlfmm_populate_warms_exact_leaf_near_cache_directly() -> None:
 
     assert coupling._exact_block_cache is not None
     assert len(coupling._exact_block_cache) > 0
+
+
+@pytest.mark.parametrize(
+    "accuracy, minimum",
+    list(enumerate((3, 8, 13, 19, 24, 30, 35, 41), start=1)),
+)
+def test_mlfmm_order_estimate_extrapolates_small_box_floor(
+    accuracy: int,
+    minimum: int,
+) -> None:
+    assert estimate_rokhlin_order(0.0, accuracy=accuracy) == minimum
+
+
+def test_mlfmm_order_refinement_is_not_limited_by_empirical_floor() -> None:
+    assert estimate_rokhlin_order(0.0, accuracy=8) == 41
+    assert estimate_rokhlin_order(27.0, accuracy=8) == 48
+    assert estimate_rokhlin_order(27.0, accuracy=12) > 48
+    assert (
+        box_order_rokhlin_like(particle_lmax=3, k=1.0, box_half_size=13.5, accuracy=8, additive=20)
+        == 68
+    )
+    with pytest.raises(ValueError, match="accuracy must be >= 1"):
+        estimate_rokhlin_order(27.0, accuracy=0)
 
 
 def test_mlfmm_options_expose_box_order_policy_controls() -> None:

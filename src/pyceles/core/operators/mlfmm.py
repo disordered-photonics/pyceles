@@ -48,13 +48,10 @@ from .mode_metadata import mode_reverse_m_indices
 MLFMMStage = Literal["direct", "single_level", "multilevel"]
 MLFMMLeafApplyMode = Literal["dense", "on_the_fly"]
 COMPLEX128_DTYPE = np.dtype(np.complex128)
-_ROKHLIN_MINIMUM_ORDERS = (3, 7, 11, 17, 24, 30)
-"""Empirical minimum orders supplementing the asymptotic box-order estimate.
-
-The discrete accuracy levels reduce order underestimation at small ka. These
-floors remain heuristic and do not guarantee low-frequency stability of
-sampled translations.
-"""
+# Least-squares linear fit to the historical FastMM small-ka floors for a=1..6.
+_ROKHLIN_MINIMUM_ORDER_FLOOR = 3
+_ROKHLIN_MINIMUM_ORDER_SLOPE = 5.5
+_ROKHLIN_MINIMUM_ORDER_INTERCEPT = -3.9
 
 
 @dataclass(frozen=True)
@@ -602,21 +599,24 @@ def resolve_mlfmm_plan(
 def estimate_rokhlin_order(ka: float, *, accuracy: int = 3) -> int:
     """Estimate the HF box order from size parameter `ka`.
 
-    The estimate uses a Rokhlin-style asymptotic growth law together with
-    conservative small-ka floor values. The `accuracy` argument is an ordinal
-    quality level, not a guaranteed number of correct decimal digits.
+    The estimate uses a Rokhlin-style asymptotic growth law together with the
+    empirical floor ``max(3, ceil(5.5 * accuracy - 3.9))``. This linear fit
+    extrapolates the historical floor values for levels one through six. The
+    `accuracy` argument is any positive ordinal quality level, not a guaranteed
+    number of correct decimal digits. Additive box order shifts this estimate
+    independently, including when the floor dominates.
     """
 
     acc = int(accuracy)
-    if acc < 1 or acc > len(_ROKHLIN_MINIMUM_ORDERS):
-        raise ValueError(
-            f"accuracy must be in [1, {len(_ROKHLIN_MINIMUM_ORDERS)}]. Got {accuracy!r}."
-        )
+    if acc < 1:
+        raise ValueError(f"accuracy must be >= 1. Got {accuracy!r}.")
+    minimum_order = max(
+        _ROKHLIN_MINIMUM_ORDER_FLOOR,
+        math.ceil(_ROKHLIN_MINIMUM_ORDER_SLOPE * acc + _ROKHLIN_MINIMUM_ORDER_INTERCEPT),
+    )
     ka_abs = abs(float(ka))
-    if ka_abs <= 0.0:
-        return int(_ROKHLIN_MINIMUM_ORDERS[acc - 1])
     order = math.floor(ka_abs + 1.8 * (acc ** (2.0 / 3.0)) * (ka_abs ** (1.0 / 3.0)))
-    return int(max(order, _ROKHLIN_MINIMUM_ORDERS[acc - 1]))
+    return int(max(order, minimum_order))
 
 
 def box_order_rokhlin_like(

@@ -178,6 +178,17 @@ size is 32 particles; lower-level hierarchy and accuracy controls remain
 available when the default is not appropriate. Pairwise coupling becomes
 memory-bound well before the largest MLFMM cases.
 
+`MLFMMOptions.accuracy_level` is a positive ordinal setting, not a requested
+number of correct digits. It sets the size-dependent box-order estimate and
+its empirical small-box minimum, extrapolated as
+`max(3, ceil(5.5 * accuracy_level - 3.9))` from the historical levels one
+through six. `order_additive` independently increases that same estimated
+order, including for small boxes where the minimum dominates. Both controls
+increase work and storage; neither guarantees a particular operator error or
+removes high-order representability and GPU resource limits.
+Check convergence against these controls separately from the iterative solver
+tolerance: a smaller residual cannot remove the sampled operator's error.
+
 ### Periodic reference phases
 
 `benchmarks/profiling/periodic_phases.py` profiles periodic preparation,

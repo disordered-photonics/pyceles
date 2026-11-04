@@ -73,6 +73,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retain double-precision sample generation and expose physical outgoing intervals.
 
 ### Changed
+- MLFMM small-box minimum orders now follow a linear extrapolation of the
+  historical levels 1 to 6, so higher accuracy levels extend both the asymptotic
+  estimate and its empirical floor. The additive order margin is retained.
 - Periodic outgoing amplitudes, exterior E/H and finite-plane flux batch angular
   conversions in bounded workspaces while streaming particle and query-point
   contractions.
