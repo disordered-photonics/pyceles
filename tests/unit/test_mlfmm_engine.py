@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import SimpleNamespace
+from typing import cast
 
 import numpy as np
 import pytest
@@ -21,8 +23,11 @@ from pyceles.core.operators.mlfmm import (
     resolve_mlfmm_plan,
 )
 from pyceles.core.operators.mlfmm_cupy import (
+    CuPyLeafTranslationTablesData,
+    _launch_leaf_otf_aggregate_fused,
     _leaf_otf_receive_shared_bytes,
     _leaf_otf_receive_threads,
+    _leaf_otf_translation_shared_bytes,
 )
 from pyceles.core.operators.mlfmm_directional import (
     MLFMMDirectionalStructuredTransforms,
@@ -1209,4 +1214,36 @@ def test_leaf_receive_shared_memory_rejects_order_above_static_limit() -> None:
             full_order=51,
             max_threads_per_block=1024,
             shared_mem_per_block=0xC000,
+        )
+
+
+@pytest.mark.fake_gpu
+def test_leaf_aggregation_rejects_oversized_tables_before_compilation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Order 51 exceeds 48 KiB without receive reduction scratch as well."""
+    assert _leaf_otf_translation_shared_bytes(51) == 0xC130
+    runtime = SimpleNamespace(
+        getDevice=lambda: 0,
+        getDeviceProperties=lambda device: {"sharedMemPerBlock": 0xC000},
+    )
+    cupy = SimpleNamespace(cuda=SimpleNamespace(runtime=runtime))
+    monkeypatch.setattr(
+        "pyceles.core.operators.mlfmm_cupy._leaf_otf_aggregate_fused_raw_kernel",
+        lambda *args, **kwargs: pytest.fail("oversized tables reached CUDA compilation"),
+    )
+    with pytest.raises(ValueError, match=r"aggregation.*required=49456.*available=49152"):
+        _launch_leaf_otf_aggregate_fused(
+            pair_deltas=None,
+            particle_indices=None,
+            row_indices=np.zeros(1),
+            target_rows=None,
+            x_states=None,
+            out=None,
+            tables=cast(CuPyLeafTranslationTablesData, SimpleNamespace(full_order=51)),
+            occupancy=1,
+            box_nm=1,
+            nmodes=1,
+            nrhs=1,
+            cupy=cupy,
         )

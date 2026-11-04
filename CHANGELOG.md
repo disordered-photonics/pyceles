@@ -99,6 +99,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and near-field showcase plotting. Particle-centre fields use analytic limits.
 
 ### Fixed
+- CuPy MLFMM reports oversized static leaf-aggregation tables before CUDA
+  compilation, including the required and available shared-memory sizes.
 
 - Preserve weakly evanescent diffraction orders near grazing and their outgoing
   attenuation across length units. Enumeration and warning tolerances no longer

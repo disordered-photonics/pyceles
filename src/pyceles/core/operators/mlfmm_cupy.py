@@ -3631,6 +3631,20 @@ def _leaf_translation_blocks_from_pair_deltas(
     return blocks
 
 
+def _leaf_otf_translation_shared_bytes(full_order: int) -> int:
+    """Count the static translation tables shared by fused leaf actions."""
+
+    order = int(full_order)
+    if order < 0:
+        raise ValueError(f"full_order must be >= 0. Got {full_order!r}.")
+    n_orders = 2 * order + 1
+    n_p_pdm = n_orders * (n_orders + 1) // 2
+    n_phase = 2 * n_orders - 1
+    # Four geometry scalars, radial tables, triangular P_l^m values,
+    # azimuthal phases, and ct/st powers. All entries are doubles.
+    return int((4 + 4 * n_orders + n_p_pdm + 2 * n_phase) * np.dtype(np.float64).itemsize)
+
+
 @cache
 def _leaf_otf_aggregate_fused_raw_kernel(
     full_order: int, coeff_dtype_name: str, conjugate_radial: bool = False
@@ -3895,12 +3909,20 @@ def _launch_leaf_otf_aggregate_fused(
     if count <= 0:
         return
     n_pairs = int(count * int(occupancy))
+    props = cupy.cuda.runtime.getDeviceProperties(cupy.cuda.runtime.getDevice())
+    required = _leaf_otf_translation_shared_bytes(int(tables.full_order))
+    shared_limit = int(props["sharedMemPerBlock"])
+    if required > shared_limit:
+        raise ValueError(
+            "Fused CuPy MLFMM leaf aggregation exceeds the device static shared-memory limit: "
+            f"order={int(tables.full_order)}, required={required} bytes, "
+            f"available={shared_limit} bytes. Reduce the box order or use the NumPy backend."
+        )
     kernel = _leaf_otf_aggregate_fused_raw_kernel(
         int(tables.full_order),
         np.dtype(x_states.dtype).str,
         conjugate_radial=conjugate_radial,
     )
-    props = cupy.cuda.runtime.getDeviceProperties(cupy.cuda.runtime.getDevice())
     max_grid_pairs = int(props["maxGridSize"][0])
     max_threads = int(props["maxThreadsPerBlock"])
     threads = 256 if max_threads >= 256 else 128 if max_threads >= 128 else 64
@@ -4030,22 +4052,16 @@ def _launch_leaf_otf_receive_contract(
 def _leaf_otf_receive_shared_bytes(full_order: int, threads: int) -> int:
     """Return static shared-memory bytes for the fused leaf receive kernel."""
 
-    order = int(full_order)
     thread_count = int(threads)
-    if order < 0:
-        raise ValueError(f"full_order must be >= 0. Got {full_order!r}.")
     if thread_count < 32 or thread_count % 32:
         raise ValueError(
             f"threads must be a positive whole-warp count of at least 32. Got {threads!r}."
         )
-    n_orders = 2 * order + 1
-    n_p_pdm = n_orders * (n_orders + 1) // 2
-    n_phase = 2 * n_orders - 1
-    # Four scalar geometry values, radial tables, triangular P_l^m table,
-    # azimuthal phase tables, ct/st powers, and one complex reduction slot per
-    # thread. All entries are doubles.
-    doubles = 4 + 2 * n_orders + n_p_pdm + 2 * n_phase + 2 * n_orders + 2 * thread_count
-    return int(doubles * np.dtype(np.float64).itemsize)
+    # Receive additionally reduces one complex value per thread.
+    return (
+        _leaf_otf_translation_shared_bytes(full_order)
+        + 2 * thread_count * np.dtype(np.float64).itemsize
+    )
 
 
 def _leaf_otf_receive_threads(
