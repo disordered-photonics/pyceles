@@ -27,6 +27,7 @@ from pyceles._cupy_memory import (
 )
 from pyceles._optional import coerce_array, import_cupy
 from pyceles.core.indexing import _translation_orders, index_vswf, iter_modes, n_modes
+from pyceles.core.spherical import _legendre_scalar_tables
 from pyceles.core.translation import (
     RadialLUT,
     _translation_ab5_compact_tables,
@@ -168,7 +169,7 @@ class CuPyHostLeafTranslationTablesData:
     pair_offset: np.ndarray
     pair_pmin: np.ndarray
     pair_pcount: np.ndarray
-    plm_coeffs: np.ndarray
+    legendre_coeffs: np.ndarray
     compact_re_ab: np.ndarray
     compact_im_ab: np.ndarray
     re_j: np.ndarray
@@ -330,7 +331,7 @@ class CuPyLeafTranslationTablesData:
     pair_offset: Any
     pair_pmin: Any
     pair_pcount: Any
-    plm_coeffs: Any
+    legendre_coeffs: Any
     compact_re_ab: Any
     compact_im_ab: Any
     re_j: Any
@@ -673,6 +674,50 @@ def _leaf_rect_pair_tables_and_ab(
     )
 
 
+def _leaf_legendre_coefficients(max_degree: int, dtype: Any = np.float64) -> np.ndarray:
+    """Pack canonical angular recurrences once, before repeated leaf actions."""
+    degree = int(max_degree)
+    a0, b0, diagonal, a, b = _legendre_scalar_tables(degree)
+    rows, columns = np.tril_indices(degree + 1)
+    alpha = a[rows, columns]
+    beta = b[rows, columns]
+    zonal = columns == 0
+    alpha[zonal] = a0[rows[zonal]]
+    beta[zonal] = b0[rows[zonal]]
+    if degree:
+        alpha[0] = np.sqrt(3.0)  # P_1^0 from P_0^0; the CPU special-cases this step.
+    return np.asarray(np.concatenate((diagonal, alpha, beta)), dtype=dtype)
+
+
+# CELES/Doicu normalized P_l^m, without the Condon--Shortley phase.
+# One thread owns one m column, so no inter-thread recurrence dependency exists.
+# This avoids cancellation between large monomial coefficients at high l.
+_LEAF_LEGENDRE_COLUMN_SOURCE = r"""
+template <typename Real>
+__device__ void leaf_legendre_column(
+    const int m, const int max_degree, const Real ct, const Real st,
+    const Real* coefficients, Real* values
+) {
+    const int n = max_degree + 1;
+    const int triangle = n * (n + 1) / 2;
+    Real st_power = Real(1);
+    for (int j = 0; j < m; ++j) st_power *= st;
+    Real current = coefficients[m] * st_power;
+    values[m * (m + 1) / 2 + m] = current;
+    Real previous = Real(0);
+    for (int l = m; l < max_degree; ++l) {
+        const int index = l * (l + 1) / 2 + m;
+        const Real a = coefficients[n + index];
+        const Real b = coefficients[n + triangle + index];
+        const Real next = a * ct * current - b * previous;
+        values[(l + 1) * (l + 2) / 2 + m] = next;
+        previous = current;
+        current = next;
+    }
+}
+"""
+
+
 @cache
 def _leaf_translation_blocks_rect_raw_kernel(
     full_order: int, dtype_name: str, conjugate_radial: bool = False
@@ -704,23 +749,7 @@ def _leaf_translation_blocks_rect_raw_kernel(
     sincos_fn = "sincosf" if real_t == "float" else "sincos"
     source = f"""
     #include <cupy/complex.cuh>
-    __device__ {real_t} assoc_legendre_function(
-        const int l,
-        const int m,
-        const {real_t}* ct_powers,
-        const {real_t}* st_powers,
-        const {real_t}* plm_coeffs
-    ) {{
-        {real_t} plm = ({real_t})0.0;
-        const {real_t} st_pow = st_powers[m];
-        int jj = 0;
-        for (int lambda = l - m; lambda >= 0; lambda -= 2) {{
-            const int idx = jj * ({n_orders} * {n_orders}) + m * {n_orders} + l;
-            plm += st_pow * ct_powers[lambda] * plm_coeffs[idx];
-            jj += 1;
-        }}
-        return plm;
-    }}
+    {_LEAF_LEGENDRE_COLUMN_SOURCE}
 
     __device__ {complex_t} bessel_lookup_linear(
         const int p,
@@ -764,7 +793,7 @@ def _leaf_translation_blocks_rect_raw_kernel(
         const {real_t}* im_j,
         const {real_t} inv_dr,
         const int last_index,
-        const {real_t}* plm_coeffs,
+        const {real_t}* legendre_coeffs,
         const {real_t}* re_ab,
         const {real_t}* im_ab,
         const int* pair_offset,
@@ -789,8 +818,6 @@ def _leaf_translation_blocks_rect_raw_kernel(
         __shared__ {real_t} p_pdm_shared[{n_p_pdm}];
         __shared__ {real_t} cos_mphi_shared[{n_phase}];
         __shared__ {real_t} sin_mphi_shared[{n_phase}];
-        __shared__ {real_t} ct_pow_shared[{n_orders}];
-        __shared__ {real_t} st_pow_shared[{n_orders}];
 
         if (tid == 0) {{
             const {real_t} dx = pair_deltas[3 * pair_idx + 0];
@@ -826,26 +853,13 @@ def _leaf_translation_blocks_rect_raw_kernel(
             return;
         }}
 
-        if (tid == 0) {{
-            ct_pow_shared[0] = ({real_t})1.0;
-            st_pow_shared[0] = ({real_t})1.0;
-            for (int p = 1; p < {n_orders}; ++p) {{
-                ct_pow_shared[p] = ct_pow_shared[p - 1] * ct_shared;
-                st_pow_shared[p] = st_pow_shared[p - 1] * st_shared;
-            }}
-        }}
-        __syncthreads();
-
         for (int p = tid; p < {n_orders}; p += n_threads) {{
             const {complex_t} radial = bessel_lookup_linear(p, r_shared, re_j, im_j, inv_dr, last_index);
             re_j_shared[p] = radial.real();
             im_j_shared[p] = {"-" if conjugate_radial else ""}radial.imag();
-            for (int absdm = 0; absdm <= p; ++absdm) {{
-                p_pdm_shared[p * (p + 1) / 2 + absdm] =
-                    assoc_legendre_function(
-                        p, absdm, ct_pow_shared, st_pow_shared, plm_coeffs
-                    );
-            }}
+        }}
+        for (int m = tid; m < {n_orders}; m += n_threads) {{
+            leaf_legendre_column<{real_t}>(m, {n_orders} - 1, ct_shared, st_shared, legendre_coeffs, p_pdm_shared);
         }}
         if (tid == 0) {{
             for (int dm = -2 * {order}; dm <= 2 * {order}; ++dm) {{
@@ -977,7 +991,6 @@ def build_leaf_box_maps_cupy(
         in_mode_indices=in_mode_idx,
         out_dtype=np.dtype(out_dtype),
     )
-    plm_coeffs_raw = _translation_plm_coeff_table(full_order, dtype=real_dtype).reshape(-1)
 
     re_j_raw, im_j_raw = _split_complex_table_transposed(
         np.asarray(radial_lut_full.j)[: 2 * full_order + 1, :],
@@ -1042,7 +1055,9 @@ def build_leaf_box_maps_cupy(
     pair_pcount_dev = cupy.asarray(
         np.ascontiguousarray(pair_pcount_raw, dtype=np.int32), dtype=cupy.int32
     )
-    plm_coeffs_dev = cupy.asarray(np.ascontiguousarray(plm_coeffs_raw), dtype=cupy_real_dtype)
+    legendre_coeffs_dev = cupy.asarray(
+        _leaf_legendre_coefficients(2 * full_order, real_dtype), dtype=cupy_real_dtype
+    )
     re_ab_dev = cupy.asarray(np.ascontiguousarray(compact_re_ab_raw), dtype=cupy_real_dtype)
     im_ab_dev = cupy.asarray(np.ascontiguousarray(compact_im_ab_raw), dtype=cupy_real_dtype)
     re_j_dev = cupy.asarray(re_j_raw, dtype=cupy_real_dtype)
@@ -1089,7 +1104,7 @@ def build_leaf_box_maps_cupy(
                 im_j_dev,
                 inv_dr_scalar,
                 np.int32(last_index),
-                plm_coeffs_dev,
+                legendre_coeffs_dev,
                 re_ab_dev,
                 im_ab_dev,
                 pair_offset_dev,
@@ -1292,7 +1307,6 @@ def _build_host_leaf_otf_payload(
         in_mode_indices=in_mode_indices,
         out_dtype=np.dtype(np.complex128),
     )
-    plm_coeffs_raw = _translation_plm_coeff_table(full_order, dtype=np.float64).reshape(-1)
 
     # Leaf aggregation/receive only needs regular-wave Bessel values between a
     # particle and its own leaf center.  Do not inherit a much longer exact-near
@@ -1332,7 +1346,7 @@ def _build_host_leaf_otf_payload(
         pair_offset=np.ascontiguousarray(pair_offset_raw, dtype=np.int32),
         pair_pmin=np.ascontiguousarray(pair_pmin_raw, dtype=np.int32),
         pair_pcount=np.ascontiguousarray(pair_pcount_raw, dtype=np.int32),
-        plm_coeffs=np.ascontiguousarray(plm_coeffs_raw, dtype=np.float64),
+        legendre_coeffs=_leaf_legendre_coefficients(2 * full_order),
         compact_re_ab=np.ascontiguousarray(compact_re_ab_raw, dtype=np.float64),
         compact_im_ab=np.ascontiguousarray(compact_im_ab_raw, dtype=np.float64),
         re_j=re_j,
@@ -1839,9 +1853,7 @@ def _upload_leaf_translation_tables(
         pair_pcount=cupy.asarray(
             np.ascontiguousarray(tables.pair_pcount, dtype=np.int32), dtype=cupy.int32
         ),
-        plm_coeffs=cupy.asarray(
-            np.ascontiguousarray(tables.plm_coeffs, dtype=np.float64), dtype=cupy.float64
-        ),
+        legendre_coeffs=cupy.asarray(tables.legendre_coeffs, dtype=cupy.float64),
         compact_re_ab=cupy.asarray(
             np.ascontiguousarray(tables.compact_re_ab, dtype=np.float64), dtype=cupy.float64
         ),
@@ -3619,7 +3631,7 @@ def _leaf_translation_blocks_from_pair_deltas(
                 tables.im_j,
                 np.float64(float(tables.inv_dr)),
                 np.int32(int(tables.last_index)),
-                tables.plm_coeffs,
+                tables.legendre_coeffs,
                 tables.compact_re_ab,
                 tables.compact_im_ab,
                 tables.pair_offset,
@@ -3641,8 +3653,8 @@ def _leaf_otf_translation_shared_bytes(full_order: int) -> int:
     n_p_pdm = n_orders * (n_orders + 1) // 2
     n_phase = 2 * n_orders - 1
     # Four geometry scalars, radial tables, triangular P_l^m values,
-    # azimuthal phases, and ct/st powers. All entries are doubles.
-    return int((4 + 4 * n_orders + n_p_pdm + 2 * n_phase) * np.dtype(np.float64).itemsize)
+    # and azimuthal phases. All entries are doubles.
+    return int((4 + 2 * n_orders + n_p_pdm + 2 * n_phase) * np.dtype(np.float64).itemsize)
 
 
 @cache
@@ -3670,23 +3682,7 @@ def _leaf_otf_aggregate_fused_raw_kernel(
     #include <cupy/atomics.cuh>
     #include <cupy/complex.cuh>
 
-    __device__ double assoc_legendre_function_fused(
-        const int l,
-        const int m,
-        const double* ct_powers,
-        const double* st_powers,
-        const double* plm_coeffs
-    ) {{
-        double plm = 0.0;
-        const double st_pow = st_powers[m];
-        int jj = 0;
-        for (int lambda = l - m; lambda >= 0; lambda -= 2) {{
-            const int idx = jj * ({n_orders} * {n_orders}) + m * {n_orders} + l;
-            plm += st_pow * ct_powers[lambda] * plm_coeffs[idx];
-            jj += 1;
-        }}
-        return plm;
-    }}
+    {_LEAF_LEGENDRE_COLUMN_SOURCE}
 
     __device__ complex<double> bessel_lookup_linear_fused(
         const int p,
@@ -3746,7 +3742,7 @@ def _leaf_otf_aggregate_fused_raw_kernel(
         const double* im_j,
         const double inv_dr,
         const int last_index,
-        const double* plm_coeffs,
+        const double* legendre_coeffs,
         const double* re_ab,
         const double* im_ab,
         const int* pair_offset,
@@ -3773,8 +3769,6 @@ def _leaf_otf_aggregate_fused_raw_kernel(
             __shared__ double p_pdm_shared[{n_p_pdm}];
             __shared__ double cos_mphi_shared[{n_phase}];
             __shared__ double sin_mphi_shared[{n_phase}];
-            __shared__ double ct_pow_shared[{n_orders}];
-            __shared__ double st_pow_shared[{n_orders}];
 
             if (tid == 0) {{
                 const double dx = pair_deltas[3 * group_pair_idx + 0];
@@ -3795,27 +3789,14 @@ def _leaf_otf_aggregate_fused_raw_kernel(
             __syncthreads();
 
             if (r_shared > 0.0) {{
-                if (tid == 0) {{
-                    ct_pow_shared[0] = 1.0;
-                    st_pow_shared[0] = 1.0;
-                    for (int p = 1; p < {n_orders}; ++p) {{
-                        ct_pow_shared[p] = ct_pow_shared[p - 1] * ct_shared;
-                        st_pow_shared[p] = st_pow_shared[p - 1] * st_shared;
-                    }}
-                }}
-                __syncthreads();
-
                 for (int p = tid; p < {n_orders}; p += n_threads) {{
                     const complex<double> radial =
                         bessel_lookup_linear_fused(p, r_shared, re_j, im_j, inv_dr, last_index);
                     re_j_shared[p] = radial.real();
                     im_j_shared[p] = {"-" if conjugate_radial else ""}radial.imag();
-                    for (int absdm = 0; absdm <= p; ++absdm) {{
-                        p_pdm_shared[p * (p + 1) / 2 + absdm] =
-                            assoc_legendre_function_fused(
-                                p, absdm, ct_pow_shared, st_pow_shared, plm_coeffs
-                            );
-                    }}
+                }}
+                for (int m = tid; m < {n_orders}; m += n_threads) {{
+                    leaf_legendre_column<double>(m, {n_orders} - 1, ct_shared, st_shared, legendre_coeffs, p_pdm_shared);
                 }}
                 if (tid == 0) {{
                     for (int dm = -2 * {order}; dm <= 2 * {order}; ++dm) {{
@@ -3949,7 +3930,7 @@ def _launch_leaf_otf_aggregate_fused(
             tables.im_j,
             np.float64(float(tables.inv_dr)),
             np.int32(int(tables.last_index)),
-            tables.plm_coeffs,
+            tables.legendre_coeffs,
             tables.compact_re_ab,
             tables.compact_im_ab,
             tables.pair_offset,
@@ -4104,23 +4085,7 @@ def _leaf_otf_receive_fused_raw_kernel(
     source = f"""
     #include <cupy/complex.cuh>
 
-    __device__ double assoc_legendre_function_receive(
-        const int l,
-        const int m,
-        const double* ct_powers,
-        const double* st_powers,
-        const double* plm_coeffs
-    ) {{
-        double plm = 0.0;
-        const double st_pow = st_powers[m];
-        int jj = 0;
-        for (int lambda = l - m; lambda >= 0; lambda -= 2) {{
-            const int idx = jj * ({n_orders} * {n_orders}) + m * {n_orders} + l;
-            plm += st_pow * ct_powers[lambda] * plm_coeffs[idx];
-            jj += 1;
-        }}
-        return plm;
-    }}
+    {_LEAF_LEGENDRE_COLUMN_SOURCE}
 
     __device__ complex<double> bessel_lookup_linear_receive(
         const int p,
@@ -4170,7 +4135,7 @@ def _leaf_otf_receive_fused_raw_kernel(
         const double* im_j,
         const double inv_dr,
         const int last_index,
-        const double* plm_coeffs,
+        const double* legendre_coeffs,
         const double* re_ab,
         const double* im_ab,
         const int* pair_offset,
@@ -4193,8 +4158,6 @@ def _leaf_otf_receive_fused_raw_kernel(
         __shared__ double p_pdm_shared[{n_p_pdm}];
         __shared__ double cos_mphi_shared[{n_phase}];
         __shared__ double sin_mphi_shared[{n_phase}];
-        __shared__ double ct_pow_shared[{n_orders}];
-        __shared__ double st_pow_shared[{n_orders}];
         __shared__ double partial_re[{reduction_threads}];
         __shared__ double partial_im[{reduction_threads}];
 
@@ -4214,12 +4177,6 @@ def _leaf_otf_receive_fused_raw_kernel(
                     ct_shared = dz / rr;
                     st_shared = sqrt(fmax(0.0, 1.0 - ct_shared * ct_shared));
                     phi_shared = atan2(dy, dx);
-                    ct_pow_shared[0] = 1.0;
-                    st_pow_shared[0] = 1.0;
-                    for (int p = 1; p < {n_orders}; ++p) {{
-                        ct_pow_shared[p] = ct_pow_shared[p - 1] * ct_shared;
-                        st_pow_shared[p] = st_pow_shared[p - 1] * st_shared;
-                    }}
                 }}
             }}
             __syncthreads();
@@ -4230,12 +4187,9 @@ def _leaf_otf_receive_fused_raw_kernel(
                         bessel_lookup_linear_receive(p, r_shared, re_j, im_j, inv_dr, last_index);
                     re_j_shared[p] = radial.real();
                     im_j_shared[p] = {"-" if conjugate_radial else ""}radial.imag();
-                    for (int absdm = 0; absdm <= p; ++absdm) {{
-                        p_pdm_shared[p * (p + 1) / 2 + absdm] =
-                            assoc_legendre_function_receive(
-                                p, absdm, ct_pow_shared, st_pow_shared, plm_coeffs
-                            );
-                    }}
+                }}
+                for (int m = threadIdx.x; m < {n_orders}; m += blockDim.x) {{
+                    leaf_legendre_column<double>(m, {n_orders} - 1, ct_shared, st_shared, legendre_coeffs, p_pdm_shared);
                 }}
                 if (threadIdx.x == 0) {{
                     for (int dm = -2 * {order}; dm <= 2 * {order}; ++dm) {{
@@ -4387,7 +4341,7 @@ def _launch_leaf_otf_receive_fused(
             tables.im_j,
             np.float64(float(tables.inv_dr)),
             np.int32(int(tables.last_index)),
-            tables.plm_coeffs,
+            tables.legendre_coeffs,
             tables.compact_re_ab,
             tables.compact_im_ab,
             tables.pair_offset,

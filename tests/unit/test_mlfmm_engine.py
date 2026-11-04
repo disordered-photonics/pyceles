@@ -1189,20 +1189,20 @@ def test_multilevel_downward_transfer_matches_exact_recenter_oracle(transfer_sca
     assert rel < 0.50
 
 
-def test_leaf_receive_shared_memory_falls_back_to_two_warps_at_order_50() -> None:
-    """The production additive-order-16 case fits by shrinking reduction scratch only."""
+def test_leaf_receive_shared_memory_falls_back_to_four_warps_at_order_50() -> None:
+    """A high-order receive fits by shrinking reduction scratch only."""
 
     limit = 0xC000
-    assert _leaf_otf_receive_shared_bytes(50, 256) == 0xCA48
-    assert _leaf_otf_receive_shared_bytes(50, 128) == 0xC248
-    assert _leaf_otf_receive_shared_bytes(50, 64) == 0xBE48
+    assert _leaf_otf_receive_shared_bytes(50, 256) == 0xC3F8
+    assert _leaf_otf_receive_shared_bytes(50, 128) == 0xBBF8
+    assert _leaf_otf_receive_shared_bytes(50, 64) == 0xB7F8
     assert (
         _leaf_otf_receive_threads(
             full_order=50,
             max_threads_per_block=1024,
             shared_mem_per_block=limit,
         )
-        == 64
+        == 128
     )
 
 
@@ -1211,7 +1211,7 @@ def test_leaf_receive_shared_memory_rejects_order_above_static_limit() -> None:
 
     with pytest.raises(ValueError, match="static shared-memory limit"):
         _leaf_otf_receive_threads(
-            full_order=51,
+            full_order=52,
             max_threads_per_block=1024,
             shared_mem_per_block=0xC000,
         )
@@ -1221,8 +1221,8 @@ def test_leaf_receive_shared_memory_rejects_order_above_static_limit() -> None:
 def test_leaf_aggregation_rejects_oversized_tables_before_compilation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Order 51 exceeds 48 KiB without receive reduction scratch as well."""
-    assert _leaf_otf_translation_shared_bytes(51) == 0xC130
+    """Order 52 exceeds 48 KiB without receive reduction scratch as well."""
+    assert _leaf_otf_translation_shared_bytes(52) == 0xC1A8
     runtime = SimpleNamespace(
         getDevice=lambda: 0,
         getDeviceProperties=lambda device: {"sharedMemPerBlock": 0xC000},
@@ -1232,7 +1232,7 @@ def test_leaf_aggregation_rejects_oversized_tables_before_compilation(
         "pyceles.core.operators.mlfmm_cupy._leaf_otf_aggregate_fused_raw_kernel",
         lambda *args, **kwargs: pytest.fail("oversized tables reached CUDA compilation"),
     )
-    with pytest.raises(ValueError, match=r"aggregation.*required=49456.*available=49152"):
+    with pytest.raises(ValueError, match=r"aggregation.*required=49576.*available=49152"):
         _launch_leaf_otf_aggregate_fused(
             pair_deltas=None,
             particle_indices=None,
@@ -1240,10 +1240,21 @@ def test_leaf_aggregation_rejects_oversized_tables_before_compilation(
             target_rows=None,
             x_states=None,
             out=None,
-            tables=cast(CuPyLeafTranslationTablesData, SimpleNamespace(full_order=51)),
+            tables=cast(CuPyLeafTranslationTablesData, SimpleNamespace(full_order=52)),
             occupancy=1,
             box_nm=1,
             nmodes=1,
             nrhs=1,
             cupy=cupy,
         )
+
+
+def test_leaf_recurrence_removes_order_51_shared_memory_barrier() -> None:
+    assert _leaf_otf_translation_shared_bytes(51) == 47808
+    assert _leaf_otf_receive_shared_bytes(51, 64) == 48832
+    assert (
+        _leaf_otf_receive_threads(
+            full_order=51, max_threads_per_block=1024, shared_mem_per_block=49152
+        )
+        == 64
+    )
