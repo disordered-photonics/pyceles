@@ -189,6 +189,15 @@ removes high-order representability and GPU resource limits.
 Check convergence against these controls separately from the iterative solver
 tolerance: a smaller residual cannot remove the sampled operator's error.
 
+`interpolation_half_width` controls the local interpolation between directional
+grids (default 2, or four nodes in each angular coordinate).
+`angular_grid_factor` refines the angular quadrature independently of box and
+Hankel orders (default 1). Wider interpolation increases the stored transfer
+stencil and its repeated application cost; finer grids increase directional
+storage and work throughout the hierarchy. These are explicit refinement
+controls, not preparation-only accuracy improvements. Compare full actions
+and observables with a reference when choosing them.
+
 ### Periodic reference phases
 
 `benchmarks/profiling/periodic_phases.py` profiles periodic preparation,

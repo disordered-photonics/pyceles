@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- MLFMM exposes independent angular interpolation width and grid refinement
+  controls without changing the modal or Hankel truncation order.
 
 - NumPy/CuPy periodic Ewald and Rayleigh dipoles and coherent collections support
   host and native sphere/layered-sphere emitters, total E/H, regular reaction fields and work
@@ -99,6 +101,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and near-field showcase plotting. Particle-centre fields use analytic limits.
 
 ### Fixed
+- CuPy MLFMM leaf translations use normalized angular recurrences with
+  coefficients prepared once, avoiding high-degree polynomial cancellation.
 - CuPy MLFMM reports oversized static leaf-aggregation tables before CUDA
   compilation, including the required and available shared-memory sizes.
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import operator
 from dataclasses import dataclass
 from time import perf_counter
 from typing import Literal
@@ -60,7 +61,10 @@ class MLFMMOptions:
 
     Occupancy and depth determine the hierarchy. The leaf-size factor bounds
     the particle-to-box geometry, while accuracy and additive order control
-    sampled expansion size. Sampled transport includes every far-ownership
+    sampled expansion size. Interpolation width independently controls angular
+    resampling between levels. The angular grid factor refines quadrature.
+    Neither control increases the Hankel truncation order.
+    Sampled transport includes every far-ownership
     level from 2 through the leaves.
     """
 
@@ -70,6 +74,8 @@ class MLFMMOptions:
     accuracy_level: int = 3
     order_additive: int = 2
     collect_stream_stats: bool = False
+    interpolation_half_width: int = 2
+    angular_grid_factor: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -536,6 +542,9 @@ def resolve_mlfmm_plan(
         or float(resolved_options.leaf_size_radius_factor) <= 0.0
     ):
         raise ValueError("MLFMMOptions.leaf_size_radius_factor must be finite and > 0.")
+    if operator.index(resolved_options.interpolation_half_width) < 1:
+        raise ValueError("MLFMMOptions.interpolation_half_width must be >= 1.")
+    _angular_grid_order(1, resolved_options.angular_grid_factor)
     if int(resolved_options.accuracy_level) < 1:
         raise ValueError("MLFMMOptions.accuracy_level must be >= 1.")
 
@@ -823,6 +832,14 @@ def _offset_delta_from_half_size(half_size: float, offset: tuple[int, int, int])
     """Return the physical center shift for one relative box offset."""
 
     return 2.0 * float(half_size) * np.asarray(offset, dtype=float)
+
+
+def _angular_grid_order(base_order: int, factor: float) -> int:
+    """Refine angular samples without changing the modal or Hankel cutoff."""
+    value = float(factor)
+    if not np.isfinite(value) or value < 1.0:
+        raise ValueError("angular_grid_factor must be finite and >= 1.")
+    return int(np.ceil(int(base_order) * value))
 
 
 def _sampled_rokhlin_translator(
@@ -1655,6 +1672,7 @@ def build_single_level_mlfmm_operators(
     translator_order: int | None = None,
     accuracy_level: int = 3,
     order_additive: int = 2,
+    angular_grid_factor: float = 1.0,
     dtype: np.dtype | type[np.complexfloating] | type[np.complex128] = np.complex128,
     leaf_map_backend: Literal["numpy", "cupy"] = "numpy",
     build_leaf_maps: bool = True,
@@ -1684,7 +1702,9 @@ def build_single_level_mlfmm_operators(
     shared_translator_order = (
         int(shared_box_order) if translator_order is None else int(translator_order)
     )
-    shared_grid_order = max(int(shared_box_order), int(shared_translator_order))
+    shared_grid_order = _angular_grid_order(
+        max(int(shared_box_order), int(shared_translator_order)), angular_grid_factor
+    )
     out_dtype = np.dtype(dtype)
     aggregation: tuple[np.ndarray, ...]
     receive: tuple[np.ndarray, ...]
@@ -1875,6 +1895,8 @@ def build_multilevel_mlfmm_operators(
     box_order: int | None = None,
     accuracy_level: int = 3,
     order_additive: int = 2,
+    interpolation_half_width: int = 2,
+    angular_grid_factor: float = 1.0,
     dtype: np.dtype | type[np.complexfloating] | type[np.complex128] = np.complex128,
     leaf_map_backend: Literal["numpy", "cupy"] = "numpy",
     build_leaf_maps: bool = True,
@@ -1977,6 +1999,7 @@ def build_multilevel_mlfmm_operators(
             if box_order is None
             else int(box_order)
         )
+        level_grid_order = _angular_grid_order(level_box_order, angular_grid_factor)
         if level < hf_start_level or level > hf_end_level:
             directional = dummy_directional
         else:
@@ -1986,7 +2009,7 @@ def build_multilevel_mlfmm_operators(
                     refresh=True,
                 )
             directional = structured_directional_transforms(
-                int(level_box_order), grid_order=int(level_box_order)
+                int(level_box_order), grid_order=level_grid_order
             )
         if level == 0:
             far_offset_batches = {}
@@ -2034,7 +2057,7 @@ def build_multilevel_mlfmm_operators(
                 children=children,
                 box_order=int(level_box_order),
                 translator_order=int(level_box_order),
-                grid_order=int(level_box_order),
+                grid_order=level_grid_order,
                 directional=directional,
                 far_offset_batches=far_offset_batches
                 if hf_start_level <= level <= hf_end_level
@@ -2048,8 +2071,16 @@ def build_multilevel_mlfmm_operators(
         parent_level = child_level - 1
         child = levels[child_level]
         parent = levels[parent_level]
-        interpolation = directional_interpolation(child.grid_order, parent.grid_order)
-        anterpolation = directional_anterpolation(child.grid_order, parent.grid_order)
+        interpolation = directional_interpolation(
+            child.grid_order,
+            parent.grid_order,
+            stencil_half_width=interpolation_half_width,
+        )
+        anterpolation = directional_anterpolation(
+            child.grid_order,
+            parent.grid_order,
+            stencil_half_width=interpolation_half_width,
+        )
         grouped: dict[tuple[int, int, int], list[tuple[int, int]]] = {}
         for child_idx, parent_idx in enumerate(child.parent_indices):
             shift = (
@@ -2713,6 +2744,7 @@ def prepare_mlfmm_coupling(
             radial_lut=radial_lut_hf,
             accuracy_level=int(resolved_options.accuracy_level),
             order_additive=int(resolved_options.order_additive),
+            angular_grid_factor=resolved_options.angular_grid_factor,
             dtype=far_out_dtype,
             leaf_map_backend=leaf_backend_lit,
             build_leaf_maps=bool(build_leaf_maps),
@@ -2744,6 +2776,8 @@ def prepare_mlfmm_coupling(
         radial_lut=radial_lut_hf,
         accuracy_level=int(resolved_options.accuracy_level),
         order_additive=int(resolved_options.order_additive),
+        interpolation_half_width=resolved_options.interpolation_half_width,
+        angular_grid_factor=resolved_options.angular_grid_factor,
         dtype=far_out_dtype,
         leaf_map_backend=leaf_backend_lit,
         build_leaf_maps=bool(build_leaf_maps),

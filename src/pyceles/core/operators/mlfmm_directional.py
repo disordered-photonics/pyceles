@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import operator
 from dataclasses import dataclass
 from functools import cache, cached_property
 
@@ -596,6 +597,10 @@ def _build_sparse_directional_interpolation(
     source_size = n_alpha_src * n_beta_src
     target_size = n_alpha_dst * n_beta_dst
 
+    p = operator.index(stencil_half_width)
+    if p < 1:
+        raise ValueError("stencil_half_width must be positive.")
+
     if (
         n_alpha_src == n_alpha_dst
         and n_beta_src == n_beta_dst
@@ -608,7 +613,11 @@ def _build_sparse_directional_interpolation(
             shape=(target_size, source_size),
         )
 
-    p = max(1, int(stencil_half_width))
+    if p > n_beta_src or 2 * p > n_alpha_src:
+        raise ValueError(
+            "stencil_half_width must fit the source angular grid "
+            f"(got {p}, n_beta={n_beta_src}, n_alpha={n_alpha_src})."
+        )
     half_turn = n_alpha_src // 2
     if 2 * half_turn != n_alpha_src:
         raise ValueError("Directional alpha grid size must be even for FaSTMM2-style shifts.")
@@ -727,6 +736,7 @@ def _cached_directional_interpolation(
     target_order: int,
     alpha_factor_key: int,
     beta_factor_key: int,
+    stencil_half_width: int,
 ) -> MLFMMDirectionalInterpolation:
     source_grid = directional_grid(
         int(source_order),
@@ -743,6 +753,7 @@ def _cached_directional_interpolation(
         source_beta=source_grid.beta,
         target_alpha=target_grid.alpha,
         target_beta=target_grid.beta,
+        stencil_half_width=stencil_half_width,
     )
     return MLFMMDirectionalInterpolation(
         source_order=int(source_order),
@@ -757,14 +768,21 @@ def directional_interpolation(
     *,
     alpha_factor: float = 1.0,
     beta_factor: float = 1.0,
+    stencil_half_width: int = 2,
 ) -> MLFMMDirectionalInterpolation:
-    """Return a cached interpolation operator between two directional grids."""
+    """Return a cached interpolation operator between two directional grids.
+
+    Each angular coordinate uses ``2 * stencil_half_width`` local nodes.
+    This controls resampling independently of the expansion/translator order.
+    The default preserves the existing four-node interpolation.
+    """
 
     return _cached_directional_interpolation(
         int(source_order),
         int(target_order),
         _cache_key_factor(alpha_factor),
         _cache_key_factor(beta_factor),
+        operator.index(stencil_half_width),
     )
 
 
@@ -774,6 +792,7 @@ def directional_anterpolation(
     *,
     alpha_factor: float = 1.0,
     beta_factor: float = 1.0,
+    stencil_half_width: int = 2,
 ) -> MLFMMDirectionalInterpolation:
     """Return the transpose back-projection paired with `directional_interpolation`."""
 
@@ -782,6 +801,7 @@ def directional_anterpolation(
         target_order,
         alpha_factor=alpha_factor,
         beta_factor=beta_factor,
+        stencil_half_width=stencil_half_width,
     )
     return MLFMMDirectionalInterpolation(
         source_order=int(target_order),
