@@ -37,7 +37,10 @@ class PeriodicRayleighOrder:
 
 @dataclass(frozen=True)
 class PeriodicRayleighReport:
-    """Geometry-only warning report for artificial periodicity hazards."""
+    """Advisory geometry-only report for artificial-periodicity hazards.
+
+    Returning a near/anomalous status does not alter or block a calculation.
+    """
 
     period_over_host_wavelength_x: float
     period_over_host_wavelength_y: float
@@ -115,13 +118,15 @@ def rayleigh_report(
     rayleigh_margin: float = 1.0e-12,
     max_nearest_orders: int = 12,
 ) -> PeriodicRayleighReport:
-    """Return the nearest Rayleigh/Wood anomaly for a periodic cell.
+    """Report the nearest Rayleigh/Wood anomaly for a periodic cell.
 
-    This is a cheap geometry-only preflight: it enumerates reciprocal-lattice
-    orders near the host-medium light circle and reports the minimum
-    ``|kz| / k`` clearance. It intentionally does not inspect particle
-    material, T-matrices, or the Ewald splitting parameter, because those
-    influence the response strength but not the singular locations.
+    This opt-in, geometry-only diagnostic enumerates reciprocal-lattice orders
+    near the host-medium light circle and reports the minimum ``|kz| / k``
+    clearance. It returns a status and message; it does not emit a warning,
+    change solver settings, or prevent a calculation. It intentionally does
+    not inspect particle material, T-matrices, or the Ewald splitting
+    parameter, because those influence response strength but not the singular
+    locations.
     """
 
     if not isinstance(lattice, RectangularLattice2D):

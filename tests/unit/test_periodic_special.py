@@ -281,7 +281,7 @@ def test_shifted_delta_sequence_rejects_same_plane_limit() -> None:
 
 
 def test_shifted_delta_sequence_rejects_regular_recurrence_near_singularity() -> None:
-    with pytest.raises(ValueError, match="Rayleigh-threshold"):
+    with pytest.raises(ValueError, match="Rayleigh/Wood threshold"):
         shifted_delta_sequence(2, np.array([1.0e-16 + 0.0j]), z_offset=0.5, eta=1.2)
 
 

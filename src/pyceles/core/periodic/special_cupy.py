@@ -720,16 +720,18 @@ def shifted_delta_sequence_cupy_batched(
     if int(z_arr.size) == 0 or int(gamma_arr.size) == 0:
         return cp.zeros((int(z_arr.size), int(gamma_arr.size), n_max + 1), dtype=cp.complex128)
 
+    x = -(gamma_arr * gamma_arr) / (4.0 * eta_f * eta_f)
+    if bool(cp.any(cp.abs(x) <= float(singular_atol)).get()):
+        raise ValueError(
+            "shifted reciprocal integrals are singular at or near a "
+            "Rayleigh/Wood threshold (gamma approximately zero)."
+        )
     scaled = z_arr[:, None] * gamma_arr[None, :]
     if bool(cp.any(cp.abs(scaled) <= float(singular_atol)).get()):
         raise ValueError(
-            "shifted reciprocal integrals are singular in the same-plane or "
-            "Rayleigh-threshold limit; route those points to the same-plane "
-            "formula or avoid gamma*z_offset == 0."
+            "shifted reciprocal integrals are singular in the same-plane limit; "
+            "use the dedicated same-plane formula."
         )
-    x = -(gamma_arr * gamma_arr) / (4.0 * eta_f * eta_f)
-    if bool(cp.any(cp.abs(x) <= float(singular_atol)).get()):
-        raise ValueError("shifted reciprocal integrals are singular at gamma=0.")
     complex_argument = x.imag != 0.0
     complex_evanescent = (x.real > 0.0) & complex_argument
     scaled_limit = cp.where(

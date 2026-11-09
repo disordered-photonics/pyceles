@@ -483,16 +483,18 @@ def _shifted_delta_sequence_batched_raw(
     out = np.zeros((z_arr.size, gamma_arr.size, n_max + 1), dtype=np.complex128)
     if z_arr.size == 0 or gamma_arr.size == 0:
         return out
+    x = -(gamma_arr * gamma_arr) / (4.0 * float(eta) * float(eta))
+    if np.any(np.abs(x) <= float(singular_atol)):
+        raise ValueError(
+            "shifted reciprocal integrals are singular at or near a "
+            "Rayleigh/Wood threshold (gamma approximately zero)."
+        )
     scaled = z_arr[:, None] * gamma_arr[None, :]
     if np.any(np.abs(scaled) <= float(singular_atol)):
         raise ValueError(
-            "shifted reciprocal integrals are singular in the same-plane or "
-            "Rayleigh-threshold limit; route those points to the same-plane "
-            "formula or avoid gamma*z_offset == 0."
+            "shifted reciprocal integrals are singular in the same-plane limit; "
+            "use the dedicated same-plane formula."
         )
-    x = -(gamma_arr * gamma_arr) / (4.0 * float(eta) * float(eta))
-    if np.any(np.abs(x) <= float(singular_atol)):
-        raise ValueError("shifted reciprocal integrals are singular at gamma=0.")
     if np.any(x.imag != 0.0):
         return _shifted_delta_sequence_batched_raw_complex(
             n_max,
@@ -671,16 +673,18 @@ def shifted_delta_sequence_batched(
     out = np.zeros((z_arr.size, gamma_arr.size, n_max + 1), dtype=np.complex128)
     if z_arr.size == 0 or gamma_arr.size == 0:
         return out
+    x = -(gamma_arr * gamma_arr) / (4.0 * eta_f * eta_f)
+    if np.any(np.abs(x) <= float(singular_atol)):
+        raise ValueError(
+            "shifted reciprocal integrals are singular at or near a "
+            "Rayleigh/Wood threshold (gamma approximately zero)."
+        )
     scaled = z_arr[:, None] * gamma_arr[None, :]
     if np.any(np.abs(scaled) <= float(singular_atol)):
         raise ValueError(
-            "shifted reciprocal integrals are singular in the same-plane or "
-            "Rayleigh-threshold limit; route those points to the same-plane "
-            "formula or avoid gamma*z_offset == 0."
+            "shifted reciprocal integrals are singular in the same-plane limit; "
+            "use the dedicated same-plane formula."
         )
-    x = -(gamma_arr * gamma_arr) / (4.0 * eta_f * eta_f)
-    if np.any(np.abs(x) <= float(singular_atol)):
-        raise ValueError("shifted reciprocal integrals are singular at gamma=0.")
 
     series_mask = _shifted_delta_series_mask(
         gamma_arr,

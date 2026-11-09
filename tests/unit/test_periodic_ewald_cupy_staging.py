@@ -142,7 +142,7 @@ def test_fixed_cupy_ewald_rejects_shifted_exact_rayleigh_zero() -> None:
         eta=0.002,
     )
 
-    with pytest.raises(ValueError, match="Rayleigh/Wood anomaly"):
+    with pytest.raises(ValueError, match="exact Rayleigh/Wood threshold"):
         ewald_cupy.ewald_structural_sums_2d_fixed_cupy(
             relative_source_minus_destination=np.asarray([[20.0, -15.0, 0.1]]),
             lmax_struct=1,

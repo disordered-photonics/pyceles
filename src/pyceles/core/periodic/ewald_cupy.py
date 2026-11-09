@@ -1228,8 +1228,8 @@ def _shifted_reciprocal_compact_terms_cupy(
     reciprocal_terms = workspace.reciprocal_terms(int(reciprocal_shell_count))
     if reciprocal_terms.has_rayleigh_zero:
         raise ValueError(
-            "shifted reciprocal integrals are singular at a Rayleigh/Wood anomaly; "
-            "move away from the anomaly or use the same-plane formula."
+            "the shifted Ewald recurrence is singular at an exact Rayleigh/Wood "
+            "threshold; choose a non-anomalous period or wavelength."
         )
     total_terms = int(reciprocal_terms.rho.shape[0])
     start = max(0, int(term_start))
@@ -1327,8 +1327,8 @@ def _add_shifted_reciprocal_structural_sums_cupy(
     reciprocal_terms = workspace.reciprocal_terms(int(reciprocal_shell_count))
     if reciprocal_terms.has_rayleigh_zero:
         raise ValueError(
-            "shifted reciprocal integrals are singular at a Rayleigh/Wood anomaly; "
-            "move away from the anomaly or use the same-plane formula."
+            "the shifted Ewald recurrence is singular at an exact Rayleigh/Wood "
+            "threshold; choose a non-anomalous period or wavelength."
         )
     shifted_tables = workspace.shifted_reciprocal_tables(int(reciprocal_shell_count), int(order))
     upper_gamma = workspace.upper_gamma_terms(

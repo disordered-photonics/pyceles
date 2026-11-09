@@ -133,7 +133,7 @@ def _reciprocal_gamma(k: complex, q: Array) -> Array:
     if np.any(gamma == 0.0):
         raise ValueError(
             "The Rayleigh reciprocal basis contains a grazing diffraction order "
-            "(Wood anomaly). Move away from the anomaly or use method='ewald'."
+            "(Wood anomaly), where this reciprocal representation is singular."
         )
     return np.asarray(gamma, dtype=np.complex128)
 
