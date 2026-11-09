@@ -101,6 +101,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and near-field showcase plotting. Particle-centre fields use analytic limits.
 
 ### Fixed
+- The Rayleigh/Wood diagnostic now classifies exact grazing orders as `at`
+  despite the square-root roundoff floor in their computed clearance.
 - CuPy MLFMM leaf translations use normalized angular recurrences with
   coefficients prepared once, avoiding high-degree polynomial cancellation.
 - CuPy MLFMM reports oversized static leaf-aggregation tables before CUDA

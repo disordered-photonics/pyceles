@@ -74,6 +74,15 @@ def test_rayleigh_report_flags_near_and_exact_square_thresholds() -> None:
     assert exact.warning_level == "at"
     assert exact.min_clearance == pytest.approx(0.0, abs=1.0e-10)
 
+    wavelength = 550.0
+    wood_scale = math.sqrt(8.0)
+    exact_wood = rayleigh_report(
+        RectangularLattice2D(wood_scale * wavelength, wood_scale * wavelength),
+        k=2.0 * math.pi / wavelength,
+        k_parallel=np.zeros(2),
+    )
+    assert exact_wood.warning_level == "at"
+
 
 def test_rayleigh_report_uses_host_wavelength_scaling() -> None:
     wavelength_vacuum = 500.0

@@ -18,6 +18,8 @@ import numpy.typing as npt
 
 from pyceles.core.lattice import RectangularLattice2D
 
+_DEFAULT_AT_THRESHOLD = math.sqrt(8.0 * np.finfo(float).eps)
+
 
 @dataclass(frozen=True)
 class PeriodicRayleighOrder:
@@ -114,7 +116,7 @@ def rayleigh_report(
     order_bound: int | None = None,
     include_specular: bool = False,
     near_threshold: float = 0.08,
-    at_threshold: float = 1.0e-8,
+    at_threshold: float = _DEFAULT_AT_THRESHOLD,
     rayleigh_margin: float = 1.0e-12,
     max_nearest_orders: int = 12,
 ) -> PeriodicRayleighReport:
@@ -126,7 +128,8 @@ def rayleigh_report(
     change solver settings, or prevent a calculation. It intentionally does
     not inspect particle material, T-matrices, or the Ewald splitting
     parameter, because those influence response strength but not the singular
-    locations.
+    locations. The default ``at_threshold`` accounts for the square-root
+    roundoff floor in evaluating ``sqrt(k**2 - |q|**2)`` near grazing orders.
     """
 
     if not isinstance(lattice, RectangularLattice2D):
