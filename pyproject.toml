@@ -96,7 +96,7 @@ markers = [
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-extend-exclude = ["notebooks", "outputs"]
+extend-exclude = ["outputs"]
 force-exclude = true
 
 [tool.ruff.lint]
@@ -107,6 +107,7 @@ ignore = ["E501", "E741"]
 "tests/io/test_plotting_helpers.py" = ["E402"]
 
 [tool.mypy]
+files = ["src", "examples", "benchmarks", "tests"]
 python_version = "3.12"
 check_untyped_defs = true
 warn_unused_ignores = true

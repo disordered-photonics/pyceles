@@ -28,9 +28,11 @@ repos:
     rev: v2.3.1
     hooks:
       - id: mypy
-        name: mypy (src+examples+tests)
-        args: [--config-file=pyproject.toml, src, examples, tests]
+        name: mypy
+        args: [--config-file=pyproject.toml]
         pass_filenames: false
+        # Targets live in pyproject.toml; configuration-only commits must check them too.
+        always_run: true
         # Keep these exact pins synchronized with the dev extra in pyproject.toml.
         # Mypy diagnostics depend on the installed scientific packages and stubs,
         # not only on the mypy executable itself.
