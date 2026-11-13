@@ -182,11 +182,12 @@ memory-bound well before the largest MLFMM cases.
 number of correct digits. It sets the size-dependent box-order estimate and
 its empirical small-box minimum, extrapolated as
 `max(3, ceil(5.5 * accuracy_level - 3.9))` from the historical levels one
-through six. `order_additive` independently increases that same estimated
-order, including for small boxes where the minimum dominates. Both controls
-increase work and storage; neither guarantees a particular operator error or
-removes high-order representability and GPU resource limits.
-Check convergence against these controls separately from the iterative solver
+through six. `order_additive` adds a fixed integer offset to that same estimated
+order. The two settings shape one truncation rather than provide independent
+error controls, and different pairs can resolve to the same per-level orders.
+Both affect work and storage; neither guarantees a particular operator error
+or removes high-order representability and GPU resource limits. Check action
+convergence against the resolved orders separately from iterative-solver
 tolerance: a smaller residual cannot remove the sampled operator's error.
 
 `interpolation_half_width` controls the local interpolation between directional

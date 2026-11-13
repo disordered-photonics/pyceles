@@ -60,10 +60,12 @@ class MLFMMOptions:
     """Expert tuning knobs for pyceles MLFMM partition resolution.
 
     Occupancy and depth determine the hierarchy. The leaf-size factor bounds
-    the particle-to-box geometry, while accuracy and additive order control
-    sampled expansion size. Interpolation width independently controls angular
-    resampling between levels. The angular grid factor refines quadrature.
-    Neither control increases the Hankel truncation order.
+    the particle-to-box geometry. ``accuracy_level`` selects the size-dependent
+    box-order estimate and its empirical floor; ``order_additive`` applies a
+    fixed integer offset to that same estimated order. They are not independent
+    error estimates. Interpolation width controls angular resampling between
+    levels, and the angular grid factor refines quadrature; those two settings
+    do not change the modal truncation order.
     Sampled transport includes every far-ownership
     level from 2 through the leaves.
     """
@@ -612,8 +614,9 @@ def estimate_rokhlin_order(ka: float, *, accuracy: int = 3) -> int:
     empirical floor ``max(3, ceil(5.5 * accuracy - 3.9))``. This linear fit
     extrapolates the historical floor values for levels one through six. The
     `accuracy` argument is any positive ordinal quality level, not a guaranteed
-    number of correct decimal digits. Additive box order shifts this estimate
-    independently, including when the floor dominates.
+    number of correct decimal digits. The optional additive offset is applied
+    by :func:`box_order_rokhlin_like` to this same order estimate; it is not a
+    separate error estimate.
     """
 
     acc = int(accuracy)
@@ -638,9 +641,9 @@ def box_order_rokhlin_like(
 ) -> int:
     """Return a grouped box order from the level side length.
 
-    This keeps one shared order per occupied level and starts from the neutral
-    Rokhlin-style estimate used by the NumPy MLFMM path, while never dropping
-    below the particle multipole order already present in that box.
+    The accuracy setting and additive offset jointly determine one scalar
+    sampled order for the level. The result never drops below the particle
+    multipole order already present in that box.
     """
 
     side_length = 2.0 * float(box_half_size)
