@@ -697,6 +697,8 @@ def _mlfmm_adjoint_depth_particles() -> ParticleCollection:
 
 
 def _transition_numpy_mlfmm_coupling(*, max_leaf_particles: int) -> MLFMMCouplingOperator:
+    """Use modest sampled orders for streaming-policy and workspace checks."""
+
     lmax = 1
     wavelength = 550.0
     n_medium = 1.0 + 0j
@@ -709,7 +711,9 @@ def _transition_numpy_mlfmm_coupling(*, max_leaf_particles: int) -> MLFMMCouplin
         radial_lut_dr=0.5,
         cache_translation_blocks=False,
         coupling_backend="mlfmm",
-        mlfmm_options=MLFMMOptions(max_leaf_particles=max_leaf_particles, max_depth=4),
+        mlfmm_options=MLFMMOptions(
+            max_leaf_particles=max_leaf_particles, max_depth=4, accuracy_level=1, order_additive=0
+        ),
         backend="numpy",
     )
     coupling = prepared.coupling
@@ -740,8 +744,7 @@ def _sim_cfg(
         wavelength=wavelength,
         n_medium=n_medium,
         lmax=3,
-        # Backend parity needs representative forward/backward directions,
-        # not production-resolution far-field output.
+        # Sample representative forward/backward directions for backend parity.
         polar_angles=pcl.core.uniform_polar_grid(61),
         azimuthal_angles=pcl.core.uniform_periodic_azimuth_grid(24),
         radial_lut_dr=0.5,
@@ -1264,7 +1267,7 @@ def test_cupy_mlfmm_prepared_operator_matches_numpy_reference(
         particles=particles,
         n_medium=n_medium,
         radial_lut_dr=0.5,
-        cache_translation_blocks=False,
+        cache_translation_blocks=True,
         operator_dtype=np.complex128,
         coupling_backend="mlfmm",
         mlfmm_options=options,
@@ -1353,7 +1356,7 @@ def test_cupy_mlfmm_adjoint_exact_near_uses_device_kernel() -> None:
 
     lmax = 1
     particles = _mlfmm_single_level_particles()
-    prepared_reference = prepare_matvec(
+    prepared = prepare_matvec(
         lmax=lmax,
         k=2.0 * np.pi / 550.0,
         particles=particles,
@@ -1362,11 +1365,10 @@ def test_cupy_mlfmm_adjoint_exact_near_uses_device_kernel() -> None:
         cache_translation_blocks=False,
         coupling_backend="mlfmm",
         mlfmm_options=MLFMMOptions(max_leaf_particles=4, max_depth=4),
-        backend="numpy",
+        backend="cupy",
     )
-    coupling = prepared_reference.coupling
-    assert isinstance(coupling, MLFMMCouplingOperator)
-    runtime = prepare_mlfmm_cupy_coupling(coupling)
+    runtime = prepared.coupling
+    assert isinstance(runtime, CuPyMLFMMCouplingOperator)
     n = len(particles) * n_modes(lmax)
     rng = np.random.default_rng(20260912)
     x = np.asarray(rng.standard_normal(n) + 1j * rng.standard_normal(n), dtype=np.complex128)
@@ -1493,7 +1495,7 @@ def test_cupy_mlfmm_complex64_request_matches_numpy_with_far_complex128() -> Non
         particles=particles,
         n_medium=n_medium,
         radial_lut_dr=0.5,
-        cache_translation_blocks=False,
+        cache_translation_blocks=True,
         operator_dtype=np.complex64,
         coupling_backend="mlfmm",
         mlfmm_options=options,

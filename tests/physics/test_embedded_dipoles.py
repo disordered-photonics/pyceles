@@ -210,7 +210,7 @@ def test_embedded_mlfmm_matches_pairwise_for_coefficients_fields_and_work(host, 
     particles = tuple(Sphere(tuple(p), 40, 1.7) for p in positions)
     pairwise = _simulation(particles, host=host, solver="gmres")
     config = replace(pairwise.config, lmax=2)
-    pairwise = Simulation(config, particles=particles)
+    pairwise = Simulation(replace(config, cache_translation_blocks=True), particles=particles)
     mlfmm = Simulation(
         replace(
             config,

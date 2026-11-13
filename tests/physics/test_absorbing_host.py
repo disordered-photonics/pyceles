@@ -51,7 +51,9 @@ def test_absorbing_mlfmm_public_workflow_matches_pairwise(backend, request):
         azimuthal_angles=np.arange(12) * np.pi / 6,
     )
     source = pcl.PlaneWave(600, medium_n=config.n_medium, polarization=(0.6, 0.8j), polar_angle=0.4)
-    expected = pcl.Simulation(config, particles=particles).run(source)
+    expected = pcl.Simulation(
+        replace(config, cache_translation_blocks=True), particles=particles
+    ).run(source, include_farfield=False)
     simulation = pcl.Simulation(
         replace(
             config,
@@ -63,7 +65,7 @@ def test_absorbing_mlfmm_public_workflow_matches_pairwise(backend, request):
         ),
         particles=particles,
     )
-    actual = simulation.run(source)
+    actual = simulation.run(source, include_farfield=False)
     assert actual.k == expected.k and actual.k.imag > 0
     assert actual.power is None and actual.cross_sections is None
     assert np.linalg.norm(actual.coeffs - expected.coeffs) / np.linalg.norm(expected.coeffs) < 1e-4

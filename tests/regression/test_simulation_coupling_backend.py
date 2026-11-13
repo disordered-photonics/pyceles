@@ -74,7 +74,7 @@ def prepared_multilevel_mlfmm():
         particles=particles,
         n_medium=1.0 + 0j,
         radial_lut_dr=1.0,
-        cache_translation_blocks=False,
+        cache_translation_blocks=True,
         coupling_backend="mlfmm",
         mlfmm_options=MLFMMOptions(
             max_leaf_particles=1,
@@ -86,10 +86,11 @@ def prepared_multilevel_mlfmm():
     )
 
 
-@pytest.mark.slow
 def test_simulation_direct_solve_uses_matvec_fallback_for_true_mlfmm_coupling(
     prepared_multilevel_mlfmm,
 ) -> None:
+    assert isinstance(prepared_multilevel_mlfmm.coupling, MLFMMCouplingOperator)
+    assert prepared_multilevel_mlfmm.coupling.resolved_plan.stage == "multilevel"
     lmax, _, particles = _mlfmm_multilevel_problem()
     cfg = SimulationConfig(
         wavelength=550.0,
@@ -99,17 +100,32 @@ def test_simulation_direct_solve_uses_matvec_fallback_for_true_mlfmm_coupling(
         azimuthal_angles=np.linspace(0.0, 2.0 * np.pi, 8, endpoint=False),
         solver_method="direct",
         coupling_backend="mlfmm",
-        mlfmm_options=MLFMMOptions(max_leaf_particles=1, max_depth=2),
+        mlfmm_options=MLFMMOptions(
+            max_leaf_particles=1, max_depth=3, accuracy_level=1, order_additive=0
+        ),
+        radial_lut_dr=1.0,
+        cache_translation_blocks=True,
         verbose=False,
     )
     sim = Simulation(cfg, particles=particles)
     sim._prepared_operator_cache = prepared_multilevel_mlfmm
     sim._prepared_operator_dtype = np.dtype(np.complex128)
+    sim._prepared_operator_accum_dtype = np.dtype(np.complex128)
 
     out = solve_sources_core(sim, {"source": _plane_wave()})
 
+    assert sim._prepared_operator_cache is prepared_multilevel_mlfmm
     assert out.solver_result.method == "direct"
+    assert out.solver_result.info == 0
     assert out.coeffs["source"].shape == (len(particles), 6)
+    # The direct fallback assembled this MLFMM operator through its matvec;
+    # checking the actual equation catches broken assembly/solve plumbing.
+    solution = out.coeffs["source"].reshape(-1)
+    rhs = out.rhs["source"].reshape(-1)
+    relative_residual = np.linalg.norm(
+        prepared_multilevel_mlfmm.apply_A(solution) - rhs
+    ) / np.linalg.norm(rhs)
+    assert relative_residual < 1e-9
 
 
 def test_prepare_matvec_accepts_numpy_mlfmm_complex64_operator_dtype() -> None:
