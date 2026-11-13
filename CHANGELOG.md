@@ -101,6 +101,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and near-field showcase plotting. Particle-centre fields use analytic limits.
 
 ### Fixed
+- Gaussian source constructors consistently validate wavelength, width, angles,
+  and amplitude. `GaussianBeam` defaults to a finite width of 2000 and rejects
+  infinite widths; plane-wave illumination uses `PlaneWave`.
 - Gaussian and Laguerre-Gaussian TE/TM polarizations follow the incident-plane
   axes continuously as their direction changes. Gaussian projection, spectra
   and incident E/H agree in both propagation senses. Structured-beam mode phases

@@ -20,6 +20,11 @@ than a string-keyed mapping.
 This keeps policy centralized and avoids class-name-specific special cases as
 new source wrappers/classes are added.
 
+Gaussian-beam widths must be finite and positive. `GaussianBeam` defaults to
+`beam_width=2000.0`, in the same length units as `wavelength`. Use `PlaneWave`
+for plane-wave illumination; an infinite Gaussian width is not a sampled
+angular spectrum.
+
 ## Angular-grid policy
 
 pyceles uses a single shared angular grid by default to keep standard workflows

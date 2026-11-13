@@ -417,23 +417,22 @@ def test_finite_beam_power_balance_uses_initial_pwp_for_tilted_sources():
     np.testing.assert_allclose(_required_float(out.reflectance), 0.0, rtol=0.0, atol=0.0)
 
 
-def test_finite_beam_power_balance_rejects_plane_wave_limit_gaussian():
+def test_finite_beam_power_balance_rejects_plane_wave():
     alpha = np.linspace(0.0, 2 * np.pi, 9, endpoint=False)
     beta = np.linspace(0.0, np.pi, 17)
     coeff = np.zeros((alpha.size, beta.size), dtype=np.complex128)
     p = _dummy_spectrum(alpha, beta, coeff)
-    source = GaussianBeam(
+    source = PlaneWave(
         wavelength=550.0,
         medium_n=1.0 + 0j,
         polarization="TE",
         polar_angle=0.0,
         azimuthal_angle=0.0,
-        beam_width=np.inf,
         focal_point=(0.0, 0.0, 0.0),
         amplitude=1.0,
     )
 
-    with pytest.raises(ValueError, match="plane-wave limit"):
+    with pytest.raises(ValueError, match="PlaneWave"):
         finite_beam_power_balance(
             source,
             p,

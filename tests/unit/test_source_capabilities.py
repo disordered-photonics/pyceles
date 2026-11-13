@@ -97,24 +97,10 @@ def _finite_gaussian() -> GaussianBeam:
     )
 
 
-def _infinite_gaussian() -> GaussianBeam:
-    return GaussianBeam(
-        wavelength=550.0,
-        medium_n=1.0 + 0j,
-        polarization="TE",
-        polar_angle=0.2,
-        azimuthal_angle=0.4,
-        beam_width=np.inf,
-        focal_point=(0.0, 0.0, 0.0),
-        amplitude=1.0,
-    )
-
-
 @pytest.mark.parametrize(
     ("factory", "expect_angular_spectrum", "expect_finite_power", "expect_jones"),
     [
         (_finite_gaussian, True, True, True),
-        (_infinite_gaussian, True, False, True),
         (
             lambda: SLMSource(base_source=_finite_gaussian(), modulation=1.0 + 0.0j),
             True,
@@ -122,7 +108,7 @@ def _infinite_gaussian() -> GaussianBeam:
             True,
         ),
         (
-            lambda: SLMSource(base_source=_infinite_gaussian(), modulation=1.0 + 0.0j),
+            lambda: SLMSource(base_source=BesselBeam(wavelength=550.0), modulation=1.0 + 0.0j),
             True,
             False,
             True,
