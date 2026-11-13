@@ -32,6 +32,23 @@ The complete suite is the strongest check before a release:
 python -m pytest -q
 ```
 
+GPU tests reuse compiled kernels across runs in pytest's cache directory
+(`.pytest_cache` by default). CuPy keys these artifacts by the generated CUDA
+source, compiler options, GPU architecture, and compiler/build version
+information. Changed kernel sources automatically receive new cache entries;
+unchanged specializations can be reused. Numerical inputs and assertions are
+evaluated on every run.
+
+To run with an empty pytest cache, including the tests' CUDA compilation
+artifacts:
+
+```bash
+python -m pytest -q --cache-clear
+```
+
+The first GPU calls then include compilation time, so distinguish cold-cache
+and warm-cache runs when comparing test durations.
+
 ## Covered numerical contracts
 
 The test suite covers, among other areas:

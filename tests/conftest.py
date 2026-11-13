@@ -65,14 +65,19 @@ def _gpu_compilation_cache_env(
         yield
         return
 
-    # Keep compilation artifacts inside one pytest-owned session root. CuPy
-    # and CUDA caches must be shared across real-device tests; assigning fresh
-    # cache directories per test forces repeated JIT work.
-    root = tmp_path_factory.mktemp("cupy-compilation-cache")
+    # CuPy keys compiled artifacts by source, compiler options and CUDA version.
+    # Reuse them across runs; pytest --cache-clear exercises cold compilation.
+    # -p no:cacheprovider leaves Config without a cache attribute.
+    cache = getattr(request.config, "cache", None)
+    root = (
+        cache.mkdir("cupy-compilation")
+        if cache is not None
+        else tmp_path_factory.mktemp("cupy-compilation-cache")
+    )
     cupy_cache_dir = root / "cupy-cache"
     cuda_cache_dir = root / "cuda-cache"
-    cupy_cache_dir.mkdir()
-    cuda_cache_dir.mkdir()
+    cupy_cache_dir.mkdir(exist_ok=True)
+    cuda_cache_dir.mkdir(exist_ok=True)
 
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setenv("CUPY_CACHE_DIR", str(cupy_cache_dir))
@@ -92,8 +97,8 @@ def _require_gpu_runtime_for_marked_tests(
     if "gpu" not in request.node.keywords:
         return
 
-    # Scratch state remains isolated per test even though compiled kernels are
-    # cached for the whole session.
+    # Scratch state remains isolated per test; compiled kernels can be reused
+    # across sessions.
     root = tmp_path_factory.mktemp("cupy-runtime")
     tmp_dir = root / "tmp"
     tmp_dir.mkdir()

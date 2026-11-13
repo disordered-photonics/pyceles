@@ -109,5 +109,8 @@ GPU-specific tests require a working CUDA/CuPy installation:
 python -m pytest -q -m gpu
 ```
 
+See [Validation and reproducibility](validation.md#automated-tests) for test
+markers and GPU compilation-cache controls.
+
 Documentation is maintained as Markdown under `docs/` and does not require an
 additional documentation tool.
