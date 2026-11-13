@@ -13,18 +13,22 @@ pytestmark = pytest.mark.reference
 
 
 def test_laguerre_gaussian_projection_snapshot():
+    # Fixed reference illumination in incident-plane Jones/mode-phase coordinates.
     source = LaguerreGaussianBeam(
         wavelength=550.0,
         medium_n=1.0 + 0j,
         radial_order_p=1,
         azimuthal_order_l=2,
-        polarization=(1.0 + 0.0j, -0.3 + 0.4j),
+        polarization=(
+            -0.3139407618753801 + 0.39996096570531586j,
+            -0.9957114029843714 - 0.005588015038557281j,
+        ),
         polar_angle=0.25,
         azimuthal_angle=0.55,
         beam_width=1700.0,
         focal_point=(10.0, -5.0, 2.0),
         amplitude=1.1,
-        azimuthal_phase=0.15,
+        azimuthal_phase=-1.919533637668998,
     )
     coeffs = project_source_to_svwf(
         np.array([[0.0, 0.0, 0.0], [80.0, -20.0, 30.0]], dtype=float),

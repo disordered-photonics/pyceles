@@ -683,15 +683,16 @@ def test_cartesian_focused_laguerre_polarization_vector_is_directional_not_ampli
     )
 
 
-def test_laguerre_gaussian_l0_p0_matches_gaussian_angular_spectrum():
+@pytest.mark.parametrize("polar_angle,azimuthal_angle", [(0, 0.4), (0.3, 0.7), (np.pi, 0.4)])
+def test_laguerre_gaussian_l0_p0_matches_gaussian_angular_spectrum(polar_angle, azimuthal_angle):
     lg = LaguerreGaussianBeam(
         wavelength=550.0,
         medium_n=1.0 + 0j,
         radial_order_p=0,
         azimuthal_order_l=0,
         polarization=(1.0 + 0.0j, -0.4j),
-        polar_angle=0.3,
-        azimuthal_angle=0.7,
+        polar_angle=polar_angle,
+        azimuthal_angle=azimuthal_angle,
         beam_width=1800.0,
         focal_point=(4.0, -3.0, 2.0),
         amplitude=1.2,

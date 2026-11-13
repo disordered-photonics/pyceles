@@ -21,6 +21,12 @@ class BesselBeam:
     Real cone and axis angles specify parallel phase/attenuation directions
     in a passive host. ``amplitude`` sets the ring's spectral weight at center;
     the ideal beam has no finite incident power.
+
+    TE/TM are azimuthal/meridional polarizations around the beam axis on each
+    cone ray. Mode azimuth is measured from the axis-frame e_theta towards
+    e_phi; ``azimuthal_phase`` adds a common complex phase.
+    ``forward_only`` selects the cone pointing along the beam axis, which
+    may itself point towards negative laboratory z.
     """
 
     wavelength: float
@@ -59,7 +65,7 @@ class BesselBeam:
             raise ValueError(f"`cone_angle` must lie in (0, pi). Got {self.cone_angle!r}.")
         if bool(self.forward_only) and cone >= (0.5 * np.pi):
             raise ValueError(
-                "`forward_only=True` requires `cone_angle < pi/2` (positive kz cone). "
+                "`forward_only=True` requires `cone_angle < pi/2` (forward along the beam axis). "
                 f"Got cone_angle={self.cone_angle!r}."
             )
 
@@ -117,6 +123,7 @@ class CartesianPolarizedBesselBeam:
     """Finite-centre ideal Bessel ring with Cartesian polarization transport.
 
     The global vector is projected transverse to each real cone direction.
+    The mode phase uses the same incident-plane reference as BesselBeam.
     ``amplitude`` sets spectral weight at center, including in a passive
     complex host; the ideal beam has no finite incident power.
     """
@@ -160,7 +167,7 @@ class CartesianPolarizedBesselBeam:
             raise ValueError(f"`cone_angle` must lie in (0, pi). Got {self.cone_angle!r}.")
         if bool(self.forward_only) and cone >= (0.5 * np.pi):
             raise ValueError(
-                "`forward_only=True` requires `cone_angle < pi/2` (positive kz cone). "
+                "`forward_only=True` requires `cone_angle < pi/2` (forward along the beam axis). "
                 f"Got cone_angle={self.cone_angle!r}."
             )
 

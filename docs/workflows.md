@@ -65,10 +65,22 @@ Relation to CELES and SMUTHI:
 
 ## Polarization API
 
-All propagating sources support:
+Sources with a TE/TM polarization basis accept:
 
 - `polarization="TE"` or `"TM"`,
 - `polarization=(a_te, a_tm)` with complex Jones-like amplitudes.
+
+`PlaneWave`, `GaussianBeam`, and the Laguerre-Gaussian families use the
+incident-plane axes: TE is along e_phi and TM along e_theta at the central
+propagation direction. The specified azimuth fixes these directions even at
+normal and backward incidence. A beam's local frame is Rz(azimuth) Ry(polar),
+also used by `FinitePlaneSource`. Vortex azimuths are measured from its local
+x=e_theta towards y=e_phi; `azimuthal_phase` adds to the mode phase.
+
+`BesselBeam` TE/TM instead specify cylindrical azimuthal/meridional
+polarizations on each cone ray. Its mode phase uses the same local frame.
+The Cartesian-polarized beam classes prescribe a laboratory vector projected
+transverse to each ray, independently of this spatial phase reference.
 
 An SLM-style modulation wrapper is available for angular-spectrum sources:
 

@@ -11,7 +11,7 @@ one or more pyceles operator backends for the same configuration and produces:
 Conventions used here:
 - the incident Cartesian polarizations are e_phi (TE/perp) and e_theta (TM/par),
   with the specified azimuth retained at normal incidence,
-- GaussianBeam Jones weights express these directions in its transverse frame;
+- Gaussian and plane-wave sources share this incident polarization convention;
   no fitted field phases or angle-dependent MSTM channel swaps are applied,
 - fixed far-field scales (no fitting):
   scattering_map_model=1 uses 100*pi^2, scattering_map_model=0 uses 100*pi^3.
@@ -35,8 +35,6 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 import pyceles as pcl
-from pyceles.core.angular import beam_axis_and_frame
-from pyceles.core.sources.base import is_normal_incidence
 from pyceles.io import (
     far_field_intensity,
     plot_farfield_hemispheres,
@@ -552,34 +550,6 @@ def _mstm_dimless_to_physical(points_dimless: np.ndarray, wavelength: float) -> 
     return np.asarray(points_dimless, dtype=float) / float(k0)
 
 
-def _mstm_polarized_sources(cfg: BenchmarkConfig) -> dict[str, pcl.GaussianBeam]:
-    """Match MSTM's Cartesian incident basis before solving either channel."""
-    beta, alpha = float(cfg.polar_angle), float(cfg.azimuthal_angle)
-    source = pcl.GaussianBeam(
-        wavelength=float(cfg.wavelength),
-        medium_n=1.0 + 0j,
-        polar_angle=beta,
-        azimuthal_angle=alpha,
-        beam_width=float(cfg.beam_width),
-    )
-    # GaussianBeam's axial projection uses signed lab x/y axes; tilted projections
-    # use beam_axis_and_frame. Follow that source contract, not an MSTM cutoff.
-    if is_normal_incidence(beta):
-        u, v = np.sign(np.cos(beta)) * np.eye(3)[:2]
-    else:
-        _, u, v = beam_axis_and_frame(beta, alpha)
-    sa, ca = np.sin(alpha), np.cos(alpha)
-    native_basis = np.column_stack((-sa * u + ca * v, ca * u + sa * v))
-    directions = {
-        "te": np.array([-sa, ca, 0.0]),
-        "tm": np.array([np.cos(beta) * ca, np.cos(beta) * sa, -np.sin(beta)]),
-    }
-    return {
-        name: source.with_polarization(native_basis.T @ direction)
-        for name, direction in directions.items()
-    }
-
-
 def _pyceles_run(
     cfg: BenchmarkConfig,
     sphere_data: np.ndarray,
@@ -591,7 +561,14 @@ def _pyceles_run(
     radii = np.asarray(sphere_data[:, 0], dtype=float)
     n_particle = np.asarray(sphere_data[:, 4] + 1j * sphere_data[:, 5], dtype=np.complex128)
 
-    sources = _mstm_polarized_sources(cfg)
+    source = pcl.GaussianBeam(
+        wavelength=float(cfg.wavelength),
+        medium_n=1.0 + 0j,
+        polar_angle=float(cfg.polar_angle),
+        azimuthal_angle=float(cfg.azimuthal_angle),
+        beam_width=float(cfg.beam_width),
+    )
+    sources = {"te": source.with_polarization("TE"), "tm": source.with_polarization("TM")}
 
     sim_cfg = pcl.SimulationConfig(
         wavelength=float(cfg.wavelength),
@@ -1767,8 +1744,7 @@ def main() -> None:
                 "name": "te->perp,tm->par",
                 "mapping": chosen_mapping,
                 "note": (
-                    "Incident Jones weights align pyceles sources with MSTM's "
-                    "e_phi/e_theta polarizations, retaining the incident azimuth "
+                    "Both incident bases use e_phi/e_theta polarizations, retaining the incident azimuth "
                     "at normal incidence. No field phase fitting is applied."
                 ),
             },

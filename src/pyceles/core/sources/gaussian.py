@@ -26,7 +26,11 @@ from .common import _float_triplet_tuple, _real_beam_wavenumber, _validated_int
 
 @dataclass(frozen=True)
 class GaussianBeam:
-    """Gaussian wavebundle source in a homogeneous medium."""
+    """Gaussian wavebundle with incident-plane TE/TM Jones polarization.
+
+    The axis-frame x/y directions are e_theta/e_phi, as for PlaneWave;
+    azimuth fixes these axes even at normal or backward incidence.
+    """
 
     wavelength: float
     medium_n: complex = 1.0 + 0j
@@ -108,7 +112,11 @@ class GaussianBeam:
 
 @dataclass(frozen=True)
 class LaguerreGaussianBeam:
-    """Collimated Maxwell-consistent Laguerre-Gaussian beam via angular spectrum."""
+    """Collimated Maxwell-consistent LG beam in the incident-plane frame.
+
+    TE/TM polarization follows GaussianBeam. The vortex azimuth is measured
+    from e_theta towards e_phi, with additive phase ``azimuthal_phase``.
+    """
 
     wavelength: float
     medium_n: complex = 1.0 + 0j
@@ -198,7 +206,10 @@ class LaguerreGaussianBeam:
 
 @dataclass(frozen=True)
 class FocusedLaguerreGaussianBeam:
-    """Debye/aplanatic focused Laguerre-Gaussian beam via angular spectrum."""
+    """Debye/aplanatic focused LG beam in the incident-plane frame.
+
+    Polarization axes and the vortex phase reference follow LaguerreGaussianBeam.
+    """
 
     wavelength: float
     medium_n: complex = 1.0 + 0j
@@ -304,7 +315,10 @@ class FocusedLaguerreGaussianBeam:
 
 @dataclass(frozen=True)
 class CartesianPolarizedFocusedLaguerreGaussianBeam:
-    """Debye/aplanatic focused LG beam with one lab-frame polarization state."""
+    """Focused LG beam with lab-frame polarization projected per ray.
+
+    The vortex phase reference follows LaguerreGaussianBeam's incident-plane frame.
+    """
 
     wavelength: float
     medium_n: complex = 1.0 + 0j

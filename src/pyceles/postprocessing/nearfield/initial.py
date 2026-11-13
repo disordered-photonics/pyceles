@@ -90,7 +90,7 @@ def _compute_initial_field_gaussian_normal_incidence_analytic(
     e0 = float(amplitude)
     w = float(beam_width)
     pref = e0 * (k**2) * (w**2) / (4.0 * np.pi)
-    envelope: real_array = pref * cb * np.exp(-(w**2) / 4.0 * (k**2) * (sb**2))
+    envelope: real_array = pref * np.abs(cb) * np.exp(-(w**2) / 4.0 * (k**2) * (sb**2))
     envelope *= np.sign(cb) == np.sign(float(propagation_sign))
     beta_weighted: real_array = envelope * sb * beta_w
 
@@ -139,12 +139,16 @@ def _compute_initial_field_gaussian_normal_incidence_analytic(
 
     pol = "te" if a_te != 0.0 else "tm"
     jones_weight = a_te if pol == "te" else a_tm
-    alpha_g = float(azimuthal_angle) if pol == "te" else float(azimuthal_angle) - np.pi / 2.0
-    c = float(np.cos(alpha_g))
-    s = float(np.sin(alpha_g))
     propagation = float(np.sign(propagation_sign))
     if propagation == 0.0:
         propagation = 1.0
+    alpha_g = (
+        float(azimuthal_angle)
+        if pol == "te"
+        else float(azimuthal_angle) - propagation * np.pi / 2.0
+    )
+    c = float(np.cos(alpha_g))
+    s = float(np.sin(alpha_g))
 
     e = np.zeros((pts.shape[0], 3), dtype=accum_dtype)
     h = np.zeros_like(e)
@@ -334,12 +338,14 @@ def _compute_initial_field_gaussian_rotated_fast(
         local = rel
         rot_back = np.eye(3, dtype=float)
         prop_sign = float(np.sign(np.cos(float(beam.polar_angle))))
+        polarization_azimuth = float(beam.azimuthal_angle)
     else:
         n0, u, v = beam_axis_and_frame(float(beam.polar_angle), float(beam.azimuthal_angle))
         q = np.stack([u, v, n0], axis=0)
         local = rel @ q.T
         rot_back = q
         prop_sign = 1.0
+        polarization_azimuth = 0.0
 
     out_local = _compute_initial_field_gaussian_normal_incidence_analytic(
         local,
@@ -348,7 +354,7 @@ def _compute_initial_field_gaussian_rotated_fast(
         beam_width=float(beam.beam_width),
         amplitude=float(beam.amplitude),
         polarization=beam.polarization,
-        azimuthal_angle=float(beam.azimuthal_angle),
+        azimuthal_angle=polarization_azimuth,
         propagation_sign=prop_sign,
         polar_angles=np.asarray(polar_angles, dtype=float),
         azimuthal_angles=np.asarray(azimuthal_angles, dtype=float),

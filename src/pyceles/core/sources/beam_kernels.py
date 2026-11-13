@@ -89,16 +89,15 @@ def _gaussian_angular_spectrum_coeffs(
     e0 = float(getattr(beam, "amplitude", 1.0))
     w = float(getattr(beam, "beam_width", np.inf))
     pol = str(polarization_override or getattr(beam, "polarization", "TE")).lower()
-    alpha_pol = float(getattr(beam, "azimuthal_angle", 0.0))
-    if pol != "te":
-        alpha_pol -= np.pi / 2.0
     phase = np.exp(-1j * (kx * rg[0] + ky * rg[1] + kz * rg[2]))
     pref = e0 * (k**2) * (w**2) / (4.0 * np.pi)
     if is_normal_incidence(float(beam.polar_angle)):
-        # Match the lab-frame basis and signed cos(beta) used by the axial
-        # projection and initial-field evaluator, including -z propagation.
+        # Express the axis-frame TE/TM polarizations in the lab ray basis.
         direction = np.sign(np.cos(float(beam.polar_angle)))
-        envelope = pref * cb * np.exp(-(w**2) / 4.0 * (k**2) * sb**2)
+        alpha_pol = float(beam.azimuthal_angle)
+        if pol != "te":
+            alpha_pol -= direction * np.pi / 2.0
+        envelope = pref * np.abs(cb) * np.exp(-(w**2) / 4.0 * (k**2) * sb**2)
         envelope *= np.sign(cb) == direction
         common = jones_weight * envelope * phase
         return PlaneWaveSpectrum(
@@ -122,6 +121,7 @@ def _gaussian_angular_spectrum_coeffs(
     cos_beta_l = sz_l
     envelope = pref * cos_beta_l * np.exp(-(w**2) / 4.0 * (k**2) * rho2_l)
     envelope = envelope * (cos_beta_l > 0.0)
+    alpha_pol = 0.0 if pol == "te" else -np.pi / 2.0
     g_te_l = np.cos(alpha_l - alpha_pol) * envelope
     g_tm_l = np.sin(alpha_l - alpha_pol) * envelope
     ephi_g = np.stack([-sa, ca, np.zeros_like(agrid)], axis=2)
@@ -224,9 +224,7 @@ def _laguerre_gaussian_angular_spectrum_coeffs(
     envelope = envelope * (cos_beta_l > 0.0)
     envelope = envelope * np.exp(1j * (l * alpha_l + az_phase))
     pol = str(polarization_override or getattr(beam, "polarization", "TE")).lower()
-    alpha_pol = float(getattr(beam, "azimuthal_angle", 0.0))
-    if pol != "te":
-        alpha_pol -= np.pi / 2.0
+    alpha_pol = 0.0 if pol == "te" else -np.pi / 2.0
     g_te_l = np.cos(alpha_l - alpha_pol) * envelope
     g_tm_l = np.sin(alpha_l - alpha_pol) * envelope
     phase = np.exp(-1j * (kx * rg[0] + ky * rg[1] + kz * rg[2]))
@@ -388,9 +386,7 @@ def _focused_laguerre_gaussian_angular_spectrum_coeffs(
     envelope = np.asarray(geom["envelope"], dtype=np.complex128)
     phase = np.asarray(geom["phase"], dtype=np.complex128)
     pol = str(polarization_override or getattr(beam, "polarization", "TE")).lower()
-    alpha_pol = float(getattr(beam, "azimuthal_angle", 0.0))
-    if pol != "te":
-        alpha_pol -= np.pi / 2.0
+    alpha_pol = 0.0 if pol == "te" else -np.pi / 2.0
     g_te_l = np.cos(alpha_l - alpha_pol) * envelope
     g_tm_l = np.sin(alpha_l - alpha_pol) * envelope
     sin_alpha_l = np.sin(alpha_l)
@@ -605,11 +601,12 @@ def _bessel_ring_geometry(
     cos_beta_l = np.clip(sz_l, -1.0, 1.0)
     sin_beta_l = np.sqrt(np.maximum(0.0, 1.0 - cos_beta_l**2))
     if is_normal_incidence(float(beam.polar_angle)):
-        ring_1d = _bessel_ring_beta_kernel(beta, float(beam.cone_angle))
+        cone = float(beam.cone_angle)
+        if np.cos(float(beam.polar_angle)) < 0.0:
+            cone = np.pi - cone
+        ring_1d = _bessel_ring_beta_kernel(beta, cone)
         if not bool(beam.forward_only):
-            ring_1d = ring_1d + _bessel_ring_beta_kernel(
-                beta, float(np.pi - float(beam.cone_angle))
-            )
+            ring_1d = ring_1d + _bessel_ring_beta_kernel(beta, np.pi - cone)
         ring = np.broadcast_to(ring_1d[None, :], (alpha.size, beta.size))
     else:
         ring = _bessel_tilted_ring_kernel(

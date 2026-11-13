@@ -9,6 +9,7 @@ import numpy.typing as npt
 
 from pyceles._arrays import owned_read_only_view
 
+from ..angular import beam_axis_and_frame
 from ..conversions import fourier_plane_to_svwf_regular
 from ..fourier_plane import FourierPlaneSpectrum
 from .common import _float_triplet_tuple
@@ -89,9 +90,8 @@ class FinitePlaneSource:
 
     def plane_frame(self) -> np.ndarray:
         """Return the plane-to-lab Cartesian rotation."""
-        ca, sa = np.cos(self.azimuthal_angle), np.sin(self.azimuthal_angle)
-        cb, sb = np.cos(self.polar_angle), np.sin(self.polar_angle)
-        return np.array([[ca * cb, -sa, ca * sb], [sa * cb, ca, sa * sb], [-sb, 0, cb]])
+        axis, u, v = beam_axis_and_frame(self.polar_angle, self.azimuthal_angle)
+        return np.column_stack((u, v, axis))
 
     def incident_coeffs(
         self,

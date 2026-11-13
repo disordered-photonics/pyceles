@@ -2,6 +2,7 @@
 
 import numpy as np
 import pytest
+from scipy.spatial.transform import Rotation
 from scipy.special import jv
 
 from pyceles.core.sources import BesselBeam
@@ -10,7 +11,8 @@ from pyceles.postprocessing.nearfield import compute_initial_field
 
 @pytest.mark.parametrize("host", [1.33, 1.33 + 0.01j, 1.33 + 0.5j])
 @pytest.mark.parametrize("polarization", ["TE", "TM"])
-def test_finite_center_bessel_fields_match_cylindrical_integral(host, polarization):
+@pytest.mark.parametrize("theta,phi", [(0, 0), (np.pi, 0.37)])
+def test_finite_center_bessel_fields_match_cylindrical_integral(host, polarization, theta, phi):
     beam = BesselBeam(
         600,
         medium_n=host,
@@ -18,15 +20,18 @@ def test_finite_center_bessel_fields_match_cylindrical_integral(host, polarizati
         polarization=polarization,
         center=(10, -20, 30),
         amplitude=0.7 - 0.2j,
+        polar_angle=theta,
+        azimuthal_angle=phi,
     )
+    rotation = (Rotation.from_rotvec([0, 0, phi]) * Rotation.from_rotvec([0, theta, 0])).as_matrix()
     relative = np.array([[20, 10, 30], [-15, 25, 50]], dtype=float)
     k = 2 * np.pi / 600 * host
     actual = compute_initial_field(
-        relative + beam.center,
+        relative @ rotation.T + beam.center,
         k=k,
         n_medium=host,
         beam=beam,
-        polar_angles=np.array([0, 0.4, np.pi / 2, np.pi]),
+        polar_angles=np.array([0, 0.4, np.pi / 2, np.pi - 0.4, np.pi]),
         azimuthal_angles=np.arange(32) * np.pi / 16,
         show_progress=False,
     )
@@ -42,4 +47,6 @@ def test_finite_center_bessel_fields_match_cylindrical_integral(host, polarizati
         (azimuthal, -host * meridional) if polarization == "TE" else (meridional, host * azimuthal)
     )
     for field, expected in zip(actual, (expected_e, expected_h), strict=True):
-        np.testing.assert_allclose(field, phase[:, None] * expected, rtol=2e-13, atol=2e-13)
+        np.testing.assert_allclose(
+            field, (phase[:, None] * expected) @ rotation.T, rtol=2e-13, atol=2e-13
+        )

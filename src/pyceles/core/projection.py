@@ -223,13 +223,13 @@ def incident_coeffs_wavebundle_normal_incidence(
 
     prefac = E0 * (k**2) * (w**2) / np.pi
 
+    direction = np.sign(np.cos(float(beam.polar_angle)))
     if str(polarization_override).upper() == "TE":
         alphaG = float(beam.azimuthal_angle)
     else:
-        alphaG = float(beam.azimuthal_angle) - np.pi / 2
+        alphaG = float(beam.azimuthal_angle) - direction * np.pi / 2
 
     full_beta = np.asarray(polar_angles_array, dtype=float).reshape(-1)
-    direction = np.sign(np.cos(float(beam.polar_angle)))
     mask = np.sign(np.cos(full_beta)) == direction
     beta = full_beta[mask]
     d_beta = float(np.mean(np.diff(beta)))
@@ -237,7 +237,7 @@ def incident_coeffs_wavebundle_normal_incidence(
     sb = np.sin(beta)
 
     gaussfac = np.exp(-(w**2) / 4 * (k**2) * (sb**2))
-    gaussfac_sincos = gaussfac * cb * sb
+    gaussfac_sincos = gaussfac * np.abs(cb) * sb
 
     pilm, taulm = spherical_functions_trigon(cb, sb, lmax, xp=np)
 

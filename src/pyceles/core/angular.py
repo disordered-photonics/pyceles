@@ -70,19 +70,18 @@ def periodic_azimuthal_weights(alpha: np.ndarray) -> np.ndarray:
 def beam_axis_and_frame(
     polar_angle: float, azimuthal_angle: float
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return beam axis n0 and transverse orthonormal vectors (u, v)."""
-    st = float(np.sin(polar_angle))
-    ct = float(np.cos(polar_angle))
+    """Return the axis and transverse (e_theta, e_phi) frame Rz(phi) Ry(theta).
+
+    The supplied azimuth fixes the transverse axes even at either pole.
+    Structured-beam azimuths and mode phases are measured from e_theta.
+    """
+    axial = polar_angle in (0.0, np.pi)
+    st = 0.0 if axial else float(np.sin(polar_angle))
+    ct = (1.0 if polar_angle == 0.0 else -1.0) if axial else float(np.cos(polar_angle))
     ca = float(np.cos(azimuthal_angle))
     sa = float(np.sin(azimuthal_angle))
     n0 = np.array([st * ca, st * sa, ct], dtype=float)
 
-    # Choose the Cartesian axis most orthogonal to n0 to avoid near-collinearity
-    # without introducing arbitrary angular thresholds.
-    basis = np.eye(3, dtype=float)
-    ref = basis[int(np.argmin(np.abs(basis @ n0)))]
-    u = ref - float(np.dot(ref, n0)) * n0
-    nu = float(np.linalg.norm(u))
-    u = np.array([0.0, 1.0, 0.0], dtype=float) if nu == 0.0 else u / nu
-    v = np.cross(n0, u)
+    u = np.array([ct * ca, ct * sa, -st], dtype=float)
+    v = np.array([-sa, ca, 0.0], dtype=float)
     return n0, u, v
