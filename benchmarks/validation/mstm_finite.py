@@ -9,8 +9,10 @@ one or more pyceles operator backends for the same configuration and produces:
 - RMSE/rel-RMSE statistics for pyceles-vs-MSTM and NumPy-vs-CuPy.
 
 Conventions used here:
-- fixed channel mapping: pyceles te -> MSTM par, pyceles tm -> MSTM perp,
-- fixed near-field phase/sign convention: MSTM par channel multiplied by -1,
+- the incident Cartesian polarizations are e_phi (TE/perp) and e_theta (TM/par),
+  with the specified azimuth retained at normal incidence,
+- GaussianBeam Jones weights express these directions in its transverse frame;
+  no fitted field phases or angle-dependent MSTM channel swaps are applied,
 - fixed far-field scales (no fitting):
   scattering_map_model=1 uses 100*pi^2, scattering_map_model=0 uses 100*pi^3.
 """
@@ -25,11 +27,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
 
+import matplotlib
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.spatial import cKDTree
 
 import pyceles as pcl
+from pyceles.core.angular import beam_axis_and_frame
+from pyceles.core.sources.base import is_normal_incidence
 from pyceles.io import (
     far_field_intensity,
     plot_farfield_hemispheres,
@@ -41,8 +48,7 @@ SolverMethod = Literal["gmres", "bicgstab", "lgmres", "gcrotmk", "direct"]
 ComplexDType = Literal["complex64", "complex128"]
 OperatorBackend = Literal["numpy", "cupy"]
 # Fixed channel mapping used throughout benchmark diagnostics.
-MSTM_POLARIZATION_MAPPING: dict[str, str] = {"te": "par", "tm": "perp"}
-MSTM_NEARFIELD_PHASE_CORRECTION: dict[str, complex] = {"par": (-1.0 + 0.0j), "perp": (1.0 + 0.0j)}
+MSTM_POLARIZATION_MAPPING: dict[str, str] = {"te": "perp", "tm": "par"}
 S11_SCALE_MODEL1 = float(100.0 * np.pi * np.pi)
 S11_SCALE_MODEL0 = float(100.0 * np.pi * np.pi * np.pi)
 
@@ -546,6 +552,34 @@ def _mstm_dimless_to_physical(points_dimless: np.ndarray, wavelength: float) -> 
     return np.asarray(points_dimless, dtype=float) / float(k0)
 
 
+def _mstm_polarized_sources(cfg: BenchmarkConfig) -> dict[str, pcl.GaussianBeam]:
+    """Match MSTM's Cartesian incident basis before solving either channel."""
+    beta, alpha = float(cfg.polar_angle), float(cfg.azimuthal_angle)
+    source = pcl.GaussianBeam(
+        wavelength=float(cfg.wavelength),
+        medium_n=1.0 + 0j,
+        polar_angle=beta,
+        azimuthal_angle=alpha,
+        beam_width=float(cfg.beam_width),
+    )
+    # GaussianBeam's axial projection uses signed lab x/y axes; tilted projections
+    # use beam_axis_and_frame. Follow that source contract, not an MSTM cutoff.
+    if is_normal_incidence(beta):
+        u, v = np.sign(np.cos(beta)) * np.eye(3)[:2]
+    else:
+        _, u, v = beam_axis_and_frame(beta, alpha)
+    sa, ca = np.sin(alpha), np.cos(alpha)
+    native_basis = np.column_stack((-sa * u + ca * v, ca * u + sa * v))
+    directions = {
+        "te": np.array([-sa, ca, 0.0]),
+        "tm": np.array([np.cos(beta) * ca, np.cos(beta) * sa, -np.sin(beta)]),
+    }
+    return {
+        name: source.with_polarization(native_basis.T @ direction)
+        for name, direction in directions.items()
+    }
+
+
 def _pyceles_run(
     cfg: BenchmarkConfig,
     sphere_data: np.ndarray,
@@ -557,16 +591,7 @@ def _pyceles_run(
     radii = np.asarray(sphere_data[:, 0], dtype=float)
     n_particle = np.asarray(sphere_data[:, 4] + 1j * sphere_data[:, 5], dtype=np.complex128)
 
-    source = pcl.GaussianBeam(
-        wavelength=float(cfg.wavelength),
-        medium_n=1.0 + 0j,
-        polarization="TE",
-        polar_angle=float(cfg.polar_angle),
-        azimuthal_angle=float(cfg.azimuthal_angle),
-        amplitude=1.0,
-        beam_width=float(cfg.beam_width),
-        focal_point=(0.0, 0.0, 0.0),
-    )
+    sources = _mstm_polarized_sources(cfg)
 
     sim_cfg = pcl.SimulationConfig(
         wavelength=float(cfg.wavelength),
@@ -590,12 +615,7 @@ def _pyceles_run(
         refractive_indices=n_particle,
     )
     sim = pcl.Simulation(sim_cfg, particles=particles)
-    solved = sim.solve_sources(
-        {
-            "te": source.with_polarization("TE"),
-            "tm": source.with_polarization("TM"),
-        }
-    )
+    solved = sim.solve_sources(sources)
     multi = sim.postprocess_sources(solved)
     run_basis = {"te": multi["te"], "tm": multi["tm"]}
 
@@ -672,6 +692,10 @@ def _pyceles_run(
 
     return {
         "operator_backend": operator_backend,
+        "source_jones_basis": {
+            name: [float(weight.real) for weight in source.jones_coefficients()]
+            for name, source in sources.items()
+        },
         "solver": {
             "method": str(multi.solver_result.method),
             "iterations": iterations_out,
@@ -779,19 +803,13 @@ def _compare_nearfield(
     outside_mask: np.ndarray,
 ) -> dict[str, Any]:
     mstm_by_pol = {
-        # Fixed TE convention alignment:
-        # MSTM "par" channel is multiplied by -1 globally.
         "par": {
-            "E": MSTM_NEARFIELD_PHASE_CORRECTION["par"]
-            * np.asarray(mstm_nf["E_par"], dtype=np.complex128),
-            "H": MSTM_NEARFIELD_PHASE_CORRECTION["par"]
-            * np.asarray(mstm_nf["H_par"], dtype=np.complex128),
+            "E": np.asarray(mstm_nf["E_par"], dtype=np.complex128),
+            "H": np.asarray(mstm_nf["H_par"], dtype=np.complex128),
         },
         "perp": {
-            "E": MSTM_NEARFIELD_PHASE_CORRECTION["perp"]
-            * np.asarray(mstm_nf["E_perp"], dtype=np.complex128),
-            "H": MSTM_NEARFIELD_PHASE_CORRECTION["perp"]
-            * np.asarray(mstm_nf["H_perp"], dtype=np.complex128),
+            "E": np.asarray(mstm_nf["E_perp"], dtype=np.complex128),
+            "H": np.asarray(mstm_nf["H_perp"], dtype=np.complex128),
         },
     }
     py_by_pol = {
@@ -819,8 +837,6 @@ def _compare_nearfield(
         h_out = _rel_rmse_complex(h_py, h_ms, mask=outside_mask)
         out["per_channel"][py_ch] = {
             "mstm_channel": mstm_ch,
-            "applied_mstm_phase_real": float(np.real(MSTM_NEARFIELD_PHASE_CORRECTION[mstm_ch])),
-            "applied_mstm_phase_imag": float(np.imag(MSTM_NEARFIELD_PHASE_CORRECTION[mstm_ch])),
             "E_rel_rmse_all": float(e_all),
             "H_rel_rmse_all": float(h_all),
             "E_rel_rmse_outside": float(e_out),
@@ -1525,7 +1541,7 @@ def main() -> None:
         )
         for backend in cfg.py_operator_backends
     }
-    chosen_mapping = dict(MSTM_POLARIZATION_MAPPING)
+    chosen_mapping = MSTM_POLARIZATION_MAPPING
     eff_cmp = {
         backend: _eff_compare_fixed_mapping(run["efficiencies_basis"], mstm_out, chosen_mapping)
         for backend, run in py_runs.items()
@@ -1594,19 +1610,15 @@ def main() -> None:
             "model_backend": "cupy",
         }
 
-    # Build phase-aligned MSTM near-field channels for side-by-side maps.
+    # The incident bases already agree, including their complex phases.
     mstm_by_pol = {
         "par": {
-            "E": MSTM_NEARFIELD_PHASE_CORRECTION["par"]
-            * np.asarray(mstm_nf["E_par"], dtype=np.complex128),
-            "H": MSTM_NEARFIELD_PHASE_CORRECTION["par"]
-            * np.asarray(mstm_nf["H_par"], dtype=np.complex128),
+            "E": np.asarray(mstm_nf["E_par"], dtype=np.complex128),
+            "H": np.asarray(mstm_nf["H_par"], dtype=np.complex128),
         },
         "perp": {
-            "E": MSTM_NEARFIELD_PHASE_CORRECTION["perp"]
-            * np.asarray(mstm_nf["E_perp"], dtype=np.complex128),
-            "H": MSTM_NEARFIELD_PHASE_CORRECTION["perp"]
-            * np.asarray(mstm_nf["H_perp"], dtype=np.complex128),
+            "E": np.asarray(mstm_nf["E_perp"], dtype=np.complex128),
+            "H": np.asarray(mstm_nf["H_perp"], dtype=np.complex128),
         },
     }
     py_by_pol = {
@@ -1741,6 +1753,7 @@ def main() -> None:
             backend: {
                 "operator_backend": run["operator_backend"],
                 "solver": run["solver"],
+                "source_jones_basis": run["source_jones_basis"],
                 "efficiencies_basis": run["efficiencies_basis"],
                 "farfield_grid_shape": [
                     int(np.asarray(run["farfield_map"]["alpha"]).size),
@@ -1751,15 +1764,13 @@ def main() -> None:
         },
         "comparison": {
             "polarization_mapping": {
-                "name": "te->par,tm->perp",
+                "name": "te->perp,tm->par",
                 "mapping": chosen_mapping,
-                "note": "MSTM near-field columns are (E_par,H_par,E_perp,H_perp); benchmark uses fixed mapping te->par, tm->perp.",
-            },
-            "nearfield_phase_correction_on_mstm": {
-                "par_real": float(np.real(MSTM_NEARFIELD_PHASE_CORRECTION["par"])),
-                "par_imag": float(np.imag(MSTM_NEARFIELD_PHASE_CORRECTION["par"])),
-                "perp_real": float(np.real(MSTM_NEARFIELD_PHASE_CORRECTION["perp"])),
-                "perp_imag": float(np.imag(MSTM_NEARFIELD_PHASE_CORRECTION["perp"])),
+                "note": (
+                    "Incident Jones weights align pyceles sources with MSTM's "
+                    "e_phi/e_theta polarizations, retaining the incident azimuth "
+                    "at normal incidence. No field phase fitting is applied."
+                ),
             },
             "farfield_scales": {
                 "scattering_map_model_1_scale": S11_SCALE_MODEL1,

@@ -87,6 +87,7 @@ class RunConfig:
     pyceles_nearfield_bmax: float | None = None
     pyceles_field_evanescent_decay: float = 8.0
     pyceles_periodic_method: Literal["ewald", "rayleigh"] = "ewald"
+    pyceles_backend: Literal["numpy", "cupy"] = "numpy"
 
 
 _NUMERIC_TOKEN_RE = re.compile(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eEdD][+-]?\d+)?")
@@ -967,6 +968,7 @@ def _run_pyceles_case(
             n_medium=complex(case.medium_refractive_index),
             lmax=int(case.lmax),
             periodic=periodic,
+            operator_backend=cfg.pyceles_backend,
             solver_method="direct",
             verbose=False,
         )
@@ -1093,6 +1095,7 @@ def _run_pyceles_case(
         "nearfield": nearfield_artifacts,
         "nearfield_bmax_policy": nearfield_bmax_policy,
         "periodic_method": cfg.pyceles_periodic_method,
+        "operator_backend": cfg.pyceles_backend,
         "mapping_convention": {"parallel": "tm", "perpendicular": "te"},
     }
 
@@ -1395,6 +1398,12 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--pyceles-backend",
+        choices=("numpy", "cupy"),
+        default=RunConfig.pyceles_backend,
+        help="Operator backend used by the pyceles comparison run.",
+    )
+    parser.add_argument(
         "--pyceles-periodic-method",
         choices=("ewald", "rayleigh"),
         default="ewald",
@@ -1440,6 +1449,7 @@ def main() -> None:
         ),
         pyceles_field_evanescent_decay=float(args.pyceles_field_evanescent_decay),
         pyceles_periodic_method=args.pyceles_periodic_method,
+        pyceles_backend=args.pyceles_backend,
     )
     summary = run_case(case, cfg)
     map_report_path: Path | None = None
