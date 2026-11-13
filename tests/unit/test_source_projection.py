@@ -91,7 +91,8 @@ def test_project_source_to_svwf_matches_gaussian_formula():
     np.testing.assert_allclose(got, ref, rtol=0.0, atol=0.0)
 
 
-def test_gaussian_angular_spectrum_projection_parity_normal():
+@pytest.mark.parametrize("polar_angle", [0.0, 5e-13, np.pi])
+def test_gaussian_angular_spectrum_projection_parity_normal(polar_angle):
     positions = np.array(
         [
             [0.0, 0.0, 0.0],
@@ -104,7 +105,7 @@ def test_gaussian_angular_spectrum_projection_parity_normal():
         wavelength=550.0,
         medium_n=1.0 + 0j,
         polarization="TE",
-        polar_angle=0.0,
+        polar_angle=polar_angle,
         azimuthal_angle=0.4,
         beam_width=2000.0,
         focal_point=(3.0, -5.0, 2.0),
@@ -115,14 +116,37 @@ def test_gaussian_angular_spectrum_projection_parity_normal():
     azimuthal = np.linspace(0.0, 2.0 * np.pi, 121, endpoint=False)
 
     ref = incident_coeffs_wavebundle_normal_incidence(positions, lmax, source_ref, polar)
-    got = project_source_to_svwf(
+    k = 2 * np.pi / source_ref.wavelength
+    got = pwp_to_svwf_regular(
         positions,
         lmax,
-        source_ref,
+        k=k,
+        spectrum=source_ref.angular_spectrum(k=k, polar_angles=polar, azimuthal_angles=azimuthal),
+    )
+    np.testing.assert_allclose(got, ref, rtol=1e-12, atol=1e-14)
+
+    # An unmodulated wrapper uses the general spectrum field evaluator;
+    # compare it with the Gaussian's independent analytic azimuth integral.
+    analytic_fields = compute_initial_field(
+        positions,
+        beam=source_ref,
+        k=k,
+        n_medium=1.0,
         polar_angles=polar,
         azimuthal_angles=azimuthal,
+        show_progress=False,
     )
-    np.testing.assert_allclose(got, ref, rtol=0.0, atol=0.0)
+    spectrum_fields = compute_initial_field(
+        positions,
+        beam=SLMSource(base_source=source_ref),
+        k=k,
+        n_medium=1.0,
+        polar_angles=polar,
+        azimuthal_angles=azimuthal,
+        show_progress=False,
+    )
+    for analytic, spectrum in zip(analytic_fields, spectrum_fields, strict=True):
+        np.testing.assert_allclose(spectrum, analytic, rtol=1e-12, atol=1e-14)
 
 
 def test_pwp_to_svwf_regular_rejects_wavevector_k_inconsistency():

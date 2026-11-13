@@ -101,6 +101,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and near-field showcase plotting. Particle-centre fields use analytic limits.
 
 ### Fixed
+- Gaussian-beam coefficient projection, spectra and incident E/H use one axial
+  polarization convention, including backward propagation and near-normal
+  power diagnostics.
 - The Rayleigh/Wood diagnostic now classifies exact grazing orders as `at`
   despite the square-root roundoff floor in their computed clearance.
 - CuPy MLFMM leaf translations use normalized angular recurrences with

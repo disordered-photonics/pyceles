@@ -259,7 +259,9 @@ def incident_coeffs_wavebundle_normal_incidence(
                 mode_indices_by_m[m + lmax].append(idx)
 
     g1_modes = Bdag_pol1 * gaussfac_sincos[None, :]
-    g2_modes = Bdag_pol2 * gaussfac_sincos[None, :]
+    # TM's spherical basis reverses relative to the transverse polarization
+    # for backward propagation, as in the incident-field azimuth integral.
+    g2_modes = direction * Bdag_pol2 * gaussfac_sincos[None, :]
 
     fp = np.asarray(beam.focal_point, dtype=float).reshape(3)
     rel = pos - fp

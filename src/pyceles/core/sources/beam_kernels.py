@@ -85,18 +85,6 @@ def _gaussian_angular_spectrum_coeffs(
     kx = k * sb * ca
     ky = k * sb * sa
     kz = k * cb
-    sx = sb * ca
-    sy = sb * sa
-    sz = cb
-    s = np.stack([sx, sy, sz], axis=2)
-    n0, u, v = beam_axis_and_frame(float(beam.polar_angle), float(beam.azimuthal_angle))
-    sx_l = np.einsum("abi,i->ab", s, u)
-    sy_l = np.einsum("abi,i->ab", s, v)
-    sz_l = np.einsum("abi,i->ab", s, n0)
-    rho2_l = np.maximum(0.0, 1.0 - sz_l**2)
-    alpha_l = np.arctan2(sy_l, sx_l)
-    sin_beta_l = np.sqrt(rho2_l)
-    cos_beta_l = sz_l
     rg = np.asarray(getattr(beam, "focal_point", (0.0, 0.0, 0.0)), float)
     e0 = float(getattr(beam, "amplitude", 1.0))
     w = float(getattr(beam, "beam_width", np.inf))
@@ -106,6 +94,32 @@ def _gaussian_angular_spectrum_coeffs(
         alpha_pol -= np.pi / 2.0
     phase = np.exp(-1j * (kx * rg[0] + ky * rg[1] + kz * rg[2]))
     pref = e0 * (k**2) * (w**2) / (4.0 * np.pi)
+    if is_normal_incidence(float(beam.polar_angle)):
+        # Match the lab-frame basis and signed cos(beta) used by the axial
+        # projection and initial-field evaluator, including -z propagation.
+        direction = np.sign(np.cos(float(beam.polar_angle)))
+        envelope = pref * cb * np.exp(-(w**2) / 4.0 * (k**2) * sb**2)
+        envelope *= np.sign(cb) == direction
+        common = jones_weight * envelope * phase
+        return PlaneWaveSpectrum(
+            alpha,
+            beta,
+            kx,
+            ky,
+            kz,
+            np.cos(agrid - alpha_pol) * common,
+            direction * np.sin(agrid - alpha_pol) * common,
+        )
+
+    s = np.stack([sb * ca, sb * sa, cb], axis=2)
+    n0, u, v = beam_axis_and_frame(float(beam.polar_angle), float(beam.azimuthal_angle))
+    sx_l = np.einsum("abi,i->ab", s, u)
+    sy_l = np.einsum("abi,i->ab", s, v)
+    sz_l = np.einsum("abi,i->ab", s, n0)
+    rho2_l = np.maximum(0.0, 1.0 - sz_l**2)
+    alpha_l = np.arctan2(sy_l, sx_l)
+    sin_beta_l = np.sqrt(rho2_l)
+    cos_beta_l = sz_l
     envelope = pref * cos_beta_l * np.exp(-(w**2) / 4.0 * (k**2) * rho2_l)
     envelope = envelope * (cos_beta_l > 0.0)
     g_te_l = np.cos(alpha_l - alpha_pol) * envelope
