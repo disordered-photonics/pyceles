@@ -17,7 +17,7 @@ from pyceles.core.translation import translation_block_rect
 
 @pytest.mark.parametrize("k", [1.1, 1.1 + 0.3j])
 @pytest.mark.parametrize("dense", [True, False])
-@pytest.mark.parametrize("lmax, box_order", [(1, 3), (2, 3), (3, 2)])
+@pytest.mark.parametrize("lmax, box_order", [(1, 3), (3, 3), (3, 2), (9, 9)])
 def test_regular_reception_and_both_leaf_adjoints_match_opposite_shifts(k, dense, lmax, box_order):
     positions = np.array([[0.2, -0.3, 0.4], [-0.1, 0.2, 0.3]])
     partition = build_uniform_mlfmm_partition(

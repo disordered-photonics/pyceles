@@ -38,13 +38,13 @@ from pyceles.linear import solve_linear_system
 )
 def absorbing_hierarchy(request):
     depth, dense, dtype = request.param
-    corners = np.array([[x, y, z] for x in (-2.5, 2.5) for y in (-2.5, 2.5) for z in (-2.5, 2.5)])
+    corners = np.array([[x, y, z] for x in (-4.0, 4.0) for y in (-4.0, 4.0) for z in (-4.0, 4.0)])
     positions = np.vstack(
         [
             corners + offset
-            for offset in ([0, 0, 0], [0.14, 0.11, 0.09], [0.3, 0.2, 0.17], [0.4, 0.3, 0.28])
+            for offset in ([0, 0, 0], [0.2, 0.15, 0.1], [0.5, 0.3, 0.25], [0.6, 0.5, 0.4])
         ]
-        + [corners[0] + [[0.7, 0.15, 0.09], [1.4, 0.3, 0.18], [0.35, 0.8, 0.2]]]
+        + [corners[0] + [[1.1, 0.2, 0.1], [2.3, 0.45, 0.3], [0.6, 1.2, 0.3]]]
     )
     host = 1.33 + 0.1j
     particles = spheres_from_arrays(
